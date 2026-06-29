@@ -1,0 +1,80 @@
+# Heimdall Whitelist Plugin Configuration Example
+# Copy this to your server's plugins/HeimdallWhitelist/config.yml and customize
+
+# Bot API Configuration
+api:
+  # The URL of your Heimdall bot API endpoint
+  # Example: http://localhost:3001 or https://your-bot-domain.com
+  baseUrl: "http://localhost:3001"
+
+  # Per-guild API key from the Heimdall dashboard (Minecraft > Config > API Key)
+  # This secret is used to sign requests — it is never sent over the wire.
+  apiKey: "your-api-key-here"
+
+  # How long to wait for API responses (in milliseconds)
+  timeout: 5000
+
+  # How many times to retry failed API calls
+  retries: 3
+
+  # Delay between retries (in milliseconds)
+  retryDelay: 1000
+
+# Server identification (sent to bot API)
+server:
+  # Unique identifier for this server (will be auto-generated if not set)
+  serverId: ""
+
+  # Server name to display in Discord
+  displayName: "My Minecraft Server"
+
+# Message Configuration
+messages:
+  # Message shown when player is not whitelisted and has no pending auth
+  notWhitelisted: "§cYou are not whitelisted on this server!\n§7Please link your Discord account first.\n§eJoin our Discord: discord.gg/yourserver"
+
+  # Message shown when player has a pending authentication code
+  pendingAuth: "§eYou have a pending authentication!\n§7Use /confirm-code §e{code} §7in our Discord server to complete linking.\n§eJoin our Discord: discord.gg/yourserver"
+
+  # Message shown when player is temporarily allowed (linking in progress)
+  temporaryAccess: "§aTemporary access granted!\n§7Complete your account linking in Discord to maintain access.\n§eUse /confirm-code §e{code} §7in our Discord server."
+
+  # Message shown when API is unavailable
+  apiUnavailable: "§cWhitelist check failed - API unavailable.\n§7Please try again later or contact an administrator."
+
+  # Message shown when API is unavailable but player is allowed due to fail-open mode
+  apiUnavailableAllowed: "§eAPI temporarily unavailable - access granted.\n§7Please link your Discord account when possible.\n§eJoin our Discord: discord.gg/yourserver"
+
+  # Message shown for internal errors
+  internalError: "§cAn internal error occurred.\n§7Please contact an administrator if this persists."
+
+# Performance settings
+performance:
+  # Maximum number of concurrent API requests
+  maxConcurrentRequests: 5
+
+  # Cache player status for this many minutes (reduces API calls)
+  cacheTimeout: 5
+
+# Logging configuration
+logging:
+  # Enable debug logging (verbose output)
+  debug: false
+
+  # Log all API requests and responses
+  logApiCalls: false
+
+# Advanced settings
+advanced:
+  # Allow players to join temporarily while API calls are in progress
+  allowTemporaryAccess: true
+
+  # How long to allow temporary access (in seconds)
+  temporaryAccessDuration: 300
+
+  # Fallback behavior when API is completely unavailable after all retries
+  # Options:
+  #   "allow" - Allow all players to join (fail open - recommended for production)
+  #   "deny" - Deny all players (fail closed)
+  #   "whitelist-only" - Only allow players already on local whitelist
+  apiFallbackMode: "allow"
