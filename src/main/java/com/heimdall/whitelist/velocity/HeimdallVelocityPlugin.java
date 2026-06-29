@@ -58,6 +58,7 @@ public class HeimdallVelocityPlugin {
   private OffenseManager offenseManager;
   private WebSocketClient wsClient;
   private UpdateChecker updateChecker;
+  private final long startedAtMs = System.currentTimeMillis();
   private final Map<UUID, Long> linkCooldowns = new ConcurrentHashMap<>();
 
   @Inject
@@ -161,6 +162,8 @@ public class HeimdallVelocityPlugin {
     wsClient = new WebSocketClient(logger, configProvider);
     wsClient.setGuildId(apiClient.getGuildId());
     wsClient.setMessageHandler((type, msg) -> handleWsMessage(type, msg));
+    wsClient.setIdentifyMetadataSupplier(this::buildIdentifyMetadata);
+    wsClient.setHealthSupplier(this::buildHealthSnapshot);
     if (configProvider.getBoolean("websocket.enabled", false)) {
       wsClient.connect();
     }
@@ -1017,6 +1020,27 @@ public class HeimdallVelocityPlugin {
 
   /* ═══════════════════════ WebSocket message handler ═════════════════════ */
 
+  private JsonObject buildIdentifyMetadata() {
+    JsonObject m = new JsonObject();
+    m.addProperty("pluginVersion", BuildConstants.VERSION);
+    m.addProperty("platform", "velocity");
+    m.addProperty("serverSoftware",
+        server.getVersion().getName() + " " + server.getVersion().getVersion());
+    m.addProperty("mcVersion", "");
+    m.addProperty("startedAt", startedAtMs);
+    return m;
+  }
+
+  private JsonObject buildHealthSnapshot() {
+    JsonObject h = new JsonObject();
+    // No TPS on a proxy — report online count + memory only.
+    h.addProperty("onlinePlayers", server.getPlayerCount());
+    Runtime rt = Runtime.getRuntime();
+    h.addProperty("usedMemMb", (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024));
+    h.addProperty("maxMemMb", rt.maxMemory() / (1024 * 1024));
+    return h;
+  }
+
   private void handleWsMessage(String type, JsonObject msg) {
     String id = msg.has("id") ? msg.get("id").getAsString() : "";
     JsonObject payload = msg.has("payload") ? msg.getAsJsonObject("payload") : new JsonObject();
@@ -1056,6 +1080,33 @@ public class HeimdallVelocityPlugin {
         wsClient.reply(id, "probe_result", ack);
         break;
       }
+      case "update": {
+        // Dashboard-triggered remote update — Velocity has no update folder, so
+        // download into the plugin data dir and report where it landed.
+        server.getScheduler().buildTask(this, () -> {
+          JsonObject result = new JsonObject();
+          try {
+            boolean available = updateChecker.checkNow();
+            if (!available || updateChecker.getLatestRelease() == null) {
+              result.addProperty("success", false);
+              result.addProperty("message", "Already up to date");
+            } else {
+              File target = new File(dataDirectory.toFile(),
+                  "heimdall-whitelist-" + updateChecker.getLatestRelease().getVersion() + ".jar");
+              updateChecker.downloadUpdate(target);
+              result.addProperty("success", true);
+              result.addProperty("version", updateChecker.getLatestRelease().getVersion());
+              result.addProperty("message", "Downloaded to plugin data dir; move to plugins/ and restart");
+            }
+          } catch (Exception e) {
+            result.addProperty("success", false);
+            result.addProperty("message", e.getMessage());
+          }
+          wsClient.reply(id, "update_result", result);
+        }).schedule();
+        break;
+      }
+
       default:
         if (configProvider.getBoolean("logging.debug", false)) {
           logger.debug("[WS] Unhandled message type: " + type);
