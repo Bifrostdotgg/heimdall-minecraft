@@ -71,6 +71,16 @@
       <version>2.10.1</version>
     </dependency>
 
+    <!-- Log4j2 core — needed to attach a programmatic appender for console
+         streaming (ConsoleStreamer). Provided at runtime by both Paper and
+         Velocity, so it is `provided` scope and must NOT be shaded. -->
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>2.19.0</version>
+      <scope>provided</scope>
+    </dependency>
+
     <!-- LuckPerms API -->
     <dependency>
       <groupId>net.luckperms</groupId>
