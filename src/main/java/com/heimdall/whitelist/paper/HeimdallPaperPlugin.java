@@ -1,5 +1,6 @@
 package com.heimdall.whitelist.paper;
 
+import com.heimdall.whitelist.BuildConstants;
 import com.heimdall.whitelist.api.HeimdallTunnel;
 import com.heimdall.whitelist.core.*;
 import net.kyori.adventure.text.Component;
@@ -38,6 +39,7 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
   private WebSocketClient wsClient;
   private HeimdallTunnelImpl tunnel;
   private UpdateChecker updateChecker;
+  private final long startedAtMs = System.currentTimeMillis();
   private int cacheCleanupTaskId = -1;
   private int offenseRefreshTaskId = -1;
   private int updateCheckTaskId = -1;
@@ -150,6 +152,8 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
     wsClient = new WebSocketClient(logger, configProvider);
     wsClient.setGuildId(apiClient.getGuildId());
     wsClient.setMessageHandler((type, msg) -> handleWsMessage(type, msg));
+    wsClient.setIdentifyMetadataSupplier(this::buildIdentifyMetadata);
+    wsClient.setHealthSupplier(this::buildHealthSnapshot);
 
     // Expose the socket as a shared service so other plugins (e.g. Trace) can
     // ride this one connection instead of opening their own.
@@ -776,6 +780,31 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
     return cleaned.isBlank() ? null : cleaned;
   }
 
+  /* ═══════════════════════ WS self-report (identify + health) ════════════ */
+
+  private JsonObject buildIdentifyMetadata() {
+    JsonObject m = new JsonObject();
+    m.addProperty("pluginVersion", BuildConstants.VERSION);
+    m.addProperty("platform", "paper");
+    m.addProperty("serverSoftware", getServer().getName() + " " + getServer().getVersion());
+    m.addProperty("mcVersion", getServer().getMinecraftVersion());
+    m.addProperty("startedAt", startedAtMs);
+    return m;
+  }
+
+  private JsonObject buildHealthSnapshot() {
+    JsonObject h = new JsonObject();
+    double[] tps = getServer().getTPS();
+    h.addProperty("tps", Math.round(tps[0] * 100.0) / 100.0);
+    h.addProperty("mspt", Math.round(getServer().getAverageTickTime() * 100.0) / 100.0);
+    h.addProperty("onlinePlayers", getServer().getOnlinePlayers().size());
+    h.addProperty("maxPlayers", getServer().getMaxPlayers());
+    Runtime rt = Runtime.getRuntime();
+    h.addProperty("usedMemMb", (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024));
+    h.addProperty("maxMemMb", rt.maxMemory() / (1024 * 1024));
+    return h;
+  }
+
   /* ═══════════════════════ WebSocket message handler ═════════════════════ */
 
   private void handleWsMessage(String type, JsonObject msg) {
@@ -873,6 +902,33 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
         }
         break;
       }
+      case "update": {
+        // Dashboard-triggered remote update — download the latest jar into the
+        // Paper update folder (applied on next restart) and report back.
+        getServer().getScheduler().runTaskAsynchronously(this, () -> {
+          JsonObject result = new JsonObject();
+          try {
+            boolean available = updateChecker.checkNow();
+            if (!available || updateChecker.getLatestRelease() == null) {
+              result.addProperty("success", false);
+              result.addProperty("message", "Already up to date");
+            } else {
+              File updateFolder = new File(getDataFolder().getParentFile(), "update");
+              File target = new File(updateFolder, getFile().getName());
+              updateChecker.downloadUpdate(target);
+              result.addProperty("success", true);
+              result.addProperty("version", updateChecker.getLatestRelease().getVersion());
+              result.addProperty("message", "Downloaded; restart to apply");
+            }
+          } catch (Exception e) {
+            result.addProperty("success", false);
+            result.addProperty("message", e.getMessage());
+          }
+          wsClient.reply(id, "update_result", result);
+        });
+        break;
+      }
+
       default:
         // Hand off to any plugin that registered for this type via HeimdallTunnel.
         if (tunnel != null && tunnel.dispatchInbound(type, id, payload)) {

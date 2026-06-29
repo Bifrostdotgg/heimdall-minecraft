@@ -12,6 +12,7 @@ import java.util.UUID;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 
 /**
  * WebSocket client for the Heimdall bot 2-way tunnel.
@@ -61,6 +62,12 @@ public class WebSocketClient {
   /** External message handler: (type, full message json) */
   private volatile BiConsumer<String, JsonObject> messageHandler;
 
+  /** Extra fields merged into the identify payload (version/platform/etc). */
+  private volatile Supplier<JsonObject> identifyMetadataSupplier;
+
+  /** Periodic health snapshot (tps/online/memory) sent on each heartbeat. */
+  private volatile Supplier<JsonObject> healthSupplier;
+
   public WebSocketClient(PluginLogger logger, ConfigProvider config) {
     this.logger = logger;
     this.config = config;
@@ -91,6 +98,23 @@ public class WebSocketClient {
    */
   public void setMessageHandler(BiConsumer<String, JsonObject> handler) {
     this.messageHandler = handler;
+  }
+
+  /**
+   * Supply extra fields merged into the identify payload on connect — e.g.
+   * pluginVersion, platform, mcVersion. Platform layer sets this.
+   */
+  public void setIdentifyMetadataSupplier(Supplier<JsonObject> supplier) {
+    this.identifyMetadataSupplier = supplier;
+  }
+
+  /**
+   * Supply a periodic health snapshot ({@code tps}, {@code onlinePlayers},
+   * memory, ...) sent as a fire-and-forget {@code health} message on each
+   * heartbeat tick. Platform layer sets this.
+   */
+  public void setHealthSupplier(Supplier<JsonObject> supplier) {
+    this.healthSupplier = supplier;
   }
 
   /**
@@ -162,6 +186,19 @@ public class WebSocketClient {
               payload.addProperty("serverId", serverId);
               payload.addProperty("serverName",
                   config.getString("server.displayName", serverId));
+              // Merge platform-supplied metadata (version, platform, mcVersion…)
+              Supplier<JsonObject> metaSupplier = identifyMetadataSupplier;
+              if (metaSupplier != null) {
+                try {
+                  JsonObject meta = metaSupplier.get();
+                  if (meta != null) {
+                    for (String k : meta.keySet()) {
+                      payload.add(k, meta.get(k));
+                    }
+                  }
+                } catch (Exception ignored) {
+                }
+              }
               identify.add("payload", payload);
               sendRaw(gson.toJson(identify));
 
@@ -350,6 +387,18 @@ public class WebSocketClient {
       ping.addProperty("type", "ping");
       ping.add("payload", new JsonObject());
       sendRaw(gson.toJson(ping));
+
+      // Piggyback a health snapshot on the heartbeat cadence.
+      Supplier<JsonObject> hs = healthSupplier;
+      if (hs != null) {
+        try {
+          JsonObject health = hs.get();
+          if (health != null) {
+            send("health", health);
+          }
+        } catch (Exception ignored) {
+        }
+      }
     }, heartbeatInterval, heartbeatInterval, TimeUnit.MILLISECONDS);
   }
 
