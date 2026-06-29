@@ -40,11 +40,13 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
   private HeimdallTunnelImpl tunnel;
   private ConsoleStreamer consoleStreamer;
   private UpdateChecker updateChecker;
+  private WhitelistSyncService whitelistSyncService;
   private final long startedAtMs = System.currentTimeMillis();
   private int cacheCleanupTaskId = -1;
   private int offenseRefreshTaskId = -1;
   private int updateCheckTaskId = -1;
   private int consoleFlushTaskId = -1;
+  private int whitelistSyncTaskId = -1;
   /**
    * In-memory /linkdiscord cooldowns, keyed by player UUID. Previously these were
    * written into the live config object and persisted by saveConfig(), so the
@@ -126,6 +128,17 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
       whitelistCache.cleanupExpiredEntries();
     }, cleanupInterval, cleanupInterval).getTaskId();
 
+    // Whitelist pre-warm sync: keep the cache a complete mirror of the whitelist so
+    // a brief bot outage (redeploy/restart) is invisible to every whitelisted
+    // player. Runs off the main thread; first pass shortly after boot, then on the
+    // configured interval.
+    whitelistSyncService = new WhitelistSyncService(logger, configProvider, apiClient, whitelistCache);
+    if (whitelistSyncService.isEnabled()) {
+      long syncIntervalTicks = whitelistSyncService.getIntervalMinutes() * 60 * 20L;
+      whitelistSyncTaskId = getServer().getScheduler().runTaskTimerAsynchronously(this,
+          () -> whitelistSyncService.syncNow(), 20L * 10, syncIntervalTicks).getTaskId();
+    }
+
     // Generate server ID if not set
     if (getConfig().getString("server.serverId", "").isEmpty()) {
       String serverId = UUID.randomUUID().toString();
@@ -193,6 +206,11 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
     // Cancel update check task
     if (updateCheckTaskId != -1) {
       getServer().getScheduler().cancelTask(updateCheckTaskId);
+    }
+
+    // Cancel whitelist pre-warm sync task
+    if (whitelistSyncTaskId != -1) {
+      getServer().getScheduler().cancelTask(whitelistSyncTaskId);
     }
 
     // Stop console streaming (cancel flush task + detach appender)

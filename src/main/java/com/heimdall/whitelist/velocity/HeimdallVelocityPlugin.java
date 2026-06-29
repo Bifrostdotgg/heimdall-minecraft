@@ -60,6 +60,8 @@ public class HeimdallVelocityPlugin {
   private ConsoleStreamer consoleStreamer;
   private com.velocitypowered.api.scheduler.ScheduledTask consoleFlushTask;
   private UpdateChecker updateChecker;
+  private WhitelistSyncService whitelistSyncService;
+  private com.velocitypowered.api.scheduler.ScheduledTask whitelistSyncTask;
   private final long startedAtMs = System.currentTimeMillis();
   private final Map<UUID, Long> linkCooldowns = new ConcurrentHashMap<>();
 
@@ -131,6 +133,16 @@ public class HeimdallVelocityPlugin {
           .repeat(intervalHours, TimeUnit.HOURS).schedule();
     }
 
+    // Whitelist pre-warm sync: keep the cache a complete mirror of the whitelist so
+    // a brief bot outage (redeploy/restart) is invisible to every whitelisted
+    // player. Runs off-thread on the configured interval.
+    whitelistSyncService = new WhitelistSyncService(logger, configProvider, apiClient, whitelistCache);
+    if (whitelistSyncService.isEnabled()) {
+      CompletableFuture.runAsync(() -> whitelistSyncService.syncNow());
+      whitelistSyncTask = server.getScheduler().buildTask(this, () -> whitelistSyncService.syncNow())
+          .repeat(whitelistSyncService.getIntervalMinutes(), TimeUnit.MINUTES).schedule();
+    }
+
     // Register command
     server.getCommandManager().register("hwl", new HeimdallCommand(), "heimdallwhitelist");
     server.getCommandManager().register("linkdiscord", new LinkDiscordCommand());
@@ -183,6 +195,11 @@ public class HeimdallVelocityPlugin {
 
   @Subscribe
   public void onProxyShutdown(ProxyShutdownEvent event) {
+    // Cancel whitelist pre-warm sync task
+    if (whitelistSyncTask != null) {
+      whitelistSyncTask.cancel();
+    }
+
     // Stop console streaming (cancel flush task + detach appender)
     if (consoleFlushTask != null) {
       consoleFlushTask.cancel();

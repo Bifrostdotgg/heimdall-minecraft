@@ -126,6 +126,21 @@ cache:
   # How often to run cache cleanup (in minutes)
   cleanupInterval: 30
 
+  # Pre-warm sync: periodically pull the FULL whitelist from the bot and mirror
+  # it into the local cache. This is what makes a brief bot outage (a redeploy,
+  # a restart, a network blip) invisible to EVERY whitelisted player — not just
+  # the ones who happened to connect recently. Combined with
+  # advanced.apiFallbackMode: whitelist-only, a cached player is always let in
+  # even while the bot is unreachable. A failed sync leaves the cache untouched
+  # (never wiped), so this only ever adds resilience.
+  prewarm:
+    enabled: true
+
+    # How often to refresh the full whitelist (in minutes). Lower = revocations
+    # propagate to the local cache faster and a freshly-whitelisted inactive
+    # player is covered sooner; higher = fewer bulk requests. 5 is a good default.
+    intervalMinutes: 5
+
 # WebSocket Tunnel
 # Enables a persistent 2-way connection to the Heimdall bot, so the dashboard
 # can trigger live actions (re-probe mods, live player list, remote commands)

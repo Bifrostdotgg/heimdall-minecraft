@@ -8,6 +8,7 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.lang.reflect.Type;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import com.google.gson.Gson;
@@ -158,6 +159,70 @@ class WhitelistCacheTest {
 
     assertTrue(secondVerified >= firstVerified, "re-verification must not move lastVerified backward");
     assertEquals(Boolean.TRUE, cache.isCachedWhitelisted(UUID, USER));
+  }
+
+  // ── Pre-warm sync reconcile (restart resilience) ──────────────────────────
+
+  private static final String UUID2 = "99999999-8888-7777-6666-555555555555";
+
+  @Test
+  void reconcileAddsUncachedWhitelistedPlayer(@TempDir Path dir) {
+    WhitelistCache cache = newCache(dir.toFile(), 24);
+    assertNull(cache.isCachedWhitelisted(UUID, USER), "precondition: not cached");
+
+    WhitelistCache.ReconcileResult r =
+        cache.reconcileFromSync(List.of(new WhitelistSyncEntry(UUID, USER)));
+
+    assertEquals(1, r.added);
+    assertEquals(0, r.pruned);
+    assertEquals(Boolean.TRUE, cache.isCachedWhitelisted(UUID, USER),
+        "a pre-warmed player must be served from cache (so a bot outage is invisible to them)");
+  }
+
+  @Test
+  void reconcilePrunesRevokedPlayer(@TempDir Path dir) {
+    WhitelistCache cache = newCache(dir.toFile(), 24);
+    cache.addWhitelistedPlayer(UUID, USER);
+    assertEquals(Boolean.TRUE, cache.isCachedWhitelisted(UUID, USER));
+
+    // The authoritative whitelist no longer lists them → revoked → must be pruned,
+    // so a revocation propagates promptly instead of lingering until expiry.
+    WhitelistCache.ReconcileResult r = cache.reconcileFromSync(List.of());
+
+    assertEquals(1, r.pruned);
+    assertNull(cache.isCachedWhitelisted(UUID, USER),
+        "a player absent from the authoritative whitelist must be dropped from cache");
+  }
+
+  @Test
+  void reconcileRefreshesStaleEntryPastCeiling(@TempDir Path dir) throws Exception {
+    long now = System.currentTimeMillis();
+    long longAgo = now - 48L * 60L * 60L * 1000L; // verified 48h ago
+    writeRaw(dir, Map.of(UUID, new WhitelistCache.CacheEntry(
+        USER, UUID, now, now + 3600_000, true, longAgo)));
+
+    WhitelistCache cache = newCache(dir.toFile(), 6); // 6h ceiling; 48h stale
+    assertNull(cache.isCachedWhitelisted(UUID, USER), "precondition: stale, past ceiling");
+
+    cache.reconcileFromSync(List.of(new WhitelistSyncEntry(UUID, USER)));
+
+    assertEquals(Boolean.TRUE, cache.isCachedWhitelisted(UUID, USER),
+        "a sync re-verification must advance lastVerified and restore service");
+  }
+
+  @Test
+  void reconcileKeepsListedAndPrunesUnlisted(@TempDir Path dir) {
+    WhitelistCache cache = newCache(dir.toFile(), 24);
+    cache.addWhitelistedPlayer(UUID, USER);
+    cache.addWhitelistedPlayer(UUID2, "Alex");
+
+    WhitelistCache.ReconcileResult r =
+        cache.reconcileFromSync(List.of(new WhitelistSyncEntry(UUID, USER)));
+
+    assertEquals(1, r.updated);
+    assertEquals(1, r.pruned);
+    assertEquals(Boolean.TRUE, cache.isCachedWhitelisted(UUID, USER));
+    assertNull(cache.isCachedWhitelisted(UUID2, "Alex"));
   }
 
   private void writeRaw(Path dir, Map<String, WhitelistCache.CacheEntry> entries) throws Exception {

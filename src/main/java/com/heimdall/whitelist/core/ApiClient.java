@@ -561,6 +561,52 @@ public class ApiClient {
     return obj.has(key) && !obj.get(key).isJsonNull() ? obj.get(key).getAsString() : null;
   }
 
+  /* ═══════════════════════ Whitelist Pre-warm Sync ═══════════════════════ */
+
+  /** Read timeout for the (potentially large) full-whitelist dump. */
+  private static final int WHITELIST_SYNC_TIMEOUT_MS = 15_000;
+
+  /**
+   * Fetch the FULL set of currently-whitelisted players for this guild, so the
+   * cache can be pre-warmed (restart resilience). Blocking work runs on the
+   * request executor. The list can be large, so a longer read timeout than the
+   * latency-sensitive login path is used.
+   */
+  public CompletableFuture<List<WhitelistSyncEntry>> fetchWhitelistSync() {
+    return CompletableFuture.supplyAsync(() -> {
+      try {
+        JsonObject response = makeGetRequest(
+            "/api/guilds/" + guildId + "/minecraft/whitelist/sync",
+            Math.max(timeout, WHITELIST_SYNC_TIMEOUT_MS));
+
+        JsonObject data = response;
+        if (response.has("data") && response.get("data").isJsonObject()) {
+          data = response.getAsJsonObject("data");
+        }
+
+        List<WhitelistSyncEntry> entries = new ArrayList<>();
+        if (data.has("players") && data.get("players").isJsonArray()) {
+          JsonArray players = data.getAsJsonArray("players");
+          for (int i = 0; i < players.size(); i++) {
+            if (!players.get(i).isJsonObject()) {
+              continue;
+            }
+            JsonObject p = players.get(i).getAsJsonObject();
+            String uuid = getStringOrNull(p, "uuid");
+            if (uuid == null || uuid.isBlank()) {
+              continue;
+            }
+            entries.add(new WhitelistSyncEntry(uuid, getStringOrNull(p, "username")));
+          }
+        }
+        return entries;
+      } catch (Exception e) {
+        logger.debug("[WhitelistSync] Failed to fetch whitelist: " + e.getMessage());
+        throw new RuntimeException("Failed to fetch whitelist sync: " + e.getMessage(), e);
+      }
+    }, executor);
+  }
+
   /* ═══════════════════════ Offense System ═══════════════════════ */
 
   /**
