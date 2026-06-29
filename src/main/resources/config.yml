@@ -147,3 +147,16 @@ websocket:
 roleSync:
   # Enable role synchronization with Discord
   enabled: false
+
+# Update Checker
+# The plugin asks your Heimdall bot for the latest published plugin version
+# (the bot reads it from GitHub Releases) and warns when this server is behind.
+updates:
+  # Check for a newer plugin version on startup and on the interval below.
+  checkEnabled: true
+
+  # When an update is available, message admins (heimdall.admin) as they join.
+  notifyAdmins: true
+
+  # How often to re-check for updates, in hours. Minimum 1.
+  checkIntervalHours: 12

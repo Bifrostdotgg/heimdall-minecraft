@@ -1,6 +1,7 @@
 package com.heimdall.whitelist.velocity;
 
 import com.google.inject.Inject;
+import com.heimdall.whitelist.BuildConstants;
 import com.heimdall.whitelist.core.*;
 import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.command.SimpleCommand;
@@ -24,6 +25,7 @@ import org.slf4j.Logger;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -39,7 +41,7 @@ import java.util.stream.Collectors;
 /**
  * Main Velocity plugin class for Heimdall Whitelist
  */
-@Plugin(id = "heimdall-whitelist", name = "HeimdallWhitelist", version = "2.0.0", description = "Dynamic whitelist integration with Heimdall Discord bot", url = "https://github.com/lerndmina/Heimdall", authors = {
+@Plugin(id = "heimdall-whitelist", name = "HeimdallWhitelist", version = BuildConstants.VERSION, description = "Dynamic whitelist integration with Heimdall Discord bot", url = "https://github.com/Bifrostdotgg/heimdall-minecraft", authors = {
     "Lerndmina" }, dependencies = { @Dependency(id = "luckperms", optional = true) })
 public class HeimdallVelocityPlugin {
 
@@ -55,6 +57,7 @@ public class HeimdallVelocityPlugin {
   private VelocityLuckPermsManager luckPermsManager;
   private OffenseManager offenseManager;
   private WebSocketClient wsClient;
+  private UpdateChecker updateChecker;
   private final Map<UUID, Long> linkCooldowns = new ConcurrentHashMap<>();
 
   @Inject
@@ -115,6 +118,15 @@ public class HeimdallVelocityPlugin {
     CompletableFuture.runAsync(() -> offenseManager.refresh());
     server.getScheduler().buildTask(this, () -> offenseManager.refresh())
         .repeat(5, TimeUnit.MINUTES).schedule();
+
+    // Initialize update checker (asks the bot for the latest published version)
+    updateChecker = new UpdateChecker(logger, apiClient);
+    if (configProvider.getBoolean("updates.checkEnabled", true)) {
+      long intervalHours = Math.max(1, configProvider.getLong("updates.checkIntervalHours", 12));
+      CompletableFuture.runAsync(() -> updateChecker.checkNow());
+      server.getScheduler().buildTask(this, () -> updateChecker.checkNow())
+          .repeat(intervalHours, TimeUnit.HOURS).schedule();
+    }
 
     // Register command
     server.getCommandManager().register("hwl", new HeimdallCommand(), "heimdallwhitelist");
@@ -356,11 +368,23 @@ public class HeimdallVelocityPlugin {
    */
   @Subscribe
   public void onPostLogin(PostLoginEvent event) {
-    if (whitelistCache == null || !configProvider.getBoolean("cache.enabled", true)) {
-      return;
-    }
     Player player = event.getPlayer();
-    whitelistCache.extendCacheOnJoin(player.getUniqueId().toString(), player.getUsername());
+
+    if (whitelistCache != null && configProvider.getBoolean("cache.enabled", true)) {
+      whitelistCache.extendCacheOnJoin(player.getUniqueId().toString(), player.getUsername());
+    }
+
+    // Notify admins when a plugin update is available.
+    if (updateChecker != null
+        && configProvider.getBoolean("updates.notifyAdmins", true)
+        && updateChecker.isUpdateAvailable()
+        && updateChecker.getLatestRelease() != null
+        && player.hasPermission("heimdall.admin")) {
+      String latest = updateChecker.getLatestRelease().getVersion();
+      player.sendMessage(colorize("&e[HeimdallWhitelist] &7An update is available: &f"
+          + updateChecker.getCurrentVersion() + " &7→ &a" + latest));
+      player.sendMessage(colorize("&7Run &f/hwl update&7 to download it."));
+    }
   }
 
   /**
@@ -381,6 +405,46 @@ public class HeimdallVelocityPlugin {
    */
   private Component colorize(String message) {
     return LegacyComponentSerializer.legacySection().deserialize(message.replace('&', '§'));
+  }
+
+  /* ═══════════════════════ /hwl version & update ════════════════ */
+
+  private void handleVersionCommand(CommandSource source) {
+    source.sendMessage(colorize("&eHeimdall Whitelist &7v&f" + updateChecker.getCurrentVersion()));
+    source.sendMessage(colorize("&7Checking for updates..."));
+    server.getScheduler().buildTask(this, () -> {
+      boolean available = updateChecker.checkNow();
+      if (available && updateChecker.getLatestRelease() != null) {
+        source.sendMessage(colorize("&aUpdate available: &f" + updateChecker.getLatestRelease().getVersion()));
+        source.sendMessage(colorize("&7Run &f/hwl update&7 to download it."));
+      } else {
+        source.sendMessage(colorize("&aYou are running the latest version."));
+      }
+    }).schedule();
+  }
+
+  private void handleUpdateCommand(CommandSource source) {
+    if (!updateChecker.isUpdateAvailable() || updateChecker.getLatestRelease() == null) {
+      source.sendMessage(colorize("&eNo update available, or no check has run yet. Try &f/hwl version&e first."));
+      return;
+    }
+
+    final PluginReleaseInfo rel = updateChecker.getLatestRelease();
+    source.sendMessage(colorize("&eDownloading HeimdallWhitelist &f" + rel.getVersion() + "&e..."));
+
+    server.getScheduler().buildTask(this, () -> {
+      try {
+        // Velocity has no plugins/update auto-apply folder — download into the
+        // plugin's data directory and instruct a manual move + restart.
+        File target = new File(dataDirectory.toFile(), "heimdall-whitelist-" + rel.getVersion() + ".jar");
+        updateChecker.downloadUpdate(target);
+        source.sendMessage(colorize("&aDownloaded to &f" + target.getAbsolutePath()));
+        source.sendMessage(colorize(
+            "&7Replace the old jar in your proxy's &fplugins/&7 folder with this file, then restart."));
+      } catch (Exception e) {
+        source.sendMessage(colorize("&cUpdate failed: " + e.getMessage()));
+      }
+    }).schedule();
   }
 
   /**
@@ -409,6 +473,8 @@ public class HeimdallVelocityPlugin {
         source.sendMessage(colorize("&7/hwl cache clear - Clear the whitelist cache"));
         source.sendMessage(colorize("&7/hwl offense reload - Refresh cached offense types"));
         source.sendMessage(colorize("&7/hwl offense types - List all offense types"));
+        source.sendMessage(colorize("&7/hwl version - Show version & check for updates"));
+        source.sendMessage(colorize("&7/hwl update - Download the latest version"));
         return;
       }
 
@@ -538,6 +604,14 @@ public class HeimdallVelocityPlugin {
           handleOffenseSubcommand(source, args);
           break;
 
+        case "version":
+          handleVersionCommand(source);
+          break;
+
+        case "update":
+          handleUpdateCommand(source);
+          break;
+
         default:
           source.sendMessage(colorize("&cUnknown subcommand: " + subCommand));
           break;
@@ -548,7 +622,7 @@ public class HeimdallVelocityPlugin {
     public List<String> suggest(Invocation invocation) {
       String[] args = invocation.arguments();
       if (args.length <= 1) {
-        return Arrays.asList("reload", "status", "enable", "disable", "test", "cache", "offense");
+        return Arrays.asList("reload", "status", "enable", "disable", "test", "cache", "offense", "version", "update");
       } else if (args.length == 2 && args[0].equalsIgnoreCase("cache")) {
         return Arrays.asList("stats", "clear");
       } else if (args.length == 2 && args[0].equalsIgnoreCase("offense")) {

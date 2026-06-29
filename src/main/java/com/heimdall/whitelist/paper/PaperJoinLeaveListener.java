@@ -1,5 +1,6 @@
 package com.heimdall.whitelist.paper;
 
+import com.heimdall.whitelist.core.UpdateChecker;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -26,6 +27,19 @@ public class PaperJoinLeaveListener implements Listener {
     // Extend cache on successful join
     if (plugin.getConfig().getBoolean("cache.enabled", true)) {
       plugin.getWhitelistCache().extendCacheOnJoin(uuid, username);
+    }
+
+    // Notify admins when a plugin update is available.
+    UpdateChecker updateChecker = plugin.getUpdateChecker();
+    if (updateChecker != null
+        && plugin.getConfig().getBoolean("updates.notifyAdmins", true)
+        && updateChecker.isUpdateAvailable()
+        && updateChecker.getLatestRelease() != null
+        && player.hasPermission("heimdall.admin")) {
+      String latest = updateChecker.getLatestRelease().getVersion();
+      player.sendMessage(plugin.colorize("&e[HeimdallWhitelist] &7An update is available: &f"
+          + updateChecker.getCurrentVersion() + " &7→ &a" + latest));
+      player.sendMessage(plugin.colorize("&7Run &f/hwl update&7 to download it (applied on restart)."));
     }
   }
 
