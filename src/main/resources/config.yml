@@ -143,6 +143,16 @@ websocket:
   # How long to wait for a pong before considering the connection dead (ms)
   heartbeat-timeout: 10000
 
+# Console Streaming
+# Streams this server's console output (INFO and above) to the Heimdall bot over
+# the WebSocket tunnel, so staff can read live logs from the dashboard without
+# shell access. Lines are batched (~once per second) and only sent while the
+# tunnel is connected; nothing is buffered to disk and the in-memory buffer is
+# bounded. Has no effect unless `websocket.enabled` is also true.
+console:
+  # Capture and stream console output to the bot. Set false to disable.
+  stream: true
+
 # Role Sync Settings
 roleSync:
   # Enable role synchronization with Discord

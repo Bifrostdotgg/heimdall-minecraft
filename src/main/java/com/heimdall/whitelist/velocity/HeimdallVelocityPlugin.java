@@ -57,6 +57,8 @@ public class HeimdallVelocityPlugin {
   private VelocityLuckPermsManager luckPermsManager;
   private OffenseManager offenseManager;
   private WebSocketClient wsClient;
+  private ConsoleStreamer consoleStreamer;
+  private com.velocitypowered.api.scheduler.ScheduledTask consoleFlushTask;
   private UpdateChecker updateChecker;
   private final long startedAtMs = System.currentTimeMillis();
   private final Map<UUID, Long> linkCooldowns = new ConcurrentHashMap<>();
@@ -167,10 +169,28 @@ public class HeimdallVelocityPlugin {
     if (configProvider.getBoolean("websocket.enabled", false)) {
       wsClient.connect();
     }
+
+    // Console streaming: capture INFO+ log lines and ship them to the bot over
+    // the same tunnel. Only attach when explicitly enabled.
+    if (configProvider.getBoolean("console.stream", true)) {
+      consoleStreamer = new ConsoleStreamer(wsClient, logger);
+      consoleStreamer.attach();
+      // Drain + flush once per second.
+      consoleFlushTask = server.getScheduler().buildTask(this, () -> consoleStreamer.flush())
+          .repeat(1, TimeUnit.SECONDS).schedule();
+    }
   }
 
   @Subscribe
   public void onProxyShutdown(ProxyShutdownEvent event) {
+    // Stop console streaming (cancel flush task + detach appender)
+    if (consoleFlushTask != null) {
+      consoleFlushTask.cancel();
+    }
+    if (consoleStreamer != null) {
+      consoleStreamer.detach();
+    }
+
     // Shutdown WebSocket
     if (wsClient != null) {
       wsClient.shutdown();

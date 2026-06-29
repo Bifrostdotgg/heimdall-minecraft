@@ -38,11 +38,13 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
   private OffenseManager offenseManager;
   private WebSocketClient wsClient;
   private HeimdallTunnelImpl tunnel;
+  private ConsoleStreamer consoleStreamer;
   private UpdateChecker updateChecker;
   private final long startedAtMs = System.currentTimeMillis();
   private int cacheCleanupTaskId = -1;
   private int offenseRefreshTaskId = -1;
   private int updateCheckTaskId = -1;
+  private int consoleFlushTaskId = -1;
   /**
    * In-memory /linkdiscord cooldowns, keyed by player UUID. Previously these were
    * written into the live config object and persisted by saveConfig(), so the
@@ -164,6 +166,16 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
     if (getConfig().getBoolean("websocket.enabled", false)) {
       wsClient.connect();
     }
+
+    // Console streaming: capture INFO+ log lines and ship them to the bot over
+    // the same tunnel. Only attach when explicitly enabled.
+    if (getConfig().getBoolean("console.stream", true)) {
+      consoleStreamer = new ConsoleStreamer(wsClient, logger);
+      consoleStreamer.attach();
+      // Drain + flush ~once per second on an async thread.
+      consoleFlushTaskId = getServer().getScheduler().runTaskTimerAsynchronously(this,
+          () -> consoleStreamer.flush(), 20L, 20L).getTaskId();
+    }
   }
 
   @Override
@@ -181,6 +193,14 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
     // Cancel update check task
     if (updateCheckTaskId != -1) {
       getServer().getScheduler().cancelTask(updateCheckTaskId);
+    }
+
+    // Stop console streaming (cancel flush task + detach appender)
+    if (consoleFlushTaskId != -1) {
+      getServer().getScheduler().cancelTask(consoleFlushTaskId);
+    }
+    if (consoleStreamer != null) {
+      consoleStreamer.detach();
     }
 
     // Shutdown WebSocket
