@@ -5,7 +5,7 @@
 
   <groupId>com.heimdall</groupId>
   <artifactId>heimdall-whitelist</artifactId>
-  <version>2.0.0</version>
+  <version>2.1.0</version>
   <packaging>jar</packaging>
 
   <name>HeimdallWhitelist</name>
@@ -77,7 +77,7 @@
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-core</artifactId>
-      <version>2.19.0</version>
+      <version>2.24.3</version>
       <scope>provided</scope>
     </dependency>
 
