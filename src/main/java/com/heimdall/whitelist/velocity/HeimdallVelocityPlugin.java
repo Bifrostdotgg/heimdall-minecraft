@@ -463,24 +463,57 @@ public class HeimdallVelocityPlugin {
     }).schedule();
   }
 
+  /** Resolve this plugin's own jar on disk (Velocity exposes it via the plugin source). */
+  private File resolveOwnJar() {
+    try {
+      return server.getPluginManager().fromInstance(this)
+          .flatMap(c -> c.getDescription().getSource())
+          .map(Path::toFile)
+          .orElse(null);
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  /**
+   * Download the latest release and install it. Velocity has no plugins/update
+   * folder, but it does expose the running jar's path — so replace that jar in
+   * place (atomic .part → swap) and the admin only needs to restart. On Linux the
+   * JVM keeps the old file open until restart, so this is safe. Falls back to the
+   * data directory (manual move) only if the jar can't be located or replaced
+   * (e.g. a locked file on Windows). Returns a user-facing status message; throws
+   * only if the download itself fails.
+   */
+  private String installLatestUpdate() throws java.io.IOException {
+    final String version = updateChecker.getLatestRelease().getVersion();
+    File ownJar = resolveOwnJar();
+    if (ownJar != null) {
+      try {
+        updateChecker.downloadUpdate(ownJar); // replace the live jar in place
+        return "Installed " + version + " in place — restart the proxy to apply.";
+      } catch (java.io.IOException inPlaceErr) {
+        logger.warning("[Update] Could not replace the running jar (" + inPlaceErr.getMessage()
+            + "); falling back to the data directory.");
+      }
+    }
+    File fallback = new File(dataDirectory.toFile(), "heimdall-whitelist-" + version + ".jar");
+    updateChecker.downloadUpdate(fallback);
+    return "Downloaded " + version + " to " + fallback.getAbsolutePath()
+        + " — couldn't replace the running jar automatically; move it into plugins/ and restart.";
+  }
+
   private void handleUpdateCommand(CommandSource source) {
     if (!updateChecker.isUpdateAvailable() || updateChecker.getLatestRelease() == null) {
       source.sendMessage(colorize("&eNo update available, or no check has run yet. Try &f/hwl version&e first."));
       return;
     }
 
-    final PluginReleaseInfo rel = updateChecker.getLatestRelease();
-    source.sendMessage(colorize("&eDownloading HeimdallWhitelist &f" + rel.getVersion() + "&e..."));
+    source.sendMessage(colorize("&eDownloading HeimdallWhitelist &f"
+        + updateChecker.getLatestRelease().getVersion() + "&e..."));
 
     server.getScheduler().buildTask(this, () -> {
       try {
-        // Velocity has no plugins/update auto-apply folder — download into the
-        // plugin's data directory and instruct a manual move + restart.
-        File target = new File(dataDirectory.toFile(), "heimdall-whitelist-" + rel.getVersion() + ".jar");
-        updateChecker.downloadUpdate(target);
-        source.sendMessage(colorize("&aDownloaded to &f" + target.getAbsolutePath()));
-        source.sendMessage(colorize(
-            "&7Replace the old jar in your proxy's &fplugins/&7 folder with this file, then restart."));
+        source.sendMessage(colorize("&a" + installLatestUpdate()));
       } catch (Exception e) {
         source.sendMessage(colorize("&cUpdate failed: " + e.getMessage()));
       }
@@ -1118,8 +1151,8 @@ public class HeimdallVelocityPlugin {
         break;
       }
       case "update": {
-        // Dashboard-triggered remote update — Velocity has no update folder, so
-        // download into the plugin data dir and report where it landed.
+        // Dashboard-triggered remote update — replace the running jar in place
+        // (restart applies it); see installLatestUpdate().
         server.getScheduler().buildTask(this, () -> {
           JsonObject result = new JsonObject();
           try {
@@ -1128,12 +1161,10 @@ public class HeimdallVelocityPlugin {
               result.addProperty("success", false);
               result.addProperty("message", "Already up to date");
             } else {
-              File target = new File(dataDirectory.toFile(),
-                  "heimdall-whitelist-" + updateChecker.getLatestRelease().getVersion() + ".jar");
-              updateChecker.downloadUpdate(target);
+              String installMsg = installLatestUpdate();
               result.addProperty("success", true);
               result.addProperty("version", updateChecker.getLatestRelease().getVersion());
-              result.addProperty("message", "Downloaded to plugin data dir; move to plugins/ and restart");
+              result.addProperty("message", installMsg);
             }
           } catch (Exception e) {
             result.addProperty("success", false);
