@@ -8,7 +8,10 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.lang.reflect.Type;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -175,6 +178,87 @@ public class WhitelistCache {
 
     logger.info("Added whitelisted player to cache: " + username + " (" + uuid + ")" +
         ", expires in " + (cacheWindowMs / 60000) + " minutes");
+  }
+
+  /** Summary of a {@link #reconcileFromSync} pass. */
+  public static class ReconcileResult {
+    public final int added;
+    public final int updated;
+    public final int pruned;
+
+    public ReconcileResult(int added, int updated, int pruned) {
+      this.added = added;
+      this.updated = updated;
+      this.pruned = pruned;
+    }
+  }
+
+  /**
+   * Make the cache authoritatively mirror the bot's current whitelist (the
+   * pre-warm sync). Every supplied player is a fresh, bot-confirmed verification:
+   * upserted as whitelisted with {@code lastVerified = now} so the max-extension
+   * ceiling is measured from now, and the expiry refreshed (never shrunk below an
+   * already-extended value). Cache entries NOT in the supplied set are pruned —
+   * the cache only holds positive (whitelisted) entries, so anything missing from
+   * the authoritative whitelist has been revoked/removed and must go, propagating
+   * revocations promptly rather than waiting for each entry to expire.
+   *
+   * <p>Callers MUST only invoke this with the result of a SUCCESSFUL full fetch —
+   * never on error — or the prune would wrongly wipe the cache. An empty list is
+   * a legitimate "no whitelisted players" state and is applied as such.
+   *
+   * @param entries the full set of currently-whitelisted players from the bot
+   * @return counts of entries added, refreshed, and pruned
+   */
+  public ReconcileResult reconcileFromSync(List<WhitelistSyncEntry> entries) {
+    long now = System.currentTimeMillis();
+    Set<String> syncedUuids = new HashSet<>();
+    int added = 0;
+    int updated = 0;
+
+    for (WhitelistSyncEntry entry : entries) {
+      String uuid = entry.getUuid();
+      if (uuid == null || uuid.isBlank()) {
+        continue;
+      }
+      syncedUuids.add(uuid);
+      String username = entry.getUsername();
+
+      CacheEntry existing = cache.get(uuid);
+      if (existing == null) {
+        cache.put(uuid, new CacheEntry(
+            username != null ? username : uuid,
+            uuid,
+            now,
+            now + cacheWindowMs,
+            true,
+            now));
+        added++;
+      } else {
+        existing.whitelisted = true;
+        existing.lastVerified = now;
+        if (username != null && !username.isBlank()) {
+          existing.username = username;
+        }
+        // Refresh the window from this verification, but never shrink an entry a
+        // recent join/leave already slid further forward (capped to the ceiling).
+        existing.cacheExpiry = Math.max(existing.cacheExpiry, capExpiry(existing, now + cacheWindowMs));
+        updated++;
+      }
+    }
+
+    int pruned = 0;
+    for (String uuid : new HashSet<>(cache.keySet())) {
+      if (!syncedUuids.contains(uuid)) {
+        cache.remove(uuid);
+        pruned++;
+      }
+    }
+
+    saveCache();
+    logger.info("Whitelist pre-warm sync: " + added + " added, " + updated + " refreshed, "
+        + pruned + " pruned (" + cache.size() + " cached)");
+    return new ReconcileResult(added, updated, pruned);
   }
 
   /**
