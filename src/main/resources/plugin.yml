@@ -1,10 +1,10 @@
 name: HeimdallWhitelist
-version: 2.0.0
+version: ${project.version}
 main: com.heimdall.whitelist.paper.HeimdallPaperPlugin
 api-version: "1.21"
 description: Dynamic whitelist integration with Heimdall Discord bot
 author: Lerndmina
-website: https://github.com/lerndmina/Heimdall
+website: https://github.com/Bifrostdotgg/heimdall-minecraft
 softdepend: [LuckPerms]
 folia-supported: false
 

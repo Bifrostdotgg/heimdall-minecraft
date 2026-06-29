@@ -10,6 +10,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.Listener;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
@@ -36,8 +37,10 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
   private OffenseManager offenseManager;
   private WebSocketClient wsClient;
   private HeimdallTunnelImpl tunnel;
+  private UpdateChecker updateChecker;
   private int cacheCleanupTaskId = -1;
   private int offenseRefreshTaskId = -1;
+  private int updateCheckTaskId = -1;
   /**
    * In-memory /linkdiscord cooldowns, keyed by player UUID. Previously these were
    * written into the live config object and persisted by saveConfig(), so the
@@ -98,6 +101,16 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
     // Refresh offense types every 5 minutes
     offenseRefreshTaskId = getServer().getScheduler().runTaskTimerAsynchronously(this,
         () -> offenseManager.refresh(), 5 * 60 * 20L, 5 * 60 * 20L).getTaskId();
+
+    // Initialize update checker (asks the bot for the latest published version)
+    updateChecker = new UpdateChecker(logger, apiClient);
+    if (getConfig().getBoolean("updates.checkEnabled", true)) {
+      long intervalHours = Math.max(1, getConfig().getLong("updates.checkIntervalHours", 12));
+      long intervalTicks = intervalHours * 60 * 60 * 20L;
+      // Initial check shortly after boot, then on the configured interval.
+      updateCheckTaskId = getServer().getScheduler().runTaskTimerAsynchronously(this,
+          () -> updateChecker.checkNow(), 20L * 10, intervalTicks).getTaskId();
+    }
 
     // Register events
     getServer().getPluginManager().registerEvents(new PaperLoginListener(this), this);
@@ -161,6 +174,11 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
       getServer().getScheduler().cancelTask(offenseRefreshTaskId);
     }
 
+    // Cancel update check task
+    if (updateCheckTaskId != -1) {
+      getServer().getScheduler().cancelTask(updateCheckTaskId);
+    }
+
     // Shutdown WebSocket
     if (wsClient != null) {
       wsClient.shutdown();
@@ -212,6 +230,8 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
       sender.sendMessage(colorize("&7/hwl cache cleanup - Clean up expired cache entries"));
       sender.sendMessage(colorize("&7/hwl offense reload - Refresh cached offense types"));
       sender.sendMessage(colorize("&7/hwl offense types - List all offense types"));
+      sender.sendMessage(colorize("&7/hwl version - Show version & check for updates"));
+      sender.sendMessage(colorize("&7/hwl update - Download the latest version (applied on restart)"));
       return true;
     }
 
@@ -338,10 +358,61 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
       case "offense":
         return handleOffenseSubcommand(sender, args);
 
+      case "version":
+        return handleVersionCommand(sender);
+
+      case "update":
+        return handleUpdateCommand(sender);
+
       default:
         sender.sendMessage(colorize("&cUnknown subcommand: " + subCommand));
         return false;
     }
+  }
+
+  /* ═══════════════════════ /hwl version & update ════════════════ */
+
+  private boolean handleVersionCommand(CommandSender sender) {
+    sender.sendMessage(colorize("&eHeimdall Whitelist &7v&f" + updateChecker.getCurrentVersion()));
+    sender.sendMessage(colorize("&7Checking for updates..."));
+    getServer().getScheduler().runTaskAsynchronously(this, () -> {
+      boolean available = updateChecker.checkNow();
+      getServer().getScheduler().runTask(this, () -> {
+        if (available && updateChecker.getLatestRelease() != null) {
+          sender.sendMessage(colorize("&aUpdate available: &f" + updateChecker.getLatestRelease().getVersion()));
+          sender.sendMessage(colorize("&7Run &f/hwl update&7 to download it (applied on restart)."));
+        } else {
+          sender.sendMessage(colorize("&aYou are running the latest version."));
+        }
+      });
+    });
+    return true;
+  }
+
+  private boolean handleUpdateCommand(CommandSender sender) {
+    if (!updateChecker.isUpdateAvailable() || updateChecker.getLatestRelease() == null) {
+      sender.sendMessage(colorize("&eNo update available, or no check has run yet. Try &f/hwl version&e first."));
+      return true;
+    }
+
+    sender.sendMessage(colorize("&eDownloading HeimdallWhitelist &f"
+        + updateChecker.getLatestRelease().getVersion() + "&e..."));
+
+    getServer().getScheduler().runTaskAsynchronously(this, () -> {
+      try {
+        // Paper applies a JAR dropped in plugins/update/ (matching the current
+        // plugin's file name) on the next server start.
+        File updateFolder = new File(getDataFolder().getParentFile(), "update");
+        File target = new File(updateFolder, getFile().getName());
+        updateChecker.downloadUpdate(target);
+        getServer().getScheduler().runTask(this,
+            () -> sender.sendMessage(colorize("&aUpdate downloaded! Restart the server to apply it.")));
+      } catch (Exception e) {
+        getServer().getScheduler().runTask(this,
+            () -> sender.sendMessage(colorize("&cUpdate failed: " + e.getMessage())));
+      }
+    });
+    return true;
   }
 
   private boolean handleLinkDiscordCommand(CommandSender sender, String[] args) {
@@ -599,7 +670,7 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
     if (commandName.equals("hwl") && sender.hasPermission("heimdall.admin")) {
       if (args.length == 1) {
         String prefix = args[0].toLowerCase();
-        return Arrays.asList("reload", "status", "enable", "disable", "test", "cache", "offense")
+        return Arrays.asList("reload", "status", "enable", "disable", "test", "cache", "offense", "version", "update")
             .stream()
             .filter(s -> s.startsWith(prefix))
             .collect(Collectors.toList());
@@ -851,5 +922,9 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
 
   public WebSocketClient getWsClient() {
     return wsClient;
+  }
+
+  public UpdateChecker getUpdateChecker() {
+    return updateChecker;
   }
 }

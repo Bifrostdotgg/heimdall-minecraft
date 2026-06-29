@@ -29,9 +29,13 @@ The plugin can be used on either the backend servers, the proxy, or both dependi
 
 ## Installation
 
+Download the latest `heimdall-whitelist-X.X.X.jar` from the
+[**Releases page**](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest).
+The same JAR works on both Paper and Velocity.
+
 ### Paper/Spigot Installation
 
-1. Download the latest `heimdall-whitelist-X.X.X.jar` from the releases page
+1. Download the latest `heimdall-whitelist-X.X.X.jar` from the [Releases page](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest)
 2. Place the JAR file in your server's `plugins/` folder
 3. Start your server to generate the default configuration
 4. Edit `plugins/HeimdallWhitelist/config.yml`
@@ -39,11 +43,34 @@ The plugin can be used on either the backend servers, the proxy, or both dependi
 
 ### Velocity Installation
 
-1. Download the latest `heimdall-whitelist-X.X.X.jar` from the releases page
+1. Download the latest `heimdall-whitelist-X.X.X.jar` from the [Releases page](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest)
 2. Place the JAR file in your Velocity proxy's `plugins/` folder
 3. Start your proxy to generate the default configuration
 4. Edit `plugins/heimdall-whitelist/config.json`
 5. Restart your proxy or use `/hwl reload`
+
+### Keeping the plugin updated
+
+The plugin checks your Heimdall bot for the latest published version on startup
+and every few hours. When a newer version is available:
+
+- A warning is logged to the server console.
+- Admins (`heimdall.admin`) are notified as they join (if `updates.notifyAdmins` is on).
+- Run `/hwl version` to see the installed vs. latest version on demand.
+- Run `/hwl update` to download the latest JAR:
+  - **Paper**: it is placed in `plugins/update/` and applied automatically on the
+    next server restart.
+  - **Velocity**: it is downloaded into the plugin's data folder; move it into the
+    proxy's `plugins/` directory (replacing the old JAR) and restart.
+
+Update behavior is configurable under the `updates:` section of the config:
+
+```yaml
+updates:
+  checkEnabled: true       # check for new versions on startup + interval
+  notifyAdmins: true       # message admins on join when an update is available
+  checkIntervalHours: 12   # how often to re-check (minimum 1)
+```
 
 ## Configuration
 
@@ -151,6 +178,8 @@ The Velocity version uses JSON configuration with the same options:
 - `/hwl test <player>` - Test whitelist check for a specific player
 - `/hwl cache stats` - Show cache statistics
 - `/hwl cache clear` - Clear the whitelist cache
+- `/hwl version` - Show the installed version and check for updates
+- `/hwl update` - Download the latest version (applied on restart)
 
 **Permission Required**: `heimdall.admin` (defaults to OP)
 
@@ -300,12 +329,17 @@ See the main Heimdall documentation for bot setup instructions.
 ### Building from Source
 
 ```bash
-git clone https://github.com/lerndmina/Heimdall.git
-cd Heimdall/minecraft-plugin
+git clone https://github.com/Bifrostdotgg/heimdall-minecraft.git
+cd heimdall-minecraft
 mvn clean package
 ```
 
-The compiled JAR will be in `target/HeimdallWhitelist-X.X.X.jar`.
+The compiled JAR will be in `target/heimdall-whitelist-X.X.X.jar`.
+
+The plugin version has a single source of truth: the `<version>` in `pom.xml`.
+The `templating-maven-plugin` generates `BuildConstants.VERSION` from it, and
+`plugin.yml` reads it via resource filtering — so bumping the POM (or releasing a
+`vX.Y.Z` tag, which sets the POM) updates every version reference at once.
 
 ### API Endpoints Used
 
@@ -318,10 +352,15 @@ The compiled JAR will be in `target/HeimdallWhitelist-X.X.X.jar`.
 
 ## Support
 
-- **Issues**: Report bugs on [GitHub Issues](https://github.com/lerndmina/Heimdall/issues)
-- **Documentation**: See the main [Heimdall Documentation](https://github.com/lerndmina/Heimdall)
+- **Issues**: Report bugs on [GitHub Issues](https://github.com/Bifrostdotgg/heimdall-minecraft/issues)
 - **Discord**: Join our Discord server for community support
 
 ## License
 
-This project is licensed under the same license as the main Heimdall project.
+This project is **source-available, not open source**. It is licensed under the
+[PolyForm Shield License 1.0.0](https://polyformproject.org/licenses/shield/1.0.0)
+— see the [LICENSE](LICENSE) file for the full text.
+
+In short: you are free to download, build, run, and modify the plugin for your own
+Minecraft servers and networks (including commercial/monetized ones). What you may
+**not** do is use it to provide a product or service that competes with Heimdall.

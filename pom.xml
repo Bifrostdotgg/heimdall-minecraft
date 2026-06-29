@@ -10,7 +10,22 @@
 
   <name>HeimdallWhitelist</name>
   <description>Dynamic whitelist integration with Heimdall Discord bot - supports Paper 1.21.1+ and Velocity</description>
-  <url>https://github.com/lerndmina/Heimdall</url>
+  <url>https://github.com/Bifrostdotgg/heimdall-minecraft</url>
+
+  <licenses>
+    <license>
+      <name>PolyForm Shield License 1.0.0</name>
+      <url>https://polyformproject.org/licenses/shield/1.0.0</url>
+      <distribution>repo</distribution>
+      <comments>Source-available, non-OSS. Free to use and modify for any purpose
+        except competing with Heimdall. See the LICENSE file.</comments>
+    </license>
+  </licenses>
+
+  <scm>
+    <connection>scm:git:https://github.com/Bifrostdotgg/heimdall-minecraft.git</connection>
+    <url>https://github.com/Bifrostdotgg/heimdall-minecraft</url>
+  </scm>
 
   <properties>
     <maven.compiler.source>21</maven.compiler.source>
@@ -83,6 +98,22 @@
     </resources>
 
     <plugins>
+      <!-- Templating Plugin: generates BuildConstants.java from ${project.version}
+           so the plugin version has a single source of truth (the POM). -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>templating-maven-plugin</artifactId>
+        <version>3.1.0</version>
+        <executions>
+          <execution>
+            <id>filter-src</id>
+            <goals>
+              <goal>filter-sources</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
       <!-- Maven Compiler Plugin -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

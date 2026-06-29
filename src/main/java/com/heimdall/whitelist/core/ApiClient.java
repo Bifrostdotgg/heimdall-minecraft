@@ -3,6 +3,7 @@ package com.heimdall.whitelist.core;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.heimdall.whitelist.BuildConstants;
 
 import java.io.*;
 import java.net.HttpURLConnection;
@@ -201,7 +202,7 @@ public class ApiClient {
         // Configure connection
         connection.setRequestMethod("POST");
         connection.setRequestProperty("Content-Type", "application/json");
-        connection.setRequestProperty("User-Agent", "HeimdallWhitelist/2.0.0");
+        connection.setRequestProperty("User-Agent", "HeimdallWhitelist/" + BuildConstants.VERSION);
 
         String bodyString = requestBody.toString();
 
@@ -394,7 +395,7 @@ public class ApiClient {
         // Configure connection
         connection.setRequestMethod("POST");
         connection.setRequestProperty("Content-Type", "application/json");
-        connection.setRequestProperty("User-Agent", "HeimdallWhitelist/2.0.0");
+        connection.setRequestProperty("User-Agent", "HeimdallWhitelist/" + BuildConstants.VERSION);
 
         String bodyString = requestBody.toString();
 
@@ -518,6 +519,46 @@ public class ApiClient {
     return new WhitelistResponse(false, false, "", "link_code", code);
   }
 
+  /* ═══════════════════════ Update Check ═════════════════════════ */
+
+  /** Longer read timeout for the update check than the login-path default. */
+  private static final int UPDATE_CHECK_TIMEOUT_MS = 8000;
+
+  /**
+   * Fetch the latest published plugin release from the bot API. The bot sources
+   * this from GitHub Releases and caches it.
+   */
+  public CompletableFuture<PluginReleaseInfo> getLatestRelease() {
+    return CompletableFuture.supplyAsync(() -> {
+      try {
+        JsonObject response = makeGetRequest(
+            "/api/guilds/" + guildId + "/minecraft/plugin/latest",
+            Math.max(timeout, UPDATE_CHECK_TIMEOUT_MS));
+
+        JsonObject data = response;
+        if (response.has("data") && response.get("data").isJsonObject()) {
+          data = response.getAsJsonObject("data");
+        }
+
+        return new PluginReleaseInfo(
+            getStringOrNull(data, "version"),
+            getStringOrNull(data, "downloadUrl"),
+            data.has("releaseNotes") && !data.get("releaseNotes").isJsonNull()
+                ? data.get("releaseNotes").getAsString()
+                : "",
+            getStringOrNull(data, "htmlUrl"),
+            getStringOrNull(data, "publishedAt"));
+      } catch (Exception e) {
+        logger.debug("Failed to fetch latest release: " + e.getMessage());
+        throw new RuntimeException("Failed to fetch latest release: " + e.getMessage(), e);
+      }
+    }, executor);
+  }
+
+  private static String getStringOrNull(JsonObject obj, String key) {
+    return obj.has(key) && !obj.get(key).isJsonNull() ? obj.get(key).getAsString() : null;
+  }
+
   /* ═══════════════════════ Offense System ═══════════════════════ */
 
   /**
@@ -618,9 +659,19 @@ public class ApiClient {
   }
 
   /**
-   * Generic GET request that returns the parsed JSON response.
+   * Generic GET request that returns the parsed JSON response, using the
+   * configured per-request {@link #timeout}.
    */
   private JsonObject makeGetRequest(String endpoint) throws IOException {
+    return makeGetRequest(endpoint, timeout);
+  }
+
+  /**
+   * Generic GET request with an explicit timeout. Used for non-login-path calls
+   * (e.g. the update check) that can tolerate a longer wait than the latency-
+   * sensitive whitelist check.
+   */
+  private JsonObject makeGetRequest(String endpoint, int requestTimeoutMs) throws IOException {
     IOException lastException = null;
 
     for (int attempt = 1; attempt <= retries; attempt++) {
@@ -634,7 +685,7 @@ public class ApiClient {
 
         connection.setRequestMethod("GET");
         connection.setRequestProperty("Content-Type", "application/json");
-        connection.setRequestProperty("User-Agent", "HeimdallWhitelist/2.0.0");
+        connection.setRequestProperty("User-Agent", "HeimdallWhitelist/" + BuildConstants.VERSION);
 
         // HMAC-SHA256 request signing (GET has no body)
         if (hmacSecret != null && !hmacSecret.isEmpty()) {
@@ -643,8 +694,8 @@ public class ApiClient {
           connection.setRequestProperty("X-Timestamp", sig[1]);
         }
 
-        connection.setConnectTimeout(timeout);
-        connection.setReadTimeout(timeout);
+        connection.setConnectTimeout(requestTimeoutMs);
+        connection.setReadTimeout(requestTimeoutMs);
 
         int responseCode = connection.getResponseCode();
 
@@ -697,7 +748,7 @@ public class ApiClient {
 
         connection.setRequestMethod(method);
         connection.setRequestProperty("Content-Type", "application/json");
-        connection.setRequestProperty("User-Agent", "HeimdallWhitelist/2.0.0");
+        connection.setRequestProperty("User-Agent", "HeimdallWhitelist/" + BuildConstants.VERSION);
 
         String bodyString = requestBody != null ? requestBody.toString() : "";
 
