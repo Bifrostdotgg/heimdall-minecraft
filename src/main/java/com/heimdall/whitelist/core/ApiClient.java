@@ -136,6 +136,8 @@ public class ApiClient {
       requestBody.addProperty("uuid", uuid);
       requestBody.addProperty("ip", ip);
       requestBody.addProperty("serverIp", serverIp != null ? serverIp : "localhost");
+      // WS serverId so the bot can attribute join-feed events to this server.
+      requestBody.addProperty("serverId", config.getString("server.serverId", ""));
       requestBody.addProperty("currentlyWhitelisted", currentlyWhitelisted);
 
       // Add current groups for role sync
