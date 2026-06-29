@@ -1,0 +1,149 @@
+# Heimdall Whitelist Plugin Configuration
+# This plugin integrates with your Heimdall Discord bot for dynamic whitelist management
+
+# Global Plugin Control
+# IMPORTANT: Plugin starts DISABLED by default for security
+# When disabled, ALL players can join without any whitelist checks
+# Set this to true only after configuring your API settings properly
+# You can also use '/hwl enable' command in-game
+enabled: false
+
+# Bot API Configuration
+api:
+  # The URL of your Heimdall bot API endpoint
+  # Example: http://localhost:3001 or https://your-bot-domain.com
+  baseUrl: "https://api.bifrost.gg"
+
+  # Per-guild API key from the Heimdall dashboard (Minecraft > Config > API Key)
+  # This secret is used to sign requests — it is never sent over the wire.
+  # Obtained from https://bot.bifrost.gg
+  apiKey: "your-api-key-here"
+
+  # Your Discord server (guild) ID — REQUIRED.
+  # Find this by enabling Developer Mode in Discord, then right-clicking your server.
+  guildId: ""
+
+  # How long to wait for API responses (in milliseconds)
+  # Keep this low so reconnect storms fail fast instead of queueing for seconds.
+  timeout: 1500
+
+  # Total HTTP attempts per whitelist check.
+  # 1 means no retry; higher values can amplify burst load.
+  retries: 1
+
+  # Delay between retries (in milliseconds)
+  retryDelay: 1000
+
+# Server identification (sent to bot API)
+server:
+  # Unique identifier for this server (will be auto-generated if not set)
+  serverId: ""
+
+  # Server name to display in Discord
+  displayName: "My Minecraft Server"
+
+  # Public IP address of this server (sent to bot API for connection tracking)
+  publicIp: "localhost"
+
+# Message Configuration
+# NOTE: Player-facing messages (not whitelisted, auth code, whitelist success, etc.)
+# are configured in the Heimdall dashboard and served by the bot API — not here.
+messages:
+  # Message shown when the API is unavailable and the player is denied
+  apiUnavailable: "§cWhitelist system is temporarily unavailable. Please try again later."
+
+  # Message shown when the API is unavailable but the player is allowed (fail-open/cache hit)
+  apiUnavailableAllowed: "§eWhitelist API is temporarily unavailable. You have been allowed in from cache."
+
+  # Message shown to admins on reload
+  reloaded: "§aHeimdall Whitelist plugin reloaded successfully!"
+
+  # Message shown on status command
+  status: "§7Heimdall Whitelist Status:\n§7API URL: §f{url}\n§7Server ID: §f{serverId}\n§7Last Check: §f{lastCheck}"
+
+# Logging Configuration
+logging:
+  # Enable debug logging
+  debug: false
+
+  # Log whitelist decisions
+  logDecisions: true
+
+# Performance Settings
+performance:
+  # Cache whitelist decisions for this many seconds
+  cacheTimeout: 30
+
+  # Maximum concurrent API requests from this Minecraft server.
+  # Login checks are mostly network-bound, so this should be much higher than the old default.
+  maxConcurrentRequests: 128
+
+# Advanced Failure Handling
+advanced:
+  # When the API is unhealthy:
+  # - allow: fail open
+  # - whitelist-only: allow only players already in positive cache
+  # - deny: fail closed
+  apiFallbackMode: whitelist-only
+
+# Whitelist Bypass
+# UUIDs listed here skip every whitelist check (including the guild-ID guard).
+# The `heimdall.bypass` permission cannot gate login because permissions are not
+# attached during AsyncPlayerPreLoginEvent (the player object does not exist
+# yet), so list the player's UUID here instead. Matching is case-insensitive and
+# trims whitespace. Leave empty to bypass nobody (issue #796 / MC-2).
+bypass:
+  uuids: []
+
+# Whitelist Cache Settings
+cache:
+  # Enable/disable caching (can be toggled via role sync settings)
+  enabled: true
+
+  # How long to cache whitelist decisions (in minutes)
+  # This reduces API calls for repeat connections
+  cacheWindow: 60
+
+  # How long to extend cache when a player joins (in minutes)
+  # Since they successfully joined, extend their cache
+  extendOnJoin: 120
+
+  # How long to extend cache when a player leaves (in minutes)
+  # Since they were allowed to play, extend their cache
+  extendOnLeave: 180
+
+  # Hard ceiling (in hours) on how long a positive cache entry can keep being
+  # extended past the last successful API verification. Join/leave extensions
+  # slide the cache forward, but never beyond this many hours since the player
+  # was last actually verified against the bot. This stops a player who was
+  # removed from the Discord whitelist from keeping access indefinitely just by
+  # rejoining once per extension window. Once the ceiling is reached, the next
+  # join forces a fresh API check (and re-verification if still whitelisted).
+  # Set to 0 to disable the bound (NOT recommended — restores the old behaviour
+  # where revocation could be evaded indefinitely).
+  maxExtensionHours: 24
+
+  # How often to run cache cleanup (in minutes)
+  cleanupInterval: 30
+
+# WebSocket Tunnel
+# Enables a persistent 2-way connection to the Heimdall bot, so the dashboard
+# can trigger live actions (re-probe mods, live player list, remote commands)
+# without opening inbound ports. Disabled by default — requires Trace
+# integration on the bot side.
+websocket:
+  # Enable the WebSocket tunnel (URL is derived from api.baseUrl)
+  enabled: false
+  # Initial reconnect delay in ms (doubles each failure, up to max)
+  reconnect-delay: 5000
+  # Maximum reconnect delay in ms
+  max-reconnect-delay: 30000
+  # How often to send a heartbeat ping (ms)
+  heartbeat-interval: 30000
+  # How long to wait for a pong before considering the connection dead (ms)
+  heartbeat-timeout: 10000
+
+# Role Sync Settings
+roleSync:
+  # Enable role synchronization with Discord
+  enabled: false
