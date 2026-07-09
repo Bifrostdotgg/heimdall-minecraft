@@ -140,6 +140,10 @@ public class ApiClient {
       requestBody.addProperty("serverId", config.getString("server.serverId", ""));
       requestBody.addProperty("currentlyWhitelisted", currentlyWhitelisted);
 
+      // Explicit Bedrock/Floodgate identity (prefix-free gamertag + XUID) so the
+      // bot can match Bedrock players regardless of the server's prefix config.
+      addBedrockIdentity(requestBody, uuid);
+
       // Add current groups for role sync
       JsonArray groupsArray = new JsonArray();
       if (currentGroups != null) {
@@ -178,6 +182,7 @@ public class ApiClient {
       JsonObject requestBody = new JsonObject();
       requestBody.addProperty("username", normalizedUsername);
       requestBody.addProperty("uuid", uuid);
+      addBedrockIdentity(requestBody, uuid);
 
       try {
         return makeRequestForLinkCode("/api/guilds/" + guildId + "/minecraft/request-link-code", requestBody);
@@ -186,6 +191,24 @@ public class ApiClient {
         throw new RuntimeException("API request failed: " + e.getMessage(), e);
       }
     }, executor);
+  }
+
+  /**
+   * Attach explicit Bedrock identity fields to a request body when the joining
+   * player is a Floodgate (Bedrock) player. No-op for Java players or when
+   * Floodgate isn't installed — the bot then falls back to synthetic-UUID +
+   * prefix inference.
+   */
+  private void addBedrockIdentity(JsonObject requestBody, String uuid) {
+    FloodgateSupport.BedrockIdentity bedrock = FloodgateSupport.resolve(uuid);
+    if (bedrock == null) {
+      return;
+    }
+    requestBody.addProperty("isBedrock", true);
+    requestBody.addProperty("bedrockGamertag", bedrock.gamertag());
+    if (bedrock.xuid() != null && !bedrock.xuid().isBlank()) {
+      requestBody.addProperty("bedrockXuid", bedrock.xuid());
+    }
   }
 
   private WhitelistResponse makeRequest(String endpoint, JsonObject requestBody) throws IOException {
