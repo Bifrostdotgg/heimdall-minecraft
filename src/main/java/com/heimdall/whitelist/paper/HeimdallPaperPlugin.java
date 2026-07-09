@@ -13,6 +13,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -967,6 +968,53 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
         break;
       }
 
+      case "role_sync": {
+        // Bot-pushed realtime role change — apply LuckPerms groups to the
+        // (online) player immediately, no rejoin required. Fire-and-forget.
+        try {
+          if (luckPermsManager == null || !luckPermsManager.isAvailable()) {
+            logger.warning("[WS] role_sync received but LuckPerms is not available");
+            break;
+          }
+          String uuidStr = payload.has("uuid") && !payload.get("uuid").isJsonNull()
+              ? payload.get("uuid").getAsString()
+              : null;
+          String username = payload.has("username") && !payload.get("username").isJsonNull()
+              ? payload.get("username").getAsString()
+              : null;
+
+          UUID targetUuid = null;
+          if (uuidStr != null && !uuidStr.isBlank()) {
+            try {
+              targetUuid = UUID.fromString(uuidStr);
+            } catch (IllegalArgumentException ignored) {
+              // Fall through to username resolution.
+            }
+          }
+          if (targetUuid == null && username != null) {
+            Player p = getServer().getPlayerExact(username);
+            if (p != null) {
+              targetUuid = p.getUniqueId();
+            }
+          }
+          if (targetUuid == null) {
+            logger.warning("[WS] role_sync: could not resolve a UUID for " + username);
+            break;
+          }
+
+          List<String> targetGroups = jsonArrayToStringList(payload, "targetGroups");
+          List<String> managedGroups = jsonArrayToStringList(payload, "managedGroups");
+
+          final UUID resolvedUuid = targetUuid;
+          final String label = username != null ? username : resolvedUuid.toString();
+          luckPermsManager.setPlayerGroups(resolvedUuid, targetGroups, managedGroups)
+              .thenAccept(ok -> logger.info("[WS] role_sync applied for " + label + ": " + ok));
+        } catch (Exception e) {
+          logger.warning("[WS] role_sync failed: " + e.getMessage());
+        }
+        break;
+      }
+
       default:
         // Hand off to any plugin that registered for this type via HeimdallTunnel.
         if (tunnel != null && tunnel.dispatchInbound(type, id, payload)) {
@@ -974,6 +1022,20 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
         }
         logger.debug("[WS] Unhandled message type: " + type);
     }
+  }
+
+  /** Parse a JSON string array field into a List (empty when absent/invalid). */
+  private static List<String> jsonArrayToStringList(JsonObject obj, String key) {
+    List<String> out = new ArrayList<>();
+    if (obj.has(key) && obj.get(key).isJsonArray()) {
+      JsonArray arr = obj.getAsJsonArray(key);
+      for (int i = 0; i < arr.size(); i++) {
+        if (!arr.get(i).isJsonNull()) {
+          out.add(arr.get(i).getAsString());
+        }
+      }
+    }
+    return out;
   }
 
   /**

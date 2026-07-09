@@ -143,12 +143,14 @@ cache:
 
 # WebSocket Tunnel
 # Enables a persistent 2-way connection to the Heimdall bot, so the dashboard
-# can trigger live actions (re-probe mods, live player list, remote commands)
-# without opening inbound ports. Disabled by default — requires Trace
-# integration on the bot side.
+# can trigger live actions (live player list, remote commands, console
+# streaming, and realtime Discord→Minecraft role-sync push) without opening
+# inbound ports. Enabled by default so role changes apply to online players
+# immediately; set false to fall back to HTTP-only (role sync then applies on
+# the player's next join).
 websocket:
   # Enable the WebSocket tunnel (URL is derived from api.baseUrl)
-  enabled: false
+  enabled: true
   # Initial reconnect delay in ms (doubles each failure, up to max)
   reconnect-delay: 5000
   # Maximum reconnect delay in ms
