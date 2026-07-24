@@ -78,3 +78,25 @@ advanced:
   #   "deny" - Deny all players (fail closed)
   #   "whitelist-only" - Only allow players already on local whitelist
   apiFallbackMode: "allow"
+
+# WebSocket tunnel
+# Persistent 2-way connection to the Heimdall bot. It powers realtime
+# Discord -> Minecraft role-sync push, the dashboard's live console, player
+# list and status, and remote plugin updates — all without opening inbound
+# ports. Enabled by default; set enabled: false to fall back to HTTP-only
+# (role sync then applies on the player's next join).
+websocket:
+  # Enable the WebSocket tunnel (URL is derived from api.baseUrl)
+  enabled: true
+
+  # Initial reconnect delay in ms (doubles each failure, up to the max)
+  reconnect-delay: 5000
+
+  # Maximum reconnect delay in ms
+  max-reconnect-delay: 30000
+
+  # How often to send a heartbeat ping (in milliseconds)
+  heartbeat-interval: 30000
+
+  # How long to wait for a pong before considering the connection dead (ms)
+  heartbeat-timeout: 10000
