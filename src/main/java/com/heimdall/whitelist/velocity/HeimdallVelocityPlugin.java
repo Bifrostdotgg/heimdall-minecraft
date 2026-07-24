@@ -279,6 +279,13 @@ public class HeimdallVelocityPlugin {
       if (configProvider.getBoolean("logging.debug", false)) {
         logger.debug("Cache hit for " + username + ": allowing based on cache");
       }
+      // Role sync starved by cache pre-warm: the pre-warm sync keeps every
+      // whitelisted player permanently cached, so this early-allow branch is the
+      // common path and the API-path role sync below would otherwise never run.
+      // Fire an async, fire-and-forget check so role sync and the bot's
+      // connection history/join feed still happen — it must never block or
+      // affect the login result.
+      runCacheHitSyncAsync(username, uuid, ip, playerUuid);
       return;
     }
 
@@ -320,36 +327,7 @@ public class HeimdallVelocityPlugin {
         }
 
         // Apply role sync if enabled and LuckPerms is available
-        if (response.isRoleSyncEnabled() && response.getManagedGroups() != null
-            && !response.getManagedGroups().isEmpty()) {
-
-          if (luckPermsManager != null && luckPermsManager.isAvailable()) {
-            logger.info("Scheduling role sync for " + username + " with target groups: "
-                + response.getTargetGroups() +
-                " and managed groups: " + response.getManagedGroups());
-
-            // Schedule role sync after a short delay to ensure player is fully connected
-            final List<String> targetGroups = response.getTargetGroups();
-            final List<String> managedGroups = response.getManagedGroups();
-
-            server.getScheduler().buildTask(this, () -> {
-              try {
-                luckPermsManager.setPlayerGroups(playerUuid, targetGroups, managedGroups)
-                    .thenAccept(success -> {
-                      if (success) {
-                        logger.info("Successfully applied role sync for " + username);
-                      } else {
-                        logger.warning("Role sync returned false for " + username);
-                      }
-                    });
-              } catch (Exception e) {
-                logger.warning("Failed to apply role sync for " + username + ": " + e.getMessage());
-              }
-            }).delay(2, TimeUnit.SECONDS).schedule();
-          } else {
-            logger.warning("Role sync requested for " + username + " but LuckPerms is not available on Velocity");
-          }
-        }
+        scheduleRoleSync(playerUuid, username, response);
 
         // If the action is to show an auth code, deny with the code message
         if (mustShowAuthCode) {
@@ -400,6 +378,93 @@ public class HeimdallVelocityPlugin {
           break;
       }
     }
+  }
+
+  /**
+   * Schedule LuckPerms role sync from a whitelist response, after a short delay
+   * so the player is fully connected. No-op when the response doesn't request
+   * role sync. Shared by the API login path and the async cache-hit path.
+   */
+  private void scheduleRoleSync(UUID playerUuid, String username, WhitelistResponse response) {
+    if (!response.isRoleSyncEnabled() || response.getManagedGroups() == null
+        || response.getManagedGroups().isEmpty()) {
+      return;
+    }
+
+    if (luckPermsManager == null || !luckPermsManager.isAvailable()) {
+      logger.warning("Role sync requested for " + username + " but LuckPerms is not available on Velocity");
+      return;
+    }
+
+    logger.info("Scheduling role sync for " + username + " with target groups: "
+        + response.getTargetGroups() +
+        " and managed groups: " + response.getManagedGroups());
+
+    // Schedule role sync after a short delay to ensure player is fully connected
+    final List<String> targetGroups = response.getTargetGroups();
+    final List<String> managedGroups = response.getManagedGroups();
+
+    server.getScheduler().buildTask(this, () -> {
+      try {
+        luckPermsManager.setPlayerGroups(playerUuid, targetGroups, managedGroups)
+            .thenAccept(success -> {
+              if (success) {
+                logger.info("Successfully applied role sync for " + username);
+              } else {
+                logger.warning("Role sync returned false for " + username);
+              }
+            });
+      } catch (Exception e) {
+        logger.warning("Failed to apply role sync for " + username + ": " + e.getMessage());
+      }
+    }).delay(2, TimeUnit.SECONDS).schedule();
+  }
+
+  /**
+   * Fire-and-forget whitelist check for a player admitted from the positive
+   * cache (role sync starved by cache pre-warm). Runs off the login thread and
+   * must never block, kick, or otherwise affect the already-allowed login:
+   * role sync rides on the API response, and the /connection-attempt call also
+   * restores the bot's connection history / lastSeen / dashboard join feed for
+   * cache-hit joins. A non-whitelisted response is NOT acted on here —
+   * revocation propagation is handled by the pre-warm prune.
+   */
+  private void runCacheHitSyncAsync(String username, String uuid, String ip, UUID playerUuid) {
+    CompletableFuture.runAsync(() -> {
+      try {
+        // Mirror the login guards: skip when the plugin was disabled or the
+        // guild ID is unresolved by the time this runs.
+        if (!configProvider.getBoolean("enabled", false)
+            || apiClient.getGuildId() == null || apiClient.getGuildId().isEmpty()) {
+          return;
+        }
+
+        List<String> currentGroups = null;
+        if (luckPermsManager != null && luckPermsManager.isAvailable()) {
+          currentGroups = luckPermsManager.getPlayerGroups(playerUuid);
+        }
+
+        WhitelistResponse response = whitelistManager.checkPlayerWhitelist(
+            username,
+            uuid,
+            ip,
+            currentGroups,
+            configProvider.getString("server.publicIp", "localhost"),
+            true);
+
+        if (response.shouldBeWhitelisted()) {
+          scheduleRoleSync(playerUuid, username, response);
+        } else if (configProvider.getBoolean("logging.debug", false)) {
+          logger.debug("Async cache-hit check for " + username
+              + " returned non-whitelisted; leaving cached login untouched (pre-warm prune handles revocation)");
+        }
+      } catch (Exception e) {
+        // Player is already admitted from cache — never surface this.
+        if (configProvider.getBoolean("logging.debug", false)) {
+          logger.debug("Async cache-hit whitelist check failed for " + username + ": " + e.getMessage());
+        }
+      }
+    });
   }
 
   /**
