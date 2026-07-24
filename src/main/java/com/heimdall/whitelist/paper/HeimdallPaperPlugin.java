@@ -177,7 +177,7 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
     getServer().getServicesManager().register(HeimdallTunnel.class, tunnel, this,
         org.bukkit.plugin.ServicePriority.Normal);
 
-    if (getConfig().getBoolean("websocket.enabled", false)) {
+    if (getConfig().getBoolean("websocket.enabled", true)) {
       wsClient.connect();
     }
 
@@ -287,7 +287,7 @@ public class HeimdallPaperPlugin extends JavaPlugin implements Listener {
         // Re-read WS settings in place. Rebuilding the client orphaned the old
         // scheduler + selector thread and dropped the message handler wiring.
         if (wsClient != null) {
-          if (getConfig().getBoolean("websocket.enabled", false)) {
+          if (getConfig().getBoolean("websocket.enabled", true)) {
             wsClient.reconnect(apiClient.getGuildId());
           } else {
             wsClient.disconnect();

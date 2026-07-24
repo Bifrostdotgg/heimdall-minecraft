@@ -43,6 +43,18 @@ This guide will help you set up the Heimdall Minecraft Plugin for dynamic whitel
 
 2. Customize other settings as needed (see config-example.yml)
 
+### WebSocket Tunnel
+
+The plugin also keeps a persistent WebSocket connection to the bot (derived from
+`api.baseUrl` — no inbound ports or extra setup needed). It powers realtime
+Discord role-sync push, the dashboard's live console/player list/status, and
+remote plugin updates. It is **enabled by default**; to opt out, set:
+
+```yaml
+websocket:
+  enabled: false
+```
+
 ## Step 5: Set Up Discord Commands
 
 1. In your Discord server, run:

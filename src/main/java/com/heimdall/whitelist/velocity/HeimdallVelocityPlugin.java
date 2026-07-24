@@ -179,7 +179,7 @@ public class HeimdallVelocityPlugin {
     wsClient.setMessageHandler((type, msg) -> handleWsMessage(type, msg));
     wsClient.setIdentifyMetadataSupplier(this::buildIdentifyMetadata);
     wsClient.setHealthSupplier(this::buildHealthSnapshot);
-    if (configProvider.getBoolean("websocket.enabled", false)) {
+    if (configProvider.getBoolean("websocket.enabled", true)) {
       wsClient.connect();
     }
 
@@ -627,7 +627,7 @@ public class HeimdallVelocityPlugin {
           // Re-read WS settings in place. Rebuilding the client orphaned the old
           // scheduler + selector thread and dropped the message handler wiring.
           if (wsClient != null) {
-            if (configProvider.getBoolean("websocket.enabled", false)) {
+            if (configProvider.getBoolean("websocket.enabled", true)) {
               wsClient.reconnect(apiClient.getGuildId());
             } else {
               wsClient.disconnect();

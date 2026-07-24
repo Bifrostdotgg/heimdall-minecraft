@@ -120,9 +120,10 @@ public class VelocityConfigProvider implements ConfigProvider {
     bypass.add("uuids", new com.google.gson.JsonArray());
     cfg.add("bypass", bypass);
 
-    // WebSocket tunnel
+    // WebSocket tunnel — enabled by default: it powers realtime role-sync push,
+    // the dashboard live console/players/status, and remote plugin updates.
     JsonObject websocket = new JsonObject();
-    websocket.addProperty("enabled", false);
+    websocket.addProperty("enabled", true);
     websocket.addProperty("reconnect-delay", 5000);
     websocket.addProperty("max-reconnect-delay", 30000);
     websocket.addProperty("heartbeat-interval", 30000);

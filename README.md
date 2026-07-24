@@ -149,6 +149,24 @@ The Velocity version uses JSON configuration with the same options:
 }
 ```
 
+### WebSocket Tunnel
+
+Both platforms keep a persistent 2-way WebSocket connection to the Heimdall bot
+(URL derived from `api.baseUrl`, no inbound ports needed). It powers realtime
+Discord→Minecraft role-sync push, the dashboard's live console, player list and
+status, and remote plugin updates. **Enabled by default** — set
+`websocket.enabled: false` to fall back to HTTP-only (role sync then applies on
+the player's next join).
+
+```yaml
+websocket:
+  enabled: true # set false to disable the tunnel
+  reconnect-delay: 5000 # initial reconnect delay (ms), doubles up to the max
+  max-reconnect-delay: 30000
+  heartbeat-interval: 30000 # ping interval (ms)
+  heartbeat-timeout: 10000 # how long to wait for a pong (ms)
+```
+
 ### Important Configuration Notes
 
 - **enabled**: Controls whether whitelist protection is active. Starts `false` for security
