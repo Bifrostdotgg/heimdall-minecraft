@@ -1,35 +1,50 @@
 package com.heimdall.platform.bukkit.paper;
 
+import java.lang.reflect.Method;
 import org.bukkit.Bukkit;
 
 /**
- * Detects whether the running server exposes the Paper API.
+ * Capability probes for the Paper-only API this module uses.
  *
- * <p>Everything in this module is reached only after {@link #isPaper()} returns {@code true}, so
- * the shared jar never links a Paper class on a plain Spigot server.
+ * <p><strong>Probed by capability, never by brand.</strong> "Is this Paper?" is the question that
+ * looks right and is wrong in both directions: Paper 1.12.2 answers yes and has none of the API a
+ * 1.16-era check would then call, while Purpur, Pufferfish and Folia answer no and have all of it.
+ * Both mistakes surface as a {@code NoSuchMethodError} on a customer's server.
+ *
+ * <p>So the probe asks for the methods themselves. {@code Server#getTPS()} is a Paper addition that
+ * Spigot has never had; {@code getAverageTickTime()} arrived later still, which is why they are
+ * checked separately and MSPT can be absent on a server that reports TPS perfectly well.
+ *
+ * <p>Reflection is used here rather than a direct call precisely because this class has to be
+ * <em>safe to load</em> on a server that has neither. A method body that named {@code
+ * Bukkit.getTPS()} would be verified — and fail — the moment the class was linked, however
+ * carefully the code around it checked first. {@link PaperTickSource} is the class that makes the
+ * direct calls, and nothing loads it until these probes have said yes.
  */
 public final class PaperSupport {
 
     private PaperSupport() {
     }
 
-    /** Whether the running server exposes the Paper API. */
-    public static boolean isPaper() {
-        try {
-            Class.forName("com.destroystokyo.paper.PaperConfig");
-            return true;
-        } catch (ClassNotFoundException legacyMissing) {
-            try {
-                Class.forName("io.papermc.paper.configuration.Configuration");
-                return true;
-            } catch (ClassNotFoundException modernMissing) {
-                return false;
-            }
-        }
+    /** Whether {@code Server#getTPS()} exists on this server. */
+    public static boolean hasTickApi() {
+        return hasServerMethod("getTPS");
     }
 
-    /** The server implementation string, used in phase 0 only for logging. */
-    public static String describeServer() {
-        return Bukkit.getName() + " " + Bukkit.getVersion();
+    /** Whether {@code Server#getAverageTickTime()} exists. Paper 1.16+; absent on older Paper. */
+    public static boolean hasMsptApi() {
+        return hasServerMethod("getAverageTickTime");
+    }
+
+    private static boolean hasServerMethod(String name) {
+        try {
+            // Asked of the interface rather than of the running instance: CraftBukkit's Server
+            // implementation is obfuscated on some builds, and the API interface is what a direct
+            // call would be compiled against anyway.
+            Method method = Bukkit.getServer().getClass().getMethod(name);
+            return method != null;
+        } catch (Throwable absent) {
+            return false;
+        }
     }
 }
