@@ -2,6 +2,7 @@ package com.heimdall.platform.velocity;
 
 import com.heimdall.core.platform.ConsoleBridge;
 import com.heimdall.core.platform.LogLine;
+import com.heimdall.core.platform.UnknownCommandException;
 import com.heimdall.core.util.Registration;
 import com.heimdall.platform.common.Log4jConsoleTap;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -42,9 +43,15 @@ final class VelocityConsoleBridge implements ConsoleBridge {
                 // thenApply rather than thenApplyAsync: no executor to name, and the mapping is a
                 // string concatenation that does not deserve a thread hop. The conformance rule
                 // bans the executor-less *Async overloads, not the synchronous stages.
-                .thenApply(executed -> Boolean.TRUE.equals(executed)
-                        ? "dispatched: " + trimmed
-                        : "no such command: " + trimmed);
+                .thenApply(executed -> {
+                    if (Boolean.TRUE.equals(executed)) {
+                        return "dispatched: " + trimmed;
+                    }
+                    // Previously returned as a cheerful acknowledgement string, which meant the one
+                    // caller who needs to know — /offend, having just had an infraction recorded
+                    // bot-side — could only find out by matching on message text, and did not.
+                    throw new UnknownCommandException(trimmed);
+                });
     }
 
     @Override

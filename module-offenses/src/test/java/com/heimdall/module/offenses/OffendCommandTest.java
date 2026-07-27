@@ -291,6 +291,25 @@ class OffendCommandTest {
         }
 
         @Test
+        @DisplayName("a punishment plugin that is not installed is REPORTED, not swallowed")
+        void anUnknownPunishmentCommandIsReported() {
+            // The realistic shape of this: the bot's escalation tier says `warn`, and this server
+            // has no warn command because the punishment plugin was never installed or was renamed.
+            // Both platforms return a boolean saying so and neither used to read it, so the
+            // moderator was told the offense was recorded and left believing it had been actioned.
+            platform.withoutCommand("warn");
+
+            assertTrue(run(staff, TARGET_NAME, "xray"));
+
+            awaitTold(staff, "the server refused to run");
+            assertTrue(staff.wasTold("Offense recorded for " + TARGET_NAME),
+                    "the infraction IS filed bot-side — that half succeeded and must still be "
+                            + "reported, or the moderator files it again: " + staff.messageText());
+            assertTrue(staff.wasTold("no such command"),
+                    "and the reason has to name what was missing: " + staff.messageText());
+        }
+
+        @Test
         @DisplayName("a server that refuses the punishment command says so — the infraction is filed")
         void aRefusedDispatchIsReported() {
             platform.failingDispatch(new IllegalStateException("no such command: warn"));

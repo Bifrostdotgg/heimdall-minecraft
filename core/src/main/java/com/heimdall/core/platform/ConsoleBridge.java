@@ -48,12 +48,19 @@ public interface ConsoleBridge {
      * Runs {@code command} as the server console.
      *
      * <p>The command is dispatched on whatever thread the platform requires, so the caller does not
-     * have to know. The future completes with the acknowledgement once dispatch has been
-     * <em>attempted</em>, and fails only if the platform refused outright — a command that does not
-     * exist is a successful dispatch that printed an error, which the tap will carry.
+     * have to know.
+     *
+     * <p><strong>A command the server does not have fails with
+     * {@link UnknownCommandException}</strong>, rather than completing with an acknowledgement. That
+     * is a deliberate correction: "the command ran and printed an error" is true of the transport
+     * and false of the only caller that matters. {@code /offend} hands the server a punishment the
+     * bot has already recorded an infraction for, so a missing punishment plugin means the record
+     * exists and nothing happened — and the moderator standing there is the only person who can
+     * reconcile that. Both platforms already return a boolean saying so; neither used to read it.
      *
      * @param command the command line, without a leading slash
      * @return a short acknowledgement, never the command's output
+     * @throws UnknownCommandException completed exceptionally when no such command exists
      */
     CompletableFuture<String> dispatchCommand(String command);
 

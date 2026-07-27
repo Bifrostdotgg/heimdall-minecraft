@@ -66,6 +66,8 @@ public final class FakePlatform implements PlatformFacade {
     private volatile BedrockIdentityProvider floodgate = BedrockIdentityProvider.NONE;
     private volatile boolean deferLater;
     private volatile RuntimeException dispatchFailure;
+    private final java.util.Set<String> unknownCommands =
+            Collections.synchronizedSet(new java.util.LinkedHashSet<String>());
 
     public FakePlatform(ServerRole role, Path dataDirectory) {
         this.role = role;
@@ -107,6 +109,17 @@ public final class FakePlatform implements PlatformFacade {
      */
     public FakePlatform failingDispatch(RuntimeException failure) {
         this.dispatchFailure = failure;
+        return this;
+    }
+
+    /**
+     * Makes a command the server does not have behave like one — a typed failure, not a success.
+     *
+     * <p>Matched on the first word, because a punishment command arrives as a whole line
+     * ({@code tempban Steve 1d …}) and what is missing is the verb.
+     */
+    public FakePlatform withoutCommand(String verb) {
+        unknownCommands.add(verb.trim().toLowerCase(java.util.Locale.ROOT));
         return this;
     }
 
@@ -191,6 +204,17 @@ public final class FakePlatform implements PlatformFacade {
     /** The command registrar, so a test can run what a module registered. */
     public RecordingCommands commandRegistry() {
         return commands;
+    }
+
+    private boolean isUnknown(String command) {
+        if (command == null || unknownCommands.isEmpty()) {
+            return false;
+        }
+        String trimmed = command.trim();
+        int space = trimmed.indexOf(' ');
+        String verb = (space < 0 ? trimmed : trimmed.substring(0, space))
+                .toLowerCase(java.util.Locale.ROOT);
+        return unknownCommands.contains(verb);
     }
 
     /** A Floodgate stand-in that reports exactly one UUID as a Bedrock player. */
@@ -299,6 +323,15 @@ public final class FakePlatform implements PlatformFacade {
                     CompletableFuture<String> failed = new CompletableFuture<String>();
                     failed.completeExceptionally(failure);
                     return failed;
+                }
+                if (isUnknown(command)) {
+                    // Recorded even so: the caller DID dispatch it, and a test asserting "nothing
+                    // was run" must be able to tell that apart from "it was run and refused".
+                    dispatchedCommands.add(command);
+                    CompletableFuture<String> unknown = new CompletableFuture<String>();
+                    unknown.completeExceptionally(
+                            new com.heimdall.core.platform.UnknownCommandException(command));
+                    return unknown;
                 }
                 dispatchedCommands.add(command);
                 return CompletableFuture.completedFuture("dispatched: " + command);
