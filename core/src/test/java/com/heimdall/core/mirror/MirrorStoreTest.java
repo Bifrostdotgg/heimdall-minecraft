@@ -260,6 +260,44 @@ class MirrorStoreTest {
         }
 
         @Test
+        @DisplayName("a verification that arrives late cannot pull lastVerified backward")
+        void lastVerifiedNeverMovesBackward(@TempDir Path dir) {
+            // Two verifications read their timestamps and then land out of order — what two threads
+            // racing looks like, and what no wall clock can be made to reproduce on demand.
+            MirrorStore<String> store = open(dir, 6);
+            store.record(UUID, USER);
+
+            clock.advanceMinutes(20);
+            store.record(UUID, USER);
+            long newest = clock.now();
+
+            clock.rewind(TimeUnit.MINUTES.toMillis(20));
+            store.record(UUID, "Stale");
+
+            assertEquals(newest, store.rawEntry(UUID).lastVerified(),
+                    "the late arrival must not lower the ceiling the newer verification granted");
+            assertEquals("Stale", store.get(UUID),
+                    "though its value still lands — it is the most recent write");
+        }
+
+        @Test
+        @DisplayName("a late reconcile cannot lower the ceiling either")
+        void reconcileNeverMovesLastVerifiedBackward(@TempDir Path dir) {
+            MirrorStore<String> store = open(dir, 6);
+            store.record(UUID, USER);
+            clock.advanceMinutes(20);
+            store.record(UUID, USER);
+            long newest = clock.now();
+
+            clock.rewind(TimeUnit.MINUTES.toMillis(20));
+            store.reconcile(authoritative(UUID));
+
+            assertEquals(newest, store.rawEntry(UUID).lastVerified());
+            assertTrue(store.rawEntry(UUID).cacheExpiry() <= newest + TimeUnit.HOURS.toMillis(6),
+                    "and the expiry stays inside the ceiling that lastVerified implies");
+        }
+
+        @Test
         @DisplayName("activity alone never creates an entry")
         void extendingAnUnknownKeyDoesNothing(@TempDir Path dir) {
             MirrorStore<String> store = open(dir, 24);

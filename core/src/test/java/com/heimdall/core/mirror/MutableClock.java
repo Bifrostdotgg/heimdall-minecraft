@@ -39,4 +39,15 @@ final class MutableClock implements LongSupplier {
     void advanceHours(long hours) {
         advance(TimeUnit.HOURS.toMillis(hours));
     }
+
+    /**
+     * Moves time backward.
+     *
+     * <p>Not something a real clock does, which is the point: it stands in for two verifications
+     * computing their timestamps and then arriving out of order, which a real concurrent run does
+     * all the time and no wall clock can be made to reproduce on demand.
+     */
+    void rewind(long millis) {
+        now -= millis;
+    }
 }
