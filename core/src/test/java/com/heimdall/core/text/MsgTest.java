@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextColor;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -59,6 +60,70 @@ class MsgTest {
     void multipleCodesRoundTrip() {
         assertEquals("§cDenied: §7you are not whitelisted",
                 Msg.toLegacy(Msg.legacy("§cDenied: §7you are not whitelisted")));
+    }
+
+    // ── Hex round trip ───────────────────────────────────────────────────────
+
+    /**
+     * The exact bytes a Minecraft client speaks for #ff8800.
+     *
+     * <p>Written out rather than built from a helper on purpose: the whole bug this pins was a
+     * serializer that read this form and wrote a different one, and a test that asked the same
+     * serializer to produce its own expectation could not have caught it.
+     */
+    private static final String HEX_ORANGE_IN = "§x§f§f§8§8§0§0Denied";
+
+    @Test
+    @DisplayName("hex survives the round trip in the form the client understands")
+    void hexRoundTripsInTheClientForm() {
+        String out = Msg.toLegacy(Msg.legacy(HEX_ORANGE_IN));
+
+        assertEquals(HEX_ORANGE_IN, out,
+                "the writer must emit the repeated-character form the reader accepts. Without "
+                        + "useUnusualXRepeatedCharacterHexFormat() this comes back as the "
+                        + "compact §#ff8800 form, which no client understands — it renders as "
+                        + "those literal characters on the kick screen");
+    }
+
+    @Test
+    @DisplayName("the hex colour is a real colour, not literal text")
+    void hexParsesToAColour() {
+        Component parsed = Msg.legacy(HEX_ORANGE_IN);
+
+        assertEquals(TextColor.color(0xff, 0x88, 0x00), anyColourOf(parsed),
+                "if the §x form were not parsed, the code would survive as content");
+        assertEquals("Denied", contentOf(parsed));
+    }
+
+    @Test
+    @DisplayName("a component built in code serialises to the client form too")
+    void hexFromComponentSerialisesToTheClientForm() {
+        // The direction that actually matters in production: a dashboard template becomes a
+        // Component somewhere upstream, and toLegacy is the last thing that touches it.
+        Component built = Component.text("Denied").color(TextColor.color(0xff, 0x88, 0x00));
+
+        assertEquals(HEX_ORANGE_IN, Msg.toLegacy(built));
+    }
+
+    @Test
+    @DisplayName("named colours are unaffected by the hex flags")
+    void namedColoursStillRoundTrip() {
+        assertEquals("§cDenied", Msg.toLegacy(Msg.legacy("§cDenied")));
+        assertEquals("§a§lBold green", Msg.toLegacy(Msg.legacy("§a§lBold green")));
+    }
+
+    /** Any colour in the tree, named or hex. */
+    private static TextColor anyColourOf(Component component) {
+        if (component.color() != null) {
+            return component.color();
+        }
+        for (Component child : component.children()) {
+            TextColor colour = anyColourOf(child);
+            if (colour != null) {
+                return colour;
+            }
+        }
+        return null;
     }
 
     /** The colour the rendered text actually carries, whether it landed on the root or a child. */

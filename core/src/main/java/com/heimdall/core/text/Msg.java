@@ -29,16 +29,32 @@ import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 public final class Msg {
 
     /**
-     * The section-sign serializer, with hex colours enabled.
+     * The section-sign serializer, with hex colours in the form a Minecraft client understands.
      *
      * <p>{@code legacySection()} rather than {@code legacyAmpersand()}: the bot's message templates
-     * arrive already resolved to §, which is what a Minecraft client understands. Hex support is
-     * harmless on 1.8.8 — the serializer only produces the {@code §x§r§r§g§g§b§b} form when the
-     * input contains it, and nothing on the legacy path does.
+     * arrive already resolved to §, which is what a client reads.
+     *
+     * <h2>Both hex flags, because one without the other is broken</h2>
+     *
+     * <p>{@code hexColors()} on its own is asymmetric, and it is the shape of bug that survives
+     * review precisely because the round trip is never written down anywhere. It makes the parser
+     * <em>accept</em> {@code §x§R§R§G§G§B§B} — the repeated-character form vanilla actually speaks —
+     * while the writer <em>emits</em> {@code §#RRGGBB}, which no client understands. That renders as
+     * the literal characters: {@code §x§f§f§8§8§0§0Denied} goes in and {@code §#ff8800Denied} comes
+     * out.
+     *
+     * <p>Every user-visible string on the Bukkit family passes through {@link #toLegacy} on its way
+     * to a kick screen, a pre-login denial or a chat message, so the asymmetry would corrupt all of
+     * them the moment a dashboard template used a hex colour.
+     * {@code useUnusualXRepeatedCharacterHexFormat()} makes the writer speak the reader's dialect.
+     *
+     * <p>Harmless on 1.8.8: the {@code §x} form is only produced when the input carried a hex
+     * colour, and nothing produces one until a template says so.
      */
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.builder()
             .character(LegacyComponentSerializer.SECTION_CHAR)
             .hexColors()
+            .useUnusualXRepeatedCharacterHexFormat()
             .build();
 
     private Msg() {
