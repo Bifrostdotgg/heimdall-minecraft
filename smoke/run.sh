@@ -34,6 +34,14 @@ ENABLE_PATTERN='Heimdall v[0-9][^ ]* \(phase 0 scaffold\)'
 DISABLE_PATTERN='Heimdall v[0-9][^ ]* shutting down'
 # Velocity's own shutdown line, not ours — see the assertion for why it is worth checking.
 VELOCITY_SHUTDOWN_PATTERN='Shutting down the proxy'
+# The server's own "I have finished starting" line. Both families print it.
+#
+# Waiting for this as well as for the plugin banner is not belt-and-braces. A plugin enables during
+# startup, several seconds before the server opens its RCON port, so stopping as soon as the banner
+# appears races the server's own boot — and losing that race does not fail cleanly: rcon-cli is
+# refused, the fallback SIGTERM reaches a server not yet listening to stdin, and the row dies a
+# minute later on "Took too long, so killing server process".
+READY_PATTERN='Done \([0-9.]+s\)'
 
 # ── The matrix ───────────────────────────────────────────────────────────────────────────────
 #
@@ -147,6 +155,13 @@ selftest() {
     expect_match "${VELOCITY_SHUTDOWN_PATTERN}" \
         "[13:51:47 INFO]: Shutting down the proxy..." \
         yes "velocity graceful shutdown" || failures=$((failures + 1))
+    # Both families print this, in different shapes.
+    expect_match "${READY_PATTERN}" '[13:48:25 INFO]: Done (4.541s)! For help, type "help" or "?"' \
+        yes "ready line (bukkit)" || failures=$((failures + 1))
+    expect_match "${READY_PATTERN}" "[13:51:44 INFO]: Done (0.56s)!" \
+        yes "ready line (velocity)" || failures=$((failures + 1))
+    expect_match "${READY_PATTERN}" "[13:48:20 INFO]: Preparing spawn area: 36%" \
+        no "ready line vs mid-boot progress" || failures=$((failures + 1))
 
     # The rows themselves have to be well-formed, since a typo in a 6-field record would otherwise
     # surface as a confusing docker error many minutes into a run.
@@ -304,6 +319,15 @@ row_body() {
     fi
     pass "plugin enabled: $(grep -Eo "${ENABLE_PATTERN}.*" "${log_file}" | head -n 1)"
 
+    # The plugin enables DURING startup, before the server opens its RCON port. Stopping now would
+    # race the rest of the boot, and losing that race does not fail cleanly — see READY_PATTERN.
+    if ! wait_for_pattern "${log_file}" "${READY_PATTERN}" "${BOOT_TIMEOUT}" \
+            "the server's own ready line"; then
+        dump_log "${log_file}"
+        return 1
+    fi
+    pass "server finished starting"
+
     if ! assert_no_heimdall_errors "${log_file}" "boot"; then
         dump_log "${log_file}"
         return 1
@@ -314,11 +338,25 @@ row_body() {
         # `stop` over RCON is the server's own shutdown path, so onDisable actually runs. A
         # `docker stop` would work too, but only because itzg traps the signal — asserting the
         # disable line through a code path the plugin will never see in production proves less.
+        # Retried rather than one-shot: the RCON listener can still be a moment behind the ready
+        # line, and a single refused connection would drop us onto the SIGTERM fallback — which,
+        # against a server that is not listening yet, ends in the container being killed a minute
+        # later with no disable banner and no useful diagnosis.
         log "stopping via rcon-cli"
-        docker exec "${container}" rcon-cli stop >/dev/null 2>&1 || {
-            warn "rcon-cli stop failed, falling back to SIGTERM"
+        local attempt=0 stopped=0
+        while [ "${attempt}" -lt 5 ]; do
+            if docker exec "${container}" rcon-cli stop >/dev/null 2>&1; then
+                stopped=1
+                break
+            fi
+            attempt=$(( attempt + 1 ))
+            warn "rcon-cli stop attempt ${attempt}/5 failed; retrying"
+            sleep 3
+        done
+        if [ "${stopped}" -ne 1 ]; then
+            warn "rcon-cli never succeeded, falling back to SIGTERM"
             docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
-        }
+        fi
     else
         # Velocity has no RCON. SIGTERM runs its shutdown hook.
         log "stopping via SIGTERM"

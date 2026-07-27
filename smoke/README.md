@@ -70,14 +70,21 @@ problem, and Velocity does write in there (bStats).
 ## What each row asserts
 
 1. The server starts and the plugin logs its enable banner, within `SMOKE_BOOT_TIMEOUT`.
-2. No error in the boot log is attributable to the plugin.
-3. The server stops **gracefully** — over RCON (`rcon-cli stop`) for the Bukkit family, so the
-   server's own shutdown path runs and `onDisable` is actually called. `docker stop` would also
-   work, but only because the image traps the signal, and asserting through a path the plugin will
-   never see in production proves less.
-4. Bukkit rows log the disable banner. Velocity has no disable banner in phase 0 (the scaffold
-   registers no shutdown listener), so that row asserts only that unloading does not throw.
-5. No error in the shutdown log is attributable to the plugin.
+2. The **server** then logs its own `Done (Xs)` line. A plugin enables *during* startup, seconds
+   before the server opens its RCON port, so stopping on the plugin banner alone races the rest of
+   the boot — and losing that race does not fail cleanly: RCON is refused, the fallback SIGTERM
+   reaches a server not yet reading stdin, and the row dies a minute later on "Took too long, so
+   killing server process". That is a flake, not a finding, and it cost one CI run to learn.
+3. No error in the boot log is attributable to the plugin.
+4. The server stops **gracefully** — over RCON (`rcon-cli stop`, retried a few times) for the Bukkit
+   family, so the server's own shutdown path runs and `onDisable` is actually called. `docker stop`
+   would also work, but only because the image traps the signal, and asserting through a path the
+   plugin will never see in production proves less.
+5. Bukkit rows log the disable banner. Velocity has no disable banner in phase 0 (the scaffold
+   registers no shutdown listener), so those rows assert the proxy's own `Shutting down the proxy`
+   line instead — "no errors" alone would be far too weak, since a proxy killed outright also logs
+   no errors.
+6. No error in the shutdown log is attributable to the plugin.
 
 On failure the row prints the tail of the server log and the whole run exits non-zero.
 
