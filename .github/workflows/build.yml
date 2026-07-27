@@ -70,6 +70,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # Every smoke assertion is a grep, and a grep that matches nothing looks exactly
+      # like a clean server log. This points the patterns at lines that must trip them
+      # and at real log noise that must not. It needs no Docker, so it runs here and
+      # fails the whole matrix before six runners spend twenty minutes proving nothing.
+      - name: Verify the smoke assertions themselves
+        run: smoke/run.sh --selftest
+
       - id: rows
         run: |
           rows="$(smoke/run.sh --list | jq -R -s -c 'split("\n") | map(select(length > 0))')"
