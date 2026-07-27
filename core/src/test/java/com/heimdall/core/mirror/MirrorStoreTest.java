@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
+import com.heimdall.core.testing.MutableClock;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
