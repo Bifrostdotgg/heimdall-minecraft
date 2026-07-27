@@ -40,10 +40,19 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
  * <p>A malformed file is reported and treated as absent rather than thrown: the plugin has to boot
  * far enough to tell an operator what is wrong with their config.
  *
- * <p>Comments in a hand-edited file are <em>not</em> preserved across a save — SnakeYAML discards
- * them at parse time. Saves come from the setup flow, which writes a file that did not exist or
- * that it wrote itself, so this trades a rare cosmetic loss for not carrying a comment-preserving
- * YAML editor around.
+ * <p><strong>Comments in a hand-edited file are lost on save</strong>, because SnakeYAML discards
+ * them at parse time. The justification this used to carry — "saves come from the setup flow, which
+ * only ever rewrites a file it wrote itself" — is not true yet: {@code /hd setup} lands in phase 1e,
+ * so <em>every</em> {@code bootstrap.yml} in existence today was written by hand, and the plugin
+ * already saves over it the moment guild discovery answers.
+ *
+ * <p>It is still the right trade, for a different reason: the alternative is carrying a
+ * comment-preserving YAML editor to protect four keys and a cache. What the loss is not allowed to
+ * be is <em>surprising</em>, so the one field the plugin writes on its own initiative is named
+ * {@link #KEY_GUILD_ID_CACHE} rather than something an operator might take for a setting — the name
+ * says what it is, on disk, without needing a comment that would not survive anyway.
+ *
+ * <p>Unknown keys <em>are</em> preserved (departure D19); only the comments around them are not.
  */
 public final class BootstrapStore {
 
@@ -57,17 +66,35 @@ public final class BootstrapStore {
     /**
      * A <strong>cache</strong>, written by the plugin, not a setting an operator fills in.
      *
-     * <p>It is in this file rather than in a separate one because it belongs to the same identity
-     * the token does — copy {@code bootstrap.yml} to another box and the guild it names is still the
-     * right one. The setup flow never asks for it; {@code identify} answers it, and whatever that
-     * answers next overwrites this.
+     * <p>The key is spelled {@code guildIdCache} on disk, and the suffix is doing real work. Comments
+     * do not survive a save (see the class javadoc), so the name is the only place the file itself
+     * can say "this is not yours to set" — and the failure it prevents is specific: an operator who
+     * read a bare {@code guildId} as configuration and corrected it to the guild they meant would
+     * produce a server that signs perfectly and reads somebody else's configuration, which is the
+     * exact hazard departure D54 removed the setting for.
+     *
+     * <p>It lives in this file rather than beside it because it belongs to the same identity the
+     * token does: copy {@code bootstrap.yml} to another box and the guild it names is still right.
+     * {@code identify} answers it on every boot, and whatever that answers overwrites this.
      */
-    private static final String KEY_GUILD_ID = "guildId";
+    private static final String KEY_GUILD_ID_CACHE = "guildIdCache";
+
+    /**
+     * What the same cache was called before it was renamed.
+     *
+     * <p>Read, never written. 1d shipped the key as {@code guildId} for exactly as long as it took a
+     * review to point out that the name reads like a setting, and any server that booted against
+     * that build has one on disk. Dropping it would cost those servers one extra {@code identify}
+     * per boot, which is harmless — but it would also mean silently discarding a key the plugin
+     * itself wrote, and "the plugin deleted something out of my config" is a worse thing to be true
+     * than a one-line migration.
+     */
+    private static final String LEGACY_KEY_GUILD_ID = "guildId";
 
     /** Every key this version knows how to interpret. Anything else is passed through untouched. */
     private static final Set<String> KNOWN_KEYS = new HashSet<String>(Arrays.asList(
             KEY_ENDPOINT, KEY_TOKEN_ID, KEY_TOKEN, KEY_SERVER_ID, KEY_ROLE, KEY_DEBUG,
-            KEY_GUILD_ID));
+            KEY_GUILD_ID_CACHE, LEGACY_KEY_GUILD_ID));
 
     private final HeimdallLogger logger;
     private final Path file;
@@ -128,7 +155,11 @@ public final class BootstrapStore {
                 builder.role(parseRole(asString(value)));
             } else if (KEY_DEBUG.equals(key)) {
                 builder.debug(asBoolean(value));
-            } else if (KEY_GUILD_ID.equals(key)) {
+            } else if (KEY_GUILD_ID_CACHE.equals(key)) {
+                builder.guildId(asString(value));
+            } else if (LEGACY_KEY_GUILD_ID.equals(key) && !raw.containsKey(KEY_GUILD_ID_CACHE)) {
+                // Migration, one way. Guarded so a file carrying both — a downgrade and re-upgrade —
+                // takes the current key rather than whichever the map iterated last.
                 builder.guildId(asString(value));
             }
         }
@@ -162,8 +193,10 @@ public final class BootstrapStore {
         document.put(KEY_ROLE, config.role().wireName());
         document.put(KEY_DEBUG, Boolean.valueOf(config.debug()));
         // Written last of the known keys so it reads as what it is: an appendix the plugin
-        // maintains, below the four fields the operator was actually asked for.
-        document.put(KEY_GUILD_ID, config.guildId());
+        // maintains, below the fields the operator was actually asked for. The legacy spelling is
+        // deliberately not written back, so a file rewritten by this version ends up with one key
+        // rather than two saying the same thing.
+        document.put(KEY_GUILD_ID_CACHE, config.guildId());
         document.putAll(unknownKeys());
 
         AtomicFiles.writeUtf8(file, dumper().dump(document));

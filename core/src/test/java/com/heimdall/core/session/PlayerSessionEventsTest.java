@@ -18,6 +18,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -147,6 +148,80 @@ class PlayerSessionEventsTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    @DisplayName("a listener closed while its event is queued does NOT run")
+    void aQueuedEventCannotOutliveItsRegistration() throws Exception {
+        // A real pool, and one thread, so the ordering can be forced: the first task blocks the
+        // single worker while the second is queued behind it, and the registration is closed in
+        // that window. A same-thread executor cannot express this at all, which is exactly why the
+        // bug survived the rest of this file.
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            PlayerSessionEvents events = new PlayerSessionEvents(logger, pool);
+            final CountDownLatch blockTheWorker = new CountDownLatch(1);
+            final CountDownLatch workerIsBusy = new CountDownLatch(1);
+            pool.execute(new Runnable() {
+                @Override
+                public void run() {
+                    workerIsBusy.countDown();
+                    try {
+                        blockTheWorker.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            });
+            assertTrue(workerIsBusy.await(5, TimeUnit.SECONDS));
+
+            final AtomicBoolean ran = new AtomicBoolean();
+            Registration handle = events.onJoin(new PlayerSessionListener() {
+                @Override
+                public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                    ran.set(true);
+                }
+            });
+
+            // Queued behind the blocked worker, then unregistered before it can be picked up. This
+            // is a module being disabled a moment after somebody joined.
+            events.join(FakePlayer.named("Steve"), 1L);
+            handle.close();
+            blockTheWorker.countDown();
+
+            // Drain, so "it did not run" is a fact rather than a race the test won by accident.
+            CountDownLatch drained = new CountDownLatch(1);
+            pool.execute(drained::countDown);
+            assertTrue(drained.await(5, TimeUnit.SECONDS), "the pool never drained");
+
+            assertFalse(ran.get(),
+                    "the whitelist module's window listener would be running against a MirrorStore "
+                            + "its own module had already closed — and closing a store flushes it, "
+                            + "so a config flap could put two of them over one file (D57)");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("an Error from a listener is contained like everything else")
+    void anErrorIsContained() {
+        PlayerSessionEvents events = new PlayerSessionEvents(logger, INLINE);
+        List<String> reached = new ArrayList<String>();
+        events.onJoin(new PlayerSessionListener() {
+            @Override
+            public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                // The shape that actually escapes here: an API that moved between server versions.
+                throw new NoSuchMethodError("org.bukkit.Something.gone()");
+            }
+        });
+        events.onJoin(collectingInto(reached));
+
+        events.join(FakePlayer.named("Steve"), 1L);
+
+        assertEquals(java.util.Collections.singletonList("Steve@1"), reached,
+                "an Error escaping onto a shared pool thread would take the other listeners with it");
+        assertTrue(logger.logged(LogLevel.SEVERE, "join listener failed"), logger.records().toString());
     }
 
     @Test

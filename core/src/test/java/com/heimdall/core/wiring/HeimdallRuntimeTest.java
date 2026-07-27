@@ -178,8 +178,8 @@ class HeimdallRuntimeTest {
         }
 
         @Test
-        @DisplayName("a cached guild is used without asking, so a restart mid-outage still dials")
-        void cachedGuildSkipsDiscovery(@TempDir Path dataDir) throws IOException {
+        @DisplayName("a cached guild dials immediately, and is still confirmed with the bot")
+        void cachedGuildIsProvisional(@TempDir Path dataDir) throws IOException {
             BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
             store.save(BootstrapConfig.builder()
                     .endpoint("https://api.example.invalid")
@@ -190,13 +190,38 @@ class HeimdallRuntimeTest {
                     .build());
 
             HeimdallRuntime runtime = runtime(dataDir, store).build();
-            assertEquals("123456789012345678", runtime.guildId());
+            assertEquals("123456789012345678", runtime.guildId(),
+                    "the cache is what the tunnel dials with, immediately — a restart during a bot "
+                            + "outage must not be a cold start");
             assertTrue(runtime.tunnel().settings().isConfigured());
 
             runtime.start();
-            assertFalse(runtime.isDiscoveringGuild(),
-                    "the cached guild is the answer; there is nothing to discover");
+
+            // Still asking, on purpose. Trusting the cache forever is the sticky-wrong-guild trap:
+            // a token moved between guilds, re-issued bot-side, or a bootstrap.yml copied to a
+            // second server leaves the cached value permanently wrong, and a plugin that never
+            // re-asks signs perfectly valid requests against somebody else's configuration.
+            assertTrue(runtime.isDiscoveringGuild(),
+                    "the cached guild is provisional and has to be confirmed");
             runtime.close();
+        }
+
+        @Test
+        @DisplayName("the status line tells the three states apart")
+        void statusDistinguishesTheThreeStates(@TempDir Path dataDir) throws IOException {
+            BootstrapStore empty = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime unconfigured = runtime(dataDir, empty).build();
+            assertTrue(unconfigured.connectionStatus().contains("not set up"),
+                    unconfigured.connectionStatus());
+            unconfigured.close();
+
+            HeimdallRuntime discovering = runtime(dataDir, configured(dataDir)).build();
+            discovering.start();
+            String status = discovering.connectionStatus();
+            assertTrue(status.contains("asking the bot") || status.contains("cannot reach the bot"),
+                    "a configured server that has not resolved yet must say which of those it is: "
+                            + status);
+            discovering.close();
         }
 
         @Test

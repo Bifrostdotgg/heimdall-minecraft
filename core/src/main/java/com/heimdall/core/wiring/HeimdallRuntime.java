@@ -163,8 +163,16 @@ public final class HeimdallRuntime implements AutoCloseable {
         return client;
     }
 
+    /**
+     * Discovery runs whenever there is a client to run it with — cached guild or not.
+     *
+     * <p>The cache is provisional. Skipping the ask because a value exists is the sticky-wrong-guild
+     * trap {@link GuildDiscovery} describes: a token moved between guilds, re-issued bot-side, or a
+     * {@code bootstrap.yml} copied to a second server leaves the cached value permanently wrong, and
+     * a plugin that never re-asks signs perfectly valid requests against somebody else's guild.
+     */
     private boolean needsGuildDiscovery() {
-        return api != null && Strings.isBlank(guildId);
+        return api != null;
     }
 
     private GuildDiscovery buildGuildDiscovery() {
@@ -221,13 +229,22 @@ public final class HeimdallRuntime implements AutoCloseable {
                     + "(see " + bootstrapStore.file() + ")");
             return;
         }
+        // Started before the dial, and independently of it. With a cached guild the tunnel goes up
+        // now on the provisional value and this confirms it in the background; without one, this is
+        // the only thing that will produce a tunnel at all.
         if (guildDiscovery != null) {
-            // The discovering state. Everything above is already running — commands answer, modules
-            // are enabled, the HTTP client has credentials — and the one thing missing is the guild
-            // the tunnel URL is keyed by. Said once, here, rather than on every retry.
-            logger.info("discovering which guild this server's token belongs to; the tunnel stays "
-                    + "idle until it answers");
+            if (Strings.isBlank(guildId)) {
+                logger.info("discovering which guild this server's token belongs to; the tunnel "
+                        + "stays idle until it answers");
+            } else {
+                logger.debug(() -> "dialling on the cached guild " + guildId
+                        + " and confirming it with the bot in the background");
+            }
             guildDiscovery.start();
+        }
+
+        if (Strings.isBlank(guildId)) {
+            // Nothing to dial with yet. Discovery above is what changes that.
             return;
         }
         if (!tunnel.settings().isConfigured()) {
@@ -253,6 +270,21 @@ public final class HeimdallRuntime implements AutoCloseable {
      * which is a great deal better than refusing to connect.
      */
     private void adoptGuild(String resolved) {
+        if (resolved.equals(guildId)) {
+            // The overwhelmingly common case once a server has booted once: the cache was right.
+            // Returning here is what keeps confirm-on-every-boot cheap — no file write, and above
+            // all no reconnect, which would drop a tunnel that is already up and working.
+            logger.debug(() -> "the bot confirmed the cached guild " + resolved);
+            return;
+        }
+        boolean wasProvisional = Strings.isNotBlank(guildId);
+        if (wasProvisional) {
+            // Loud, because it means this server has been talking to the wrong guild — reading its
+            // config and reporting its logins there — for as long as the cache has been wrong.
+            logger.warn("this server's token belongs to guild " + resolved + ", not the cached "
+                    + guildId + "; switching over. If that is a surprise, this bootstrap.yml was "
+                    + "probably copied from another server.");
+        }
         guildId = resolved;
         if (api != null) {
             api.reconfigure(ApiSettingsFactory.fromBootstrap(bootstrap, resolved).build());
@@ -267,7 +299,8 @@ public final class HeimdallRuntime implements AutoCloseable {
             return;
         }
         // reconnect() rather than connect(): it accepts the guild, cancels anything the backoff has
-        // armed, and works whether or not a socket exists. See TunnelClient#reconnect.
+        // armed, and works whether or not a socket exists — including the case where this is a
+        // correction and a socket is already open on the wrong guild. See TunnelClient#reconnect.
         tunnel.reconnect(resolved);
     }
 
@@ -410,6 +443,42 @@ public final class HeimdallRuntime implements AutoCloseable {
     /** Whether the guild is still being resolved — the state in which the tunnel stays idle. */
     public boolean isDiscoveringGuild() {
         return guildDiscovery != null && !guildDiscovery.isResolved();
+    }
+
+    /**
+     * One line describing how this server stands with its bot, for {@code /hd}.
+     *
+     * <p>Three states an operator confuses constantly, told apart here rather than in the command so
+     * both platforms say the same thing: never set up, set up but the bot will not have the token,
+     * and set up but the bot is unreachable. The middle one is the one that looks like a network
+     * problem and is not.
+     */
+    public String connectionStatus() {
+        if (!isConfigured()) {
+            return "not set up — no bootstrap.yml yet";
+        }
+        GuildDiscovery discovery = guildDiscovery;
+        if (discovery != null && !discovery.isResolved()) {
+            String provisional = Strings.isBlank(guildId)
+                    ? "" : " (running on the cached guild " + guildId + ")";
+            switch (discovery.status()) {
+                case TOKEN_REFUSED:
+                    return "the bot refused this server's token — it looks revoked or re-issued; "
+                            + "run setup again" + provisional;
+                case UNREACHABLE:
+                    return "cannot reach the bot (" + discovery.lastFailure() + "); retrying"
+                            + provisional;
+                case DISCOVERING:
+                default:
+                    return "asking the bot which guild this token belongs to" + provisional;
+            }
+        }
+        if (tunnel == null) {
+            return "configured, but this build has no tunnel";
+        }
+        return tunnel.isConnected()
+                ? "connected to guild " + guildId
+                : "guild " + guildId + " resolved; the tunnel is not connected";
     }
 
     /** Live from construction, so a platform can register its modules before {@link #start()}. */

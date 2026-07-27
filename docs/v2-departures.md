@@ -855,9 +855,21 @@ over.
 
 ### N3 — YAML comments are lost on save
 
-SnakeYAML discards them at parse time. Saves come from the setup flow, which writes a file that
-either did not exist or that it wrote itself, so this trades a rare cosmetic loss against carrying a
-comment-preserving YAML editor.
+SnakeYAML discards them at parse time.
+
+**The original justification was wrong and is corrected here rather than deleted**, because it is the
+reasoning somebody will reach for again. It said saves come from the setup flow, which only ever
+rewrites a file it wrote itself — but `/hd setup` does not exist until phase 1e, so *every*
+`bootstrap.yml` in existence today is hand-written, and since 1d the plugin saves over it
+unprompted the first time guild discovery answers. Hand-written comments really are being lost, on
+real installs, today.
+
+It is still the right trade, for a different reason: the alternative is carrying a
+comment-preserving YAML editor to protect four keys and a cache. What the loss is not allowed to be
+is *surprising*, which is why the one field the plugin writes on its own initiative is called
+`guildIdCache` on disk (D54). The name is the only thing in that file that can explain itself, since
+a comment saying so would not survive the next save either. Unknown keys are still preserved (D19);
+only the comments around them are not.
 
 ### N4 — the client still sends a ping the bot ignores
 

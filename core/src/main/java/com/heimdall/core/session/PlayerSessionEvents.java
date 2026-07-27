@@ -3,6 +3,7 @@ package com.heimdall.core.session;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.util.Registration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
@@ -31,8 +32,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>The consequence to know when writing a listener: <strong>join and quit are not ordered
  * relative to each other</strong> once they are off the event thread, and a quit for a player who
  * reconnected immediately can in principle land after the second join. That is why the timestamp is
- * carried on the event rather than read by the listener, and why the mirror's window rule
- * ({@code extendOnEvent}) is idempotent in the value it writes.
+ * carried on the event rather than read by the listener.
+ *
+ * <h2>A closed registration cannot fire, even from a task already queued</h2>
+ *
+ * <p>The same problem {@code SubscriptionRegistry} solves for tunnel frames, solved the same way —
+ * deliberately, so there is one pattern here to understand rather than two. Removing a listener from
+ * a list only affects <em>future</em> dispatches; a task handed to the executor a microsecond
+ * earlier is already beyond the list's reach. So each registration carries an {@link AtomicBoolean},
+ * closing it deactivates <em>before</em> it unlists, and the task re-checks that flag
+ * <strong>inside the executor</strong> immediately before invoking the listener.
+ *
+ * <p>Without that re-check the failure is neither theoretical nor small: the whitelist module's
+ * window listener would run against a {@code MirrorStore} its own module had already closed, and
+ * closing a store flushes it synchronously — so a config flap could leave two stores over one file
+ * with a write still pending, which is exactly the hazard departure D57 refuses to reopen. A
+ * disabled module still sliding cache expiries is the same class of bug as one still gating logins.
  *
  * <p>If the executor refuses the task — the pools are shutting down — the event is dropped with a
  * debug line. Shutdown is the one time a missed cache extension costs nothing.
@@ -51,15 +66,16 @@ public final class PlayerSessionEvents {
     private final HeimdallLogger logger;
     private final Executor executor;
 
-    private final CopyOnWriteArrayList<PlayerSessionListener> joinListeners =
-            new CopyOnWriteArrayList<PlayerSessionListener>();
-    private final CopyOnWriteArrayList<PlayerSessionListener> quitListeners =
-            new CopyOnWriteArrayList<PlayerSessionListener>();
+    private final CopyOnWriteArrayList<Subscription> joinListeners =
+            new CopyOnWriteArrayList<Subscription>();
+    private final CopyOnWriteArrayList<Subscription> quitListeners =
+            new CopyOnWriteArrayList<Subscription>();
 
     /**
      * @param executor where listeners run; {@code heimdall-io} in production. A same-thread executor
-     *     is a legitimate choice in a test and is what makes the dispatch assertable without a
-     *     latch.
+     *     is a legitimate choice in a test and is what makes dispatch assertable without a latch —
+     *     note that it also hides the queued-task race this class guards against, so the test for
+     *     that one has to use a real pool.
      */
     public PlayerSessionEvents(HeimdallLogger logger, Executor executor) {
         if (logger == null || executor == null) {
@@ -111,34 +127,36 @@ public final class PlayerSessionEvents {
     // ── Internals ────────────────────────────────────────────────────────────
 
     private Registration register(
-            final CopyOnWriteArrayList<PlayerSessionListener> into,
-            final PlayerSessionListener listener) {
+            final CopyOnWriteArrayList<Subscription> into, final PlayerSessionListener listener) {
         if (listener == null) {
             throw new IllegalArgumentException("listener is required");
         }
-        into.add(listener);
+        final Subscription subscription = new Subscription(listener);
+        into.add(subscription);
         return Registration.once(new Runnable() {
             @Override
             public void run() {
-                into.remove(listener);
+                // Deactivate first, then unlist — the order is the whole guarantee. A task already
+                // queued re-checks this flag before it runs, so a listener can never fire after its
+                // registration was closed; it may only be dropped slightly before.
+                subscription.active.set(false);
+                into.remove(subscription);
             }
         });
     }
 
     private void dispatch(
             final String what,
-            final List<PlayerSessionListener> listeners,
+            final List<Subscription> listeners,
             final PlayerHandle player,
             final long timestampMs) {
         if (player == null || listeners.isEmpty()) {
             return;
         }
-        // Snapshotted here rather than inside the task: the list is copy-on-write, so iterating it
-        // later would be safe either way, but taking the view on the event thread means a listener
-        // registered between the event and the hand-off does not see an event from before it
-        // existed.
-        final List<PlayerSessionListener> snapshot =
-                new java.util.ArrayList<PlayerSessionListener>(listeners);
+        // Snapshotted on the event thread rather than inside the task: the list is copy-on-write, so
+        // either would be safe to iterate, but taking the view here means a listener registered
+        // between the event and the hand-off does not see an event from before it existed.
+        final List<Subscription> snapshot = new ArrayList<Subscription>(listeners);
         try {
             executor.execute(new Runnable() {
                 @Override
@@ -157,22 +175,47 @@ public final class PlayerSessionEvents {
     }
 
     private void deliver(
-            String what, List<PlayerSessionListener> snapshot, PlayerHandle player, long timestampMs) {
-        // Guarded per listener: one module's broken handler must not stop the mirror of another
-        // from being extended, and there is nothing the caller could do about it anyway — the
-        // player has already joined.
-        AtomicBoolean reported = new AtomicBoolean();
-        for (PlayerSessionListener listener : snapshot) {
+            String what, List<Subscription> snapshot, PlayerHandle player, long timestampMs) {
+        boolean reported = false;
+        for (Subscription subscription : snapshot) {
+            // Re-checked here, inside the executor, and not only when the snapshot was taken. This
+            // is the line that stops a disabled module's listener running against collaborators it
+            // has already closed. See the class javadoc.
+            if (!subscription.active.get()) {
+                continue;
+            }
             try {
-                listener.onPlayerSession(player, timestampMs);
-            } catch (RuntimeException broken) {
-                if (reported.compareAndSet(false, true)) {
+                subscription.listener.onPlayerSession(player, timestampMs);
+            } catch (Throwable broken) {
+                // Throwable, not RuntimeException. What is worth being careful about here is a
+                // NoSuchMethodError or NoClassDefFoundError from a listener that reached an API
+                // which moved between server versions — the class of failure departures D43, D44
+                // and D45 are about. Letting one escape onto a shared pool thread would look like
+                // the pool's own fault and would take the remaining listeners down with it.
+                if (!reported) {
+                    reported = true;
                     logger.error("a player " + what + " listener failed for " + player.name(), broken);
                 } else {
                     logger.debug(() -> "another player " + what + " listener failed for "
                             + player.name() + ": " + broken);
                 }
             }
+        }
+    }
+
+    /**
+     * One listener and whether it is still live.
+     *
+     * <p>Identity-compared, so two modules registering the same lambda stay independent — the same
+     * reason {@code SubscriptionRegistry} wraps its handlers rather than storing them bare.
+     */
+    private static final class Subscription {
+
+        private final PlayerSessionListener listener;
+        private final AtomicBoolean active = new AtomicBoolean(true);
+
+        Subscription(PlayerSessionListener listener) {
+            this.listener = listener;
         }
     }
 }

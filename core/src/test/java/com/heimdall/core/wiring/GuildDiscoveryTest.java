@@ -90,8 +90,8 @@ class GuildDiscoveryTest {
     }
 
     @Test
-    @DisplayName("a wrong key keeps retrying, and says so once rather than every time")
-    void retriesOnRefusal() throws Exception {
+    @DisplayName("a refused token is named as one, not as an unreachable bot")
+    void aRefusedTokenIsItsOwnState() throws Exception {
         GuildDiscovery discovery = new GuildDiscovery(
                 logger, client(bot.baseUrl(), "not-the-shared-secret"), executors.scheduler(),
                 new Consumer<String>() {
@@ -105,18 +105,54 @@ class GuildDiscoveryTest {
 
         long deadline = System.currentTimeMillis() + 20_000L;
         while (System.currentTimeMillis() < deadline
-                && !logger.logged(LogLevel.WARN, "could not resolve this server's guild")) {
+                && !logger.logged(LogLevel.WARN, "refused this server's token")) {
             Thread.sleep(25);
         }
-        assertTrue(logger.logged(LogLevel.WARN, "could not resolve this server's guild"),
-                "the first failure has to be visible: " + logger.records());
+
+        // A 401 means the bot answered and said no. Reporting that as "cannot reach the bot" sends
+        // an operator to look at their network instead of at their token, which is the one thing
+        // they can actually fix.
+        assertTrue(logger.logged(LogLevel.WARN, "refused this server's token"),
+                "the first failure has to be visible, and correctly attributed: " + logger.records());
+        assertEquals(GuildDiscovery.Status.TOKEN_REFUSED, discovery.status());
+        assertFalse(logger.logged(LogLevel.WARN, "could not resolve this server's guild"),
+                "a refused token is not an unreachable bot");
         assertFalse(discovery.isResolved());
 
-        // Exactly one warning however many attempts follow. A bot that is down for an hour must not
-        // write the same line into the server log every five minutes.
+        // One warning however many attempts follow, until the re-warn timer elapses. A bot down for
+        // an hour must not write the same line every five minutes — but it must not go silent
+        // forever either, which is what WARN_INTERVAL_MS is for.
         assertEquals(1, logger.messagesAt(LogLevel.WARN).stream()
-                .filter(line -> line.contains("could not resolve this server's guild"))
+                .filter(line -> line.contains("refused this server's token"))
                 .count());
+
+        discovery.close();
+    }
+
+    @Test
+    @DisplayName("an unreachable bot is a different state from a refused token")
+    void anUnreachableBotIsNotARefusal() throws Exception {
+        GuildDiscovery discovery = new GuildDiscovery(
+                logger, client("http://127.0.0.1:1", StubBotConfig.DEFAULT_API_KEY),
+                executors.scheduler(),
+                new Consumer<String>() {
+                    @Override
+                    public void accept(String value) {
+                        throw new AssertionError("nothing is listening on that port");
+                    }
+                });
+
+        discovery.start();
+
+        long deadline = System.currentTimeMillis() + 20_000L;
+        while (System.currentTimeMillis() < deadline
+                && discovery.status() == GuildDiscovery.Status.DISCOVERING) {
+            Thread.sleep(25);
+        }
+        assertEquals(GuildDiscovery.Status.UNREACHABLE, discovery.status());
+        assertTrue(logger.logged(LogLevel.WARN, "could not resolve this server's guild"),
+                logger.records().toString());
+        assertFalse(discovery.lastFailure().isEmpty(), "a status line needs something to print");
 
         discovery.close();
     }
