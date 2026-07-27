@@ -383,6 +383,108 @@ immediately. Under a burst of fast requests that is the difference between a que
 one that grows for the length of the longest timeout.
 
 
+### D42 — the platform string is honest, with the old value kept beside it
+
+**v2:** the Bukkit entry point sent `platform: "paper"` unconditionally.
+**v3:** sends what the server reports (`paper`, `spigot`, `craftbukkit`, `purpur`, …) and adds
+`platformFamily`, carrying exactly the value v2's `platform` did.
+
+A good share of the fleet is not Paper, and support had a dashboard saying "Paper" for a server
+whose problem was that it was not Paper. Collapsing the two into one field would mean choosing
+between breaking whatever bot-side code matches on the old spelling and lying to it, so both are
+sent. On Velocity the two readings agree and `platformFamily` is `velocity`.
+
+`serverName` is also no longer sent from the Bukkit side at all: `Bukkit.getServerName()` is
+deprecated and has been removed outright on modern Paper, so calling it would be a
+`NoSuchMethodError` on the servers most of the fleet runs. The handshake already falls back to the
+`serverId` from `bootstrap.yml`, which is the name the operator chose anyway.
+
+### D43 — chat uses the deprecated event, on every version
+
+**v2:** Paper-only, and used `AsyncPlayerChatEvent`.
+**v3:** the same event, and deliberately *not* Paper's `AsyncChatEvent`, despite compiling against
+a Paper API that has it.
+
+This is a shading constraint, not a preference. `AsyncChatEvent.message()` returns a
+`net.kyori.adventure.text.Component` supplied by the **server**, while Heimdall shades its own
+Adventure and `:app` relocates it into `com.heimdall.libs.kyori`. Shadow rewrites every `net.kyori`
+reference in every class it merges — including that call's method descriptor — so the compiled call
+would ask a server-supplied event for a relocated type and fail with `NoSuchMethodError` on exactly
+the modern Paper servers the modern event was added for.
+
+Un-relocating Adventure is not available as a fix: `adventure-platform-bukkit` pins the
+`adventure-api` version it needs, and on Paper the server's own copy would win the parent-first
+lookup at whatever version that Paper line carries. Relocation cannot be excluded for one consumer.
+`AsyncPlayerChatEvent` is a plain `String`, fires from 1.8.8 to current, and has none of that
+problem. Deprecated is not the same as absent.
+
+### D44 — Velocity's text boundary is crossed reflectively
+
+**v2:** no shading, so Velocity's `Component` was simply *the* `Component`.
+**v3:** four calls — build a component, build a denial result, send a message, disconnect a player —
+go through reflection in `VelocityText`, and nothing else on Velocity does.
+
+Same root cause as D43, arriving somewhere it cannot be avoided: Velocity's API takes a `Component`
+on every method that shows a player anything, and there is no String-shaped alternative. The class
+names are assembled from an array of fragments rather than written as literals, because Shadow's
+remapper rewrites string constants that match a relocation pattern and javac folds
+`"net.kyori" + ".adventure"` into one constant before Shadow ever sees it.
+
+If the bridge cannot resolve, a denied login is **still denied** — with Velocity's default message
+instead of Heimdall's. Refusing without an explanation is bad; admitting somebody because a text
+library did not load would be a security hole.
+
+### D45 — the console tap is rebuilt for the versions it actually runs on
+
+**v2:** `ConsoleStreamer` attached a Log4j appender using the five-argument `AbstractAppender`
+constructor, stamped lines with `LogEvent.getTimeMillis()`, stripped ANSI with a pattern that had
+lost its leading `ESC`, and fanned out on the logging thread.
+**v3:** the four-argument constructor, `System.currentTimeMillis()` at capture, a corrected pattern,
+and fan-out on `heimdall-io` behind a bounded queue and a re-entrancy guard.
+
+Every one of those is a version or a correctness problem v2 did not have to face because it targeted
+modern Paper only:
+
+- the five-argument constructor arrived in Log4j **2.11.2**; Minecraft 1.8.8 ships **2.0-beta9**, so
+  on the oldest supported server v2's code is a `NoSuchMethodError` the moment console streaming is
+  switched on. The four-argument form is deprecated on modern Log4j and present in every 2.x, which
+  is the only property that matters when the runtime version spans a decade;
+- `getTimeMillis()` arrived in 2.4 — beta9 has only `getMillis()`. Stamping at capture is the same
+  instant to within the time it takes Log4j to call an appender, and needs no reflection;
+- v2's ANSI pattern began at the `[`, so it also ate ordinary bracketed text: `[12:00:00 INFO]` lost
+  its closing bracket on the way to Discord;
+- delivering to consumers on the logging thread puts a plugin's callback on the critical path of
+  every line the server writes.
+
+The appender is attached **eagerly at enable**, not lazily when the console module first asks, so
+the boot-smoke matrix exercises the attach on all six supported servers on every run.
+
+### D46 — one LuckPerms implementation, with both platforms' fixes
+
+**v2:** two implementations that had drifted. The Velocity one re-resolved the API lazily, checked a
+group existed before granting it, and awaited the save; the Bukkit one did none of those.
+**v3:** one implementation in `:platform-common`, with all three behaviours.
+
+`net.luckperms:api` is platform-neutral — the same artifact on Bukkit and on Velocity — so there was
+never a reason for two files, only an opportunity for them to disagree. The Bukkit copy's
+constructor-time resolve is issue #796 / MC-10: with no load-order guarantee between plugins, a
+server where LuckPerms started second had role sync dead for the whole process. Not awaiting
+`saveUser` meant a server stopped in the seconds after a sync lost it.
+
+The group diff is extracted into `GroupDiff` as a pure function of three lists, because that is the
+part that fails quietly. An empty managed list means **change nothing**, never "manage everything" —
+reading it the other way would strip every group on the server on the first sync after a deploy.
+
+### D47 — the admin command is `/hd`, and `/hdp` on the proxy
+
+**v2:** `/hwl` on both.
+**v3:** `/hd` on the Bukkit family, `/hdp` on Velocity.
+
+In a proxied network both are installed, and a player typing one name reaches whichever component
+claimed it first — which is always the proxy, because it intercepts before forwarding. v2 therefore
+had a command whose meaning depended on where the player was standing. Two verbs mean "am I asking
+the gatekeeper or this backend?" is answered by what you typed.
+
 ---
 
 ## Structure
@@ -462,6 +564,52 @@ client with no logging facade, and legacy Spigot ships no slf4j — and that con
 The seam is also what makes the invariants testable: a real server cannot be made to black-hole a
 connection, error and close simultaneously, or refuse the next four attempts and then accept.
 
+
+### D48 — the entry points do not contain the wiring
+
+**v2:** `HeimdallPaperPlugin` was 1,086 lines and `HeimdallVelocityPlugin` was 1,311, both of them
+`JavaPlugin`/`@Plugin` subclasses doing the same assembly differently.
+**v3:** each entry point is a ~40-line shell; a `BukkitBootstrap`/`VelocityBootstrap` owns the order
+things are built in; and everything that is not platform-specific lives once in
+`com.heimdall.core.wiring.HeimdallRuntime`.
+
+Wiring is exactly the kind of work where duplication is invisible — both files compile, both boot,
+and the divergence surfaces as a bug that reproduces on one platform. It also could not be looked at
+without starting Minecraft, so it never was. None of the assembly needs a server: it needs a
+`PlatformFacade`, which exists precisely so it does not.
+
+The remaining per-platform bootstrap is short enough to compare side by side, which is the point.
+
+### D49 — the platform seam is four small interfaces, not one wide one
+
+**v2:** no seam at all; core and platform were the same classes.
+**v3:** `PlatformFacade` answers seven questions, and four of the answers are focused interfaces —
+`PlayerDirectory`, `SchedulerBridge`, `ConsoleBridge`, `Integrations`.
+
+A module that only looks players up takes a `PlayerDirectory` and is testable with four lines of
+fake. One that took a whole `PlatformFacade` would need a fake for the console, the scheduler and
+three optional plugin integrations it never calls — which is how a test suite ends up asserting
+against mocks instead of behaviour.
+
+`InstanceRoleDetector` is the same idea inverted: the platform supplies two booleans and the
+*policy* that turns them into a `ServerRole` lives in core, so it is identical everywhere and the
+whole matrix is testable without a server.
+
+### D50 — proxy detection reads the server's config files, not its API
+
+**v2:** did not detect anything; role was not a concept.
+**v3:** reads `settings.bungeecord` from `spigot.yml`, and Paper's velocity switch from `paper.yml`
+or `config/paper-global.yml`, through core's own relocated SnakeYAML (`YamlProbe`).
+
+Paper's switch has moved class three times since 1.16 — `PaperConfig.velocitySupport`, gone in 1.19,
+`GlobalConfiguration` after that — while the YAML key it is loaded from has changed once, when the
+file was renamed. An API-based check would need a reflective probe per Paper generation, each of
+which is a place to be silently wrong.
+
+Bukkit's own `YamlConfiguration` would have done the parsing, and is not used: it binds to the
+server's bundled SnakeYAML, whose API changed incompatibly at 2.0, so the answer would depend on
+which version the server happens to carry. Reading it ourselves also makes the whole thing testable
+against a fixture directory — which is how the role matrix is tested at all.
 
 ---
 
