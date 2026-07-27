@@ -203,7 +203,16 @@ public final class MirrorStore<T> implements AutoCloseable {
     }
 
     /**
-     * Slides an existing entry's expiry forward on ordinary activity — a join, a leave.
+     * <strong>Sets</strong> an existing entry's expiry to {@code now + windowMs}, capped by the
+     * ceiling — on ordinary activity such as a join or a leave.
+     *
+     * <p>Set, not slide: if {@code windowMs} is shorter than what the entry already has, this
+     * <em>shortens</em> it. That is v2's behaviour verbatim (a join extension of 120 minutes
+     * landing after a leave extension of 180 minutes pulled the expiry back in), and it is kept for
+     * parity rather than because it is obviously right. The plausible improvement — taking
+     * {@code max(current, capped)} so activity can never reduce trust — is deliberately deferred
+     * until 1d wires a real caller, so that a behaviour change and a first integration do not land
+     * in the same commit. Recorded in {@code docs/v2-departures.md} as a known non-departure.
      *
      * <p><strong>Does not touch {@code lastVerified}</strong>, and is capped by the ceiling measured
      * from it. That is what stops activity alone from keeping a revoked value alive.
@@ -211,8 +220,8 @@ public final class MirrorStore<T> implements AutoCloseable {
      * <p>Does nothing for a key the mirror does not hold: activity is not evidence, so this can
      * never create an entry.
      *
-     * @param windowMs how far forward to slide, before capping
-     * @return whether an entry was found and extended
+     * @param windowMs how far ahead of now the new expiry sits, before capping
+     * @return whether an entry was found and updated
      */
     public boolean extendOnEvent(String key, long windowMs) {
         if (key == null) {
@@ -430,15 +439,34 @@ public final class MirrorStore<T> implements AutoCloseable {
         return policy.cap(proposedExpiry, entry.lastVerified());
     }
 
+    /**
+     * Loads a snapshot into the store, dropping anything unusable.
+     *
+     * <p><strong>If anything was dropped, the ETag goes with it.</strong> The ETag means "the
+     * mirror holds exactly what the bot last sent", and a partial restore makes that false — but
+     * the bot would keep answering 304 to it, so the missing entries would never come back and the
+     * mirror would be permanently, silently short. Discarding the ETag costs one full dump on the
+     * next poll and is the only way out.
+     */
     private void restore(MirrorSnapshot<T> snapshot) {
         lastEtag = snapshot.etag;
         if (snapshot.entries == null) {
             return;
         }
+        int dropped = 0;
         for (Map.Entry<String, MirrorEntry<T>> entry : snapshot.entries.entrySet()) {
             if (entry.getKey() != null && entry.getValue() != null && entry.getValue().value() != null) {
                 entries.put(entry.getKey(), entry.getValue());
+            } else {
+                dropped++;
             }
+        }
+        if (dropped > 0) {
+            lastEtag = null;
+            logger.warn("Dropped " + dropped + " unusable entr" + (dropped == 1 ? "y" : "ies")
+                    + " while loading " + file.name()
+                    + " — discarding the stored ETag so the next poll refetches in full, rather "
+                    + "than sitting on 304s against a mirror that is missing rows");
         }
         if (!entries.isEmpty()) {
             logger.info("Loaded " + entries.size() + " mirror entries from " + file.name());

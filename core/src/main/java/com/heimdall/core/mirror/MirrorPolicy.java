@@ -91,7 +91,7 @@ public final class MirrorPolicy {
         if (!isExtensionBounded()) {
             return cacheExpiry;
         }
-        return Math.min(cacheExpiry, lastVerified + maxExtensionMs);
+        return Math.min(cacheExpiry, saturatingAdd(lastVerified, maxExtensionMs));
     }
 
     /**
@@ -102,7 +102,24 @@ public final class MirrorPolicy {
         if (!isExtensionBounded()) {
             return proposedExpiry;
         }
-        return Math.min(proposedExpiry, lastVerified + maxExtensionMs);
+        return Math.min(proposedExpiry, saturatingAdd(lastVerified, maxExtensionMs));
+    }
+
+    /**
+     * {@code a + b}, clamped to {@link Long#MAX_VALUE} instead of wrapping.
+     *
+     * <p>A ceiling of, say, a hundred years in milliseconds overflows a signed long once added to a
+     * current timestamp, and the result is negative — so {@code min(cacheExpiry, ceiling)} returns
+     * the negative number and <em>everything</em> is expired. That is the exact opposite of what
+     * someone setting an enormous ceiling was asking for, and it fails silently.
+     */
+    private static long saturatingAdd(long a, long b) {
+        long sum = a + b;
+        // Overflow iff the operands share a sign and the result does not.
+        if (((a ^ sum) & (b ^ sum)) < 0) {
+            return Long.MAX_VALUE;
+        }
+        return sum;
     }
 
     @Override

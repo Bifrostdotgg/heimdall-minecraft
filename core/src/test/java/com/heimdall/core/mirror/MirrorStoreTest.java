@@ -183,6 +183,82 @@ class MirrorStoreTest {
         }
 
         @Test
+        @DisplayName("the write-time cap really writes a capped expiry, not just a clamped read")
+        void extensionIsCappedOnDiskNotOnlyOnRead(@TempDir Path dir) {
+            // Two-sided on purpose. The read-side clamp alone satisfies the "absent past the
+            // ceiling" half, so without the "still present just inside it" half, deleting cap()
+            // from extendOnEvent changes nothing any test can see — which is exactly the state
+            // this suite was in.
+            MirrorStore<String> store = open(dir, 1);
+            store.record(UUID, USER);
+            long verifiedAt = clock.now();
+
+            store.extendOnEvent(UUID, TimeUnit.MINUTES.toMillis(180));
+
+            MirrorEntry<String> entry = store.rawEntry(UUID);
+            assertNotNull(entry);
+            assertEquals(verifiedAt + ONE_HOUR, entry.cacheExpiry(),
+                    "the persisted value must be the capped one — a three-hour extension against a "
+                            + "one-hour ceiling is written as one hour, not written long and left "
+                            + "for the read clamp to hide");
+            assertEquals(verifiedAt, entry.lastVerified(), "activity must not move lastVerified");
+
+            clock.advance(ONE_HOUR - 1000);
+            assertEquals(USER, store.get(UUID), "still inside the ceiling");
+
+            clock.advance(2000);
+            assertNull(store.get(UUID), "and gone once past it");
+        }
+
+        @Test
+        @DisplayName("an entry is served up to and including its expiry, and not a millisecond past")
+        void expiryBoundaryIsInclusive(@TempDir Path dir) {
+            MirrorStore<String> store = open(dir, 24);
+            store.record(UUID, USER);
+            long expiry = store.rawEntry(UUID).cacheExpiry();
+
+            clock.advance(expiry - clock.now() - 1);
+            assertEquals(USER, store.get(UUID), "one millisecond before expiry");
+
+            clock.advance(1);
+            assertEquals(USER, store.get(UUID),
+                    "exactly at expiry — the check is `now > expiry`, so the boundary is inclusive");
+
+            clock.advance(1);
+            assertNull(store.get(UUID), "one millisecond after");
+        }
+
+        @Test
+        @DisplayName("reconcile writes a capped expiry too, rather than leaving it to the read clamp")
+        void reconcileWritesACappedExpiry(@TempDir Path dir) {
+            // A 60-minute window under a 30-minute ceiling: the refreshed expiry must be the ceiling.
+            MirrorPolicy policy = MirrorPolicy.builder()
+                    .windowMinutes(60)
+                    .maxExtensionMs(TimeUnit.MINUTES.toMillis(30))
+                    .saveDebounceMs(0)
+                    .clock(clock)
+                    .build();
+            MirrorStore<String> store = MirrorStore.builder(logger, file(dir), String.class)
+                    .policy(policy)
+                    .scheduler(scheduler)
+                    .open();
+            store.record(UUID, USER);
+
+            clock.advanceMinutes(10);
+            store.reconcile(authoritative(UUID));
+            long verifiedAt = clock.now();
+
+            assertEquals(verifiedAt + TimeUnit.MINUTES.toMillis(30),
+                    store.rawEntry(UUID).cacheExpiry(),
+                    "a 60-minute window under a 30-minute ceiling is written as 30 minutes");
+
+            clock.advanceMinutes(29);
+            assertEquals(USER, store.get(UUID));
+            clock.advanceMinutes(2);
+            assertNull(store.get(UUID));
+        }
+
+        @Test
         @DisplayName("activity alone never creates an entry")
         void extendingAnUnknownKeyDoesNothing(@TempDir Path dir) {
             MirrorStore<String> store = open(dir, 24);
@@ -310,6 +386,20 @@ class MirrorStoreTest {
         }
 
         @Test
+        @DisplayName("a sync replaces the stored value, not just its timestamps")
+        void reconcileUpdatesTheStoredValue(@TempDir Path dir) {
+            MirrorStore<String> store = open(dir, 24);
+            store.record(UUID, "OldName");
+
+            Map<String, String> renamed = new LinkedHashMap<String, String>();
+            renamed.put(UUID, "NewName");
+            ReconcileResult result = store.reconcile(renamed);
+
+            assertEquals(1, result.updated());
+            assertEquals("NewName", store.get(UUID));
+        }
+
+        @Test
         @DisplayName("null is refused, because it cannot be told apart from an empty whitelist")
         void nullSetIsRejected(@TempDir Path dir) {
             MirrorStore<String> store = open(dir, 24);
@@ -434,6 +524,99 @@ class MirrorStoreTest {
 
             assertEquals(0, store.size());
             assertNull(store.lastEtag());
+        }
+
+        @Test
+        @DisplayName("touchValue replaces the value without buying a fresh ceiling")
+        void touchValueDoesNotAdvanceLastVerified(@TempDir Path dir) {
+            MirrorStore<String> store = open(dir, 1);
+            store.record(UUID, "OldName");
+            long verifiedAt = clock.now();
+            long expiry = store.rawEntry(UUID).cacheExpiry();
+
+            clock.advanceMinutes(30);
+            assertTrue(store.touchValue(UUID, "NewName"));
+
+            assertEquals("NewName", store.get(UUID));
+            MirrorEntry<String> entry = store.rawEntry(UUID);
+            assertEquals(verifiedAt, entry.lastVerified(),
+                    "record() is the only thing that may move this; otherwise a revoked player "
+                            + "renews their ceiling every time they change their name");
+            assertEquals(expiry, entry.cacheExpiry(), "and no timestamp moves at all");
+        }
+
+        @Test
+        @DisplayName("touchValue does nothing for a key the mirror does not hold")
+        void touchValueNeverCreatesAnEntry(@TempDir Path dir) {
+            MirrorStore<String> store = open(dir, 24);
+
+            assertFalse(store.touchValue(UUID, USER));
+            assertFalse(store.touchValue(null, USER));
+            assertFalse(store.touchValue(UUID, null));
+            assertEquals(0, store.size());
+        }
+
+        @Test
+        @DisplayName("touching an unchanged value writes nothing — it is called on every join")
+        void touchValueSkipsAnUnchangedValue(@TempDir Path dir) {
+            MirrorStore<String> store = open(dir, 24, 60_000);
+            store.record(UUID, USER);
+            store.flush();
+            long writes = store.writeCount();
+
+            assertTrue(store.touchValue(UUID, USER));
+            store.flush();
+
+            assertEquals(writes, store.writeCount(),
+                    "marking the mirror dirty for an unchanged username defeats the debounce");
+        }
+
+        @Test
+        @DisplayName("clear() really empties a populated mirror, on disk too")
+        void clearEmptiesAPopulatedMirror(@TempDir Path dir) {
+            MirrorStore<String> store = open(dir, 24);
+            store.record(UUID, USER);
+            store.record(UUID2, "Alex");
+            store.setLastEtag("\"abc\"");
+
+            store.clear();
+
+            assertEquals(0, store.size());
+            assertNull(store.get(UUID));
+            assertNull(store.lastEtag());
+            assertEquals(0, open(dir, 24).size(), "and the emptiness survives a reopen");
+        }
+
+        @Test
+        @DisplayName("a partial restore discards the ETag, or the mirror sits on 304s forever")
+        void partialRestoreDropsTheEtag(@TempDir Path dir) throws IOException {
+            long now = clock.now();
+            // One good entry, one whose value did not survive — a truncated write, a hand edit, a
+            // value type that changed shape between versions.
+            writeRaw(dir, "{\"etag\":\"\\\"abc\\\"\",\"entries\":{"
+                    + "\"" + UUID + "\":{\"value\":\"" + USER + "\",\"lastConnection\":" + now
+                    + ",\"cacheExpiry\":" + (now + ONE_HOUR) + ",\"lastVerified\":" + now + "},"
+                    + "\"" + UUID2 + "\":{\"lastConnection\":" + now
+                    + ",\"cacheExpiry\":" + (now + ONE_HOUR) + ",\"lastVerified\":" + now + "}}}");
+
+            MirrorStore<String> store = open(dir, 24);
+
+            assertEquals(1, store.size(), "the unusable entry is dropped");
+            assertNull(store.lastEtag(),
+                    "and the ETag goes with it — otherwise the bot answers 304 to a mirror that is "
+                            + "permanently missing a row, and the row never comes back");
+            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "Dropped 1 unusable"));
+        }
+
+        @Test
+        @DisplayName("a clean restore keeps the ETag")
+        void cleanRestoreKeepsTheEtag(@TempDir Path dir) {
+            MirrorStore<String> first = open(dir, 24);
+            first.record(UUID, USER);
+            first.setLastEtag("\"abc\"");
+            first.close();
+
+            assertEquals("\"abc\"", open(dir, 24).lastEtag());
         }
 
         @Test

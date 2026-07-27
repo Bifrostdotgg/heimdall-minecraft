@@ -76,6 +76,22 @@ class MirrorPolicyTest {
     }
 
     @Test
+    @DisplayName("an enormous ceiling saturates instead of overflowing into the past")
+    void hugeCeilingDoesNotOverflow() {
+        // A hundred years in millis, plus a current timestamp, wraps a signed long negative — and
+        // min(cacheExpiry, negative) then expires everything. The opposite of what someone asking
+        // for a very long ceiling wanted, and silent.
+        MirrorPolicy enormous = MirrorPolicy.builder()
+                .maxExtensionMs(Long.MAX_VALUE)
+                .build();
+
+        assertTrue(enormous.effectiveExpiry(VERIFIED + HOUR, VERIFIED) > 0,
+                "the ceiling must not wrap negative");
+        assertEquals(VERIFIED + HOUR, enormous.effectiveExpiry(VERIFIED + HOUR, VERIFIED));
+        assertEquals(Long.MAX_VALUE, enormous.cap(Long.MAX_VALUE, VERIFIED));
+    }
+
+    @Test
     void negativeSettingsAreClampedToZero() {
         MirrorPolicy policy = MirrorPolicy.builder()
                 .windowMs(-1)
