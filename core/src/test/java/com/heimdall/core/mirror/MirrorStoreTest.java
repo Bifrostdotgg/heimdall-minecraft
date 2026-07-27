@@ -535,25 +535,28 @@ class MirrorStoreTest {
             store.close();
             String beforeTheCrash = readRaw(dir);
 
-            // What AtomicFiles guarantees: the bytes of the NEXT save go to a sibling and only
-            // replace the store on a rename. So a process killed part-way through writing them
-            // leaves the store byte-for-byte as it was.
-            Path temp = Files.createTempFile(dir, "whitelist-mirror.json", ".tmp");
-            Files.write(temp, "{\"entries\":{\"broke".getBytes(StandardCharsets.UTF_8));
+            // What a killed process actually leaves behind: a half-written sibling that never
+            // got renamed. AtomicFiles writes the next save's bytes there and only replaces the
+            // store on the rename, so the store is byte-for-byte as it was.
+            Path orphan = Files.createTempFile(dir, "whitelist-mirror.json", ".tmp");
+            Files.write(orphan, "{\"entries\":{\"broke".getBytes(StandardCharsets.UTF_8));
 
             assertEquals(beforeTheCrash, readRaw(dir),
                     "the half-written bytes must not have touched the store file");
+
             MirrorStore<String> reopened = open(dir, 24);
             assertEquals(USER, reopened.get(UUID));
             assertEquals(1, reopened.size(), "and nothing from the truncated file leaked in");
 
-            // The next successful save cleans up after itself.
+            // A later successful save does NOT tidy the orphan up — AtomicFiles only ever deletes
+            // the temp file it created itself, and after a kill nothing holds that handle. Stated
+            // here because the opposite was assumed, and a test that quietly deleted the orphan
+            // itself would have kept the assumption alive.
             reopened.record(UUID2, "Alex");
             reopened.close();
-            Files.deleteIfExists(temp);
-            try (Stream<Path> files = Files.list(dir)) {
-                assertEquals(1, files.count());
-            }
+            assertTrue(Files.exists(orphan),
+                    "an orphaned temp file outlives the process that abandoned it");
+            assertEquals(2, reopened.size(), "and the store itself keeps working around it");
         }
 
         @Test
@@ -566,7 +569,10 @@ class MirrorStoreTest {
             assertEquals(0, store.size());
             assertNull(store.get(UUID));
             // An empty mirror is repopulated by the next fetch; a failed boot means nobody joins.
-            assertFalse(logger.records().isEmpty(), "but the operator should be told");
+            // Asserted at SEVERE rather than "something was logged": a whitelist that silently came
+            // up empty is exactly the event an operator must not have to go looking for.
+            assertFalse(logger.at(LogLevel.SEVERE).isEmpty(),
+                    "an unreadable mirror deserves more than a debug line");
         }
 
         @Test

@@ -1,6 +1,7 @@
 package com.heimdall.core.util;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -60,6 +61,26 @@ class AtomicFilesTest {
         try (Stream<Path> files = Files.list(dir)) {
             List<String> names = files.map(p -> p.getFileName().toString()).collect(Collectors.toList());
             assertEquals(1, names.size(), "temp litter accumulates on every save: " + names);
+        }
+    }
+
+    @Test
+    @DisplayName("a write that cannot complete leaves the target alone and no temp litter behind")
+    void aFailedWriteCleansUpAfterItself(@TempDir Path dir) throws IOException {
+        // The failure is forced rather than simulated: the target is a non-empty directory, so
+        // every one of AtomicFiles' three replace strategies fails after the temp file has already
+        // been written. That is the only branch where litter can accumulate, and it is the branch a
+        // full disk or a read-only mount takes — on a server, repeatedly.
+        Path target = dir.resolve("occupied");
+        Files.createDirectories(target);
+        Files.write(target.resolve("keep-me"), "content".getBytes(StandardCharsets.UTF_8));
+
+        assertThrows(IOException.class, () -> AtomicFiles.writeUtf8(target, "new content"));
+
+        assertTrue(Files.exists(target.resolve("keep-me")), "the target is untouched");
+        try (Stream<Path> files = Files.list(dir)) {
+            assertEquals(0, files.filter(path -> path.getFileName().toString().endsWith(".tmp"))
+                    .count(), "a failed save must not leave a .tmp behind to accumulate");
         }
     }
 
