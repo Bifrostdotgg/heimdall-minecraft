@@ -14,7 +14,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -235,11 +237,23 @@ public final class StubWsServer extends WebSocketServer {
 
         StubLog.debug("ws recv " + type + " id=" + id + " from " + server.serverId());
 
-        // The bot special-cases exactly these four types, and NOTHING else — in particular there is
-        // no `ping` case. A client-initiated ping falls through to correlation (where its id never
-        // matches) and then to the listener. Adding a courteous pong here would have been a
-        // protocol the real bot does not speak, and a plugin built against it would look healthy in
-        // testing and be reaped by the real bot's sweep in production.
+        // A client-initiated ping is answered ONLY for a connection that declared capabilities, and
+        // the reply gives no liveness credit at all. Both halves are the bot's, verbatim:
+        //
+        //   * v2 connections get silence, exactly as before — the message falls through to
+        //     correlation (where its id never matches) and then to the listener, which ignores it.
+        //   * the pong echoes the request id, so a v3 plugin can time its own round trip and spot a
+        //     half-open socket before the 90-second sweep would.
+        //   * `lastSeen` is NOT refreshed. Liveness stays bot-attested: a client ping is
+        //     self-certification, and a plugin whose modules had all died but whose keepalive thread
+        //     still ran would renew its own staleness deadline forever, never tripping the sweep and
+        //     never firing the offline alert. The bot's own ping -> client pong covers socket
+        //     liveness, and THAT path does refresh it.
+        if ("ping".equals(type) && !server.capabilities().isEmpty()) {
+            send(conn, id, "pong", new JsonObject());
+            return;
+        }
+
         switch (type) {
             case "identify" -> {
                 // Deliberately does NOT refresh liveness: the bot's identify handler only records
@@ -299,21 +313,31 @@ public final class StubWsServer extends WebSocketServer {
      *
      * <p>A v2 client sends metadata only and the bot answers nothing — the connection is simply
      * considered identified. A v3 client additionally declares {@code protocolVersion} and
-     * {@code capabilities}, and gets three things back:
+     * {@code capabilities}, and the answer is:
      *
      * <ol>
-     *   <li>{@code identify_ack} echoing the identify's id, carrying {@code accepted} (false when the
-     *       client speaks a protocol newer than the stub understands) and the current
+     *   <li>{@code identify_ack} carrying {@code protocolVersion} (the bot's own, always 3),
+     *       {@code accepted} (the LIST of capabilities it will honour, in the client's spelling) and
      *       {@code configVersion};
-     *   <li>{@code config.push} with {@code version} and {@code modules}, narrowed to the modules the
-     *       client actually declared a capability for — pushing config for a module the client cannot
-     *       run is how a "silently ignored setting" bug is born;
-     *   <li>whatever {@code config.ack} the client sends back, recorded on the connection.
+     *   <li>{@code config.push} with {@code version} and {@code modules} narrowed to what those
+     *       capabilities cover — but only for a <em>registered</em> connection.
      * </ol>
      *
-     * <p>A rejected {@code identify_ack} is deliberately NOT followed by a config push, and the
-     * socket stays open: the client is told plainly that it is too new rather than being dropped
-     * into a reconnect loop it cannot diagnose.
+     * <h2>Three things a plugin author gets wrong without reading this</h2>
+     *
+     * <p><strong>{@code accepted} is a list, not a boolean.</strong> There is no refusal frame in
+     * this protocol: a capability the bot does not support is simply absent from the list, and an
+     * empty list is a <em>successful</em> handshake with a bot that recognised none of what the
+     * client declared. A client reading it as a boolean sees {@code false} and downgrades itself
+     * while the bot believes it negotiated v3.
+     *
+     * <p><strong>The ack's id is fresh, not the identify's.</strong> The bot does not correlate the
+     * two. A client that requires an echo discards every ack it will ever receive.
+     *
+     * <p><strong>An unregistered server gets an ack and no config.</strong> {@code configVersion} is
+     * 0 and no {@code config.push} follows, because the bot never reads the config store for a
+     * serverId it has no registry row for. The client runs on its own defaults — which is exactly
+     * v2 behaviour, and is why this is a supported state rather than an error.
      */
     private void handleIdentify(WebSocket conn, ConnectedServer server, String id, JsonObject payload) {
         Integer protocolVersion = payload.has("protocolVersion") && payload.get("protocolVersion").isJsonPrimitive()
@@ -330,7 +354,7 @@ public final class StubWsServer extends WebSocketServer {
                     capabilities.add(element.getAsString());
                 }
             } else if (raw.isJsonObject()) {
-                // Also accept the map form ({"whitelist": true, …}) so a client that models
+                // Also accept the map form ({"whitelist": true, ...}) so a client that models
                 // capabilities as flags rather than a list is not silently downgraded to v2.
                 declaredCapabilities = true;
                 for (Map.Entry<String, JsonElement> entry : raw.getAsJsonObject().entrySet()) {
@@ -342,38 +366,77 @@ public final class StubWsServer extends WebSocketServer {
         }
 
         server.setIdentify(payload, protocolVersion, capabilities);
+        server.setRegistered(config.isRegistered(server.serverId()));
 
         String serverName = payload.has("serverName") ? payload.get("serverName").getAsString() : server.serverId();
         StubLog.info("identified: server=" + server.serverId() + " name=" + serverName
                 + " protocol=" + (protocolVersion == null ? "v2" : String.valueOf(protocolVersion))
+                + " registered=" + server.registered()
                 + " capabilities=" + capabilities);
 
-        if (protocolVersion == null || !declaredCapabilities) {
-            // v2 client: no ack, no config push. Exactly what the real bot does today.
+        // The bot triggers the v3 handshake on a non-empty capabilities array alone —
+        // protocolVersion by itself does not. A client declaring one without the other is a v2
+        // client as far as the wire is concerned.
+        if (!declaredCapabilities || capabilities.isEmpty()) {
             return;
         }
 
-        boolean accepted = protocolVersion <= config.maxProtocolVersion();
-        JsonObject ack = new JsonObject();
-        ack.addProperty("accepted", accepted);
-        ack.addProperty("configVersion", configVersion.get());
-        if (!accepted) {
-            ack.addProperty("reason", "protocolVersion " + protocolVersion
-                    + " is newer than the highest this bot speaks (" + config.maxProtocolVersion() + ")");
+        List<String> accepted = CapabilityNegotiation.accepted(capabilities);
+        server.setAcceptedCapabilities(accepted);
+
+        List<String> rejected = new ArrayList<>();
+        for (String capability : capabilities) {
+            if (!accepted.contains(capability)) {
+                rejected.add(capability);
+            }
         }
-        send(conn, id, "identify_ack", ack);
+        if (!rejected.isEmpty()) {
+            // Logged and nothing more: the client's only signal is the omission from `accepted`.
+            StubLog.warn("unsupported capabilities from " + server.serverId() + ": " + rejected);
+        }
+
+        // Unregistered -> the config store is never read, so the version is 0 rather than whatever
+        // the stub happens to be holding.
+        int version = server.registered() ? configVersion.get() : 0;
+
+        JsonObject ack = new JsonObject();
+        ack.addProperty("protocolVersion", CapabilityNegotiation.BOT_PROTOCOL_VERSION);
+        JsonArray acceptedJson = new JsonArray();
+        for (String capability : accepted) {
+            acceptedJson.add(capability);
+        }
+        ack.add("accepted", acceptedJson);
+        ack.addProperty("configVersion", version);
+        // A fresh id, like the bot's. Echoing the identify's would let a client build a correlation
+        // production does not honour — it would work perfectly here and nowhere else.
+        send(conn, newId(), "identify_ack", ack);
         server.setIdentifyAcked(true);
 
-        if (accepted) {
-            send(conn, newId(), "config.push", buildConfig(capabilities));
+        if (server.registered()) {
+            send(conn, newId(), "config.push", buildConfig(accepted));
         }
     }
 
-    /** {@code {version, modules}}, with modules narrowed to the client's declared capabilities. */
-    private JsonObject buildConfig(Collection<String> capabilities) {
+    /**
+     * {@code {version, modules}}, narrowed to what the accepted capabilities cover.
+     *
+     * <p>Narrowing is by <strong>base module id</strong>, so {@code whitelist@1} lets the
+     * {@code whitelist} key through. Pushing config for a module the client cannot run is how a
+     * "silently ignored setting" bug is born.
+     *
+     * <p>{@code modules@1} and {@code config@1} therefore contribute nothing: they are accepted and
+     * acknowledged like any other capability, but no config document has keys by those names, so
+     * narrowing to them yields an empty map.
+     *
+     * <p>An empty accepted list narrows to <strong>nothing</strong>, not to everything. That
+     * asymmetry is deliberate and matches the bot: "the client declared nothing I understand" and
+     * "the client is a v2 client" are different states, and only the second gets no push at all.
+     */
+    private JsonObject buildConfig(List<String> acceptedCapabilities) {
+        Set<String> allowed = CapabilityNegotiation.allowedModuleIds(acceptedCapabilities);
         JsonObject modules = new JsonObject();
         for (Map.Entry<String, JsonElement> entry : config.modules().entrySet()) {
-            if (capabilities.isEmpty() || capabilities.contains(entry.getKey())) {
+            if (allowed.contains(entry.getKey().toLowerCase(Locale.ROOT))) {
                 modules.add(entry.getKey(), entry.getValue());
             }
         }
@@ -405,6 +468,12 @@ public final class StubWsServer extends WebSocketServer {
     /** Waits for a server to connect, returning it or null on timeout. */
     public ConnectedServer awaitConnection(String guildId, String serverId, long timeoutMs) {
         return await(timeoutMs, () -> connected(guildId, serverId));
+    }
+
+    /** Whether a connection for this guild and serverId is currently open. */
+    public boolean hasConnection(String guildId, String serverId) {
+        Map<String, ConnectedServer> guildMap = connections.get(guildId);
+        return guildMap != null && guildMap.containsKey(serverId);
     }
 
     /** Waits for a server to send {@code identify}, returning it or null on timeout. */
@@ -496,7 +565,7 @@ public final class StubWsServer extends WebSocketServer {
             return 0;
         }
         configVersion.incrementAndGet();
-        send(server.socket(), newId(), "config.push", buildConfig(server.capabilities()));
+        send(server.socket(), newId(), "config.push", buildConfig(server.acceptedCapabilities()));
         return 1;
     }
 

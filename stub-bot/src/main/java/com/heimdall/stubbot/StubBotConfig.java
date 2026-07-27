@@ -12,6 +12,9 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Collections;
+import java.util.Set;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 
@@ -39,11 +42,31 @@ public final class StubBotConfig {
     private Outcome defaultOutcome = Outcome.DENY;
     private final List<PlayerFixture> players = new ArrayList<>();
 
+    /**
+     * Server ids that are deliberately NOT in the registry.
+     *
+     * <p>Empty by default, so every serverId is registered and nothing that existed before this flag
+     * behaves differently. Listing one here reproduces the bot's unregistered path: it still
+     * connects, still gets an {@code identify_ack}, and gets {@code configVersion: 0} and no
+     * {@code config.push} at all.
+     *
+     * <p>Modelled as a deny-list rather than an allow-list precisely so the default is "registered".
+     * An allow-list would make an empty registry mean "nothing is registered", and every existing
+     * test would silently start exercising the unregistered path instead of the one it was written
+     * for.
+     */
+    private final Set<String> unregisteredServers = new LinkedHashSet<>();
+
+    /** Server ids whose registry row names a different token. Connecting as one is a 403. */
+    private final Set<String> foreignServers = new LinkedHashSet<>();
+
+    /** When true the registry cannot be read, which is what turns an incumbent clash into a 503. */
+    private boolean registryUnreadable;
+
     private long pingIntervalMs = 30_000L;
     private long livenessTimeoutMs = 90_000L;
 
     /** Highest {@code protocolVersion} the stub will accept in an {@code identify}. */
-    private int maxProtocolVersion = 1;
     private int configVersion = 1;
     private JsonObject modules = defaultModules();
     private JsonArray offenseTypes = defaultOffenseTypes();
@@ -108,12 +131,28 @@ public final class StubBotConfig {
                 case "default_outcome" -> config.defaultOutcome = Outcome.parse(value);
                 case "ping_interval_ms" -> config.pingIntervalMs = Long.parseLong(value.trim());
                 case "liveness_timeout_ms" -> config.livenessTimeoutMs = Long.parseLong(value.trim());
-                case "max_protocol_version" -> config.maxProtocolVersion = Integer.parseInt(value.trim());
                 case "config_version" -> config.configVersion = Integer.parseInt(value.trim());
                 case "modules" -> config.modules = JsonParser.parseString(value).getAsJsonObject();
                 case "offense_types" -> config.offenseTypes = JsonParser.parseString(value).getAsJsonArray();
                 case "plugin_latest" -> config.pluginLatest = JsonParser.parseString(value).getAsJsonObject();
                 case "verbose" -> StubLog.setVerbose(Boolean.parseBoolean(value.trim()));
+                case "registry_unreadable" -> config.registryUnreadable = Boolean.parseBoolean(value.trim());
+                case "foreign_servers" -> {
+                    config.foreignServers.clear();
+                    for (String id : value.split(",")) {
+                        if (!id.trim().isEmpty()) {
+                            config.foreignServers.add(id.trim());
+                        }
+                    }
+                }
+                case "unregistered_servers" -> {
+                    config.unregisteredServers.clear();
+                    for (String id : value.split(",")) {
+                        if (!id.trim().isEmpty()) {
+                            config.unregisteredServers.add(id.trim());
+                        }
+                    }
+                }
                 case "players" -> {
                     config.setPlayers(parsePlayers(value));
                     playersOverridden = true;
@@ -279,10 +318,6 @@ public final class StubBotConfig {
         return this;
     }
 
-    public StubBotConfig maxProtocolVersion(int value) {
-        this.maxProtocolVersion = value;
-        return this;
-    }
 
     public StubBotConfig configVersion(int value) {
         this.configVersion = value;
@@ -326,12 +361,77 @@ public final class StubBotConfig {
         return livenessTimeoutMs;
     }
 
-    public int maxProtocolVersion() {
-        return maxProtocolVersion;
-    }
 
     public int configVersion() {
         return configVersion;
+    }
+
+    /**
+     * Whether a serverId is in the registry.
+     *
+     * <p>True unless it was explicitly listed as unregistered — see the field for why the default
+     * points that way.
+     */
+    public boolean isRegistered(String serverId) {
+        return serverId != null && !unregisteredServers.contains(serverId);
+    }
+
+    /** The serverIds being treated as unregistered. */
+    public Set<String> unregisteredServers() {
+        return Collections.unmodifiableSet(unregisteredServers);
+    }
+
+    /** Marks a serverId as absent from the registry. Chainable, for tests. */
+    public StubBotConfig unregisterServer(String serverId) {
+        if (serverId != null && !serverId.trim().isEmpty()) {
+            unregisteredServers.add(serverId.trim());
+        }
+        return this;
+    }
+
+    /**
+     * Server ids that are registered to a DIFFERENT token than this stub's.
+     *
+     * <p>Connecting as one of these is the 403 case: the registry has a row and it does not point at
+     * the presented token. Permanent, and a plugin that keeps retrying will keep getting it.
+     */
+    public StubBotConfig registerServerToAnotherToken(String serverId) {
+        if (serverId != null && !serverId.trim().isEmpty()) {
+            foreignServers.add(serverId.trim());
+        }
+        return this;
+    }
+
+    /** Whether a serverId is registered to somebody else's token. */
+    public boolean isForeign(String serverId) {
+        return serverId != null && foreignServers.contains(serverId);
+    }
+
+    /**
+     * Makes the registry unreadable, which is the 503 case when an incumbent connection is held by
+     * a different token. Transient by nature — a plugin should back off and retry.
+     */
+    public StubBotConfig registryUnreadable(boolean unreadable) {
+        this.registryUnreadable = unreadable;
+        return this;
+    }
+
+    public boolean registryUnreadable() {
+        return registryUnreadable;
+    }
+
+    /** Puts one serverId back in the registry — what a successful claim does. */
+    public StubBotConfig registerServer(String serverId) {
+        if (serverId != null) {
+            unregisteredServers.remove(serverId.trim());
+        }
+        return this;
+    }
+
+    /** Puts every serverId back in the registry. */
+    public StubBotConfig registerAllServers() {
+        unregisteredServers.clear();
+        return this;
     }
 
     public JsonObject modules() {

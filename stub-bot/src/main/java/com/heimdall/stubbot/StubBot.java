@@ -39,6 +39,7 @@ public final class StubBot implements AutoCloseable {
         // Both back-ends bind loopback with an ephemeral port; the multiplexer owns the public one.
         int wsPort = ws.awaitPort(10_000L);
         this.multiplexer = new PortMultiplexer(config.bindHost(), config.port(), http.port(), wsPort);
+        this.multiplexer.setUpgradeGate(this::upgradeRejection);
         this.multiplexer.start();
         this.ws.startSweep();
     }
@@ -73,6 +74,65 @@ public final class StubBot implements AutoCloseable {
 
     public StubBotConfig config() {
         return config;
+    }
+
+    /** The HTTP side, including the setup-code and config-import test hooks. */
+    public StubHttpApi http() {
+        return http;
+    }
+
+    /**
+     * The registry checks the bot runs before it hands a socket to the WebSocket library.
+     *
+     * <p>Two rejections, and the difference between them is what a plugin needs in order to know
+     * whether to retry:
+     *
+     * <ul>
+     *   <li><strong>403</strong> — the serverId has a registry row and it names a different token.
+     *       Permanent. Retrying will get the same answer until somebody fixes the configuration, and
+     *       a plugin that reconnect-loops on it is a plugin hammering an endpoint that will never
+     *       say yes.
+     *   <li><strong>503</strong> — the registry could not be read AND a live connection for that id
+     *       is held by a different token. Transient: the bot is refusing to guess during an outage
+     *       rather than letting two servers share an id. Back off and retry.
+     * </ul>
+     *
+     * <p>A same-token reconnect always passes, by both routes: with a readable registry the row
+     * matches, and with an unreadable one the incumbent check does not fire. That is the case that
+     * actually happens in production — a server restarting — and it must never be refused.
+     */
+    private int upgradeRejection(String requestHead) {
+        String serverId = serverIdFrom(requestHead);
+        if (serverId == null) {
+            return 0;
+        }
+        if (config.isForeign(serverId)) {
+            return 403;
+        }
+        if (config.registryUnreadable() && ws.hasConnection(config.guildId(), serverId)) {
+            return 503;
+        }
+        return 0;
+    }
+
+    /** The {@code serverId} query parameter, or {@code "default"} like the bot's, or null. */
+    private static String serverIdFrom(String requestHead) {
+        int query = requestHead.indexOf("serverId=");
+        if (query < 0) {
+            return requestHead.contains("/ws/minecraft/") ? "default" : null;
+        }
+        int start = query + "serverId=".length();
+        int end = start;
+        while (end < requestHead.length()) {
+            char c = requestHead.charAt(end);
+            // & space CR LF, written as codepoints: this string came off a raw socket and the
+            // delimiters are more legible as their values than as escaped literals.
+            if (c == 0x26 || c == 0x20 || c == 0x0D || c == 0x0A) {
+                break;
+            }
+            end++;
+        }
+        return requestHead.substring(start, end);
     }
 
     /** Clears the {@code /offend} escalation counters. */

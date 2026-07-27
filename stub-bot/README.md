@@ -53,7 +53,9 @@ Precedence: defaults → `STUB_BOT_*` environment variables → `--key=value` ar
 | `STUB_BOT_DEFAULT_OUTCOME` | `deny` | Outcome served for a UUID with no fixture. |
 | `STUB_BOT_PING_INTERVAL_MS` | `30000` | WebSocket ping sweep interval. |
 | `STUB_BOT_LIVENESS_TIMEOUT_MS` | `90000` | Silence after which a connection is reaped. |
-| `STUB_BOT_MAX_PROTOCOL_VERSION` | `1` | Highest `protocolVersion` accepted in `identify`. |
+| `STUB_BOT_UNREGISTERED_SERVERS` | — | Comma-separated server ids to treat as absent from the registry. |
+| `STUB_BOT_FOREIGN_SERVERS` | — | Comma-separated server ids registered to a *different* token — their upgrade is refused with 403. |
+| `STUB_BOT_REGISTRY_UNREADABLE` | `false` | Simulates a registry outage; with an incumbent under another token the upgrade is refused with 503. |
 | `STUB_BOT_CONFIG_VERSION` | `1` | Starting config version advertised to v3 clients. |
 | `STUB_BOT_MODULES` | all but `console` | Inline JSON for the `config.push` `modules` object. |
 | `STUB_BOT_OFFENSE_TYPES` | one "Cheating" type | Inline JSON array, same shape as the bot's `OffenseType` documents. |
@@ -255,6 +257,70 @@ Durations format as `1h`, `1d`, `7d`, `1h30m`. `bot.resetInfractions()` clears t
 
 ---
 
+### `POST /api/minecraft/claim`
+
+**Public — no signature.** It has to be: a server claiming a setup code has no token to sign with
+yet, which is the entire point of the endpoint. It is registered ahead of the HMAC gate on the real
+bot too.
+
+Request: `{code, platform?, mcVersion?, role?}`.
+
+- `code` is upper-cased and then stripped of every non-alphanumeric, so `abcd-2345` and `ABCD 2345`
+  both reach `ABCD2345` — an operator reads the code off a screen and types the dash they see.
+- `role` is validated against `gatekeeper` / `enforcer` / `standalone` and **silently becomes null**
+  when it is anything else. Not a 400. A client sending a typo gets a successful claim and a server
+  with no role.
+
+Success (200): `{success: true, data: {guildId, tokenId, token, serverId, serverName}}`. `token` is
+the plaintext API key, returned exactly once.
+
+| Status | code | When |
+| --- | --- | --- |
+| 400 | `MISSING_PARAMS` | `code` absent or not a string. |
+| 401 | `INVALID_CODE` | Unknown, expired or already used. Codes are single-use. |
+| 429 | `TOO_MANY_ATTEMPTS` | Ten failures from one client. Checked **before** the body is read, so a throttled caller gets 429 whatever it sends. |
+
+Issue a code in a test with `bot.http().issueClaimCode("ABCD2345", "Survival")`. A successful claim
+also **registers** the new serverId, which is what the WebSocket upgrade then looks up.
+
+### `POST …/servers/{serverId}/config/import`
+
+Signed, and the **only** server-config route a guild-scoped Minecraft token may call — every other
+route under `servers/` is dashboard-only (see below).
+
+Request `{modules}`. **Write-once:** a second import against a server that already has a document is
+a **200 with `imported: false`** and the stored modules unchanged, not a conflict. A plugin migrating
+a v2 config file therefore cannot clobber what an operator has since edited in the dashboard, and
+does not need to ask first.
+
+Success (200): `{serverId, imported, version, modules}`.
+
+| Status | code | When |
+| --- | --- | --- |
+| 403 | `FORBIDDEN` | `"This API key does not own that server."` — the serverId is registered to a different token. |
+
+There is deliberately **no 404**: an unregistered serverId is allowed through, because the document
+it writes is inert until a registry row points at it. Refusing would only force a plugin to claim
+before it could import.
+
+## Upgrade refusals
+
+Most refusals are a silent socket close — a bad path, a missing or invalid signature — unchanged
+from v2 so a v2 plugin sees exactly what it always did. Two are **real HTTP responses**, because a
+plugin has to be able to tell them apart:
+
+| Status | When | Retry? |
+| --- | --- | --- |
+| 403 Forbidden | The serverId has a registry row naming a **different** token. | **No.** Permanent until somebody changes the configuration. |
+| 503 Service Unavailable | The registry could not be read **and** a live connection for that id is held by a different token. | **Yes**, with backoff. The bot refuses to guess during an outage rather than let two servers share an id. |
+
+**A same-token reconnect always passes**, by both routes: with a readable registry the row matches,
+and with an unreadable one the incumbent check does not fire. That is the case that actually happens
+in production — a server restarting — and it must never be refused. With an unreadable registry the
+connection is then treated as **unregistered**, so it gets `configVersion: 0` and no push.
+
+Reproduce with `STUB_BOT_FOREIGN_SERVERS` and `STUB_BOT_REGISTRY_UNREADABLE`.
+
 ## WebSocket tunnel
 
 `GET /ws/minecraft/{guildId}?serverId=…&signature=…&timestamp=…` — same port as the HTTP API.
@@ -289,7 +355,8 @@ Bot → plugin:
 | `run_command` | `{command}` | Yes → `command_result`. |
 | `probe_player` | `{uuid, username}` | Yes → `probe_result`. |
 | `update` | `{}` | Yes → `update_result`. |
-| `identify_ack` | `{accepted, configVersion, reason?}` | v3 only; echoes the `identify` id. |
+| `identify_ack` | `{protocolVersion, accepted, configVersion}` | v3 only; **fresh id — it does NOT echo the `identify` id**. |
+| `pong` | `{}` | v3 only; echoes the client `ping` id. Gives **no** liveness credit. |
 | `config.push` | `{version, modules}` | v3 only; fresh id. |
 
 Plugin → bot:
@@ -302,15 +369,21 @@ Plugin → bot:
 | `console_line` | `{lines: [{ts, level, msg}]}` | Collected per server (bounded to 2000). |
 | `config.ack` | `{version}` | v3 only; recorded. Not a liveness signal. |
 | `trace.report` / `trace.annotation` | trace payloads | **Real bot-side sinks**, not test noise: the bot's `onClientMessage` listener persists them to Mongo via `traceIngest.ts`. The stub has no database, so it forwards them to its `WsMessageListener` like any other unsolicited message. |
-| `player_join` / `player_leave` / `ping` / anything else | — | Forwarded to the `WsMessageListener`. |
+| `ping` | `{}` | v3 only: answered with `pong` echoing the id. A v2 connection gets **silence**. Never a liveness signal. |
+| `player_join` / `player_leave` / anything else | — | Forwarded to the `WsMessageListener`. |
 | `player_list` / `command_result` / `probe_result` / `update_result` | — | Correlated by id. |
 
-> **There is no `ping` case.** The bot special-cases exactly `identify`, `pong`, `health` and
-> `console_line`, and nothing else; everything else falls through to id-correlation and then to the
-> listener. A **client-initiated ping therefore gets no reply and does not refresh liveness** — it
-> lands in the same place `trace.report` does. A stub that answered it politely would be speaking a
-> protocol the real bot does not, and a plugin built against that would look healthy in testing and
-> be reaped by the real bot's sweep in production.
+> **A client `ping` is answered only for a v3 connection, and never credits liveness.** Both halves
+> matter. A v2 connection has no declared capabilities, so its ping falls through to id-correlation
+> and then to the listener — silence, byte-identical to what a deployed v2 plugin has always seen. A
+> v3 connection gets a `pong` echoing its id, so it can time its own round trip and spot a half-open
+> socket before the 90-second sweep would.
+>
+> `lastSeen` is **not** refreshed by it. Liveness stays bot-attested: a client ping is
+> self-certification, and a plugin whose modules had all died but whose keepalive thread still ran
+> would otherwise renew its own staleness deadline forever — never tripping the sweep, never firing
+> the offline alert. The bot's own ping → client `pong` covers socket liveness, and *that* path does
+> refresh it.
 
 ### Liveness
 
@@ -320,7 +393,7 @@ connection and closes any that has been silent for `STUB_BOT_LIVENESS_TIMEOUT_MS
 `1001 Heartbeat timeout`.
 
 Liveness is refreshed by `pong` and `health` **only** — not by `identify`, not by `config.ack`, and
-not by a client-initiated `ping`.
+not by a client-initiated `ping` (which is answered, but earns nothing).
 
 Both `pong` **and** `health` count as liveness, so a plugin whose heartbeat carries health without an
 explicit pong stays connected.
@@ -340,19 +413,75 @@ A **v2 client** sends metadata only:
 plugin asked for.
 
 A **v3 client** additionally declares `protocolVersion` and `capabilities` (either an array
-`["whitelist","rolesync"]` or a flag map `{"whitelist": true, "console": false}`), and gets:
+`["whitelist@1","rolesync@1"]` or a flag map `{"whitelist": true, "console": false}`).
 
-1. **`identify_ack`**, echoing the `identify` id:
-   `{"accepted": true, "configVersion": 1}`. `accepted` is `false` — with a `reason` — when the
-   client speaks a `protocolVersion` higher than `STUB_BOT_MAX_PROTOCOL_VERSION`.
-2. **`config.push`** (fresh id): `{"version": 1, "modules": { … }}`, **narrowed to the modules the
-   client declared a capability for**. Pushing config for a module the client cannot run is how a
-   silently-ignored setting is born.
+The handshake is triggered by a **non-empty `capabilities` array alone** — `protocolVersion` on its
+own does not. A client that declares one without the other is a v2 client as far as the wire is
+concerned.
+
+1. **`identify_ack`**, with a **fresh id**:
+   `{"protocolVersion": 3, "accepted": ["whitelist@1"], "configVersion": 1}`.
+2. **`config.push`** (fresh id): `{"version": 1, "modules": { … }}`, narrowed per connection.
 3. Whatever **`config.ack`** `{"version": 1}` the client sends back, recorded on the connection.
 
-A rejected `identify_ack` is deliberately **not** followed by a config push, and **the socket stays
-open** — the client is told plainly that it is too new rather than being dropped into a reconnect
-loop it cannot diagnose.
+#### Three things a client gets wrong without reading this
+
+**`accepted` is a list, not a boolean.** There is no refusal frame in this protocol at all. A
+capability the bot does not support is simply absent from the list, and an **empty list is a
+successful handshake** with a bot that recognised none of what the client declared. A client that
+reads it as a boolean sees `false`, reports that the bot refused its protocol version, and downgrades
+itself to v2-compat — while the bot believes it negotiated v3 and starts pushing configuration into
+a client that has stopped listening for it.
+
+**The ack's id is fresh, not the identify's.** The bot does not correlate the two. A client that
+requires an echo discards every ack it will ever receive, times out, and falls back to v2-compat on
+every single connection.
+
+**An unregistered server gets an ack and no config.** `configVersion` is `0` and no `config.push`
+follows, because the bot never reads the config store for a serverId it has no registry row for. The
+client runs on its own defaults — which is exactly v2 behaviour, and is why this is a supported state
+rather than an error. Reproduce it with `STUB_BOT_UNREGISTERED_SERVERS`.
+
+#### Which capabilities are accepted
+
+Exact major match against a fixed table — `whitelist`, `rolesync`, `console`, `health`, `modules`,
+`config`, all at major 1:
+
+| Declared | Accepted | Why |
+| --- | --- | --- |
+| `whitelist@1` | `whitelist@1` | Exact match. |
+| `whitelist` | `whitelist` | No `@N` reads as major 1 — and it is echoed back **verbatim**, not normalised to `whitelist@1`. |
+| `whitelist@beta` | `whitelist@beta` | A non-numeric major also reads as 1. Surprising, and it is what the bot does. |
+| `whitelist@2` | — | Known module, wrong major. Dropped. |
+| `teleport@1` | — | Unknown module. Dropped. |
+
+Duplicates collapse to their first occurrence and declaration order is preserved. Rejections are
+logged bot-side and are **otherwise silent**: omission from `accepted` is the entire signal.
+
+#### What gets pushed
+
+`modules` is narrowed to the **base module id** of each accepted capability, so `whitelist@1` lets the
+`whitelist` key through. Pushing config for a module the client cannot run is how a silently-ignored
+setting is born.
+
+`modules@1` and `config@1` are accepted and acknowledged like any other capability but contribute
+**nothing** to the push: no config document has keys by those names, so narrowing to them yields an
+empty map.
+
+An empty `accepted` list narrows to **nothing**, not to everything — "the client declared nothing I
+understand" and "the client is a v2 client" are different states, and only the second gets no push
+at all.
+
+#### WIRE CONTRACT: never dedupe a `config.push` by version
+
+**A client MUST apply every `config.push` it receives and MUST NOT skip one whose `version` it has
+already seen.** The version identifies the stored *document*, which is guild+server scoped — but the
+`modules` map is narrowed per **connection**, against that connection's capabilities.
+
+Two connections from the same server (different jar builds, a module compiled out by an update) can
+therefore legitimately receive different maps at the same version, and a re-push at an unchanged
+version can legitimately carry a different map than the previous one did. Versions are only ever
+compared *within* one connection, for staleness reporting via `config.ack` — never to skip an apply.
 
 `bot.ws().pushConfig(guildId, serverId)` bumps the version and re-pushes: the hot-toggle path.
 
@@ -400,14 +529,38 @@ Everything here is a conscious simplification, not an oversight.
 | Infractions live in memory and are never pardoned | The plugin only reads the resolved tier and command. |
 | No Bedrock/Floodgate identity resolution | The stub matches on UUID; prefix inference and same-name/different-edition guarding are bot-side matching rules with no wire-visible effect on the plugin. |
 | No `player_join` / `player_leave` / alerting side effects | Those drive Discord and the dashboard, not the plugin. |
-| A rejected upgrade fails the handshake; the real bot destroys the socket | Both look like a failed connection to the client. Java-WebSocket has no socket-destroy hook. |
+| A silently rejected upgrade fails the handshake; the real bot destroys the socket | Both look like a failed connection to the client. Java-WebSocket has no socket-destroy hook. The two refusals that carry a *status* (403, 503) are written on the raw socket before the library sees it, exactly as the bot does — see "Upgrade refusals". |
+| No token identity: one API key owns everything | The 403 and 503 paths are reproduced with explicit fixtures (`STUB_BOT_FOREIGN_SERVERS`, `STUB_BOT_REGISTRY_UNREADABLE`) rather than by modelling a token registry. A plugin cannot tell the difference — it sees the status line either way. |
 | `trace.report` / `trace.annotation` are forwarded, not persisted | They are real bot-side sinks backed by Mongo. The stub has no database; the wire behaviour (accepted, no reply) is identical. |
 | The timestamp parse is **stricter** than the bot's | The bot uses JavaScript `Number()`, which accepts hex, a leading `+`, exponents and whitespace; `Double.parseDouble` also accepts `"5d"`. None of that is a timestamp a client sends. The divergence is one-directional and fail-closed: the stub can refuse a request the bot would accept, never the reverse. |
 
 ## Deferred, deliberately
 
-**Client-initiated keepalive does not exist in the current protocol.** The v2 plugin's liveness
-derives entirely from answering the **bot's** pings (or sending `health`); a ping the plugin sends
-is not acknowledged and does not count. Making client pings meaningful would be a bot-side
-capability decision for v3 (phase 1f) — it is not invented here, because a fixture that grants a
-capability the real bot lacks produces plugins that pass their tests and die in production.
+**Client-initiated keepalive is answered but earns nothing, and that is the final shape.** It was
+open in the v2 protocol and the bot has since settled it: a v3 connection gets a `pong` echoing its
+ping's id, so a plugin can measure its own round trip and detect a half-open socket — but the reply
+does not refresh liveness, because a client ping is self-certification. A plugin whose modules had
+all died but whose keepalive thread still ran would otherwise renew its own staleness deadline
+forever, never tripping the sweep and never firing the offline alert.
+
+**Rate-limit windows are not modelled.** The claim endpoint refuses after ten failures like the
+bot's, but the failures never expire — the bot forgets them after ten minutes. A test that wants a
+clean slate restarts the stub, which is cheaper than making a fixture keep wall-clock time.
+
+## Dashboard-only routes, not fixtured
+
+These exist on the bot and are **deliberately absent here**. They are called by the dashboard with
+the global key, never by a plugin, so a fixture for them would be documentation of something no
+client under test can reach:
+
+| Method | Path |
+| --- | --- |
+| GET | `/api/guilds/{g}/minecraft/servers` |
+| POST | `/api/guilds/{g}/minecraft/servers/claim-code` |
+| DELETE | `/api/guilds/{g}/minecraft/servers/claim-code/{code}` |
+| DELETE | `/api/guilds/{g}/minecraft/servers/{serverId}` |
+| GET | `/api/guilds/{g}/minecraft/servers/{serverId}/config` |
+| PUT | `/api/guilds/{g}/minecraft/servers/{serverId}/config` |
+
+The one exception is `POST …/servers/{serverId}/config/import`, which a plugin *does* call and which
+is fixtured above.

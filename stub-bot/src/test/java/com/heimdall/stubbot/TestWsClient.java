@@ -104,8 +104,15 @@ final class TestWsClient implements AutoCloseable {
         socket.sendText(GSON.toJson(envelope), true).join();
     }
 
-    void send(String type, JsonObject payload) {
-        send(UUID.randomUUID().toString(), type, payload);
+    /**
+     * Sends a message with a fresh id.
+     *
+     * @return the id, so a caller can assert a reply correlates with it
+     */
+    String send(String type, JsonObject payload) {
+        String id = UUID.randomUUID().toString();
+        send(id, type, payload);
+        return id;
     }
 
     /** Sends a v2 {@code identify} — metadata only, no protocol version or capabilities. */
@@ -169,6 +176,17 @@ final class TestWsClient implements AutoCloseable {
             Thread.sleep(25L);
         }
         return socket.isInputClosed();
+    }
+
+    /** A JSON string array as a Java list, so a test can assert on order as well as membership. */
+    static java.util.List<String> strings(com.google.gson.JsonArray array) {
+        java.util.List<String> values = new java.util.ArrayList<>();
+        if (array != null) {
+            for (com.google.gson.JsonElement element : array) {
+                values.add(element.getAsString());
+            }
+        }
+        return values;
     }
 
     static JsonObject payload(JsonObject envelope) {

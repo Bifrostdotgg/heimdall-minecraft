@@ -42,6 +42,18 @@ final class PortMultiplexer implements AutoCloseable {
     private final Thread acceptThread;
     private volatile boolean running = true;
 
+    /**
+     * Decides whether a WebSocket upgrade may proceed, and with what HTTP status if not.
+     *
+     * <p>It lives here rather than in the WebSocket server because that is where the bot's lives:
+     * it inspects the raw upgrade request and writes an HTTP response on the socket <em>before</em>
+     * handing it to the WebSocket library. A library-level rejection cannot do that — it produces a
+     * close frame or a generic 400 — and the distinction is the whole point of these two statuses.
+     * A plugin has to be able to tell "this serverId belongs to another token" (403, permanent, stop
+     * retrying) from "the registry is unreadable right now" (503, transient, back off and retry).
+     */
+    private volatile UpgradeGate upgradeGate = head -> 0;
+
     PortMultiplexer(String bindHost, int port, int httpPort, int wsPort) {
         this.httpPort = httpPort;
         this.wsPort = wsPort;
@@ -60,6 +72,15 @@ final class PortMultiplexer implements AutoCloseable {
         }
         this.acceptThread = new Thread(this::acceptLoop, "stub-bot-accept");
         this.acceptThread.setDaemon(true);
+    }
+
+    /** Returns 0 to allow the upgrade, or the HTTP status to reject it with. */
+    interface UpgradeGate {
+        int rejectionStatus(String requestHead);
+    }
+
+    void setUpgradeGate(UpgradeGate gate) {
+        this.upgradeGate = gate == null ? head -> 0 : gate;
     }
 
     void start() {
@@ -95,7 +116,17 @@ final class PortMultiplexer implements AutoCloseable {
             }
             client.setSoTimeout(0);
 
-            boolean websocket = looksLikeWebSocketUpgrade(new String(head, StandardCharsets.ISO_8859_1));
+            String requestHead = new String(head, StandardCharsets.ISO_8859_1);
+            boolean websocket = looksLikeWebSocketUpgrade(requestHead);
+
+            if (websocket) {
+                int rejection = upgradeGate.rejectionStatus(requestHead);
+                if (rejection != 0) {
+                    writeRejection(client, rejection);
+                    closeQuietly(client);
+                    return;
+                }
+            }
             int target = websocket ? wsPort : httpPort;
 
             upstream = new Socket(InetAddress.getLoopbackAddress(), target);
@@ -178,6 +209,28 @@ final class PortMultiplexer implements AutoCloseable {
             closeQuietly(from);
             closeQuietly(to);
         }
+    }
+
+    /**
+     * Answers a refused upgrade with a real HTTP status, byte for byte as the bot does.
+     *
+     * <p>No body, and {@code Connection: close}: an upgrade that is not going to happen should cost
+     * the client one round trip and tell it exactly why in the status line.
+     */
+    private static void writeRejection(Socket client, int status) {
+        String reason = status == 403 ? "Forbidden"
+                : status == 503 ? "Service Unavailable"
+                : "Bad Request";
+        String response = "HTTP/1.1 " + status + " " + reason + "\r\n"
+                + "Connection: close\r\n"
+                + "Content-Length: 0\r\n\r\n";
+        try {
+            client.getOutputStream().write(response.getBytes(StandardCharsets.ISO_8859_1));
+            client.getOutputStream().flush();
+        } catch (IOException e) {
+            StubLog.debug("could not write the upgrade rejection: " + e);
+        }
+        StubLog.warn("refused a WebSocket upgrade with " + status + " " + reason);
     }
 
     private static void closeQuietly(Socket socket) {

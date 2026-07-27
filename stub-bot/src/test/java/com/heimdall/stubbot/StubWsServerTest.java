@@ -144,9 +144,16 @@ class StubWsServerTest {
 
                 JsonObject ack = client.await("identify_ack", 3000);
                 assertNotNull(ack, "a capability-declaring client must be acknowledged");
-                assertTrue(TestWsClient.payload(ack).get("accepted").getAsBoolean());
+                JsonObject ackPayloadIn = TestWsClient.payload(ack);
+                assertEquals(3, ackPayloadIn.get("protocolVersion").getAsInt(),
+                        "the ack declares the BOT's protocol version, not an echo of the client's");
+                // `accepted` is the list of capabilities the bot will honour, in the client's own
+                // spelling — not a yes/no. A client reading it as a boolean sees false and
+                // downgrades itself while the bot believes it negotiated v3.
+                assertEquals(List.of("whitelist", "rolesync"),
+                        TestWsClient.strings(ackPayloadIn.getAsJsonArray("accepted")));
                 assertEquals(bot.ws().configVersion(),
-                        TestWsClient.payload(ack).get("configVersion").getAsInt());
+                        ackPayloadIn.get("configVersion").getAsInt());
 
                 JsonObject push = client.await("config.push", 3000);
                 assertNotNull(push, "the ack is immediately followed by the config");
@@ -176,20 +183,86 @@ class StubWsServerTest {
         }
 
         @Test
-        @DisplayName("a client from the future is told so, and NOT dropped into a reconnect loop")
-        void tooNewAProtocolIsRejectedButNotDisconnected() throws Exception {
-            boot(StubBotConfig.withDemoFixtures().maxProtocolVersion(1));
+        @DisplayName("an unsupported capability is dropped from `accepted`, silently")
+        void unsupportedCapabilitiesAreOmitted() throws Exception {
+            boot();
             try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
-                client.identifyV3(SERVER, "Survival", 99, List.of("whitelist"));
+                // whitelist@2 is a major this bot does not speak; teleport@1 is a module it has
+                // never heard of. There is no refusal frame for either — omission from `accepted` is
+                // the entire signal a client gets, which is why this test exists.
+                client.identifyV3(SERVER, "Survival", 3,
+                        List.of("whitelist@1", "whitelist@2", "teleport@1", "rolesync@1"));
 
                 JsonObject ack = client.await("identify_ack", 3000);
                 assertNotNull(ack);
-                assertFalse(TestWsClient.payload(ack).get("accepted").getAsBoolean());
-                assertTrue(TestWsClient.payload(ack).get("reason").getAsString().contains("99"));
-                assertTrue(client.absent("config.push", 400),
-                        "there is no point pushing config a client that was just rejected");
+                assertEquals(List.of("whitelist@1", "rolesync@1"),
+                        TestWsClient.strings(TestWsClient.payload(ack).getAsJsonArray("accepted")));
                 assertTrue(client.isOpen(),
-                        "closing here would leave the plugin reconnecting forever with no idea why");
+                        "a partially-understood client is still a working client");
+            }
+        }
+
+        @Test
+        @DisplayName("a bare capability id reads as major 1 and is echoed back verbatim")
+        void bareCapabilityIdIsMajorOne() throws Exception {
+            boot();
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                client.identifyV3(SERVER, "Survival", 3, List.of("whitelist"));
+
+                JsonObject ack = client.await("identify_ack", 3000);
+                assertEquals(List.of("whitelist"),
+                        TestWsClient.strings(TestWsClient.payload(ack).getAsJsonArray("accepted")),
+                        "echoed in the client's own spelling — NOT normalised to whitelist@1, "
+                                + "because a client comparing what it sent to what came back would "
+                                + "otherwise conclude it had been refused");
+            }
+        }
+
+        @Test
+        @DisplayName("modules@1 and config@1 are accepted but are never keys in config.push")
+        void metaCapabilitiesAreAckedAndPushNothing() throws Exception {
+            boot();
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                client.identifyV3(SERVER, "Survival", 3, List.of("modules@1", "config@1"));
+
+                JsonObject ack = client.await("identify_ack", 3000);
+                assertEquals(List.of("modules@1", "config@1"),
+                        TestWsClient.strings(TestWsClient.payload(ack).getAsJsonArray("accepted")));
+
+                JsonObject modules = TestWsClient.payload(client.await("config.push", 3000))
+                        .getAsJsonObject("modules");
+                assertEquals(0, modules.size(),
+                        "they are negotiated and acknowledged like any other capability, but no "
+                                + "config document has keys by those names");
+            }
+        }
+
+        @Test
+        @DisplayName("an unregistered server is acked at version 0 and gets no config at all")
+        void unregisteredServerGetsNoConfig() throws Exception {
+            boot(StubBotConfig.withDemoFixtures().unregisterServer(SERVER));
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                client.identifyV3(SERVER, "Survival", 3, List.of("whitelist@1"));
+
+                JsonObject ack = client.await("identify_ack", 3000);
+                assertNotNull(ack, "it is still a v3 client — the ack is what stops it "
+                        + "falling back to v2-compat");
+                assertEquals(0, TestWsClient.payload(ack).get("configVersion").getAsInt(),
+                        "the bot never reads the config store for a serverId it has no row for");
+                assertTrue(client.absent("config.push", 400),
+                        "the client runs on its own defaults, which is exactly v2 behaviour");
+            }
+        }
+
+        @Test
+        @DisplayName("a registered server gets the config push, for contrast")
+        void registeredServerGetsConfig() throws Exception {
+            boot();
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                client.identifyV3(SERVER, "Survival", 3, List.of("whitelist@1"));
+
+                assertNotNull(client.await("identify_ack", 3000));
+                assertNotNull(client.await("config.push", 3000));
             }
         }
 
@@ -213,6 +286,67 @@ class StubWsServerTest {
                         .getAsJsonObject("modules");
                 assertTrue(modules.has("whitelist"));
                 assertFalse(modules.has("console"), "declared false means not declared");
+            }
+        }
+    }
+
+    // ── Client-initiated ping ────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("client ping")
+    class ClientPing {
+
+        @Test
+        @DisplayName("a v3 client gets a pong echoing its id")
+        void v3ClientGetsAPong() throws Exception {
+            boot();
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                client.identifyV3(SERVER, "Survival", 3, List.of("whitelist@1"));
+                assertNotNull(client.await("identify_ack", 3000));
+
+                String id = client.send("ping", new JsonObject());
+
+                JsonObject pong = client.await("pong", 3000);
+                assertNotNull(pong, "a v3 client needs a way to measure its own round trip");
+                assertEquals(id, pong.get("id").getAsString(),
+                        "the id is echoed so the client can correlate the reply with its request");
+            }
+        }
+
+        @Test
+        @DisplayName("a v2 client gets silence, exactly as before")
+        void v2ClientGetsSilence() throws Exception {
+            boot();
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                client.identifyV2(SERVER, "Survival");
+
+                client.send("ping", new JsonObject());
+
+                assertTrue(client.absent("pong", 500),
+                        "answering a v2 client would be a protocol change no deployed plugin asked "
+                                + "for, and it would look healthy here and nowhere else");
+            }
+        }
+
+        @Test
+        @DisplayName("a client ping earns no liveness credit")
+        void clientPingIsNotALivenessSignal() throws Exception {
+            boot();
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                client.identifyV3(SERVER, "Survival", 3, List.of("whitelist@1"));
+                assertNotNull(client.await("identify_ack", 3000));
+                ConnectedServer server = bot.ws().awaitIdentify(GUILD, SERVER, 2000);
+                assertNotNull(server);
+
+                long before = server.lastSeenMs();
+                Thread.sleep(20);
+                client.send("ping", new JsonObject());
+                assertNotNull(client.await("pong", 3000));
+
+                assertEquals(before, server.lastSeenMs(),
+                        "liveness must stay bot-attested. A plugin whose modules had all died but "
+                                + "whose keepalive thread still ran would otherwise renew its own "
+                                + "staleness deadline forever and never trip the sweep");
             }
         }
     }

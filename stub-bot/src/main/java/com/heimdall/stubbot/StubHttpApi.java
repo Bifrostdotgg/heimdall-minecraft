@@ -21,6 +21,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
+import java.util.Set;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -42,6 +44,15 @@ final class StubHttpApi {
     /** Matches the bot's own mount point: {@code /api/guilds/:guildId/minecraft/…}. */
     private static final Pattern GUILD_ROUTE =
             Pattern.compile("^/api/guilds/(\\d{17,20})/minecraft/(.+)$");
+
+    /**
+     * {@code servers/{serverId}/config/import}, relative to the guild prefix.
+     *
+     * <p>The only server-config route a guild-scoped Minecraft token may call — every other one
+     * under {@code servers/} is dashboard-only and is deliberately not fixtured here.
+     */
+    private static final Pattern CONFIG_IMPORT_ROUTE =
+            Pattern.compile("^servers/([^/?#]+)/config/import/?$");
 
     /** ISO-8601 with fixed millisecond precision, matching JavaScript's {@code toISOString()}. */
     private static final DateTimeFormatter ISO_MILLIS =
@@ -131,6 +142,18 @@ final class StubHttpApi {
                 return;
             }
 
+            // Public, like the bot's: registered with `registerPublicRouter`, ahead of the HMAC
+            // middleware. It has to be — a server claiming a setup code has no token to sign with
+            // yet, which is the entire point of the endpoint.
+            if ("/api/minecraft/claim".equals(rawPath)) {
+                if ("POST".equals(method)) {
+                    handleClaim(exchange, body);
+                } else {
+                    sendError(exchange, 404, "NOT_FOUND", "No route for " + method + " " + rawPath);
+                }
+                return;
+            }
+
             if (!Hmac.verify(config.apiKey(), method, signedPath, body, signature, timestamp)) {
                 StubLog.debug("HMAC rejected " + method + " " + signedPath
                         + " (sig=" + (signature == null ? "missing" : "present")
@@ -174,7 +197,15 @@ final class StubHttpApi {
                         sendEnvelope(exchange, 200, config.pluginLatest());
                     }
                 }
-                default -> sendError(exchange, 404, "NOT_FOUND", "No route for " + method + " " + route);
+                default -> {
+                    Matcher importRoute = CONFIG_IMPORT_ROUTE.matcher(route);
+                    if ("POST".equals(method) && importRoute.matches()) {
+                        handleConfigImport(exchange, guildId, importRoute.group(1), body);
+                    } else {
+                        sendError(exchange, 404, "NOT_FOUND",
+                                "No route for " + method + " " + route);
+                    }
+                }
             }
         } catch (RuntimeException e) {
             StubLog.warn("handler threw: " + e);
@@ -185,6 +216,113 @@ final class StubHttpApi {
     }
 
     // ── Endpoints ────────────────────────────────────────────────────────────
+
+    /**
+     * {@code POST /api/minecraft/claim} — a setup code becomes credentials.
+     *
+     * <p>The one endpoint with no signature, because the caller has nothing to sign with yet. That
+     * is also why it is the one endpoint with a rate limit: an unauthenticated route that mints API
+     * tokens is a brute-force target, and the bot throttles by client IP after ten failures in ten
+     * minutes. The throttle check runs BEFORE the body is read, so a throttled caller gets 429
+     * whatever it sends.
+     *
+     * <p>The code is normalised the way an operator will actually type it: upper-cased, then every
+     * non-alphanumeric stripped, so {@code abcd-2345} and {@code ABCD 2345} both reach
+     * {@code ABCD2345}.
+     *
+     * <p>{@code role} is validated against gatekeeper/enforcer/standalone and <strong>silently
+     * becomes null</strong> when it is anything else — not a 400. Worth knowing, because a client
+     * sending a typo gets a successful claim and a server with no role rather than an error telling
+     * it what happened.
+     */
+    private void handleClaim(HttpExchange exchange, String body) throws IOException {
+        String client = clientAddress(exchange);
+        if (isThrottled(client)) {
+            sendError(exchange, 429, "TOO_MANY_ATTEMPTS",
+                    "Too many failed setup-code attempts. Try again later.");
+            return;
+        }
+
+        JsonObject request = parseObject(body);
+        String rawCode = request.has("code") && request.get("code").isJsonPrimitive()
+                ? request.get("code").getAsString()
+                : "";
+        String code = rawCode.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "");
+        if (code.isEmpty()) {
+            recordClaimFailure(client);
+            sendError(exchange, 400, "MISSING_PARAMS", "code is required");
+            return;
+        }
+
+        ClaimCode claim = claimCodes.remove(code);
+        if (claim == null) {
+            recordClaimFailure(client);
+            sendError(exchange, 401, "INVALID_CODE",
+                    "That setup code is invalid, expired, or already used.");
+            return;
+        }
+
+        String serverId = UUID.randomUUID().toString();
+        registerClaimedServer(serverId);
+
+        JsonObject data = new JsonObject();
+        data.addProperty("guildId", config.guildId());
+        data.addProperty("tokenId", "stub-token-" + serverId.substring(0, 8));
+        // The plaintext key, returned exactly once — which is why the stub hands back its own,
+        // rather than inventing one the plugin could then not sign with.
+        data.addProperty("token", config.apiKey());
+        data.addProperty("serverId", serverId);
+        data.addProperty("serverName", claim.serverName);
+        sendEnvelope(exchange, 200, data);
+        StubLog.info("claimed setup code " + code + " -> server " + serverId);
+    }
+
+    /**
+     * {@code POST /api/guilds/{guildId}/minecraft/servers/{serverId}/config/import} — write-once.
+     *
+     * <p>The only server-config route a guild-scoped Minecraft token may call; every other one under
+     * {@code servers/} is dashboard-only. Write-once is the whole contract: a second import against
+     * a server that already has a document is <strong>200 with {@code imported: false}</strong> and
+     * the stored modules unchanged, not a conflict. A plugin migrating a v2 config file therefore
+     * cannot clobber what an operator has since edited in the dashboard, and does not need to ask
+     * first.
+     *
+     * <p>403 when the calling token does not own the serverId. There is deliberately no 404: an
+     * unregistered serverId is allowed through, because the document it writes is inert until a
+     * registry row exists to point at it.
+     */
+    private void handleConfigImport(HttpExchange exchange, String guildId, String serverId, String body)
+            throws IOException {
+        if (!guildIsConfigured(exchange, guildId)) {
+            return;
+        }
+        if (!ownsServer(serverId)) {
+            sendError(exchange, 403, "FORBIDDEN", "This API key does not own that server.");
+            return;
+        }
+
+        JsonObject request = parseObject(body);
+        JsonObject modules = request.has("modules") && request.get("modules").isJsonObject()
+                ? request.getAsJsonObject("modules")
+                : new JsonObject();
+
+        JsonObject existing = importedConfigs.get(serverId);
+        boolean created = existing == null;
+        if (created) {
+            importedConfigs.put(serverId, modules);
+        }
+
+        JsonObject data = new JsonObject();
+        data.addProperty("serverId", serverId);
+        data.addProperty("imported", created);
+        // A newly created document is version 1; an existing one keeps whatever it had, which for
+        // the stub is the version it is currently serving.
+        data.addProperty("version", created ? 1 : config.configVersion());
+        data.add("modules", created ? modules : existing);
+        sendEnvelope(exchange, 200, data);
+        StubLog.info("config import for " + serverId + " (imported=" + created + ")");
+    }
+
 
     /**
      * {@code POST /api/minecraft/identify} — resolves an API key to a guild id, so the plugin can be
@@ -683,5 +821,89 @@ final class StubHttpApi {
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
         }
+    }
+
+    // ── Claim codes and imported configs ─────────────────────────────────────
+
+    /** One outstanding setup code. */
+    private static final class ClaimCode {
+
+        private final String serverName;
+
+        ClaimCode(String serverName) {
+            this.serverName = serverName;
+        }
+    }
+
+    /** Outstanding setup codes, consumed on use. */
+    private final Map<String, ClaimCode> claimCodes = new ConcurrentHashMap<>();
+
+    /** Write-once config documents, by serverId. */
+    private final Map<String, JsonObject> importedConfigs = new ConcurrentHashMap<>();
+
+    /** Server ids this stub's token owns. Everything is owned until something says otherwise. */
+    private final Set<String> foreignServers = ConcurrentHashMap.newKeySet();
+
+    /** Failed claim attempts per client, for the rate limit. */
+    private final Map<String, Integer> claimFailures = new ConcurrentHashMap<>();
+
+    /** Matches the bot: ten failures, then refuse. */
+    private static final int MAX_CLAIM_FAILURES = 10;
+
+    /**
+     * Issues a setup code that {@code POST /api/minecraft/claim} will accept.
+     *
+     * <p>The dashboard mints these in production; here a test does. Codes are single-use — the
+     * bot consumes one atomically so two servers racing on the same code cannot both win.
+     */
+    public String issueClaimCode(String code, String serverName) {
+        String normalised = code.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "");
+        claimCodes.put(normalised, new ClaimCode(serverName));
+        return normalised;
+    }
+
+    /** Marks a serverId as belonging to a DIFFERENT token, so config import answers 403 for it. */
+    public void setServerOwnedByAnotherToken(String serverId) {
+        foreignServers.add(serverId);
+    }
+
+    /** The config document imported for a serverId, or {@code null}. */
+    public JsonObject importedConfig(String serverId) {
+        return importedConfigs.get(serverId);
+    }
+
+    private boolean ownsServer(String serverId) {
+        return !foreignServers.contains(serverId);
+    }
+
+    private void registerClaimedServer(String serverId) {
+        // A freshly claimed server is registered by definition: the claim is what writes the
+        // registry row the WebSocket upgrade then looks up.
+        config.registerServer(serverId);
+    }
+
+    private boolean isThrottled(String client) {
+        Integer failures = claimFailures.get(client);
+        return failures != null && failures >= MAX_CLAIM_FAILURES;
+    }
+
+    private void recordClaimFailure(String client) {
+        claimFailures.merge(client, 1, Integer::sum);
+    }
+
+    private String clientAddress(HttpExchange exchange) {
+        String forwarded = exchange.getRequestHeaders().getFirst("CF-Connecting-IP");
+        if (forwarded == null) {
+            forwarded = exchange.getRequestHeaders().getFirst("X-Forwarded-For");
+            if (forwarded != null && forwarded.contains(",")) {
+                forwarded = forwarded.substring(forwarded.lastIndexOf(',') + 1);
+            }
+        }
+        if (forwarded != null && !forwarded.trim().isEmpty()) {
+            return forwarded.trim();
+        }
+        return exchange.getRemoteAddress() == null
+                ? "unknown"
+                : exchange.getRemoteAddress().getAddress().getHostAddress();
     }
 }

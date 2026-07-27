@@ -27,6 +27,18 @@ public final class ConnectedServer {
     private volatile JsonObject lastHealth;
     private volatile Integer protocolVersion;
     private volatile List<String> capabilities = Collections.emptyList();
+    private volatile List<String> acceptedCapabilities = Collections.emptyList();
+
+    /**
+     * Whether this serverId is in the bot's registry.
+     *
+     * <p>The real bot binds a serverId to exactly one API token in Mongo, and looks it up at upgrade
+     * time. An unregistered connection is a real, supported state — it is what a server that has
+     * been claimed but not yet written, or one connecting during a registry outage, actually is —
+     * and it behaves visibly differently: it gets an {@code identify_ack} with
+     * {@code configVersion: 0} and no {@code config.push} at all.
+     */
+    private volatile boolean registered = true;
     private volatile boolean identifyAcked;
     private volatile Integer acknowledgedConfigVersion;
 
@@ -72,6 +84,24 @@ public final class ConnectedServer {
     }
 
     /** The capabilities the client declared; empty for a v2 client. */
+    /** The capabilities the stub told this connection it would honour. */
+    public List<String> acceptedCapabilities() {
+        return acceptedCapabilities;
+    }
+
+    public void setAcceptedCapabilities(List<String> accepted) {
+        this.acceptedCapabilities = accepted;
+    }
+
+    /** Whether this serverId is in the registry. See the field. */
+    public boolean registered() {
+        return registered;
+    }
+
+    public void setRegistered(boolean registered) {
+        this.registered = registered;
+    }
+
     public List<String> capabilities() {
         return capabilities;
     }
