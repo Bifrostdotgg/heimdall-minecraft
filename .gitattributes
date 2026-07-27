@@ -1,0 +1,10 @@
+# Normalise text in the repository, but keep the shell entry points LF-only:
+# `gradlew` runs on Linux CI and CRLF would make it unexecutable there.
+* text=auto eol=lf
+
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+
+*.jar binary
+*.png binary
+*.zip binary

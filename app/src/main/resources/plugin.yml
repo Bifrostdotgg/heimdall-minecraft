@@ -1,0 +1,10 @@
+name: Heimdall
+main: com.heimdall.platform.bukkit.HeimdallBukkitPlugin
+version: ${version}
+author: Bifrost
+website: https://bifrost.gg
+description: Discord-to-Minecraft whitelist, role sync, punishments and console relay
+
+# No `api-version` on purpose: declaring one makes the server refuse to load the
+# plugin on 1.8.8, which is a supported target. Modern Paper logs a "legacy
+# plugin" warning as a result — accepted for phase 0, revisited in phase 1.
