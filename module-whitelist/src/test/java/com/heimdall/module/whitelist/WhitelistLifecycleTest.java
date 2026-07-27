@@ -47,20 +47,24 @@ class WhitelistLifecycleTest {
     }
 
     @Test
-    @DisplayName("the capability appears and disappears with the module")
-    void capabilityFollowsTheState(@TempDir Path dir) {
+    @DisplayName("the capability is declared from registration, and survives a toggle")
+    void capabilityFollowsRegistrationNotState(@TempDir Path dir) {
         try (WhitelistHarness h = WhitelistHarness.standalone(dir)) {
-            assertFalse(h.manager.capabilities().contains(Capabilities.WHITELIST));
+            // Declared before any config has ever arrived. The bot narrows its push to the declared
+            // capabilities, so a build that only declared what was already running could never
+            // receive the push that starts anything — a fresh install would be stuck forever.
+            assertTrue(h.manager.capabilities().contains(Capabilities.WHITELIST),
+                    "a fresh install has nothing enabled and must still ask for its config");
 
             h.enableWith(settings());
-            assertTrue(h.manager.capabilities().contains(Capabilities.WHITELIST),
-                    "declaring a capability for a module that is off means receiving settings "
-                            + "nothing reads");
             assertEquals(ModuleState.ENABLED, h.manager.state(HeimdallWhitelistModule.ID));
+            assertTrue(h.manager.capabilities().contains(Capabilities.WHITELIST));
 
             h.disableModule();
-            assertFalse(h.manager.capabilities().contains(Capabilities.WHITELIST));
             assertEquals(ModuleState.STOPPED, h.manager.state(HeimdallWhitelistModule.ID));
+            assertTrue(h.manager.capabilities().contains(Capabilities.WHITELIST),
+                    "a switched-off module still has to be reachable by the toggle that switches "
+                            + "it back on");
         }
     }
 

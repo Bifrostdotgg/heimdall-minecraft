@@ -361,8 +361,8 @@ class ModuleManagerTest {
     // ── Capabilities ─────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("the declared capability set is the union over ENABLED modules only")
-    void capabilitiesAggregateOverEnabledModules() {
+    @DisplayName("the declared set is what this build CAN run, from the moment it is registered")
+    void capabilitiesAggregateOverRegisteredModules() {
         ModuleManager manager = manager(ServerRole.STANDALONE);
         manager.register(new RecordingModule("whitelist",
                 RecordingModule.caps(Capabilities.WHITELIST, Capabilities.CONFIG),
@@ -370,19 +370,36 @@ class ModuleManagerTest {
         manager.register(new RecordingModule("console",
                 RecordingModule.caps(Capabilities.CONSOLE), Collections.<ServerRole>emptySet()));
 
-        assertEquals(Collections.emptySet(), manager.capabilities());
+        // Declared before anything has been enabled, and that is the whole point: the bot narrows
+        // its config push to the declared capabilities, and a module is enabled only because a push
+        // said so. Declaring only the ENABLED set means a fresh install — nothing cached, nothing
+        // enabled — declares nothing, receives no config, and can never enable anything. It cannot
+        // recover either, because every later boot is in the same state.
+        assertEquals(desire(Capabilities.WHITELIST, Capabilities.CONFIG, Capabilities.CONSOLE),
+                manager.capabilities(),
+                "a fresh install with no cached config must still declare what it can run");
 
         manager.reconcile(desire("whitelist"));
-        assertEquals(desire(Capabilities.WHITELIST, Capabilities.CONFIG), manager.capabilities());
-
-        manager.reconcile(desire("whitelist", "console"));
         assertEquals(desire(Capabilities.WHITELIST, Capabilities.CONFIG, Capabilities.CONSOLE),
                 manager.capabilities());
 
         manager.reconcile(Collections.<String>emptySet());
+        assertEquals(desire(Capabilities.WHITELIST, Capabilities.CONFIG, Capabilities.CONSOLE),
+                manager.capabilities(),
+                "a switched-off module must keep receiving config, or it can never be switched on");
+    }
+
+    @Test
+    @DisplayName("an ineligible module declares nothing — it genuinely cannot run here")
+    void ineligibleModulesDeclareNothing() {
+        ModuleManager manager = manager(ServerRole.ENFORCER);
+        manager.register(new RecordingModule("proxy-only",
+                RecordingModule.caps(Capabilities.WHITELIST),
+                RecordingModule.roles(ServerRole.GATEKEEPER)));
+
         assertEquals(Collections.emptySet(), manager.capabilities(),
-                "claiming a capability for a switched-off module means receiving settings nothing "
-                        + "will read");
+                "unlike a disabled module, this one cannot be turned on from the dashboard at all, "
+                        + "so config for it really would be settings nothing reads");
     }
 
     // ── Config-driven hot toggle ─────────────────────────────────────────────

@@ -43,22 +43,19 @@ import java.util.Set;
  *
  * <h2>Capabilities</h2>
  *
- * <p>{@link #capabilities()} is the union over <em>enabled</em> modules, and it is what the tunnel
- * declares in {@code identify}.
+ * <p>{@link #capabilities()} is the union over <em>registered and eligible</em> modules — what this
+ * build can run, not what is running right now — and it is what the tunnel declares in
+ * {@code identify}.
  *
- * <p><strong>Known limitation: the declared set is a snapshot taken when the socket opened.</strong>
- * {@code identify} is sent once per connection, so a module enabled or disabled mid-connection is
- * not reflected to the bot until the next reconnect. The consequence is asymmetric and both halves
- * are tolerable today: a module switched <em>off</em> leaves the bot pushing config nothing reads,
- * which is harmless; a module switched <em>on</em> may receive no config until the tunnel next
- * reconnects, and runs on its defaults or its cache until then.
+ * <p>That distinction is load-bearing. The bot narrows its config push to the capabilities the
+ * client declared, and a module is enabled only because a push said so, so declaring only the
+ * enabled set makes a fresh install unable to enable anything: nothing cached, nothing enabled,
+ * nothing declared, no config, forever. See {@link #recomputeCapabilities()}.
  *
- * <p>Reconnecting to re-advertise would fix it and is deliberately not done: dropping a working
- * tunnel to update metadata would make every dashboard toggle a brief outage, which is a worse
- * trade than a delayed config push. Whether the protocol should gain a live capability update
- * instead is a bot-side decision for phase 1f — it is not invented here, because a client that
- * announced capabilities in a way the bot does not understand would look correct in testing and be
- * ignored in production.
+ * <p>Because registration happens before {@code start()} and never changes afterwards, the declared
+ * set is effectively fixed for the process — which also retires the "snapshot at socket open"
+ * hazard the earlier design had, since there is no longer anything for a mid-connection toggle to
+ * change.
  *
  * <h2>Threading</h2>
  *
@@ -111,6 +108,10 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
                         + " server (it requires " + module.roles() + ") — it will stay off");
             }
             modules.put(module.id(), managed);
+            // Recomputed here, not only on reconcile: the declared set is now about what is
+            // REGISTERED, and registration happens before start() — so waiting for a lifecycle
+            // transition would leave the first identify declaring nothing.
+            recomputeCapabilities();
         }
     }
 
@@ -287,10 +288,31 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
         managed.registrations.closeAll();
     }
 
+    /**
+     * Recomputes what this build tells the bot it can do.
+     *
+     * <p>The union over <strong>registered and eligible</strong> modules, not over enabled ones, and
+     * the difference is a bootstrap deadlock rather than a nicety. The bot narrows its
+     * {@code config.push} to the base ids of the capabilities the client declared, and a module is
+     * enabled only because a push said so. Declaring only what is already running therefore means a
+     * fresh install — no config cache, so nothing enabled — declares nothing, receives no config,
+     * and can never enable anything. It never recovers, because every subsequent boot is in the
+     * same state. Worse, an empty capabilities array is not even a v3 handshake as far as the bot is
+     * concerned, so the connection silently drops to v2-compat and the plugin runs on its built-in
+     * defaults forever.
+     *
+     * <p>Caught by the connected smoke row in phase 1d, on the first boot that had both real modules
+     * and a real bot. Neither existed at once before, which is exactly why no unit test saw it.
+     *
+     * <p>An {@link ModuleState#INELIGIBLE} module is excluded, and that one is right to exclude: it
+     * cannot run on this instance whatever the dashboard says, so config for it really would be
+     * settings nothing reads. A {@link ModuleState#FAILED} one stays declared — it is expected to
+     * run here and an operator fixing it should not also have to reconnect the tunnel.
+     */
     private void recomputeCapabilities() {
         Set<String> union = new LinkedHashSet<String>();
         for (Managed managed : modules.values()) {
-            if (managed.state != ModuleState.ENABLED) {
+            if (managed.state == ModuleState.INELIGIBLE) {
                 continue;
             }
             Set<String> claimed = managed.module.capabilities();

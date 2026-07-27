@@ -144,15 +144,18 @@ class RoleSyncLifecycleTest {
     }
 
     @Test
-    @DisplayName("the manager reports it enabled, and drops the capability again when it is off")
-    void capabilitiesFollowTheLifecycle() {
+    @DisplayName("the state follows the toggle; the declared capability does not")
+    void capabilitiesFollowRegistrationNotState() {
         harness.enable();
         assertEquals(ModuleState.ENABLED, harness.manager().state(HeimdallRoleSyncModule.ID));
         assertTrue(harness.manager().capabilities().contains(Capabilities.ROLE_SYNC));
 
         harness.disable();
         assertEquals(ModuleState.STOPPED, harness.manager().state(HeimdallRoleSyncModule.ID));
-        assertTrue(harness.manager().capabilities().isEmpty());
+        // Still declared. The bot narrows its config push to the declared capabilities, so dropping
+        // this on a toggle would mean a module that has been switched off can never receive the
+        // push that switches it back on.
+        assertTrue(harness.manager().capabilities().contains(Capabilities.ROLE_SYNC));
     }
 
     @Test
