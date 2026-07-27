@@ -116,23 +116,62 @@ final class VelocityBootstrap {
      * gracefully, which proves the proxy was not killed but proves nothing about Heimdall unloading.
      */
     void disable() {
-        TunnelSpiService.uninstall(spi);
+        guarded("uninstalling the tunnel SPI", new Runnable() {
+            @Override
+            public void run() {
+                TunnelSpiService.uninstall(spi);
+            }
+        });
         spi = null;
-        if (runtime != null) {
-            // Closes the executors too — ownership transferred when they were handed to the builder.
-            runtime.close();
-            runtime = null;
-        } else if (executors != null) {
-            // enable() threw between constructing the pools and constructing the runtime. Nothing
-            // else holds them, and daemon pools outliving a failed enable is a leak per reload.
-            executors.shutdown();
-        }
+
+        guarded("stopping the runtime", new Runnable() {
+            @Override
+            public void run() {
+                if (runtime != null) {
+                    // Closes the executors too — ownership transferred when they were handed to the
+                    // builder.
+                    runtime.close();
+                } else if (executors != null) {
+                    // enable() threw between constructing the pools and constructing the runtime.
+                    // Nothing else holds them, and daemon pools outliving a failed enable is a leak
+                    // per reload.
+                    executors.shutdown();
+                }
+            }
+        });
+        runtime = null;
         executors = null;
-        if (platform != null) {
-            platform.close();
-            platform = null;
-        }
+
+        guarded("closing the platform", new Runnable() {
+            @Override
+            public void run() {
+                if (platform != null) {
+                    platform.close();
+                }
+            }
+        });
+        platform = null;
+
         logger.info("Heimdall v" + BuildConstants.VERSION + " shutting down");
+    }
+
+    /**
+     * Runs one teardown step so its failure cannot skip the steps after it.
+     *
+     * <p>{@code Throwable}, not {@code RuntimeException}, and on this platform the consequence is
+     * directly observable: the banner below is what the boot-smoke matrix's Velocity rows assert on
+     * to distinguish "Heimdall unloaded" from "the proxy shut down". An {@code Error} out of a
+     * module's {@code disable()} — a {@code NoSuchMethodError} from the reflective text bridge is
+     * exactly the shape (departure D44) — would skip the platform close that detaches the root
+     * log4j appender AND swallow the line, turning a contained fault into a red smoke row with no
+     * obvious cause.
+     */
+    private void guarded(String what, Runnable step) {
+        try {
+            step.run();
+        } catch (Throwable failed) {
+            logger.error(what + " failed; continuing with the rest of shutdown", failed);
+        }
     }
 
     private void registerListeners() {

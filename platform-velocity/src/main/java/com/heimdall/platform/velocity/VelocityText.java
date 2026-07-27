@@ -75,7 +75,7 @@ final class VelocityText {
     private final Method denied;
 
     /** Per-receiver-type method lookups, resolved once. See {@link #lookup}. */
-    private final Map<String, Method> methods = new ConcurrentHashMap<String, Method>();
+    private final Map<MethodKey, Method> methods = new ConcurrentHashMap<MethodKey, Method>();
 
     VelocityText(HeimdallLogger logger) {
         this.logger = logger;
@@ -224,9 +224,15 @@ final class VelocityText {
      *
      * <p>Keyed by the receiver's class, not by the method name alone: the same name resolves
      * differently on a {@code Player} and on a {@code ConsoleCommandSource}.
+     *
+     * <p>And keyed by the {@link Class} <em>object</em>, not by {@code getName()}. A proxy loads
+     * plugins in separate classloaders, so two distinct classes can genuinely share a name — and the
+     * string key would then hand one of them a {@link Method} resolved against the other, which
+     * fails at invoke time as an {@code IllegalArgumentException} the caller can only report as
+     * "could not send a message". The class object cannot collide with itself.
      */
     private Method lookup(Class<?> receiver, String methodName) {
-        String key = receiver.getName() + "#" + methodName;
+        MethodKey key = new MethodKey(receiver, methodName);
         Method cached = methods.get(key);
         if (cached != null) {
             return cached;
@@ -244,6 +250,47 @@ final class VelocityText {
             logger.debug(() -> "no " + methodName + " taking a Component on " + receiver + ": "
                     + absent);
             return null;
+        }
+    }
+
+    /**
+     * One receiver type and one method name, as a cache key that cannot collide across classloaders.
+     *
+     * <p>Holds the {@link Class} strongly, which pins its loader for the life of this bridge. That is
+     * the right trade here and not a general one: the bridge lives as long as the plugin does, and
+     * the types it sees are the proxy's own handful of implementation classes — created once, never
+     * unloaded while the proxy is running. A cache keyed on names would be smaller and wrong.
+     */
+    private static final class MethodKey {
+
+        private final Class<?> receiver;
+        private final String methodName;
+
+        MethodKey(Class<?> receiver, String methodName) {
+            this.receiver = receiver;
+            this.methodName = methodName;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof MethodKey)) {
+                return false;
+            }
+            MethodKey that = (MethodKey) other;
+            return receiver == that.receiver && methodName.equals(that.methodName);
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * System.identityHashCode(receiver) + methodName.hashCode();
+        }
+
+        @Override
+        public String toString() {
+            return receiver.getName() + "#" + methodName;
         }
     }
 
