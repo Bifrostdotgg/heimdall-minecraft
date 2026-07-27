@@ -17,6 +17,7 @@
 #   SMOKE_JAR             path to the shaded jar (default: newest app/build/libs/heimdall-whitelist-*.jar)
 #   SMOKE_BOOT_TIMEOUT    seconds to wait for the enable line (default 240)
 #   SMOKE_STOP_TIMEOUT    seconds to wait for a graceful stop (default 120)
+#   SMOKE_RCON_TIMEOUT    seconds to wait for RCON to answer before the console fallback (default 120)
 #   SMOKE_KEEP            1 = leave containers and work dirs behind for inspection
 set -Eeuo pipefail
 
@@ -27,6 +28,7 @@ source "${SCRIPT_DIR}/lib.sh"
 
 BOOT_TIMEOUT="${SMOKE_BOOT_TIMEOUT:-240}"
 STOP_TIMEOUT="${SMOKE_STOP_TIMEOUT:-120}"
+RCON_TIMEOUT="${SMOKE_RCON_TIMEOUT:-120}"
 WORK_ROOT="${SCRIPT_DIR}/.work"
 
 # The plugin's own banner. Phase 1 changes this text — update it here, in one place.
@@ -39,8 +41,8 @@ VELOCITY_SHUTDOWN_PATTERN='Shutting down the proxy'
 # Waiting for this as well as for the plugin banner is not belt-and-braces. A plugin enables during
 # startup, several seconds before the server opens its RCON port, so stopping as soon as the banner
 # appears races the server's own boot — and losing that race does not fail cleanly: rcon-cli is
-# refused, the fallback SIGTERM reaches a server not yet listening to stdin, and the row dies a
-# minute later on "Took too long, so killing server process".
+# refused, the fallback `stop` reaches a console not yet reading input, and the row dies a minute
+# later on "Took too long, so killing server process".
 READY_PATTERN='Done \([0-9.]+s\)'
 
 # ── The matrix ───────────────────────────────────────────────────────────────────────────────
@@ -114,6 +116,11 @@ readonly SELFTEST_CLEAN=(
     "[13:49:18 INFO]: Thread RCON Client /0:0:0:0:0:0:0:1 shutting down"
     "[13:50:01 ERROR]: Failed to fetch telemetry from api.mojang.com"
     "[13:50:01 ERROR]: Could not load 'plugins/SomeOtherPlugin.jar' in folder 'plugins'"
+    # mc-server-runner's stop-path failures are ERROR-level and appear when the HARNESS loses the
+    # shutdown race — they are infrastructure, not the plugin, and the error detector must not
+    # convert one misdiagnosis into another. explain_runner_kill owns these lines instead.
+    'ERROR mc-server-runner  Failed to stop using rcon-cli  {"error": "exit status 1"}'
+    "ERROR mc-server-runner  Took too long, so killing server process"
 )
 
 expect_match() {
@@ -162,6 +169,23 @@ selftest() {
         yes "ready line (velocity)" || failures=$((failures + 1))
     expect_match "${READY_PATTERN}" "[13:48:20 INFO]: Preparing spawn area: 36%" \
         no "ready line vs mid-boot progress" || failures=$((failures + 1))
+
+    # The two shapes mc-server-runner takes when the harness's stop failed and the server was
+    # killed. These are exactly the lines from the red paper-1.8.8 CI runs, and matching them is
+    # what turns "onDisable did not run" into the honest "the harness never stopped the server".
+    expect_match "${RUNNER_KILL_PATTERN}" \
+        'ERROR mc-server-runner  Failed to stop using rcon-cli  {"error": "exit status 1"}' \
+        yes "runner kill (rcon-cli stop failed)" || failures=$((failures + 1))
+    expect_match "${RUNNER_KILL_PATTERN}" \
+        "ERROR mc-server-runner  Took too long, so killing server process" \
+        yes "runner kill (grace period expired)" || failures=$((failures + 1))
+    # A clean stop must not look like a kill, and neither must the plugin's own banner.
+    expect_match "${RUNNER_KILL_PATTERN}" \
+        "[13:50:13 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down" \
+        no "runner kill vs the plugin's disable banner" || failures=$((failures + 1))
+    expect_match "${RUNNER_KILL_PATTERN}" \
+        "[13:49:18 INFO]: Thread RCON Client /0:0:0:0:0:0:0:1 shutting down" \
+        no "runner kill vs the RCON thread's own shutdown line" || failures=$((failures + 1))
 
     # The rows themselves have to be well-formed, since a typo in a 6-field record would otherwise
     # surface as a confusing docker error many minutes into a run.
@@ -350,14 +374,19 @@ row_body() {
         #
         # So: poll `list`, which is idempotent and answers only once RCON is genuinely serving.
         # Then issue `stop` exactly once and let wait_for_exit be the assertion.
-        log "waiting for rcon to answer"
-        local attempt=0 ready=0
-        while [ "${attempt}" -lt 10 ]; do
+        #
+        # The budget is generous (SMOKE_RCON_TIMEOUT, default 120s) because RCON opens some time
+        # AFTER the Done line, and on the slowest rows — paper-1.8.8 on a loaded CI runner — that
+        # gap has been seen to blow past 30s. Undershooting does not fail cleanly: the old SIGTERM
+        # fallback made mc-server-runner retry rcon itself, fail the same way, and SIGKILL the
+        # server, which then surfaced as a missing disable banner five red runs in a row.
+        log "waiting for rcon to answer (budget ${RCON_TIMEOUT}s)"
+        local rcon_deadline=$(( $(date +%s) + RCON_TIMEOUT )) ready=0
+        while [ "$(date +%s)" -lt "${rcon_deadline}" ]; do
             if docker exec "${container}" rcon-cli list >/dev/null 2>&1; then
                 ready=1
                 break
             fi
-            attempt=$(( attempt + 1 ))
             sleep 3
         done
 
@@ -366,8 +395,17 @@ row_body() {
             # Exit status deliberately ignored: see above. wait_for_exit decides whether it worked.
             docker exec "${container}" rcon-cli stop >/dev/null 2>&1 || true
         else
-            warn "rcon never answered, falling back to SIGTERM"
-            docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
+            # The console pipe is the next-best graceful path. The itzg images run the server
+            # behind a named pipe wired to its stdin, and mc-send-to-console types into it — so
+            # `stop` arrives exactly as if an operator had typed it, and onDisable still runs.
+            # Going straight to SIGTERM instead would make mc-server-runner retry rcon (which
+            # just spent the whole budget failing), give up, and SIGKILL the server — destroying
+            # exactly the shutdown this row exists to observe.
+            warn "rcon never answered within ${RCON_TIMEOUT}s; sending 'stop' on the server console"
+            if ! docker exec "${container}" mc-send-to-console stop >/dev/null 2>&1; then
+                warn "console send failed too, falling back to SIGTERM"
+                docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
+            fi
         fi
     else
         # Velocity has no RCON. SIGTERM runs its shutdown hook.
@@ -390,7 +428,13 @@ row_body() {
         # Polled with a short budget rather than a single grep: on a slow daemon the follower can
         # exit before the last buffered lines have landed in the file.
         if ! wait_for_pattern "${log_file}" "${DISABLE_PATTERN}" 30 "the plugin's disable banner"; then
-            fail "no disable banner — onDisable did not run, or threw before logging"
+            # Two very different stories end here, and the log can tell them apart. If
+            # mc-server-runner logged that it killed the server, onDisable never got the chance
+            # to run and blaming the plugin would be wrong — that is the harness failing to stop
+            # the server, and explain_runner_kill says so. Only a log with no kill signature
+            # means the shutdown genuinely ran and the plugin stayed silent.
+            explain_runner_kill "${log_file}" \
+                || fail "no disable banner — onDisable did not run, or threw before logging"
             dump_log "${log_file}"
             return 1
         fi
@@ -406,8 +450,12 @@ row_body() {
         # as the Bukkit rows do, and drop this branch to a shared code path.
         if ! wait_for_pattern "${log_file}" "${VELOCITY_SHUTDOWN_PATTERN}" 30 \
                 "the proxy's own shutdown line"; then
-            fail "the proxy never logged its shutdown — it was killed rather than stopped, so"
-            fail "nothing was proven about unloading the plugin"
+            # Same split as the Bukkit branch: a runner-kill signature means the harness's stop
+            # never reached the proxy, which is its failure and not the plugin's.
+            explain_runner_kill "${log_file}" || {
+                fail "the proxy never logged its shutdown — it was killed rather than stopped, so"
+                fail "nothing was proven about unloading the plugin"
+            }
             dump_log "${log_file}"
             return 1
         fi

@@ -82,6 +82,25 @@ assert_no_heimdall_errors() {
     pass "no plugin errors during ${phase}"
 }
 
+# Lines mc-server-runner (PID 1 in the itzg images) logs when a stop it initiated could not
+# reach the server: its own rcon-cli attempt was refused, and/or the grace period expired and it
+# SIGKILLed the java process. Either one in the log means the server was torn down from outside
+# rather than asked to shut down — so nothing the plugin does or fails to do in onDisable was
+# ever exercised.
+RUNNER_KILL_PATTERN='Failed to stop using rcon-cli|Took too long, so killing server process'
+
+# Distinguishes "the harness never managed to stop the server" from "the server shut down and
+# the plugin stayed silent". Reports and returns 0 when the kill signature is in the log;
+# returns 1 (silently) when it is not, so the caller falls through to the plugin-shaped verdict.
+explain_runner_kill() {
+    local file="$1"
+    grep -Eq "${RUNNER_KILL_PATTERN}" "$file" || return 1
+    fail "HARNESS: mc-server-runner could not stop the server over rcon and killed the process,"
+    fail "so no shutdown code — the plugin's included — ever got the chance to run. This is an"
+    fail "infrastructure failure of the stop path, not a plugin regression:"
+    grep -En "${RUNNER_KILL_PATTERN}" "$file" >&2 || true
+}
+
 # Waits for the `docker logs -f` follower to exit, so the captured log is complete.
 #
 # The follower ends by itself once the container stops. Waiting for it is what makes the shutdown
