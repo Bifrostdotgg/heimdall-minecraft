@@ -35,6 +35,55 @@ public final class Capabilities {
     /** Remote configuration: this client accepts {@code config.push} and acknowledges it. */
     public static final String CONFIG = "config@1";
 
+    /** Separates a capability's name from its version. */
+    private static final char VERSION_SEPARATOR = '@';
+
     private Capabilities() {
+    }
+
+    /**
+     * The base name of a capability — {@code whitelist@1} → {@code whitelist}.
+     *
+     * <p><strong>This exists because of an unresolved question about the bot's side.</strong> The
+     * bot narrows its {@code config.push} to "the modules the client declared a capability for", and
+     * {@code stub-bot} implements that as exact string equality against the module id. Module ids
+     * are unversioned ({@code whitelist}) and capability ids are not ({@code whitelist@1}), so an
+     * exact match finds nothing and the client receives config for no modules at all — silently,
+     * because an empty push is a valid push.
+     *
+     * <p>Either the bot matches on this base name, or capability ids and module ids are the same
+     * string and the version lives elsewhere. That is a bot-side protocol decision for phase 1f, not
+     * something to settle unilaterally here. The client declares versioned ids as designed, this
+     * helper names the relationship, and {@code TunnelStubIntegrationTest} pins the current
+     * behaviour both ways so the decision is made against an executable fact.
+     */
+    public static String moduleId(String capability) {
+        if (capability == null) {
+            return "";
+        }
+        int at = capability.indexOf(VERSION_SEPARATOR);
+        return at < 0 ? capability : capability.substring(0, at);
+    }
+
+    /**
+     * The version of a capability — {@code whitelist@1} → {@code 1}; {@code 0} if it carries none.
+     *
+     * <p>Versions are per capability rather than global on purpose: bumping one protocol should not
+     * force every module in the jar to move with it, which is exactly the coupling the capability
+     * handshake exists to avoid.
+     */
+    public static int version(String capability) {
+        if (capability == null) {
+            return 0;
+        }
+        int at = capability.indexOf(VERSION_SEPARATOR);
+        if (at < 0 || at == capability.length() - 1) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(capability.substring(at + 1));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 }

@@ -2,6 +2,10 @@ plugins {
     // Never shipped — see the kdoc on heimdall.java21 for why that is stated by
     // choosing this convention rather than by leaving the release level unset.
     id("heimdall.java21")
+    // Only for the `api` configuration below: StubWsServer extends Java-WebSocket's
+    // WebSocketServer, so that type is genuinely part of this module's public
+    // surface, and Gradle's model has an exact way to say so.
+    `java-library`
     application
 }
 
@@ -9,7 +13,13 @@ dependencies {
     // Gson is already the build's JSON library; reusing it keeps the wire shapes
     // the stub emits and the ones the plugin parses expressed in the same model.
     implementation(libs.gson)
-    implementation(libs.java.websocket)
+    // `api`, not `implementation`: `StubBot.ws()` returns a StubWsServer, which IS a
+    // Java-WebSocket WebSocketServer. A consumer — core's integration tests — cannot
+    // so much as name the return type without the library on its compile classpath,
+    // and hiding it would only mean every consumer re-declaring the dependency by
+    // hand. It still never ships: :app does not depend on :stub-bot, and
+    // :app:verifyShadowJar's allowlist would fail the build if it somehow did.
+    api(libs.java.websocket)
     // Java-WebSocket logs through slf4j. Without a binding it prints a
     // "no providers were found" warning on every run and swallows its own
     // diagnostics; slf4j-simple is one jar and routes them to stderr, which is

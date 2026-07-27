@@ -226,6 +226,37 @@ public final class Payload {
         return Collections.unmodifiableList(out);
     }
 
+    /**
+     * A copy with the named keys removed.
+     *
+     * <p>For the case where a payload is part envelope and part content — a remote-config module
+     * entry is {@code {enabled, ...and the rest is settings}} — and the content has to be lifted out
+     * without naming every field of it in advance.
+     *
+     * @return this payload unchanged if none of the keys were present, so the common case allocates
+     *     nothing
+     */
+    public Payload without(String... keys) {
+        if (keys == null || keys.length == 0) {
+            return this;
+        }
+        boolean anyPresent = false;
+        for (String key : keys) {
+            if (json.has(key)) {
+                anyPresent = true;
+                break;
+            }
+        }
+        if (!anyPresent) {
+            return this;
+        }
+        JsonObject copy = json.deepCopy();
+        for (String key : keys) {
+            copy.remove(key);
+        }
+        return new Payload(copy);
+    }
+
     /** This payload as compact JSON. */
     public String toJson() {
         return json.toString();

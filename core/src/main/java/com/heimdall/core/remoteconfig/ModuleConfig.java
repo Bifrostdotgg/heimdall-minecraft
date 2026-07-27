@@ -41,16 +41,36 @@ public final class ModuleConfig {
     }
 
     /**
-     * Parses one {@code {enabled, settings}} entry.
+     * The key whose presence says the entry uses the nested shape.
+     *
+     * <p>Both shapes are real. The v3 design specifies
+     * {@code {"enabled": true, "settings": {…}}}, and that is what a nested entry is read as. But
+     * {@code stub-bot} — the executable copy of the bot's wire contract — sends its settings
+     * <em>flat</em> alongside {@code enabled}: {@code {"enabled": true, "mode": "websocket"}}. A
+     * parser that only understood the nested form would read every one of those as having no
+     * settings at all, and a module would silently run on its defaults while the dashboard showed
+     * the operator a value it had definitely saved. That is the worst class of config bug, so both
+     * are accepted rather than one being declared correct.
+     */
+    private static final String SETTINGS_KEY = "settings";
+
+    /**
+     * Parses one module entry.
      *
      * <p>An absent {@code enabled} defaults to <strong>off</strong>. The bot deciding not to say
      * should not start something, and a module that has to run has an entry saying so.
+     *
+     * <p>Settings come from the nested {@code settings} object when there is one, and otherwise from
+     * everything in the entry except {@code enabled} — see {@link #SETTINGS_KEY}.
      */
     static ModuleConfig fromPayload(Payload payload) {
         if (payload == null || payload.isEmpty()) {
             return ABSENT;
         }
-        return new ModuleConfig(true, payload.bool("enabled", false), payload.child("settings"));
+        Payload settings = payload.has(SETTINGS_KEY)
+                ? payload.child(SETTINGS_KEY)
+                : payload.without("enabled");
+        return new ModuleConfig(true, payload.bool("enabled", false), settings);
     }
 
     /** Whether the document carried an entry for this module. */
