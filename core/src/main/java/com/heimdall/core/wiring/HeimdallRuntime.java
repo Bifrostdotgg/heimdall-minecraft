@@ -95,7 +95,9 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         logger.setDebugEnabled(bootstrap.debug());
 
-        this.executors = new HeimdallExecutors(logger);
+        this.executors = builder.executors == null
+                ? new HeimdallExecutors(logger)
+                : builder.executors;
         this.loginPipeline = new LoginPipeline(logger);
         this.chatPipeline = new ChatPipeline(logger);
 
@@ -307,6 +309,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         private final PlatformFacade platform;
 
         private BootstrapStore bootstrapStore;
+        private HeimdallExecutors executors;
         private String guildId = "";
         private IdentitySource identitySource;
         private HealthSnapshotSource healthSource;
@@ -318,6 +321,22 @@ public final class HeimdallRuntime implements AutoCloseable {
             }
             this.logger = logger;
             this.platform = platform;
+        }
+
+        /**
+         * The pools to use, if the caller has already built them.
+         *
+         * <p><strong>Ownership transfers.</strong> {@link HeimdallRuntime#close()} shuts these down
+         * like any others — this is not a "borrowed executor" hook. It exists because a platform
+         * facade needs a pool at construction and the runtime needs the facade, so somebody has to
+         * create them first; making that a loan instead would leave two objects each believing the
+         * other would stop the threads.
+         *
+         * <p>Left unset, the runtime builds its own.
+         */
+        public Builder executors(HeimdallExecutors value) {
+            this.executors = value;
+            return this;
         }
 
         /** Where {@code bootstrap.yml} lives. Defaults to one under the platform's data directory. */
