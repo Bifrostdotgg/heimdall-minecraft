@@ -668,20 +668,21 @@ removing it would be a wire change made in passing rather than a decision anyone
 client ping meaningful is a bot-side capability decision for a later phase; inventing it here would
 produce a plugin that looks healthy in testing and gets reaped in production.
 
-### N5 — a capability id and a module id are not the same string, and the bot cannot currently tell
+### N5 — a capability id and a module id are not the same string (RESOLVED bot-side)
 
-**Open contract question, deliberately not settled here.**
+`Capabilities.WHITELIST` is `whitelist@1`; a config document files that module's settings under the
+unversioned id `whitelist`. If the bot compared the two with exact string equality then nothing would
+match and the client would receive config for no modules at all — silently, because an empty push is
+a perfectly valid push.
 
-The client declares versioned capabilities (`whitelist@1`); the bot files module config under an
-unversioned module id (`whitelist`); and the bot narrows its `config.push` to "the modules the client
-declared a capability for" using exact string equality. So nothing matches, and the client receives
-config for no modules at all — silently, because an empty push is a perfectly valid push.
+**The bot side has since decided, and this is now settled.** It narrows with `capabilityModuleId()`
+— the base name — so `whitelist@1` does match the `whitelist` key, and versioned ids work as
+designed. `stub-bot` implements the same rule, and `TunnelStubIntegrationTest` asserts the
+resolution rather than the hazard.
 
-Either the bot matches on the capability's base name or the two identifiers are the same string with
-the version carried elsewhere. That is a bot-side protocol decision for phase 1f. Until then
-`Capabilities.moduleId()` / `Capabilities.version()` name the relationship, and
-`TunnelStubIntegrationTest` pins the current behaviour both ways so the decision is made against an
-executable fact rather than an assumption.
+Left in this file rather than deleted: the entry is why `Capabilities.moduleId()` and
+`Capabilities.version()` exist, and the failure it describes is the one somebody will go looking for
+the next time a module runs with no configuration.
 
 ### N6 — the declared capability set is a snapshot taken when the socket opened
 
@@ -759,4 +760,31 @@ Two things it is deliberately **not**:
 1c deliberately ships no join/quit listeners at all rather than dead ones: nothing consumes the
 events until the whitelist mirror lands in 1d (its `extendOnEvent` window is the first real
 consumer), and a listener with no consumer is a listener nobody will notice has stopped working.
+
+### D51 — the identify_ack is read the way the bot actually writes it
+
+**Earlier v3 client:** required the ack to echo the identify's id, and read `accepted` as a boolean.
+**Now:** the id is not compared at all, and `accepted` is read as the list of capabilities the bot
+will honour.
+
+Both were assumptions about the bot, and both were wrong in the same direction — they would have
+made every connection to a real v3 bot fail to negotiate v3, while the bot believed it had:
+
+- the bot sends `id: nanoid()`; it does not correlate the ack with the identify. The echo check
+  would have discarded every ack it will ever send, so the client would have timed out into
+  v2-compat on every connection. Cross-socket delivery is already impossible without that check —
+  `TunnelClient`'s callbacks carry a generation and stale ones are inert (D24) — so it was a second
+  layer built on a false premise about the first;
+- `accepted` is a `string[]`. `Payload.bool("accepted", false)` over a JSON array returns the
+  fallback, so the client would have logged "the bot refused this plugin's protocol version" at
+  SEVERE and dropped to v2-compat on every successful handshake.
+
+There is no refusal frame in this protocol at all: a capability the bot does not support is simply
+absent from `accepted`, and an empty list is a *successful* handshake with a bot that recognised
+none of what this build declared. The boolean is still read, but only to detect an explicit refusal
+from a bot answering the older shape.
+
+Caught by transcribing the bot's `feat/minecraft-v3-protocol` branch into `stub-bot` rather than by
+testing — which is exactly what a fixture that claims to be executable documentation is for. The
+tests that pinned the old behaviour were pinning a client-side belief, not a contract.
 
