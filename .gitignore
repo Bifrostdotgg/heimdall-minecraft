@@ -35,7 +35,14 @@
 # Boot-smoke scratch: per-row plugin mounts and captured server logs. Anchored to
 # the one directory that produces it, for the same reason as the Gradle entries
 # above — an unanchored `.work/` would be a trap for whatever needs that name next.
+#
+# Two entries, one per scenario, rather than a `/smoke/.work*` glob: the glob would
+# also swallow a future `smoke/.workflows` or similar, which is exactly the class of
+# accident the anchoring above exists to prevent. The connected scenario's directory
+# additionally ends up holding whole server data directories — Paper writes its
+# .paper-remapped index and bStats into the same mount — so it is not merely logs.
 /smoke/.work/
+/smoke/.work-connected/
 
 # OS
 .DS_Store
