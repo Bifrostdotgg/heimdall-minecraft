@@ -27,9 +27,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *
  * <p>Pushes are fire-and-forget frames, so a replayed or reordered one is possible and applying it
  * would silently revert a setting an operator just changed. Within a connection, therefore, only a
- * strictly newer version is applied; a stale one is logged and dropped. It is still acknowledged —
- * that happens in the tunnel, deliberately — because an unacknowledged push is one the bot re-sends
- * forever.
+ * <strong>strictly newer</strong> version is applied; anything at or below the current one is
+ * logged and dropped, including an equal version carrying different content. That is deliberate:
+ * within a session the bot's counter is the authority on whether anything changed, and a re-push at
+ * an unchanged version is what a reconnect produces rather than what an edit produces. A push is
+ * still acknowledged either way — that happens in the tunnel — because an unacknowledged push is
+ * one the bot re-sends forever.
  *
  * <p>The floor resets when a connection negotiates v3. That scoping is not incidental: the disk
  * cache outlives the bot's own counter, and a guild document recreated bot-side starts counting
@@ -190,10 +193,24 @@ public final class RemoteConfig implements ConfigPushHandler, ProtocolModeListen
         ConfigDocument pushed = ConfigDocument.fromPayload(payload);
         synchronized (writeLock) {
             if (acceptedPushThisSession && pushed.version() <= applied.version()) {
-                // Acknowledged by the tunnel regardless; see the class javadoc.
+                // Acknowledged by the tunnel regardless; see the class javadoc. An EQUAL version is
+                // dropped too, deliberately: within one session the bot's counter is the authority
+                // on whether anything changed, and a re-push at the same version is the reconnect
+                // case rather than an edit.
                 logger.warn("ignoring a stale remote config push (version " + pushed.version()
                         + ", already at " + applied.version() + ")");
                 return;
+            }
+            if (!acceptedPushThisSession && pushed.version() < applied.version()) {
+                // The connection-scoped floor is doing its job here, and this is the one situation
+                // in which it is doing something surprising: the bot's counter has gone BACKWARDS
+                // across a reconnect. A guild document recreated bot-side does exactly that. Worth
+                // a warning rather than silence, because if it recurs the cause is upstream and
+                // nothing in the plugin's own logs would otherwise hint at it.
+                logger.warn("the bot's config version went backwards across a reconnect (now "
+                        + pushed.version() + ", previously " + applied.version()
+                        + ") — applying it, since the bot is the source of truth. If this repeats, "
+                        + "the guild's config may have been recreated bot-side.");
             }
             acceptedPushThisSession = true;
             swap(pushed);
