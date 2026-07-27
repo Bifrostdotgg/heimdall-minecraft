@@ -351,6 +351,11 @@ public final class TunnelClient implements TunnelBus {
      * <p>A setter rather than a constructor argument because the dependency is genuinely circular:
      * the module manager hands each module a bus backed by this client, and this client asks the
      * module manager what to declare.
+     *
+     * <p><strong>The source is consulted once per connection, when the socket opens.</strong> A
+     * module enabled or disabled while the tunnel is up does not change what the bot has been told
+     * until the next reconnect — see {@code ModuleManager}'s class javadoc for why re-advertising
+     * is deliberately not done, and what would have to change bot-side to make it possible.
      */
     public void setCapabilitySource(CapabilitySource source) {
         this.capabilitySource = source;

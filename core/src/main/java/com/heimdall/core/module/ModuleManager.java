@@ -44,10 +44,21 @@ import java.util.Set;
  * <h2>Capabilities</h2>
  *
  * <p>{@link #capabilities()} is the union over <em>enabled</em> modules, and it is what the tunnel
- * declares in {@code identify}. A hot toggle therefore changes the declaration but deliberately does
- * <strong>not</strong> reconnect to re-advertise it: dropping a working tunnel to update metadata
- * would make every module toggle a brief outage. The bot learns the new set on the next reconnect,
- * and in the meantime it is pushing config for a superset of what is running, which is harmless.
+ * declares in {@code identify}.
+ *
+ * <p><strong>Known limitation: the declared set is a snapshot taken when the socket opened.</strong>
+ * {@code identify} is sent once per connection, so a module enabled or disabled mid-connection is
+ * not reflected to the bot until the next reconnect. The consequence is asymmetric and both halves
+ * are tolerable today: a module switched <em>off</em> leaves the bot pushing config nothing reads,
+ * which is harmless; a module switched <em>on</em> may receive no config until the tunnel next
+ * reconnects, and runs on its defaults or its cache until then.
+ *
+ * <p>Reconnecting to re-advertise would fix it and is deliberately not done: dropping a working
+ * tunnel to update metadata would make every dashboard toggle a brief outage, which is a worse
+ * trade than a delayed config push. Whether the protocol should gain a live capability update
+ * instead is a bot-side decision for phase 1f — it is not invented here, because a client that
+ * announced capabilities in a way the bot does not understand would look correct in testing and be
+ * ignored in production.
  *
  * <h2>Threading</h2>
  *
