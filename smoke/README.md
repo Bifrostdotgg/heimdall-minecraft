@@ -22,6 +22,15 @@ smoke/run.sh paper-1.8.8     # one row — what CI runs, one row per runner
 smoke/run.sh --list
 ```
 
+There are **two** scenarios, and they answer different questions.
+
+| Script | Question | Rows |
+| --- | --- | --- |
+| `run.sh` | Does the jar load, work and unload with **no bot anywhere**? | six, the whole supported range |
+| `connected.sh` | Pointed at a real bot, does the plugin **actually talk to it**? | two, one per family |
+
+`connected.sh` is phase 1d's addition and is described in its own section below.
+
 Needs Docker (or a Docker-API-compatible daemon — it is developed against both Docker and Podman)
 and network access to pull the images and the server jars. Runs on CI's Ubuntu and, unchanged,
 under Git Bash on Windows.
@@ -167,3 +176,66 @@ add, in order.
 ./gradlew build
 docker compose -f smoke/docker-compose.yml up
 ```
+
+---
+
+## The connected scenario
+
+```bash
+./gradlew build                        # produces the jar AND stub-bot/build/install/
+smoke/connected.sh                     # both rows
+smoke/connected.sh velocity-3.5.1      # one row
+smoke/connected.sh --selftest          # the assertions themselves; needs no Docker
+```
+
+`run.sh` proves the jar survives six servers with nothing to talk to. This proves the other half.
+Each row starts `:stub-bot` — the executable copy of the bot's wire contract — on a private network,
+boots a server whose `bootstrap.yml` points at it, and then asserts from **both ends**.
+
+| Asserted | Where the evidence is | Why it is worth a container |
+| --- | --- | --- |
+| The guild is resolved from the token alone | plugin log | `bootstrap.yml` deliberately has no `guildId` (D54), so this is the one endpoint signed without a guild in its path actually working against a real HMAC check |
+| The v3 handshake completes | plugin log **and** stub log | D51 is a pair of misreads that each turned a good v3 bot into a silent v2-compat downgrade. The stub's `protocol=3` line is what distinguishes "connected" from "connected and speaking v3" |
+| Config is pushed and acked | stub log | proves the narrowing worked — the bot only pushes config for capabilities the client declared |
+| The whitelist mirror pre-warms | plugin log | a signed `GET whitelist/sync` round trip, reconciled into a real file on a real disk |
+| Console lines reach the bot | stub log | the log4j tap, the module's batching and the tunnel, end to end |
+| It still unloads cleanly | plugin log | with a live tunnel, which `run.sh` never has |
+
+**It earned its keep on the first run.** The plugin declared `capabilities=[]` and the stub logged
+`protocol=v2`: the capability set was the union over *enabled* modules, nothing was enabled because
+no config had arrived, and no config could arrive because the bot narrows its push by declared
+capability. A fresh install could never have been configured, and every later boot would have been
+in the same state. Nothing in 434 unit tests could see it — it needed real modules and a real bot in
+one process, which is exactly what this scenario is.
+
+### What it deliberately does not do
+
+**No player ever joins.** There is no headless client here, so the login gate's six outcomes are
+proven by the whitelist module's tests against the same stub over a real socket, and are not
+re-proven at this level.
+
+**Phase 1e adds `/hd test <player>`**, which makes a real connection-attempt from the server console.
+At that point this script can assert an allow and a deny end to end through rcon. An actual join —
+which is also what departure D43's residual risk 2 needs to close — waits on the headless-client
+work.
+
+### Two rows, not six
+
+The wire does not vary by Minecraft version. What varies is class loading and the log4j tap, and
+`run.sh` already covers those on all six. One current server from each family is what proves the
+one-jar design still reaches a bot from both entry points, for two boots instead of six.
+
+### Why the Bukkit row mounts `/data/plugins` when `run.sh` does not
+
+`run.sh` only has to get a jar in, so it uses the image's read-only `/plugins` staging path — which
+exists precisely because a host bind mount at `/data/plugins` is owned by the host user while the
+server runs as uid 1000, and modern Paper dies creating `/data/plugins/.paper-remapped` before it
+looks at a plugin at all.
+
+This row additionally has to place `bootstrap.yml` **inside the plugin's own data directory before
+boot**, and staging cannot do that. So it uses the mount and solves the ownership problem head-on
+with `chmod 777` on the host side, which is safe for a directory this script creates and deletes.
+
+Mounting only `/data/plugins/Heimdall` does **not** work: Docker then creates the `/data/plugins`
+parent as root and Paper fails exactly as above. That was tried first, and it is why this paragraph
+exists.

@@ -1,19 +1,16 @@
 # Phase 1 topology: a Minecraft server with the plugin, talking to the stub bot.
 #
 # ─────────────────────────────────────────────────────────────────────────────────────────────
-#  NOT ASSERTED YET. `smoke/run.sh` does not use this file, and CI does not run it.
+#  SUPERSEDED BY `smoke/connected.sh`, which is what actually asserts any of this.
 #
-#  Phase 0's exit criterion is "the jar loads on all matrix servers", and the plugin does not
-#  dial the bot yet — there is nothing to connect and nothing to assert. This file exists so the
-#  wiring is written down and stays runnable by hand while that is true, rather than being
-#  invented in a hurry the day the tunnel lands.
+#  This file predates that script and is kept because it is the shortest way to bring the
+#  topology up BY HAND and poke at it — `docker compose up`, then drive the stub over its own
+#  contract. connected.sh does the same thing with assertions, its own network per row, and a
+#  bootstrap.yml written into the plugin's data directory; it is what CI should run.
 #
-#  When phase 1 turns it on, the assertions to add are, roughly in order:
-#    1. the stub logs `ws connected: guild=… server=…` within N seconds of the server booting;
-#    2. `identify` arrives, with the v3 `protocolVersion` + `capabilities` (stub-bot/README.md
-#       § "identify, and the v3 capability handshake");
-#    3. a join by 11111111-… is allowed and one by 22222222-… is denied, per the fixtures below;
-#    4. restarting the stub does not stop the plugin serving the pre-warmed whitelist.
+#  Note that this file alone will NOT get the plugin talking to the stub: it mounts the jar but
+#  writes no bootstrap.yml, so the server boots in the not-configured state. See connected.sh
+#  for the two mount shapes that are needed, and why they differ per platform.
 # ─────────────────────────────────────────────────────────────────────────────────────────────
 #
 # Run it by hand:
