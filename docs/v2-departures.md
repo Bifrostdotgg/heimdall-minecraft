@@ -260,6 +260,16 @@ the server. The bot is the source of truth and has just stated its version in `i
 ordering guarantee is applied where the ordering hazard actually is: within one connection, where
 fire-and-forget frames really can arrive replayed or out of order.
 
+Two details of that rule are worth stating, because both are visible to an operator reading logs:
+
+- **Within a session, an *equal* version is dropped as firmly as an older one**, even when it
+  carries different content. The bot's counter is the authority on whether anything changed, and a
+  re-push at an unchanged version is what a reconnect produces rather than what an edit produces.
+- **A version that goes *backwards* across a reconnect is applied, and logs a warning.** That is the
+  floor reset doing exactly what it exists for — a guild document recreated bot-side — but it is
+  also the only situation in which the reset does something surprising, and nothing else in the
+  plugin's logs would hint at the cause. A repeat of that line points upstream, at the bot.
+
 ### D30 — modules do not have to clean up after themselves
 
 **v2:** no disable path at all. A feature was "off" because its own code checked a boolean on every
@@ -304,6 +314,73 @@ A parser that only understood the nested form would read every flat entry as hav
 a module would silently run on its defaults while the dashboard showed the operator a value it had
 definitely saved. Declaring one shape correct and letting the other fail silently is the worst
 available outcome, so neither is.
+
+
+### D38 — an inbound error abandons the connection, and always aborts the socket
+
+**v2:** used `java.net.http.WebSocket`, whose `onError` is terminal.
+**v3:** uses nv-websocket-client, whose `onError` is **not**.
+
+nv fires `onError` immediately before every specific error callback, including recoverable ones —
+verified against the 2.14 bytecode: `WritingThread` calls `callOnError` and then `callOnSendError`
+for a failed frame write. The terminal callback is `onDisconnected`. So a failed write arrives as an
+error on a socket that is still wide open, with its reading and writing threads alive.
+
+Every lost-connection path therefore aborts the socket, not just the ones where it is presumed dead.
+That makes the fatal/non-fatal distinction stop mattering: a recoverable error becomes one clean
+reconnect instead of an orphaned live socket, two leaked threads and a duplicate connection opened
+beside it. Treating a possibly-recoverable error as connection-abandoning is the deliberate side of
+the trade — one reconnect is cheap, a half-dead socket that keeps failing sends is not.
+
+### D39 — a login interceptor declares what its own failure means
+
+**v2:** the login path caught its API exception inline and consulted the configured fallback mode
+there.
+**v3:** `Interceptor.failureVerdict(cause)`, defaulting to abstain, applied by the pipeline when a
+check throws.
+
+The default is v2's effective behaviour at this level — fail open — but stated rather than implied,
+and the severe log line now names the module rather than a priority number. Defaulting to deny was
+rejected: it would turn any bug in any interceptor into a server nobody can join, which is a worse
+outage than the one it would guard against.
+
+**This is a backstop, not the mechanism.** "The bot is unreachable — admit or refuse?" is a policy a
+server owner configures and it belongs *inside* the interceptor, which is the only thing that knows
+a request failed rather than that something unexpected happened. The whitelist module in 1d must
+implement its fallback mode there, exactly as v2's catch did. A module using `failureVerdict` for
+its offline policy has put the policy in the wrong place.
+
+### D40 — numbers are compared by value, not by Gson's rules
+
+**New in v3**, and a correction to v3's own first attempt.
+
+Gson's `JsonPrimitive.equals` is not transitive across the parser and the builder: it compares two
+numbers as integers only when both are `Long`/`Integer`/`Short`/`Byte`/`BigInteger`, and the parser
+produces a `LazilyParsedNumber`, which falls to the `double` branch. So a parsed
+`1234567890123456789` equalled a built `1234567890123456789` *and* a built `1234567890123456788`,
+while those two were not equal to each other. Near 1.2e18 the gap between representable doubles is
+256, and snowflakes minted seconds apart differ by less.
+
+`Payload` now compares and hashes through one `BigDecimal` normalisation, which keeps 64-bit ids
+exact, treats `1` and `1.0` as one number, and folds `-0.0` into `0.0`. It matters because
+`RemoteConfig` fires a module's change listeners based on value equality, so a setting carrying a
+snowflake would silently stop reporting changes.
+
+Related, same class: `optInt` range-checks before narrowing. `getAsInt()` on a parsed number is a
+cast that never complains, so `5000000000` came back as `705032704` — under the exact method
+departure D1's nullable `queuePosition` depends on. And the boolean accessors are type-strict; Gson
+would answer `false` for the string `"yes"`, which is a confident wrong answer about whether a
+module is enabled.
+
+### D41 — a correlated request's timeout is cancelled when its reply arrives
+
+**v2:** scheduled a timeout per request and never cancelled it; every one sat on the scheduler until
+its full deadline elapsed, however quickly the request had been answered.
+**v3:** the handle is kept and cancelled on reply, on abandon, and on teardown.
+
+With `setRemoveOnCancelPolicy` set on the pool, cancelling drops the task from the queue
+immediately. Under a burst of fast requests that is the difference between a queue that drains and
+one that grows for the length of the longest timeout.
 
 
 ---
@@ -439,10 +516,18 @@ the version carried elsewhere. That is a bot-side protocol decision for phase 1f
 `TunnelStubIntegrationTest` pins the current behaviour both ways so the decision is made against an
 executable fact rather than an assumption.
 
-### N6 — a hot module toggle changes the declared capabilities without reconnecting
+### N6 — the declared capability set is a snapshot taken when the socket opened
 
-The capability set the tunnel declares is the union over *enabled* modules, so toggling one changes
-it — but the tunnel deliberately does not reconnect to re-advertise. Dropping a working connection to
-update metadata would make every module toggle a brief outage. The bot learns the new set on the next
-reconnect, and in the meantime it is pushing config for a superset of what is running, which is
-harmless.
+`identify` is sent once per connection, so the capability set the bot has been told about is
+whatever was enabled at that moment. A module toggled while the tunnel is up is not reflected until
+the next reconnect.
+
+The consequence is asymmetric, and both halves are tolerable today. A module switched **off** leaves
+the bot pushing config nothing reads — harmless. A module switched **on** may receive no config
+until the tunnel next reconnects, and runs on its built-in defaults or its disk cache until then.
+
+Reconnecting to re-advertise would fix it and is deliberately not done: dropping a working tunnel to
+update metadata would make every dashboard toggle a brief outage, which is a worse trade than a
+delayed config push. Whether the protocol should instead gain a live capability update is a bot-side
+decision for phase 1f — not invented here, because a client announcing capabilities in a way the bot
+does not understand looks correct in testing and is ignored in production.
