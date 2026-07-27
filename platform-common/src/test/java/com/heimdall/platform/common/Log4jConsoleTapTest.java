@@ -241,6 +241,42 @@ class Log4jConsoleTapTest {
                             + collector.messages());
             assertEquals("done", collector.messages().get(0));
         }
+
+        @Test
+        @DisplayName("an OSC terminated by ST, not BEL, is stripped too")
+        void stTerminatedOscIsStripped() {
+            // The other legal terminator: ESC \ rather than BEL. xterm and every modern terminal
+            // emulator emit it, and the alternation branch that handles it had no test at all —
+            // deleting it left the whole build green while a title sequence leaked a raw ESC and
+            // a stray backslash into the dashboard.
+            Collector collector = new Collector();
+            inlineTap().addTap(collector);
+
+            tap.capture(event(Level.INFO, ESC + "]0;Minecraft" + ESC + "\\" + "done"));
+
+            assertEquals("done", collector.messages().get(0));
+            assertFalse(collector.messages().get(0).contains(ESC));
+        }
+
+        @Test
+        @DisplayName("an OSC nobody terminated falls through to the two-character rule")
+        void unterminatedOscFallsThrough() {
+            // A truncated line — the server was killed mid-write, or a plugin built the sequence by
+            // hand and forgot the terminator. The OSC branch cannot match without a terminator, so
+            // the two-character rule claims the ESC ] and the rest is left as text. That is the
+            // deliberate outcome: consuming to end-of-line instead would silently eat a real log
+            // message whenever a stray ESC appeared, and a raw ESC is the one thing that must not
+            // survive.
+            Collector collector = new Collector();
+            inlineTap().addTap(collector);
+
+            tap.capture(event(Level.INFO, "before" + ESC + "]0;no terminator here"));
+
+            assertFalse(collector.messages().get(0).contains(ESC),
+                    "whatever else happens, no raw ESC may reach the dashboard: "
+                            + collector.messages());
+            assertEquals("before0;no terminator here", collector.messages().get(0));
+        }
     }
 
     @Nested

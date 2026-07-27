@@ -292,6 +292,14 @@ public final class Log4jConsoleTap implements AutoCloseable {
     /**
      * Subscribes to the console feed.
      *
+     * <p><strong>A consumer must not call {@link #attach()} or {@link #close()}.</strong> Both are
+     * {@code synchronized} on this instance and a consumer runs on the drain thread, outside that
+     * lock: a consumer that called one while another thread held it would block the drain waiting
+     * for a lock whose holder is, in {@code attach()}'s case, waiting on the drain for its own
+     * self-test probe. Detaching in response to a line is a reasonable thing to want — closing the
+     * {@code Registration} this returns is safe from anywhere, including from inside a consumer,
+     * because that only touches a copy-on-write list.
+     *
      * @return a handle that unsubscribes; closing it twice is a no-op
      */
     public Registration addTap(final Consumer<LogLine> consumer) {

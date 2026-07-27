@@ -44,7 +44,24 @@ final class LuckPermsIntegration implements LuckPermsBridge {
     private final HeimdallLogger logger;
     private final Executor executor;
 
-    /** Resolved lazily and re-resolved while null; never cached as a permanent failure. */
+    /**
+     * Resolved lazily, re-resolved while null, and <strong>dropped again whenever a call fails</strong>.
+     *
+     * <p>The negative case is issue #796 / MC-10: a bridge resolved once at construction caches a
+     * permanent failure on a server where LuckPerms simply started second, and role sync is dead for
+     * the life of the process. That is why it is retried while null.
+     *
+     * <p>The positive case is the mirror image and was the surviving gap. LuckPerms can be replaced
+     * under a running server — a hot reload through PlugMan or the like — and the handle held here
+     * then points at a shut-down instance while {@link #isAvailable()} keeps answering {@code true}.
+     * Every call would fail, forever, and nothing in the plugin would ever look again. So a failed
+     * call clears it: the next call re-resolves and picks up whatever instance is live now.
+     *
+     * <p>Clearing on <em>any</em> failure rather than trying to recognise a dead API is deliberate.
+     * {@code LuckPermsProvider.get()} is a field read against a live singleton, so a needless
+     * re-resolve after an ordinary storage error costs nothing — and a check that tried to tell the
+     * two apart would be a guess about another plugin's exception types.
+     */
     private volatile LuckPerms luckPerms;
 
     /** So "LuckPerms integration enabled" is said once, not once per lookup. */
@@ -103,6 +120,7 @@ final class LuckPermsIntegration implements LuckPermsBridge {
                     User user = loadUser(api, playerUuid);
                     return user == null ? Collections.<String>emptyList() : groupsOf(user);
                 } catch (RuntimeException e) {
+                    invalidate(api);
                     logger.warn("could not read LuckPerms groups for " + playerUuid + ": "
                             + e.getMessage());
                     return Collections.<String>emptyList();
@@ -177,8 +195,23 @@ final class LuckPermsIntegration implements LuckPermsBridge {
             logger.info("role sync for " + playerUuid + " — added " + added + ", removed " + removed);
             return Boolean.TRUE;
         } catch (RuntimeException e) {
+            invalidate(api);
             logger.error("role sync failed for " + playerUuid, e);
             return Boolean.FALSE;
+        }
+    }
+
+    /**
+     * Forgets a resolved API that has just failed, so the next call resolves again.
+     *
+     * <p>Compare-and-set against the handle the failing call actually used: another thread may have
+     * re-resolved a good one in the meantime, and clearing that would only cost an extra lookup —
+     * but doing it under a condition keeps this from being a write that fires on every concurrent
+     * failure.
+     */
+    private synchronized void invalidate(LuckPerms failed) {
+        if (luckPerms == failed) {
+            luckPerms = null;
         }
     }
 
