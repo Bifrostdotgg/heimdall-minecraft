@@ -45,23 +45,9 @@ tasks.named<ShadowJar>("shadowJar") {
     // a shared classloader space and an unrelocated Gson would collide with
     // whatever else is installed.
     relocate("com.google.gson", "com.heimdall.libs.gson")
-    relocate("org.java_websocket", "com.heimdall.libs.websocket")
+    relocate("com.neovisionaries", "com.heimdall.libs.nvws")
     relocate("org.yaml.snakeyaml", "com.heimdall.libs.snakeyaml")
     relocate("net.kyori", "com.heimdall.libs.kyori")
-
-    // slf4j-api arrives transitively via Java-WebSocket and must NOT be packaged.
-    // Relocating it is not an option either: :platform-velocity's @Inject'd
-    // org.slf4j.Logger would get rewritten with it and injection would break. Both
-    // Velocity and Paper already provide slf4j on the plugin classpath, so it is
-    // treated as provided.
-    //
-    // Open phase-1 decision: legacy Spigot (1.8.8-1.15) has no slf4j at all, so the
-    // WebSocket client's logging has to be solved there — either by dropping the
-    // library's slf4j usage or by moving the Velocity binding off org.slf4j so the
-    // whole package can be relocated.
-    dependencies {
-        exclude(dependency("org.slf4j:slf4j-api"))
-    }
 
     exclude("META-INF/*.SF")
     exclude("META-INF/*.DSA")
@@ -84,7 +70,7 @@ tasks.named<ShadowJar>("shadowJar") {
  * JDK APIs our own sources may call and the bytecode we emit, but javac happily
  * reads a Java 17 classfile off the compile classpath at release 8 — verified
  * directly, it does not error. So compiling `CoreSanity` against Gson, SnakeYAML
- * and Java-WebSocket proves those artifacts resolve and their APIs are reachable
+ * and nv-websocket-client proves those artifacts resolve and their APIs are reachable
  * from Java 8 source; it proves nothing about the bytecode that actually ships.
  *
  * The only thing that catches a dependency quietly moving to Java 11+ classfiles
@@ -121,13 +107,13 @@ val verifyShadowJar by tasks.registering {
         )
         val requiredRelocations = listOf(
             "com/heimdall/libs/gson/",
-            "com/heimdall/libs/websocket/",
+            "com/heimdall/libs/nvws/",
             "com/heimdall/libs/snakeyaml/",
             "com/heimdall/libs/kyori/",
         )
         val forbiddenPrefixes = listOf(
             "com/google/gson/",
-            "org/java_websocket/",
+            "com/neovisionaries/",
             "org/yaml/snakeyaml/",
             "net/kyori/",
             "org/slf4j/",

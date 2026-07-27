@@ -2,10 +2,11 @@ package com.heimdall.core;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
-import java.net.URI;
+import com.neovisionaries.ws.client.WebSocket;
+import com.neovisionaries.ws.client.WebSocketException;
+import com.neovisionaries.ws.client.WebSocketFactory;
+import java.io.IOException;
 import java.util.Map;
-import org.java_websocket.client.WebSocketClient;
-import org.java_websocket.handshake.ServerHandshake;
 import org.yaml.snakeyaml.Yaml;
 
 /**
@@ -13,7 +14,7 @@ import org.yaml.snakeyaml.Yaml;
  * from Java 8 source.
  *
  * <p>This class is deliberately trivial: it exists so that javac has to actually read Gson,
- * Java-WebSocket and SnakeYAML while the source level is 8 — an API that had moved on to
+ * nv-websocket-client and SnakeYAML while the source level is 8 — an API that had moved on to
  * {@code var}, records or default-method shapes we cannot express would fail here.
  *
  * <p>It does <em>not</em> prove those libraries ship Java 8 <em>bytecode</em>. That is a common
@@ -44,28 +45,13 @@ public final class CoreSanity {
         return (Map<String, Object>) new Yaml().load(document);
     }
 
-    /** Forces javac to link against the Java-WebSocket client base class. */
-    public static WebSocketClient noopClient(URI uri) {
-        return new WebSocketClient(uri) {
-            @Override
-            public void onOpen(ServerHandshake handshake) {
-                // no-op scaffold
-            }
-
-            @Override
-            public void onMessage(String message) {
-                // no-op scaffold
-            }
-
-            @Override
-            public void onClose(int code, String reason, boolean remote) {
-                // no-op scaffold
-            }
-
-            @Override
-            public void onError(Exception ex) {
-                // no-op scaffold
-            }
-        };
+    /**
+     * Forces javac to link against nv-websocket-client's factory and socket types.
+     *
+     * <p>Nothing is connected — the socket is created and handed straight back. Phase 1 replaces
+     * this with a core-owned socket abstraction so the library stays swappable.
+     */
+    public static WebSocket createSocket(String url) throws IOException, WebSocketException {
+        return new WebSocketFactory().createSocket(url);
     }
 }

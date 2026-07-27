@@ -3,13 +3,31 @@ plugins {
 }
 
 dependencies {
-    // Shaded at the app layer; every version here is pinned to a line that still
-    // produces / accepts Java 8 bytecode. `CoreSanity` touches one class from
-    // each so `--release 8` proves the claim at compile time rather than us
-    // trusting the changelogs.
+    // Deliberately `implementation`, not `api`: the shaded libraries are core's
+    // private business. A feature module that needs JSON or YAML goes through a
+    // core utility rather than importing Gson or SnakeYAML itself. That keeps the
+    // relocation surface in one place and makes swapping any of these out a
+    // core-local change instead of a repo-wide one.
+    //
+    // `CoreSanity` touches a real class from each so their APIs are proven usable
+    // from Java 8 source; the shipped bytecode levels are proven separately by
+    // :app:verifyShadowJar, which is the only check that actually catches them.
     implementation("com.google.code.gson:gson:2.10.1")
-    implementation("org.java-websocket:Java-WebSocket:1.6.0")
     implementation("org.yaml:snakeyaml:2.4")
+
+    // The WebSocket client carries one constraint that is not obvious from the
+    // outside: it must stay zero-dependency and free of any logging facade.
+    // Java-WebSocket — the obvious pick, and what v2 avoided — calls
+    // org.slf4j.LoggerFactory unconditionally from the AbstractWebSocket,
+    // WebSocketImpl and Draft_6455 constructors, and Spigot 1.8.8-1.16 ships no
+    // slf4j at all. That is a guaranteed NoClassDefFoundError across the whole
+    // legacy range the moment a socket is constructed, not a degraded-logging
+    // inconvenience. nv-websocket-client has no transitive dependencies and no
+    // logging facade at all.
+    //
+    // Phase 1 wraps this behind a core-owned socket interface so the library
+    // stays swappable if that constraint ever changes.
+    implementation("com.neovisionaries:nv-websocket-client:2.14")
 }
 
 // The Velocity `@Plugin` annotation needs the version as a compile-time
