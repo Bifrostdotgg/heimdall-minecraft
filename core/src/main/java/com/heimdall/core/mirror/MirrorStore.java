@@ -1,15 +1,8 @@
 package com.heimdall.core.mirror;
 
-import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
 import com.heimdall.core.log.HeimdallLogger;
-import com.heimdall.core.util.AtomicFiles;
 import com.heimdall.core.util.Strings;
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.lang.reflect.Type;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashSet;
@@ -19,16 +12,18 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /**
  * A disk-backed local mirror of state the bot owns, with a hard bound on how stale it may get.
  *
  * <p>Generalised from v2's {@code WhitelistCache}: the whitelist is only the first thing worth
- * mirroring, and the interesting semantics are not whitelist-specific.
+ * mirroring, and the interesting semantics are not whitelist-specific. Persistence lives in {@link
+ * MirrorFile}; this class is the rules.
  *
  * <h2>What it is for</h2>
  *
- * <p>Restart resilience. If the bot is redeploying when a player joins, the mirror answers, and the
+ * <p>Restart resilience. If the bot is redeploying when a player joins, the mirror answers and the
  * outage is invisible to them. That only works if the mirror is trustworthy, which is what the rest
  * of this contract is about.
  *
@@ -54,14 +49,8 @@ import java.util.function.LongSupplier;
  * <em>pruning</em> anything absent from it — that is how a revocation propagates promptly. So the
  * caller must only ever call it with the result of a <strong>successful</strong> full fetch. A
  * failed fetch must leave the mirror untouched; there is deliberately no "reconcile with what I
- * managed to get" entry point, because an empty list is a legitimate "nobody is whitelisted" state
- * and cannot be distinguished from a partial failure after the fact.
- *
- * <h2>Persistence</h2>
- *
- * <p>Saves are debounced onto the supplied scheduler and written atomically — see {@link
- * DebouncedWriter} and {@link AtomicFiles} for the two v2 defects that motivates. {@link #close()}
- * flushes, so nothing is lost at shutdown.
+ * managed to get" entry point, because an empty set is a legitimate "nobody is whitelisted" state
+ * and could not be told apart from a partial failure after the fact.
  *
  * <p>Thread-safe.
  *
@@ -70,31 +59,28 @@ import java.util.function.LongSupplier;
 public final class MirrorStore<T> implements AutoCloseable {
 
     private final HeimdallLogger logger;
-    private final Path file;
     private final MirrorPolicy policy;
     private final LongSupplier clock;
-    private final Gson gson = new Gson();
-    private final Type snapshotType;
     private final ConcurrentHashMap<String, MirrorEntry<T>> entries =
             new ConcurrentHashMap<String, MirrorEntry<T>>();
-    private final DebouncedWriter writer;
+    private final MirrorFile<T> file;
 
     private volatile String lastEtag;
 
     /**
      * Opens a mirror, loading whatever is already on disk.
      *
-     * @param file where the mirror is persisted; parent directories are created on first save
+     * @param path where the mirror is persisted; parent directories are created on first save
      * @param valueType the mirrored value's type, needed because Gson cannot see {@code T}
      * @param scheduler where debounced saves run — typically {@code HeimdallExecutors.scheduler()}
      */
     public static <T> MirrorStore<T> open(
             HeimdallLogger logger,
-            Path file,
+            Path path,
             Class<T> valueType,
             MirrorPolicy policy,
             ScheduledExecutorService scheduler) {
-        return open(logger, file, (Type) valueType, policy, scheduler, new LongSupplier() {
+        return open(logger, path, (Type) valueType, policy, scheduler, new LongSupplier() {
             @Override
             public long getAsLong() {
                 return System.currentTimeMillis();
@@ -105,37 +91,36 @@ public final class MirrorStore<T> implements AutoCloseable {
     /** As {@link #open}, with the clock injected so the ceiling can be tested without sleeping. */
     static <T> MirrorStore<T> open(
             HeimdallLogger logger,
-            Path file,
+            Path path,
             Type valueType,
             MirrorPolicy policy,
             ScheduledExecutorService scheduler,
             LongSupplier clock) {
-        return new MirrorStore<T>(logger, file, valueType, policy, scheduler, clock);
+        return new MirrorStore<T>(logger, path, valueType, policy, scheduler, clock);
     }
 
     private MirrorStore(
             HeimdallLogger logger,
-            Path file,
+            Path path,
             Type valueType,
             MirrorPolicy policy,
             ScheduledExecutorService scheduler,
             LongSupplier clock) {
-        if (logger == null || file == null || valueType == null || policy == null || clock == null) {
-            throw new IllegalArgumentException("logger, file, valueType, policy and clock are required");
+        if (logger == null || path == null || valueType == null || policy == null || clock == null) {
+            throw new IllegalArgumentException("logger, path, valueType, policy and clock are required");
         }
         this.logger = logger;
-        this.file = file;
         this.policy = policy;
         this.clock = clock;
-        this.snapshotType = TypeToken.getParameterized(MirrorSnapshot.class, valueType).getType();
-        this.writer = new DebouncedWriter(
-                logger, scheduler, policy.saveDebounceMs(), file.toString(), new Runnable() {
+        this.file = new MirrorFile<T>(
+                logger, path, valueType, policy.saveDebounceMs(), scheduler,
+                new Supplier<MirrorSnapshot<T>>() {
                     @Override
-                    public void run() {
-                        writeSnapshot();
+                    public MirrorSnapshot<T> get() {
+                        return snapshot();
                     }
                 });
-        load();
+        restore(file.load());
     }
 
     // ── Reads ────────────────────────────────────────────────────────────────
@@ -158,7 +143,7 @@ public final class MirrorStore<T> implements AutoCloseable {
         }
         if (clock.getAsLong() > effectiveExpiry(entry)) {
             entries.remove(key, entry);
-            writer.markDirty();
+            file.markDirty();
             return null;
         }
         return entry.value();
@@ -182,8 +167,8 @@ public final class MirrorStore<T> implements AutoCloseable {
     /**
      * The ETag from the last successful fetch that populated this mirror, or {@code null}.
      *
-     * <p>Persisted with the entries so a restart can resume conditional polling instead of pulling
-     * a full dump it already has.
+     * <p>Persisted with the entries so a restart resumes conditional polling instead of pulling a
+     * full dump it already has.
      */
     public String lastEtag() {
         return lastEtag;
@@ -192,7 +177,7 @@ public final class MirrorStore<T> implements AutoCloseable {
     /** Records the ETag that accompanied the data currently mirrored. */
     public void setLastEtag(String etag) {
         this.lastEtag = etag;
-        writer.markDirty();
+        file.markDirty();
     }
 
     // ── Writes ───────────────────────────────────────────────────────────────
@@ -210,7 +195,7 @@ public final class MirrorStore<T> implements AutoCloseable {
         }
         long now = clock.getAsLong();
         entries.put(key, new MirrorEntry<T>(value, now, now + policy.windowMs(), now));
-        writer.markDirty();
+        file.markDirty();
     }
 
     /**
@@ -236,7 +221,7 @@ public final class MirrorStore<T> implements AutoCloseable {
         long now = clock.getAsLong();
         entry.lastConnection(now);
         entry.cacheExpiry(cap(entry, now + Math.max(0, windowMs)));
-        writer.markDirty();
+        file.markDirty();
         return true;
     }
 
@@ -254,7 +239,8 @@ public final class MirrorStore<T> implements AutoCloseable {
      */
     public ReconcileResult reconcile(Map<String, T> authoritative) {
         if (authoritative == null) {
-            throw new IllegalArgumentException("the authoritative set is required — pass an empty map, not null");
+            throw new IllegalArgumentException(
+                    "the authoritative set is required — pass an empty map, not null");
         }
         long now = clock.getAsLong();
         Set<String> seen = new HashSet<String>();
@@ -279,7 +265,8 @@ public final class MirrorStore<T> implements AutoCloseable {
                 // Refresh from this verification, but never shrink an entry a recent event already
                 // slid further forward. The cap uses the just-updated lastVerified, so the ceiling
                 // has moved forward too and this cannot exceed it.
-                existing.cacheExpiry(Math.max(existing.cacheExpiry(), cap(existing, now + policy.windowMs())));
+                existing.cacheExpiry(
+                        Math.max(existing.cacheExpiry(), cap(existing, now + policy.windowMs())));
                 updated++;
             }
         }
@@ -293,8 +280,8 @@ public final class MirrorStore<T> implements AutoCloseable {
         }
 
         ReconcileResult result = new ReconcileResult(added, updated, pruned);
-        writer.markDirty();
-        logger.info("Mirror reconcile (" + file.getFileName() + "): " + result + " (" + entries.size() + " held)");
+        file.markDirty();
+        logger.info("Mirror reconcile (" + file.name() + "): " + result + " (" + entries.size() + " held)");
         return result;
     }
 
@@ -316,8 +303,8 @@ public final class MirrorStore<T> implements AutoCloseable {
             }
         }
         if (removed > 0) {
-            writer.markDirty();
-            logger.debug("Swept " + removed + " expired mirror entries from " + file.getFileName());
+            file.markDirty();
+            logger.debug("Swept " + removed + " expired mirror entries from " + file.name());
         }
         return removed;
     }
@@ -326,23 +313,23 @@ public final class MirrorStore<T> implements AutoCloseable {
     public void clear() {
         entries.clear();
         lastEtag = null;
-        writer.markDirty();
+        file.markDirty();
     }
 
     /** Writes any pending changes now. */
     public void flush() {
-        writer.flush();
+        file.flush();
     }
 
     /** Flushes and stops debouncing. Safe to call more than once. */
     @Override
     public void close() {
-        writer.close();
+        file.close();
     }
 
     /** How many times the mirror has actually been written to disk. Diagnostics and tests. */
     long writeCount() {
-        return writer.writeCount();
+        return file.writeCount();
     }
 
     /** A one-line summary for a status command. */
@@ -360,71 +347,32 @@ public final class MirrorStore<T> implements AutoCloseable {
 
     // ── Internals ────────────────────────────────────────────────────────────
 
-    /**
-     * When an entry really stops being trustworthy: its own expiry, clamped by the ceiling.
-     *
-     * <p>Enforced on read as well as on write on purpose. The write-side cap keeps the persisted
-     * value honest; this keeps a value that got past it — an older version's file, a hand edit —
-     * from ever being served.
-     */
+    /** See {@link MirrorPolicy#effectiveExpiry} — the ceiling rule itself lives on the policy. */
     private long effectiveExpiry(MirrorEntry<T> entry) {
-        if (!policy.isExtensionBounded()) {
-            return entry.cacheExpiry();
-        }
-        return Math.min(entry.cacheExpiry(), entry.lastVerified() + policy.maxExtensionMs());
+        return policy.effectiveExpiry(entry.cacheExpiry(), entry.lastVerified());
     }
 
-    /** Clamps a proposed expiry to the ceiling, so nothing on disk ever claims more than it may have. */
+    /** See {@link MirrorPolicy#cap}. */
     private long cap(MirrorEntry<T> entry, long proposedExpiry) {
-        if (!policy.isExtensionBounded()) {
-            return proposedExpiry;
-        }
-        return Math.min(proposedExpiry, entry.lastVerified() + policy.maxExtensionMs());
+        return policy.cap(proposedExpiry, entry.lastVerified());
     }
 
-    private void load() {
-        if (!Files.isRegularFile(file)) {
+    private void restore(MirrorSnapshot<T> snapshot) {
+        lastEtag = snapshot.etag;
+        if (snapshot.entries == null) {
             return;
         }
-        try {
-            String json = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
-            MirrorSnapshot<T> snapshot = gson.fromJson(json, snapshotType);
-            if (snapshot == null || snapshot.entries == null) {
-                return;
+        for (Map.Entry<String, MirrorEntry<T>> entry : snapshot.entries.entrySet()) {
+            if (entry.getKey() != null && entry.getValue() != null && entry.getValue().value() != null) {
+                entries.put(entry.getKey(), entry.getValue());
             }
-            lastEtag = snapshot.etag;
-            for (Map.Entry<String, MirrorEntry<T>> entry : snapshot.entries.entrySet()) {
-                if (entry.getKey() != null && entry.getValue() != null && entry.getValue().value() != null) {
-                    entries.put(entry.getKey(), entry.getValue());
-                }
-            }
-            logger.info("Loaded " + entries.size() + " mirror entries from " + file.getFileName());
-        } catch (IOException e) {
-            logger.error("Could not read " + file + " — starting with an empty mirror", e);
-        } catch (RuntimeException e) {
-            // A truncated or hand-mangled file must not stop the plugin booting. An empty mirror
-            // means the next fetch repopulates it; a failed boot means nobody can join at all.
-            logger.error("Could not parse " + file + " — starting with an empty mirror", e);
+        }
+        if (!entries.isEmpty()) {
+            logger.info("Loaded " + entries.size() + " mirror entries from " + file.name());
         }
     }
 
-    private void writeSnapshot() {
-        MirrorSnapshot<T> snapshot = new MirrorSnapshot<T>();
-        snapshot.etag = lastEtag;
-        snapshot.entries = new LinkedHashMap<String, MirrorEntry<T>>(entries);
-        try {
-            AtomicFiles.writeUtf8(file, gson.toJson(snapshot, snapshotType));
-        } catch (IOException e) {
-            // Surfaced to DebouncedWriter, which logs it and keeps the dirty flag set so the next
-            // flush retries.
-            throw new UncheckedIOException(e);
-        }
-    }
-
-    /** The on-disk document: the entries plus the ETag they came with. */
-    static final class MirrorSnapshot<T> {
-
-        String etag;
-        Map<String, MirrorEntry<T>> entries;
+    private MirrorSnapshot<T> snapshot() {
+        return new MirrorSnapshot<T>(lastEtag, new LinkedHashMap<String, MirrorEntry<T>>(entries));
     }
 }

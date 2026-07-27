@@ -55,6 +55,35 @@ public final class MirrorPolicy {
         return saveDebounceMs;
     }
 
+    /**
+     * When an entry really stops being trustworthy: its own expiry, clamped by the ceiling.
+     *
+     * <p>The bound lives here rather than in {@link MirrorStore} so there is exactly one expression
+     * of it, applied both when a new expiry is written ({@link #cap}) and every time a value is
+     * read. The read-side check is not redundant: it is what stops an entry written by an older
+     * version, or edited on disk, from being served past the ceiling.
+     *
+     * @param cacheExpiry the entry's own expiry
+     * @param lastVerified when the bot last confirmed the entry
+     */
+    public long effectiveExpiry(long cacheExpiry, long lastVerified) {
+        if (!isExtensionBounded()) {
+            return cacheExpiry;
+        }
+        return Math.min(cacheExpiry, lastVerified + maxExtensionMs);
+    }
+
+    /**
+     * Clamps a proposed new expiry to the ceiling, so nothing persisted ever claims a longer
+     * lifetime than the bound allows.
+     */
+    public long cap(long proposedExpiry, long lastVerified) {
+        if (!isExtensionBounded()) {
+            return proposedExpiry;
+        }
+        return Math.min(proposedExpiry, lastVerified + maxExtensionMs);
+    }
+
     @Override
     public String toString() {
         return "MirrorPolicy{windowMs=" + windowMs
