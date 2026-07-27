@@ -1,0 +1,180 @@
+package com.heimdall.core.config;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.heimdall.core.log.LogLevel;
+import com.heimdall.core.log.RecordingLogger;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/** Reading and writing {@code bootstrap.yml}, including the states that are not errors. */
+class BootstrapStoreTest {
+
+    private final RecordingLogger logger = new RecordingLogger(true);
+
+    private BootstrapStore storeIn(Path dir) {
+        return new BootstrapStore(logger, dir.resolve("bootstrap.yml"));
+    }
+
+    private static void write(Path dir, String yaml) throws IOException {
+        Files.write(dir.resolve("bootstrap.yml"), yaml.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String read(Path dir) throws IOException {
+        return new String(Files.readAllBytes(dir.resolve("bootstrap.yml")), StandardCharsets.UTF_8);
+    }
+
+    @Test
+    @DisplayName("a missing file is the not-configured state, not a failure")
+    void missingFileIsNotConfigured(@TempDir Path dir) {
+        BootstrapStore store = storeIn(dir);
+
+        assertFalse(store.exists());
+        BootstrapConfig config = store.load();
+        assertFalse(config.isConfigured());
+        assertEquals(BootstrapConfig.defaults(), config);
+        assertTrue(logger.at(LogLevel.SEVERE).isEmpty(), "a fresh install must not log an error");
+        assertTrue(logger.at(LogLevel.WARN).isEmpty());
+    }
+
+    @Test
+    void savedConfigRoundTrips(@TempDir Path dir) throws IOException {
+        BootstrapStore store = storeIn(dir);
+        BootstrapConfig config = BootstrapConfig.builder()
+                .endpoint("https://api.bifrost.gg")
+                .tokenId("tok_123")
+                .token("s3cr3t")
+                .serverId("survival")
+                .role(ServerRole.ENFORCER)
+                .debug(true)
+                .build();
+
+        store.save(config);
+
+        assertTrue(store.exists());
+        assertEquals(config, storeIn(dir).load());
+    }
+
+    @Test
+    void everyFieldIsRead(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: https://bot.example/\n"
+                + "tokenId: tok_abc\n"
+                + "token: shhh\n"
+                + "serverId: creative\n"
+                + "role: gatekeeper\n"
+                + "debug: true\n");
+
+        BootstrapConfig config = storeIn(dir).load();
+
+        assertEquals("https://bot.example", config.endpoint(), "the trailing slash is normalised away");
+        assertEquals("tok_abc", config.tokenId());
+        assertEquals("shhh", config.token());
+        assertEquals("creative", config.serverId());
+        assertEquals(ServerRole.GATEKEEPER, config.role());
+        assertTrue(config.debug());
+        assertTrue(config.isConfigured());
+    }
+
+    @Test
+    @DisplayName("a key this version does not know survives a load/save cycle")
+    void unknownKeysArePreserved(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: https://bot.example\n"
+                + "tokenId: tok_abc\n"
+                + "token: shhh\n"
+                + "futureFeature: enabled\n");
+
+        BootstrapStore store = storeIn(dir);
+        BootstrapConfig config = store.load();
+        store.save(config.toBuilder().serverId("survival").build());
+
+        String written = read(dir);
+        assertTrue(written.contains("futureFeature"),
+                "rolling a fleet back a version must not delete the newer version's settings:\n" + written);
+        assertTrue(written.contains("survival"));
+    }
+
+    @Test
+    @DisplayName("a malformed file is reported and treated as absent")
+    void malformedFileDoesNotThrow(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: [unclosed\n");
+
+        BootstrapConfig config = storeIn(dir).load();
+
+        assertFalse(config.isConfigured());
+        assertEquals(1, logger.at(LogLevel.SEVERE).size(),
+                "the operator has to be told why their server thinks it is unconfigured");
+    }
+
+    @Test
+    void emptyFileLoadsDefaults(@TempDir Path dir) throws IOException {
+        write(dir, "# nothing but a comment\n");
+
+        assertEquals(BootstrapConfig.defaults(), storeIn(dir).load());
+    }
+
+    @Test
+    @DisplayName("a non-mapping document is refused rather than half-read")
+    void scalarDocumentIsRejected(@TempDir Path dir) throws IOException {
+        write(dir, "just-a-string\n");
+
+        assertEquals(BootstrapConfig.defaults(), storeIn(dir).load());
+        assertTrue(logger.logged(LogLevel.WARN, "does not contain a YAML mapping"));
+    }
+
+    @Test
+    @DisplayName("a quoted boolean still means true")
+    void quotedBooleanIsRead(@TempDir Path dir) throws IOException {
+        write(dir, "debug: \"true\"\n");
+        assertTrue(storeIn(dir).load().debug());
+
+        write(dir, "debug: yes\n");
+        assertTrue(storeIn(dir).load().debug());
+
+        write(dir, "debug: nonsense\n");
+        assertFalse(storeIn(dir).load().debug());
+    }
+
+    @Test
+    void unknownRoleWarnsAndFallsBackToAuto(@TempDir Path dir) throws IOException {
+        write(dir, "role: overlord\n");
+
+        assertEquals(ServerRole.AUTO, storeIn(dir).load().role());
+        assertTrue(logger.logged(LogLevel.WARN, "Unknown role 'overlord'"));
+    }
+
+    @Test
+    @DisplayName("saving leaves no temp files behind")
+    void saveIsAtomicAndTidy(@TempDir Path dir) throws IOException {
+        BootstrapStore store = storeIn(dir);
+        store.save(BootstrapConfig.builder().endpoint("https://a").tokenId("t").token("s").build());
+        store.save(BootstrapConfig.builder().endpoint("https://b").tokenId("t").token("s").build());
+
+        try (Stream<Path> files = Files.list(dir)) {
+            List<String> names = files.map(p -> p.getFileName().toString()).collect(Collectors.toList());
+            assertEquals(1, names.size(), "a stray .tmp accumulates on every save: " + names);
+            assertEquals("bootstrap.yml", names.get(0));
+        }
+        assertEquals("https://b", storeIn(dir).load().endpoint());
+    }
+
+    @Test
+    @DisplayName("the file is created even when its directory does not exist yet")
+    void saveCreatesTheDirectory(@TempDir Path dir) throws IOException {
+        Path nested = dir.resolve("plugins").resolve("Heimdall");
+        BootstrapStore store = new BootstrapStore(logger, nested.resolve("bootstrap.yml"));
+
+        store.save(BootstrapConfig.builder().endpoint("https://a").tokenId("t").token("s").build());
+
+        assertTrue(Files.isRegularFile(nested.resolve("bootstrap.yml")));
+    }
+}
