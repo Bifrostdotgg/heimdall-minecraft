@@ -6,6 +6,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -26,8 +27,7 @@ import java.util.concurrent.TimeoutException;
 final class PendingRequests {
 
     private final ScheduledExecutorService scheduler;
-    private final Map<String, CompletableFuture<Payload>> pending =
-            new ConcurrentHashMap<String, CompletableFuture<Payload>>();
+    private final Map<String, Pending> pending = new ConcurrentHashMap<String, Pending>();
 
     PendingRequests(ScheduledExecutorService scheduler) {
         this.scheduler = scheduler;
@@ -41,27 +41,33 @@ final class PendingRequests {
      *     useless when four kinds of request share this map
      */
     CompletableFuture<Payload> register(final String id, final String type, long timeoutMs) {
-        CompletableFuture<Payload> future = new CompletableFuture<Payload>();
-        pending.put(id, future);
+        final Pending entry = new Pending();
+        pending.put(id, entry);
         try {
-            scheduler.schedule(new Runnable() {
+            ScheduledFuture<?> timeout = scheduler.schedule(new Runnable() {
                 @Override
                 public void run() {
-                    CompletableFuture<Payload> stale = pending.remove(id);
+                    Pending stale = pending.remove(id);
                     if (stale != null) {
-                        stale.completeExceptionally(
+                        stale.future.completeExceptionally(
                                 new TimeoutException("tunnel request timed out: " + type));
                     }
                 }
             }, Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
+            entry.timeout = timeout;
+            // The reply can land between the put and here, in which case the entry is already gone
+            // and this handle would sit in the queue for its whole delay with nothing to do.
+            if (pending.get(id) != entry) {
+                timeout.cancel(false);
+            }
         } catch (RejectedExecutionException e) {
             // The scheduler is already shutting down, so nothing will ever time this out. Failing
             // it here and now is the only way to keep the never-hangs promise.
             pending.remove(id);
-            future.completeExceptionally(
+            entry.future.completeExceptionally(
                     new IllegalStateException("tunnel is shutting down; request not sent: " + type));
         }
-        return future;
+        return entry.future;
     }
 
     /**
@@ -71,17 +77,23 @@ final class PendingRequests {
      *     an unsolicited message
      */
     boolean complete(String id, Payload payload) {
-        CompletableFuture<Payload> future = pending.remove(id);
-        if (future == null) {
+        Pending entry = pending.remove(id);
+        if (entry == null) {
             return false;
         }
-        future.complete(payload == null ? Payload.empty() : payload);
+        entry.cancelTimeout();
+        entry.future.complete(payload == null ? Payload.empty() : payload);
         return true;
     }
 
     /** Drops a registration without completing it. Used when the send itself could not happen. */
     CompletableFuture<Payload> forget(String id) {
-        return pending.remove(id);
+        Pending entry = pending.remove(id);
+        if (entry == null) {
+            return null;
+        }
+        entry.cancelTimeout();
+        return entry.future;
     }
 
     /**
@@ -93,8 +105,9 @@ final class PendingRequests {
      * on an answer that was already impossible.
      */
     void failAll(String reason) {
-        for (Map.Entry<String, CompletableFuture<Payload>> entry : pending.entrySet()) {
-            entry.getValue().completeExceptionally(new IllegalStateException(reason));
+        for (Map.Entry<String, Pending> entry : pending.entrySet()) {
+            entry.getValue().cancelTimeout();
+            entry.getValue().future.completeExceptionally(new IllegalStateException(reason));
         }
         pending.clear();
     }
@@ -102,5 +115,27 @@ final class PendingRequests {
     /** How many requests are outstanding. For tests and diagnostics. */
     int size() {
         return pending.size();
+    }
+
+    /**
+     * One outstanding request and the timeout armed for it.
+     *
+     * <p>The handle is kept so the timeout can be <em>cancelled</em> when the reply arrives, which
+     * v2 did not do: every request left a task sitting on the scheduler until its full deadline
+     * elapsed, however quickly it had been answered. With {@code setRemoveOnCancelPolicy} on the
+     * pool, cancelling drops it from the queue immediately — so a burst of fast requests leaves a
+     * queue that drains rather than one that grows for the length of the longest timeout.
+     */
+    private static final class Pending {
+
+        private final CompletableFuture<Payload> future = new CompletableFuture<Payload>();
+        private volatile ScheduledFuture<?> timeout;
+
+        void cancelTimeout() {
+            ScheduledFuture<?> armed = timeout;
+            if (armed != null) {
+                armed.cancel(false);
+            }
+        }
     }
 }
