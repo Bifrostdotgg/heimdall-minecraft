@@ -25,6 +25,16 @@ final class FakeTunnelSocket implements TunnelSocket {
     private final String url;
     private final TunnelSocketListener listener;
     private final List<String> sent = Collections.synchronizedList(new ArrayList<String>());
+
+    /**
+     * The thread each frame was written on, index-aligned with {@link #sent}.
+     *
+     * <p>Recorded because "the pong is written synchronously rather than queued behind a module
+     * handler" is a real production property — the bot's sweep closes any connection that has not
+     * answered — and it cannot be asserted by reading the current thread from the test, which is
+     * the delivering thread either way.
+     */
+    private final List<String> sentOn = Collections.synchronizedList(new ArrayList<String>());
     private final AtomicBoolean open = new AtomicBoolean();
 
     private volatile boolean aborted;
@@ -73,7 +83,10 @@ final class FakeTunnelSocket implements TunnelSocket {
     @Override
     public void sendText(String text) {
         if (open.get()) {
-            sent.add(text);
+            synchronized (sent) {
+                sent.add(text);
+                sentOn.add(Thread.currentThread().getName());
+            }
         }
     }
 
@@ -160,6 +173,23 @@ final class FakeTunnelSocket implements TunnelSocket {
             }
         }
         return frames;
+    }
+
+    /**
+     * The name of the thread the first frame of a type was written on, or null.
+     *
+     * <p>The assertion this exists for: a pong must leave on the thread that delivered the ping.
+     */
+    String threadThatSentFirst(String type) {
+        synchronized (sent) {
+            for (int i = 0; i < sent.size(); i++) {
+                Envelope parsed = Envelope.parse(sent.get(i));
+                if (parsed != null && type.equals(parsed.type())) {
+                    return sentOn.get(i);
+                }
+            }
+        }
+        return null;
     }
 
     /** The first frame of a type, or null. */

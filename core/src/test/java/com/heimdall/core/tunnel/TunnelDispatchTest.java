@@ -3,6 +3,7 @@ package com.heimdall.core.tunnel;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -64,18 +65,31 @@ class TunnelDispatchTest {
     }
 
     @Test
-    @DisplayName("a bot ping is answered with a pong echoing the same id, on the socket thread")
-    void pingIsAnsweredImmediately() {
-        Thread caller = Thread.currentThread();
-        socket.deliver(Envelope.of("ping-1", "ping", Payload.empty()));
+    @DisplayName("a bot ping is answered with a pong written on the DELIVERING thread")
+    void pingIsAnsweredImmediately() throws Exception {
+        // Delivered from a thread of our own with a name nothing else uses, so "the pong left on
+        // the thread that delivered the ping" is a real assertion. Reading Thread.currentThread()
+        // in the test proves nothing: it is the delivering thread either way, so the test would
+        // stay green if the pong were moved onto heimdall-io — which is the regression it exists
+        // to catch, because a pong queued behind module handlers on a busy pool is how a healthy
+        // server gets reaped by the bot's sweep.
+        Thread deliverer = new Thread(
+                () -> socket.deliver(Envelope.of("ping-1", "ping", Payload.empty())),
+                "pretend-socket-reader");
+        deliverer.start();
+        deliverer.join(5_000L);
 
+        // Awaited rather than read straight away, so that PRESENCE is never what fails: the
+        // property under test is which thread wrote it, and a pong that merely arrived late should
+        // fail on the thread assertion below with a message that says so.
+        Await.until("a pong to be written", () -> socket.firstFrameOfType("pong") != null);
         Envelope pong = socket.firstFrameOfType("pong");
         assertNotNull(pong, "this is the ONLY keepalive the protocol has — an unanswered ping is a "
                 + "connection the bot's sweep will close");
         assertEquals("ping-1", pong.id(), "correlation is by echoed id");
-        assertEquals(caller.getName(), Thread.currentThread().getName(),
-                "the pong is written synchronously; queueing it behind a module handler on a busy "
-                        + "IO pool is how a healthy server gets reaped");
+        assertEquals("pretend-socket-reader", socket.threadThatSentFirst("pong"),
+                "the pong must be written synchronously on the reading thread, not handed to an "
+                        + "executor");
     }
 
     @Test
@@ -115,14 +129,17 @@ class TunnelDispatchTest {
             received.set(envelope);
         });
 
+        String deliveringThread = Thread.currentThread().getName();
         socket.deliver(Envelope.fresh("role_sync",
                 Payload.builder().put("username", "Steve").build()));
 
         Await.until("the handler to run", () -> received.get() != null);
         assertEquals("Steve", received.get().payload().string("username", null));
-        assertTrue(handlerThread.get().startsWith("heimdall-io"),
+        assertNotEquals(deliveringThread, handlerThread.get(),
                 "a handler that hits the API must not be holding the socket's reading thread — v2 "
-                        + "did exactly that and its own heartbeat then aborted the connection");
+                        + "did exactly that and its own heartbeat then aborted the connection. The "
+                        + "claim is that it ran somewhere ELSE, not that the pool is called "
+                        + "anything in particular");
     }
 
     @Test
@@ -246,7 +263,8 @@ class TunnelDispatchTest {
         socket.deliver(Envelope.fresh("role_sync", Payload.empty()));
 
         Await.until("the well-behaved handler to run", () -> hits.contains("survivor"));
-        assertTrue(client.isConnected());
-        assertNull(socket.firstFrameOfType("nonsense"));
+        assertTrue(client.isConnected(), "a throwing handler must not tear the connection down");
+        assertFalse(socket.wasAborted(), "nor abort the socket");
+        assertEquals(1, sockets.createdCount(), "nor trigger a reconnect");
     }
 }
