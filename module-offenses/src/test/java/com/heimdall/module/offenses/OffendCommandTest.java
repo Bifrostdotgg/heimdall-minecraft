@@ -164,12 +164,19 @@ class OffendCommandTest {
         void theWholeFlow() {
             assertTrue(run(staff, TARGET_NAME, "xray", "caught", "on", "camera"));
 
-            awaitTold(staff, "Offense recorded for " + TARGET_NAME);
+            // Waited on FIRST, and the order matters. The handler answers asynchronously and sends
+            // its five lines in sequence before dispatching, so the dispatch is the only signal that
+            // is strictly later than all of them. Waiting on the first line instead — "Offense
+            // recorded for …" — and then asserting the rest is a race that passes locally and fails
+            // on a loaded CI runner between "Type:" and "(tier 1)", which is exactly what it did.
+            awaitDispatchCount(1);
+
+            assertTrue(staff.wasTold("Offense recorded for " + TARGET_NAME),
+                    staff.messageText().toString());
             assertTrue(staff.wasTold("Type: Cheating"), staff.messageText().toString());
             assertTrue(staff.wasTold("(tier 1)"), staff.messageText().toString());
             assertTrue(staff.wasTold("Total points: 1"), staff.messageText().toString());
 
-            awaitDispatchCount(1);
             String dispatched = platform.dispatchedCommands().get(0);
             assertTrue(dispatched.startsWith("warn " + TARGET_NAME), dispatched);
             assertTrue(staff.wasTold("Dispatching: " + dispatched), staff.messageText().toString());
@@ -290,6 +297,8 @@ class OffendCommandTest {
 
             assertTrue(run(staff, TARGET_NAME, "xray"));
 
+            // The refusal is the last thing sent on this path, so everything before it has landed
+            // by the time it has. Waiting on an earlier line would race the ones after it.
             awaitTold(staff, "the server refused to run");
             assertTrue(staff.wasTold("Offense recorded for " + TARGET_NAME),
                     "the infraction IS recorded and the punishment is NOT applied; only the person "
