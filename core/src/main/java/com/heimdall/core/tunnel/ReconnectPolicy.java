@@ -64,11 +64,6 @@ final class ReconnectPolicy {
         scheduled.set(false);
     }
 
-    /** Whether a reconnect is currently claimed. For tests and diagnostics. */
-    boolean isClaimed() {
-        return scheduled.get();
-    }
-
     /**
      * The delay to use for this attempt, doubling the delay that the <em>next</em> one will use.
      *
@@ -80,11 +75,6 @@ final class ReconnectPolicy {
         long doubled = delay > maxDelayMs / 2 ? maxDelayMs : Math.min(delay * 2, maxDelayMs);
         currentDelayMs.set(doubled);
         return delay;
-    }
-
-    /** The delay the next attempt would use, without consuming it. For tests and diagnostics. */
-    long peekDelayMs() {
-        return currentDelayMs.get();
     }
 
     /** Back to the base delay. Called on a successful open and on a manual reconnect. */
