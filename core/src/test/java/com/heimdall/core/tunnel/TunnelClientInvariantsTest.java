@@ -137,6 +137,14 @@ class TunnelClientInvariantsTest {
         assertEquals(1, sockets.createdCount(),
                 "four triggers must not each start their own doConnect chain — that is how a server "
                         + "ends up with several live sockets to the same bot, and commands run twice");
+
+        // The sharp assertion, and the reason it is not just the socket count: with a long backoff
+        // the extra reconnects would not have FIRED yet either way, so counting sockets alone
+        // cannot tell one schedule from four. The backoff advances exactly once per schedule, so
+        // the delay is a direct count of them — one doubling, not four.
+        assertEquals(120_000L, tunnel.reconnectPolicy().peekDelayMs(),
+                "exactly one reconnect was scheduled, so the backoff doubled exactly once; four "
+                        + "would leave it at the 480s ceiling");
     }
 
     @Test
