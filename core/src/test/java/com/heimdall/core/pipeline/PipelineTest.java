@@ -69,6 +69,37 @@ class PipelineTest {
     }
 
     @Test
+    @DisplayName("(S6) equal priorities keep their registration order across chain rebuilds")
+    void tiesAreStableAcrossRebuilds() {
+        LoginPipeline pipeline = new LoginPipeline(logger);
+        final List<String> order = new ArrayList<String>();
+
+        pipeline.register(attempt -> {
+            order.add("first");
+            return Verdict.abstain();
+        }, 50, "a");
+        pipeline.register(attempt -> {
+            order.add("second");
+            return Verdict.abstain();
+        }, 50, "b");
+
+        // The chain is rebuilt on every module enable and disable, so the interesting question is
+        // not whether one sort is stable but whether the order survives being re-sorted repeatedly
+        // with unrelated entries appearing and vanishing around it.
+        for (int i = 0; i < 5; i++) {
+            Registration noise = pipeline.register(attempt -> Verdict.abstain(), 50, "noise");
+            noise.close();
+        }
+
+        order.clear();
+        pipeline.dispatch(steve());
+
+        assertEquals(Arrays.asList("first", "second"), order,
+                "a ban check and a whitelist gate that swapped places because an unrelated module "
+                        + "was toggled would show players the wrong reason for being kept out");
+    }
+
+    @Test
     @DisplayName("the first deny stops the chain and nothing after it can overturn it")
     void theFirstDenyWins() {
         LoginPipeline pipeline = new LoginPipeline(logger);
@@ -128,19 +159,101 @@ class PipelineTest {
     }
 
     @Test
-    @DisplayName("an interceptor that throws is treated as having abstained")
-    void athrowingInterceptorAbstains() {
+    @DisplayName("an interceptor that throws abstains by default, and is reported against its module")
+    void aThrowingInterceptorAbstainsByDefault() {
         LoginPipeline pipeline = new LoginPipeline(logger);
         pipeline.register(attempt -> {
             throw new IllegalStateException("broken check");
-        }, 1);
-        pipeline.register(attempt -> Verdict.deny(Msg.legacy("§cbanned")), 2);
+        }, 1, "whitelist");
+        pipeline.register(attempt -> Verdict.deny(Msg.legacy("§cbanned")), 2, "punishments");
 
         Verdict verdict = pipeline.dispatch(steve());
 
         assertTrue(verdict.isDeny(), "a broken check must neither lock everyone out nor wave "
                 + "everyone through — the stricter check behind it still decides");
-        assertTrue(logger.logged(LogLevel.SEVERE, "login interceptor at priority 1 threw"));
+        assertTrue(logger.logged(LogLevel.SEVERE, "'whitelist'"),
+                "an operator has to be told WHICH gate is silently not running; the class name of "
+                        + "a lambda tells them nothing");
+    }
+
+    @Test
+    @DisplayName("an interceptor can declare that its failure means DENY, and the pipeline honours it")
+    void aFailClosedInterceptorKeepsPlayersOut() {
+        LoginPipeline pipeline = new LoginPipeline(logger);
+        pipeline.register(new Interceptor<LoginAttempt>() {
+            @Override
+            public Verdict intercept(LoginAttempt context) {
+                throw new IllegalStateException("something unexpected");
+            }
+
+            @Override
+            public Verdict failureVerdict(RuntimeException cause) {
+                return Verdict.deny(Msg.legacy("§cwhitelist unavailable"));
+            }
+        }, 1, "whitelist");
+
+        Verdict verdict = pipeline.dispatch(steve());
+
+        assertTrue(verdict.isDeny());
+        assertEquals("§cwhitelist unavailable", Msg.toLegacy(verdict.reason()));
+    }
+
+    @Test
+    @DisplayName("an interceptor whose failure handling ALSO throws is treated as abstaining")
+    void aDoublyBrokenInterceptorCannotWedgeTheChain() {
+        LoginPipeline pipeline = new LoginPipeline(logger);
+        pipeline.register(new Interceptor<LoginAttempt>() {
+            @Override
+            public Verdict intercept(LoginAttempt context) {
+                throw new IllegalStateException("broken check");
+            }
+
+            @Override
+            public Verdict failureVerdict(RuntimeException cause) {
+                throw new IllegalStateException("broken failure handling too");
+            }
+        }, 1, "whitelist");
+
+        assertFalse(pipeline.dispatch(steve()).isDeny(),
+                "at that point nothing the check says can be trusted, and the pipeline still has to "
+                        + "return an answer");
+        assertTrue(logger.logged(LogLevel.SEVERE, "also threw"));
+    }
+
+    @Test
+    @DisplayName("a null failure verdict is an abstain rather than a crash on the login thread")
+    void aNullFailureVerdictAbstains() {
+        LoginPipeline pipeline = new LoginPipeline(logger);
+        pipeline.register(new Interceptor<LoginAttempt>() {
+            @Override
+            public Verdict intercept(LoginAttempt context) {
+                throw new IllegalStateException("broken check");
+            }
+
+            @Override
+            public Verdict failureVerdict(RuntimeException cause) {
+                return null;
+            }
+        }, 1, "whitelist");
+
+        assertFalse(pipeline.dispatch(steve()).isDeny());
+    }
+
+    @Test
+    @DisplayName("a chat interceptor that throws follows the same policy")
+    void chatInterceptorsShareTheFailurePolicy() {
+        ChatPipeline pipeline = new ChatPipeline(logger);
+        final List<String> relayed = new ArrayList<String>();
+        pipeline.register(message -> {
+            throw new IllegalStateException("broken filter");
+        }, 1, "chat-filter");
+        pipeline.observe(message -> relayed.add(message.message()));
+
+        Verdict verdict = pipeline.dispatchWithObservers(hello());
+
+        assertFalse(verdict.isDeny(), "a broken chat filter must not start censoring everything");
+        assertEquals(Collections.singletonList("hello"), relayed);
+        assertTrue(logger.logged(LogLevel.SEVERE, "'chat-filter'"));
     }
 
     @Test
@@ -257,17 +370,60 @@ class PipelineTest {
         // means ADDING a method rather than calling one. This test is the executable form of that
         // claim: if a buffer, a history or a getLast ever appears, it fails.
         List<String> accessors = new ArrayList<String>();
-        for (java.lang.reflect.Method method : ChatPipeline.class.getMethods()) {
-            if (method.getDeclaringClass() != ChatPipeline.class) {
-                continue;
-            }
-            if (ChatMessage.class.isAssignableFrom(method.getReturnType())
-                    || Iterable.class.isAssignableFrom(method.getReturnType())) {
-                accessors.add(method.getName());
+        for (Class<?> type = ChatPipeline.class; type != null && type != Object.class;
+                type = type.getSuperclass()) {
+            // getDeclaredMethods, walked up the hierarchy: getMethods() misses package-private and
+            // protected members, and a buffer added to the shared Pipeline base class would be just
+            // as much of a chat log as one added here.
+            for (java.lang.reflect.Method method : type.getDeclaredMethods()) {
+                if (method.isSynthetic() || mentionsChatMessage(method.getGenericReturnType())) {
+                    if (!method.isSynthetic()) {
+                        accessors.add(type.getSimpleName() + "." + method.getName());
+                    }
+                }
             }
         }
         assertEquals(Collections.emptyList(), accessors,
-                "ChatPipeline must never return a message, or a collection that could hold one");
+                "nothing in the chat pipeline may hand back a message it has already dispatched — "
+                        + "not directly, not in a collection, not in an Optional, not in an array");
+    }
+
+    /**
+     * Whether a return type could carry a {@link ChatMessage} out of the pipeline.
+     *
+     * <p>Looks through generics and arrays rather than at the raw type alone, so
+     * {@code List<ChatMessage>}, {@code Optional<ChatMessage>} and {@code ChatMessage[]} are all
+     * caught — the raw types of the first two are {@code List} and {@code Optional}, which a
+     * check on the erased return type would wave straight through.
+     */
+    private static boolean mentionsChatMessage(java.lang.reflect.Type type) {
+        if (type instanceof Class) {
+            Class<?> raw = (Class<?>) type;
+            return ChatMessage.class.isAssignableFrom(raw)
+                    || (raw.isArray() && mentionsChatMessage(raw.getComponentType()));
+        }
+        if (type instanceof java.lang.reflect.ParameterizedType) {
+            for (java.lang.reflect.Type argument
+                    : ((java.lang.reflect.ParameterizedType) type).getActualTypeArguments()) {
+                if (mentionsChatMessage(argument)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (type instanceof java.lang.reflect.GenericArrayType) {
+            return mentionsChatMessage(
+                    ((java.lang.reflect.GenericArrayType) type).getGenericComponentType());
+        }
+        if (type instanceof java.lang.reflect.WildcardType) {
+            for (java.lang.reflect.Type bound
+                    : ((java.lang.reflect.WildcardType) type).getUpperBounds()) {
+                if (mentionsChatMessage(bound)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @Test

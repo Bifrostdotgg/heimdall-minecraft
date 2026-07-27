@@ -22,10 +22,14 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>Registration order is not execution order</h2>
  *
- * <p>Priority is explicit and ties break by registration order, so the outcome does not depend on
- * which module happened to enable first. A whitelist gate and a ban check that swapped places
- * because the dashboard toggled them in a different order would show players the wrong reason for
- * being kept out, which is a support conversation rather than a bug report.
+ * <p>Priority is explicit and <strong>ties break by registration order, stably</strong>: two checks
+ * registered at the same priority always run in the order they were registered, however many times
+ * the chain is rebuilt around them. That matters because the chain is rebuilt on every module
+ * enable and disable, and a sort that was not stable would let a whitelist gate and a ban check
+ * swap places when an unrelated module was toggled — showing players the wrong reason for being
+ * kept out, which is a support conversation rather than a bug report. The tiebreaker is an explicit
+ * monotonic sequence rather than a reliance on the sort's stability, so it holds regardless of what
+ * {@code Collections.sort} promises.
  *
  * <h2>Threading</h2>
  *
@@ -75,16 +79,19 @@ public class Pipeline<C> {
     }
 
     /**
-     * Registers a check.
+     * Registers a check, attributed to whatever registered it.
      *
-     * @param priority lower runs earlier; ties break by registration order
+     * @param priority lower runs earlier; <strong>ties break by registration order</strong>, and
+     *     that stability is deliberate — see the class javadoc
+     * @param owner what to name in a log line when this check throws, typically a module id
      * @return a handle that removes exactly this registration
      */
-    public final Registration register(final Interceptor<C> interceptor, int priority) {
+    public final Registration register(final Interceptor<C> interceptor, int priority, String owner) {
         if (interceptor == null) {
             throw new IllegalArgumentException("interceptor is required");
         }
-        final Entry<C> entry = new Entry<C>(interceptor, priority, sequence.incrementAndGet());
+        final Entry<C> entry = new Entry<C>(
+                interceptor, priority, sequence.incrementAndGet(), describe(interceptor, owner));
         synchronized (writeLock) {
             registered.add(entry);
             rebuild();
@@ -98,6 +105,24 @@ public class Pipeline<C> {
                 }
             }
         });
+    }
+
+    /** Registers a check with no owner but its own class name. */
+    public final Registration register(Interceptor<C> interceptor, int priority) {
+        return register(interceptor, priority, null);
+    }
+
+    /**
+     * Something usable in a log line.
+     *
+     * <p>A lambda's class name is {@code SomeModule$$Lambda$42/0x00...}, which tells an operator
+     * nothing, so the owner the caller supplied wins whenever there is one.
+     */
+    private static String describe(Interceptor<?> interceptor, String owner) {
+        if (owner != null && !owner.isEmpty()) {
+            return owner;
+        }
+        return interceptor.getClass().getName();
     }
 
     /** How many checks are currently registered. */
@@ -117,11 +142,12 @@ public class Pipeline<C> {
             try {
                 verdict = entry.interceptor.intercept(context);
             } catch (RuntimeException e) {
-                // Treated as an abstain, not as a denial and not as an allow. A broken check must
-                // not be able to lock a server's whole player base out, and must not be able to
-                // wave them all through either.
-                logger.error(name + " interceptor at priority " + entry.priority + " threw", e);
-                continue;
+                // An escaped exception is a bug in the check, and it is reported as one — SEVERE,
+                // naming the module, because on the login pipeline the consequence is that a gate
+                // an operator believes is running silently is not.
+                logger.error(name + " interceptor '" + entry.owner + "' (priority " + entry.priority
+                        + ") threw; applying its declared failure verdict", e);
+                verdict = failureVerdictOf(entry, e);
             }
             if (verdict == null || verdict.isAbstain()) {
                 continue;
@@ -140,6 +166,24 @@ public class Pipeline<C> {
         synchronized (writeLock) {
             registered.clear();
             rebuild();
+        }
+    }
+
+    /**
+     * What a throwing interceptor decided, according to itself.
+     *
+     * <p>Guarded in turn: an interceptor whose failure handling also throws is treated as having
+     * abstained, because at that point nothing it says can be trusted and the pipeline still has to
+     * return.
+     */
+    private Verdict failureVerdictOf(Entry<C> entry, RuntimeException cause) {
+        try {
+            Verdict declared = entry.interceptor.failureVerdict(cause);
+            return declared == null ? Verdict.abstain() : declared;
+        } catch (RuntimeException e) {
+            logger.error(name + " interceptor '" + entry.owner + "' also threw from "
+                    + "failureVerdict(); treating it as an abstain", e);
+            return Verdict.abstain();
         }
     }
 
@@ -164,11 +208,13 @@ public class Pipeline<C> {
         private final Interceptor<C> interceptor;
         private final int priority;
         private final long sequence;
+        private final String owner;
 
-        Entry(Interceptor<C> interceptor, int priority, long sequence) {
+        Entry(Interceptor<C> interceptor, int priority, long sequence, String owner) {
             this.interceptor = interceptor;
             this.priority = priority;
             this.sequence = sequence;
+            this.owner = owner;
         }
     }
 }

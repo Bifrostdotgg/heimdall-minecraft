@@ -96,12 +96,14 @@ final class ModuleContextImpl implements ModuleContext {
 
     @Override
     public Registration interceptLogin(Interceptor<LoginAttempt> interceptor, int priority) {
-        return registrations.track(environment.loginPipeline().register(interceptor, priority));
+        return registrations.track(
+                environment.loginPipeline().register(interceptor, priority, moduleId));
     }
 
     @Override
     public Registration interceptChat(Interceptor<ChatMessage> interceptor, int priority) {
-        return registrations.track(environment.chatPipeline().register(interceptor, priority));
+        return registrations.track(
+                environment.chatPipeline().register(interceptor, priority, moduleId));
     }
 
     @Override
