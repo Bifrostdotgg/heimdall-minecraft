@@ -1,9 +1,17 @@
 name: Build
 
+# `./gradlew build` is the whole gate: it compiles every module at its own
+# release level, runs the unit tests, runs the ArchUnit conformance rules, and
+# then verifies the shaded jar itself (bytecode levels, relocations, plugin.yml
+# and velocity-plugin.json). There is deliberately nothing else to add here.
+
 on:
   push:
     branches: ["main"]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -16,14 +24,24 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: maven
 
-      - name: Build with Maven
-        run: mvn -B clean package
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build
+        run: ./gradlew build --stacktrace
 
       - name: Upload snapshot JAR
         uses: actions/upload-artifact@v4
         with:
           name: heimdall-whitelist-snapshot
-          path: target/heimdall-whitelist-*.jar
+          path: app/build/libs/heimdall-whitelist-*.jar
           if-no-files-found: error
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: "**/build/reports/tests/**"
+          if-no-files-found: ignore

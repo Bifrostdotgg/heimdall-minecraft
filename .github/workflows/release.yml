@@ -1,10 +1,18 @@
 name: Release
 
-# Publishes a GitHub Release with the built plugin JAR whenever a version tag
-# is pushed (e.g. `v2.1.0`). The tag drives the released version: the POM, the
-# generated BuildConstants, and plugin.yml are all set from it so the artifact
-# version always matches the tag. This is the download source the bot's
-# /api/.../minecraft/plugin/latest endpoint reads from.
+# Publishes a GitHub Release with the shaded plugin JAR whenever a version tag
+# is pushed (e.g. `v3.0.0`). The tag drives the released version: it is passed
+# to Gradle as -Pversion, which flows into the jar name, plugin.yml,
+# velocity-plugin.json and BuildConstants.VERSION, so the artifact version can
+# never drift from the tag.
+#
+# This is the download source the bot's /api/.../minecraft/plugin/latest
+# endpoint reads. The deployed v2 fleet's self-updater picks the first asset
+# ending in `.jar` that does not start with `original-`, so exactly one jar is
+# attached and its name is fixed as heimdall-whitelist-<version>.jar.
+#
+# Tag-triggered workflows run from the tagged commit, so the v2.x.x tags still
+# build with the Maven workflow that exists on their own commits.
 
 on:
   push:
@@ -24,17 +32,19 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-          cache: maven
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Derive version from tag
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Set POM version from tag
-        run: mvn -B versions:set -DnewVersion=${{ steps.ver.outputs.version }} -DgenerateBackupPoms=false
+      - name: Build
+        run: ./gradlew build -Pversion=${{ steps.ver.outputs.version }} --stacktrace
 
-      - name: Build with Maven
-        run: mvn -B clean package
+      - name: Confirm the release asset exists
+        run: test -f "app/build/libs/heimdall-whitelist-${{ steps.ver.outputs.version }}.jar"
 
       - name: Mark prerelease for -rc/-beta tags
         id: pre
@@ -50,6 +60,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            "target/heimdall-whitelist-${{ steps.ver.outputs.version }}.jar" \
-            --title "HeimdallWhitelist ${{ steps.ver.outputs.version }}" \
+            "app/build/libs/heimdall-whitelist-${{ steps.ver.outputs.version }}.jar" \
+            --title "Heimdall ${{ steps.ver.outputs.version }}" \
             --generate-notes ${{ steps.pre.outputs.flag }}
