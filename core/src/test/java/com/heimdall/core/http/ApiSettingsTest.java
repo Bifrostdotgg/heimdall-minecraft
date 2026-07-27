@@ -74,6 +74,47 @@ class ApiSettingsTest {
     }
 
     @Test
+    @DisplayName("each endpoint's budget uses that endpoint's own per-attempt timeout")
+    void perEndpointBudgets() {
+        // Defaults: 3 attempts, 5s login timeout, 1s delay. The two long-running endpoints raise
+        // the per-attempt timeout to 15s and 8s, so a caller bounding on the login budget would
+        // abandon them roughly 30s and 9s early — #797 / MC-6 on a different endpoint.
+        ApiSettings defaults = settings(5000, 3, 1000);
+
+        assertEquals(17_000L, defaults.overallTimeoutMs(), "3 * 5000 + 2 * 1000");
+        assertEquals(47_000L, defaults.whitelistSyncBudgetMs(), "3 * 15000 + 2 * 1000");
+        assertEquals(26_000L, defaults.updateCheckBudgetMs(), "3 * 8000 + 2 * 1000");
+        assertEquals(defaults.overallTimeoutMsFor(15_000), defaults.whitelistSyncBudgetMs());
+        assertEquals(defaults.overallTimeoutMsFor(8000), defaults.updateCheckBudgetMs());
+    }
+
+    @Test
+    @DisplayName("the join timeouts restore the slack v2's caller had and the rewrite dropped")
+    void joinTimeoutsCarryTheSlack() {
+        ApiSettings defaults = settings(5000, 3, 1000);
+
+        assertEquals(1000L, ApiSettings.JOIN_SLACK_MS);
+        assertEquals(18_000L, defaults.joinTimeoutMs());
+        assertEquals(48_000L, defaults.whitelistSyncJoinTimeoutMs());
+        assertEquals(27_000L, defaults.updateCheckJoinTimeoutMs());
+
+        assertTrue(defaults.joinTimeoutMs() > defaults.overallTimeoutMs(),
+                "a single attempt applies the timeout twice — connect then read — so the budget "
+                        + "alone is not a safe bound to block on");
+    }
+
+    @Test
+    @DisplayName("a login timeout above both floors collapses the three budgets onto one")
+    void budgetsTrackTheLoginTimeoutOnceItExceedsTheFloors() {
+        ApiSettings patient = settings(20_000, 2, 500);
+
+        assertEquals(40_500L, patient.overallTimeoutMs());
+        assertEquals(40_500L, patient.whitelistSyncBudgetMs(),
+                "the 15s floor is below 20s, so the configured timeout wins");
+        assertEquals(40_500L, patient.updateCheckBudgetMs());
+    }
+
+    @Test
     @DisplayName("the long-running endpoints get a floor, never a ceiling")
     void perEndpointTimeoutFloors() {
         ApiSettings fast = settings(1500, 1, 0);

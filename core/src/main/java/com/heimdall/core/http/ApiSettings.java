@@ -31,6 +31,22 @@ public final class ApiSettings {
     /** Floor for the update check, which nobody is waiting on. */
     public static final int UPDATE_CHECK_TIMEOUT_MS = 8000;
 
+    /**
+     * Margin added on top of a budget before actually blocking on a future.
+     *
+     * <p>v2's {@code WhitelistManager} waited {@code getOverallTimeoutMs() + 1000}, and the
+     * constant was dropped when that call site was left behind in the v3 rewrite. Restored here
+     * with a name, because it is doing real work: the budget counts one {@code timeoutMs} per
+     * attempt, but {@code HttpURLConnection} applies the value <em>twice</em> — once as the connect
+     * timeout and once as the read timeout — so a single attempt that stalls at both ends can cost
+     * nearly double what the budget assumes. A second is not a proof against that; it is enough
+     * margin for the ordinary case (scheduling jitter, one slow DNS lookup) while still failing
+     * fast enough that a login does not hang. A caller that genuinely cannot tolerate an early
+     * abandon should compute its own bound from {@link #overallTimeoutMsFor(int)} and double the
+     * per-attempt term.
+     */
+    public static final long JOIN_SLACK_MS = 1000L;
+
     private final String baseUrl;
     private final String guildId;
     private final String apiKey;
@@ -103,16 +119,62 @@ public final class ApiSettings {
     }
 
     /**
-     * Worst-case wall clock for one logical request including its whole retry sequence.
+     * Worst-case wall clock for one logical request on the <strong>login path</strong>, including
+     * its whole retry sequence.
      *
-     * <p>{@code retries} attempts of {@code timeoutMs} each, plus {@code retries - 1} delays
-     * between them. A caller that blocks on the returned future <strong>must</strong> bound on this
-     * and not on {@link #timeoutMs()}: v2's login path waited {@code timeout + 1000}ms, which with
-     * three retries abandoned the request four seconds before the retry loop had finished
-     * legitimately working on it (issue #797 / MC-6).
+     * <p>{@code retries} attempts of {@link #timeoutMs()} each, plus {@code retries - 1} delays
+     * between them. v2's formula, unchanged: its login path waited {@code timeout + 1000}ms
+     * instead, which with three retries abandoned the request four seconds before the retry loop
+     * had finished legitimately working on it (issue #797 / MC-6).
+     *
+     * <p><strong>This is not the budget for every endpoint.</strong> {@link #whitelistSyncTimeoutMs()}
+     * and {@link #updateCheckTimeoutMs()} raise the per-attempt timeout well above
+     * {@link #timeoutMs()}, so bounding a whitelist-sync wait on this number abandons the request
+     * around thirty seconds early at the defaults — the same bug as #797, on a different endpoint.
+     * Use {@link #whitelistSyncBudgetMs()}, {@link #updateCheckBudgetMs()}, or
+     * {@link #overallTimeoutMsFor(int)}.
      */
     public long overallTimeoutMs() {
-        return (long) retries * timeoutMs + (long) Math.max(0, retries - 1) * retryDelayMs;
+        return overallTimeoutMsFor(timeoutMs);
+    }
+
+    /**
+     * The same budget for an endpoint whose per-attempt timeout is not {@link #timeoutMs()}.
+     *
+     * @param perAttemptTimeoutMs the connect/read timeout each attempt is given
+     */
+    public long overallTimeoutMsFor(int perAttemptTimeoutMs) {
+        return (long) retries * Math.max(0, perAttemptTimeoutMs)
+                + (long) Math.max(0, retries - 1) * retryDelayMs;
+    }
+
+    /** Retry-inclusive budget for {@code GET whitelist/sync}. */
+    public long whitelistSyncBudgetMs() {
+        return overallTimeoutMsFor(whitelistSyncTimeoutMs());
+    }
+
+    /** Retry-inclusive budget for {@code GET plugin/latest}. */
+    public long updateCheckBudgetMs() {
+        return overallTimeoutMsFor(updateCheckTimeoutMs());
+    }
+
+    /**
+     * How long to actually wait on a login-path future: the budget plus {@link #JOIN_SLACK_MS}.
+     *
+     * <p>Prefer a {@code joinTimeout} over a bare budget whenever blocking on a future.
+     */
+    public long joinTimeoutMs() {
+        return overallTimeoutMs() + JOIN_SLACK_MS;
+    }
+
+    /** How long to actually wait on a {@code whitelist/sync} future. */
+    public long whitelistSyncJoinTimeoutMs() {
+        return whitelistSyncBudgetMs() + JOIN_SLACK_MS;
+    }
+
+    /** How long to actually wait on a {@code plugin/latest} future. */
+    public long updateCheckJoinTimeoutMs() {
+        return updateCheckBudgetMs() + JOIN_SLACK_MS;
     }
 
     /** Per-attempt timeout for the whitelist dump: never shorter than {@link #WHITELIST_SYNC_TIMEOUT_MS}. */

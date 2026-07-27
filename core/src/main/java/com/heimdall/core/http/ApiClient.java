@@ -29,9 +29,27 @@ import java.util.function.Supplier;
  * common pool is shared with the server's own parallel work and is sized by core count, so on a
  * two-core VPS a handful of concurrent logins would starve it.
  *
- * <p>Callers that must block on a returned future have to bound the wait on {@link
- * ApiSettings#overallTimeoutMs()} rather than on a single timeout, or they abandon a request the
- * retry loop is still legitimately working on.
+ * <p>The client does <strong>not</strong> own that executor and never shuts it down — it is shared
+ * with everything else Heimdall runs off-thread, and its lifecycle belongs to whoever created it.
+ *
+ * <h2>Bounding a blocking wait</h2>
+ *
+ * <p>A caller that blocks on a returned future must bound the wait on the budget <em>for that
+ * endpoint</em> — not on a single timeout, and not on the login-path budget for all of them. Two
+ * endpoints deliberately run with a much longer per-attempt timeout, so one number cannot cover
+ * them:
+ *
+ * <table border="1">
+ *   <caption>Which budget bounds which call</caption>
+ *   <tr><th>Call</th><th>Wait at least</th></tr>
+ *   <tr><td>{@link #connectionAttempt}, {@link #requestLinkCode}, {@link #offenseTypes},
+ *       {@link #offend}</td><td>{@link ApiSettings#joinTimeoutMs()}</td></tr>
+ *   <tr><td>{@link #whitelistSync}</td><td>{@link ApiSettings#whitelistSyncJoinTimeoutMs()}</td></tr>
+ *   <tr><td>{@link #latestRelease}</td><td>{@link ApiSettings#updateCheckJoinTimeoutMs()}</td></tr>
+ * </table>
+ *
+ * <p>Bounding a whitelist-sync wait on the login-path budget abandons the request about thirty
+ * seconds early at the defaults, which is issue #797 / MC-6 wearing a different hat.
  *
  * <h2>Failures</h2>
  *
@@ -84,8 +102,11 @@ public final class ApiClient {
     }
 
     /**
-     * Worst-case wall clock for one logical request including retries — see {@link
-     * ApiSettings#overallTimeoutMs()}. Reflects the most recent {@link #reconfigure}.
+     * Worst-case wall clock for one <strong>login-path</strong> request including retries — see
+     * {@link ApiSettings#overallTimeoutMs()}. Reflects the most recent {@link #reconfigure}.
+     *
+     * <p>Does not cover {@link #whitelistSync} or {@link #latestRelease}; see the class javadoc for
+     * which budget bounds which call.
      */
     public long getOverallTimeoutMs() {
         return settings.overallTimeoutMs();
