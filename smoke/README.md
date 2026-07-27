@@ -57,6 +57,16 @@ more representative choice as well as the more reliable one.
 **Why dated image tags.** `:java8` and `:java21` are moving tags. A matrix that silently changes
 what it tests is worse than no matrix, because a failure then has two candidate causes.
 
+**Why the jar is mounted read-only at `/plugins`, not at `/data/plugins`.** Modern Paper writes into
+its own plugins directory — it creates `plugins/.paper-remapped` before it loads anything. A host
+bind mount there is owned by the host user, the server runs as uid 1000, and the boot dies with
+`AccessDeniedException` before the plugin is ever considered. Rootless Podman maps the host user
+into the container and hides this completely, which is exactly how the `paper-1.21.8` row passed on
+a dev machine and failed on CI. `itzg/minecraft-server` copies `/plugins` into a container-owned
+`/data/plugins` on start, so using the image's designed staging path fixes ownership for every row.
+The proxy rows keep a direct writable mount: `itzg/mc-proxy` runs as root, so it has no such
+problem, and Velocity does write in there (bStats).
+
 ## What each row asserts
 
 1. The server starts and the plugin logs its enable banner, within `SMOKE_BOOT_TIMEOUT`.
@@ -82,6 +92,21 @@ would be muted within a week.
 What is left is: a log line naming Heimdall at `ERROR` or worse, a stack frame in `com.heimdall.`,
 and the two messages Bukkit prints when a plugin fails to load or throws in `onEnable`/`onDisable`.
 The pattern lives in `lib.sh` as `HEIMDALL_ERROR_PATTERN`.
+
+## The assertions are themselves tested
+
+```bash
+smoke/run.sh --selftest      # no Docker needed; CI runs it before the matrix fans out
+```
+
+Every assertion here is a grep, and **a grep that matches nothing is indistinguishable from a clean
+server log**. So the patterns are pointed at lines that must trip them and at real noise from a
+passing run that must not, and the row records are checked for shape.
+
+That is not decorative rigour. The first version of `HEIMDALL_ERROR_PATTERN` used `[^\n]*`, which in
+a POSIX bracket expression means "not a backslash and not the letter `n`" — so it silently failed to
+match `Could not enable Heimdall` and most of what it was written to catch. Nothing about a passing
+smoke run would ever have revealed it.
 
 ## Phase 1
 

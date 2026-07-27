@@ -7,6 +7,7 @@
 #   smoke/run.sh all
 #   smoke/run.sh paper-1.8.8     # one row (what CI runs, one row per runner)
 #   smoke/run.sh --list
+#   smoke/run.sh --selftest      # verify the log assertions themselves; needs no Docker
 #
 # Phase 0 asserts load and unload only. The plugin does not dial the bot yet, so there is nothing
 # to point at a stub bot and nothing to assert about a tunnel; smoke/docker-compose.yml has that
@@ -74,6 +75,100 @@ ROWS=(
     "velocity-3.4.0|itzg/mc-proxy:2026.7.1-java17|VELOCITY|3.4.0|velocity|1G"
     "velocity-3.5.1|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G"
 )
+
+# ── Self-test ────────────────────────────────────────────────────────────────────────────────
+#
+# Every assertion this harness makes is a grep, and a grep that matches nothing is
+# indistinguishable from a clean server log. So the patterns are pointed at lines that MUST trip
+# them and at real noise that must NOT, and that runs in CI without Docker.
+#
+# This is not hypothetical rigour. The first version of HEIMDALL_ERROR_PATTERN used `[^\n]*`, which
+# in a POSIX bracket expression means "not a backslash and not the letter n" — so it silently failed
+# to match `Could not enable Heimdall` and most of what it was written to catch. Nothing about a
+# passing smoke run would ever have revealed that.
+
+# Sample lines that MUST be flagged as our fault.
+readonly SELFTEST_ERRORS=(
+    "[13:48:25 ERROR]: Could not enable Heimdall v3.0.0-SNAPSHOT"
+    "[13:48:25 SEVERE]: Error occurred while enabling Heimdall v3.0.0-SNAPSHOT (Is it up to date?)"
+    "[13:48:25 ERROR]: Error occurred while disabling Heimdall v3.0.0-SNAPSHOT"
+    "	at com.heimdall.platform.bukkit.HeimdallBukkitPlugin.onEnable(HeimdallBukkitPlugin.java:20)"
+    "[13:48:25 ERROR]: Could not load 'plugins/heimdall-whitelist-3.0.0-SNAPSHOT.jar' in folder 'plugins'"
+    "[13:48:25 WARN]: Heimdall threw a java.lang.NullPointerException"
+)
+
+# Real lines from the captured logs of a PASSING run. Flagging any of these makes the check useless.
+readonly SELFTEST_CLEAN=(
+    "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT (phase 0 scaffold) on 1.21.8-60-29c8822 (MC: 1.21.8)"
+    "[13:50:13 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down"
+    "[13:51:44 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT (phase 0 scaffold) on Velocity 3.4.0"
+    "[13:50:05 WARN]: [Heimdall] Legacy plugin detected: it has not specified an api-version"
+    "[13:49:18 INFO]: Thread RCON Client /0:0:0:0:0:0:0:1 shutting down"
+    "[13:50:01 ERROR]: Failed to fetch telemetry from api.mojang.com"
+    "[13:50:01 ERROR]: Could not load 'plugins/SomeOtherPlugin.jar' in folder 'plugins'"
+)
+
+expect_match() {
+    local pattern="$1" line="$2" want="$3" label="$4"
+    if printf '%s\n' "${line}" | grep -Eq "${pattern}"; then
+        [ "${want}" = "yes" ] && return 0
+        fail "${label}: matched but should not have"
+    else
+        [ "${want}" = "no" ] && return 0
+        fail "${label}: did not match but should have"
+    fi
+    printf '       line: %s\n' "${line}" >&2
+    return 1
+}
+
+selftest() {
+    local failures=0 line
+
+    for line in "${SELFTEST_ERRORS[@]}"; do
+        expect_match "${HEIMDALL_ERROR_PATTERN}" "${line}" yes "error detector" || failures=$((failures + 1))
+    done
+    for line in "${SELFTEST_CLEAN[@]}"; do
+        expect_match "${HEIMDALL_ERROR_PATTERN}" "${line}" no "error detector" || failures=$((failures + 1))
+    done
+
+    expect_match "${ENABLE_PATTERN}" \
+        "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT (phase 0 scaffold) on 1.21.8-60-29c8822 (MC: 1.21.8)" \
+        yes "enable banner (bukkit)" || failures=$((failures + 1))
+    expect_match "${ENABLE_PATTERN}" \
+        "[13:51:44 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT (phase 0 scaffold) on Velocity 3.4.0" \
+        yes "enable banner (velocity)" || failures=$((failures + 1))
+    expect_match "${DISABLE_PATTERN}" \
+        "[13:50:13 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down" \
+        yes "disable banner" || failures=$((failures + 1))
+    # A near-miss that really appears in the 1.16.5 log — the disable check must not accept it.
+    expect_match "${DISABLE_PATTERN}" \
+        "[13:49:18 INFO]: Thread RCON Client /0:0:0:0:0:0:0:1 shutting down" \
+        no "disable banner vs the RCON thread's own shutdown line" || failures=$((failures + 1))
+    expect_match "${VELOCITY_SHUTDOWN_PATTERN}" \
+        "[13:51:47 INFO]: Shutting down the proxy..." \
+        yes "velocity graceful shutdown" || failures=$((failures + 1))
+
+    # The rows themselves have to be well-formed, since a typo in a 6-field record would otherwise
+    # surface as a confusing docker error many minutes into a run.
+    local row name image type version platform memory
+    for row in "${ROWS[@]}"; do
+        IFS='|' read -r name image type version platform memory <<<"${row}"
+        if [ -z "${name}" ] || [ -z "${image}" ] || [ -z "${type}" ] || [ -z "${version}" ] \
+                || [ -z "${memory}" ]; then
+            fail "malformed row: ${row}"
+            failures=$((failures + 1))
+        elif [ "${platform}" != "bukkit" ] && [ "${platform}" != "velocity" ]; then
+            fail "row ${name} has unknown platform '${platform}'"
+            failures=$((failures + 1))
+        fi
+    done
+
+    if [ "${failures}" -ne 0 ]; then
+        fail "${failures} self-test assertion(s) failed"
+        return 1
+    fi
+    pass "self-test: patterns fire on ${#SELFTEST_ERRORS[@]} error lines, stay quiet on ${#SELFTEST_CLEAN[@]} clean ones, ${#ROWS[@]} rows well-formed"
+}
 
 row_names() {
     local row
@@ -167,9 +262,24 @@ row_body() {
             -e SPAWN_PROTECTION=0
             -e ENABLE_RCON=true
             -e RCON_PASSWORD=smoke
-            -v "$(host_path "${work}/plugins"):/data/plugins:rw"
+            # Mounted READ-ONLY at the image's staging path, not straight onto /data/plugins.
+            #
+            # Modern Paper writes into its own plugins directory — it creates
+            # plugins/.paper-remapped before it loads anything. A host bind mount there is owned by
+            # the host user, the server runs as uid 1000, and the boot dies with
+            # AccessDeniedException before the plugin is ever considered. That is invisible under
+            # rootless Podman, which maps the host user into the container, and it is exactly how
+            # this row passed locally and failed on CI.
+            #
+            # itzg copies /plugins into a container-owned /data/plugins on start (COPY_PLUGINS_SRC
+            # defaults to /plugins), so using the designed path fixes ownership for every row and
+            # keeps the host copy immutable as a bonus.
+            -v "$(host_path "${work}/plugins"):/plugins:ro"
         )
     else
+        # mc-proxy has no staging-copy step, but it also runs as root, so a writable bind mount
+        # straight onto its plugins directory has none of the ownership problem the Bukkit rows
+        # have. Velocity does write in there (bStats), hence rw rather than ro.
         docker_args=(
             run -d --name "${container}"
             -e "TYPE=${type}"
@@ -266,6 +376,11 @@ main() {
     if [ "${target}" = "--list" ] || [ "${target}" = "-l" ]; then
         row_names
         return 0
+    fi
+    # No Docker needed, so CI runs this alongside the matrix generation.
+    if [ "${target}" = "--selftest" ]; then
+        selftest
+        return $?
     fi
     if [ "${target}" = "--help" ] || [ "${target}" = "-h" ]; then
         sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'

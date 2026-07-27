@@ -55,12 +55,19 @@ wait_for_exit() {
 
 # Lines in the server log that are our fault.
 #
-# Deliberately narrow. A smoke run over five server generations picks up plenty of noise that has
+# Deliberately narrow. A smoke run over six server generations picks up plenty of noise that has
 # nothing to do with us — deprecation warnings, missing optional dependencies, Mojang telemetry
-# that cannot reach the network — and a check that fails on all of it gets muted within a week.
+# that cannot reach the network, and on modern Paper a legacy-plugin warning caused by our
+# deliberate omission of api-version. A check that fails on all of that gets muted within a week.
 # What is left is: a log line naming Heimdall at ERROR or worse, a stack frame in our package, and
 # the two messages Bukkit prints when a plugin fails to load or blows up in onEnable/onDisable.
-HEIMDALL_ERROR_PATTERN='(ERROR|SEVERE|FATAL)[^\n]*[Hh]eimdall|[Hh]eimdall[^\n]*(Exception|Error occurred)|at com\.heimdall\.|Could not load '\''?plugins[/\\][^'\'']*[Hh]eimdall|Error occurred while (enabling|disabling) Heimdall'
+#
+# `.*` and not `[^\n]*`: grep is line-oriented, so `.` already cannot cross a newline — while in a
+# POSIX bracket expression `\n` is not an escape at all, it is the two literal characters, so
+# `[^\n]*` actually means "any run without a backslash or the letter n". That silently refused to
+# match half the lines it was written to catch (`Could not enable Heimdall` has an `n` in it), and
+# the failure mode was a detector that quietly found nothing. --selftest exists because of this.
+HEIMDALL_ERROR_PATTERN='(ERROR|SEVERE|FATAL).*[Hh]eimdall|[Hh]eimdall.*(Exception|Error occurred)|at com\.heimdall\.|Could not load '\''?plugins[/\\].*[Hh]eimdall|Error occurred while (enabling|disabling) Heimdall'
 
 # Fails if the log contains an error attributable to the plugin.
 assert_no_heimdall_errors() {
