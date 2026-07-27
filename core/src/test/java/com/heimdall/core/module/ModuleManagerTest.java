@@ -14,6 +14,7 @@ import com.heimdall.core.pipeline.ChatPipeline;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.remoteconfig.ConfigDocument;
 import com.heimdall.core.remoteconfig.RemoteConfig;
+import com.heimdall.core.testing.FakePlatform;
 import com.heimdall.core.tunnel.Capabilities;
 import com.heimdall.core.tunnel.ProtocolMode;
 import java.nio.file.Path;
