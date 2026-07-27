@@ -376,10 +376,10 @@ class PipelineTest {
             // protected members, and a buffer added to the shared Pipeline base class would be just
             // as much of a chat log as one added here.
             for (java.lang.reflect.Method method : type.getDeclaredMethods()) {
-                if (method.isSynthetic() || mentionsChatMessage(method.getGenericReturnType())) {
-                    if (!method.isSynthetic()) {
-                        accessors.add(type.getSimpleName() + "." + method.getName());
-                    }
+                // Synthetic members are the compiler's, not the API's: a lambda body or a bridge
+                // method is not a way anyone can read a message back out.
+                if (!method.isSynthetic() && mentionsChatMessage(method.getGenericReturnType())) {
+                    accessors.add(type.getSimpleName() + "." + method.getName());
                 }
             }
         }
