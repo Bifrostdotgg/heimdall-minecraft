@@ -271,6 +271,51 @@ selftest() {
     expect_match "${RUNNER_KILL_PATTERN}"         "[13:49:18 ERROR]: mc-server-runner  Failed to stop using rcon-cli"         yes "console fallback: what the harness must NOT cause" || failures=$((failures + 1))
     expect_match "${DISABLE_PATTERN}"         "[13:50:13 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down"         yes "console fallback: a console stop still runs the shutdown handler"         || failures=$((failures + 1))
 
+    # The exit-timeout attribution, which is the piece that was missing entirely: its bare failure
+    # bypassed every other attribution in this file, so two CI runs blamed the plugin for a slow
+    # container exit. Each case is driven from a real log shape and the CLAIM is what is asserted —
+    # a check that only asserted "it failed" would have passed against the broken version too.
+    local attribution_dir
+    attribution_dir="$(mktemp -d)"
+
+    printf '%s
+'         '[13:50:13 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down'         >"${attribution_dir}/clean-unload.log"
+    local attribution_says
+    # Captured rather than piped: `set -o pipefail` is on and attribute_exit_timeout always returns
+    # 1 (the row failed either way), so a pipeline would report the function's status instead of
+    # grep's and every one of these would "fail" whatever it printed.
+    attribution_says="$(attribute_exit_timeout "${attribution_dir}/clean-unload.log" c 120 2>&1 || true)"
+    if printf '%s' "${attribution_says}" | grep -q "the plugin's disable"; then
+        pass "exit-timeout attribution: a clean unload is not blamed on the plugin"
+    else
+        fail "exit-timeout attribution: a log containing the disable banner must not read as a"
+        fail "plugin failure — that is the misattribution this exists to stop"
+        failures=$((failures + 1))
+    fi
+
+    printf '%s
+'         "ERROR mc-server-runner  Took too long, so killing server process"         >"${attribution_dir}/runner-kill.log"
+    attribution_says="$(attribute_exit_timeout "${attribution_dir}/runner-kill.log" c 120 2>&1 || true)"
+    if printf '%s' "${attribution_says}" | grep -q "killed the process"; then
+        pass "exit-timeout attribution: a runner kill is named as one"
+    else
+        fail "exit-timeout attribution: a runner-kill signature must be reported as the harness"
+        failures=$((failures + 1))
+    fi
+
+    printf '%s
+' '[13:48:20 INFO]: Preparing spawn area: 36%%'         >"${attribution_dir}/inconclusive.log"
+    attribution_says="$(attribute_exit_timeout "${attribution_dir}/inconclusive.log" c 120 2>&1 || true)"
+    if printf '%s' "${attribution_says}" | grep -q "nothing has been proven"; then
+        pass "exit-timeout attribution: an incomplete shutdown is called inconclusive"
+    else
+        fail "exit-timeout attribution: with no banner and no kill signature the honest answer is"
+        fail "'inconclusive', not 'the plugin regressed'"
+        failures=$((failures + 1))
+    fi
+
+    rm -rf "${attribution_dir}"
+
     # The rows themselves have to be well-formed, since a typo in a 6-field record would otherwise
     # surface as a confusing docker error many minutes into a run.
     local row name image type version platform memory
@@ -439,21 +484,34 @@ row_body() {
     # a missing plugin: the server starts loading a jar whose entries are not all there yet and dies
     # with ClassNotFoundException, which reads exactly like a broken shaded jar. It vanishes on
     # retry, which is the worst possible property for a failure to have.
+    #
+    # The barrier compares the file's SIZE, not merely that it is non-empty. `test -s` passes on a
+    # partially-propagated jar — one byte is enough — so the check it replaced could be satisfied by
+    # exactly the half-written file it exists to wait for, and would then hand the server a truncated
+    # archive. Comparing against the host's byte count is the cheapest thing that cannot be true
+    # early. (It can still be true for a jar whose bytes differ but whose length matches; that would
+    # need a hash, and a share that reorders content without changing length is not a failure mode
+    # any of these daemons has.)
     local mount_path="/plugins"
     [ "${platform}" = "velocity" ] && mount_path="/server/plugins"
-    local jar_name
+    local jar_name host_size
     jar_name="$(basename "${jar}")"
-    local visible=0 mount_deadline=$(( $(date +%s) + 60 ))
+    host_size="$(wc -c <"${jar}" | tr -d '[:space:]')"
+    local visible=0 seen_size="" mount_deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "${mount_deadline}" ]; do
-        if timeout 15 docker exec "${container}" test -s "${mount_path}/${jar_name}" 2>/dev/null; then
+        seen_size="$(timeout 15 docker exec "${container}" \
+            sh -c "wc -c <'${mount_path}/${jar_name}' 2>/dev/null" 2>/dev/null \
+            | tr -d '[:space:]')"
+        if [ -n "${seen_size}" ] && [ "${seen_size}" = "${host_size}" ]; then
             visible=1
             break
         fi
         sleep 2
     done
     if [ "${visible}" -ne 1 ]; then
-        fail "HARNESS: ${jar_name} never became visible at ${mount_path} inside the container —"
-        fail "the bind mount did not propagate, so nothing has been proven about the plugin"
+        fail "HARNESS: ${jar_name} never became fully visible at ${mount_path} inside the container"
+        fail "(host ${host_size} bytes, container ${seen_size:-absent}) — the bind mount did not"
+        fail "propagate, so nothing has been proven about the plugin"
         dump_log "${log_file}"
         return 1
     fi
@@ -606,6 +664,10 @@ row_body() {
     fi
 
     if ! wait_for_exit "${container}" "${STOP_TIMEOUT}"; then
+        # Attributed rather than blamed. This assertion runs BEFORE the disable-banner checks below,
+        # so a bare failure here bypasses all of their attribution and a slow container exit reads
+        # as a plugin regression — which is exactly what it did, twice, in CI.
+        attribute_exit_timeout "${log_file}" "${container}" "${STOP_TIMEOUT}"
         dump_log "${log_file}"
         return 1
     fi

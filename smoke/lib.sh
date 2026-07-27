@@ -76,6 +76,11 @@ container_uid() {
 }
 
 # Waits for a container to stop running. Returns 1 on timeout.
+#
+# Deliberately says nothing about WHOSE fault a timeout is. It cannot know: a container that is
+# still running after the stop budget may be a server the harness never managed to stop, or one
+# whose shutdown is merely slow, and neither is a plugin regression. The caller has the captured log
+# and attributes it — see attribute_exit_timeout.
 wait_for_exit() {
     local container="$1" timeout="$2"
     local deadline=$(( $(date +%s) + timeout ))
@@ -85,7 +90,6 @@ wait_for_exit() {
         fi
         sleep 2
     done
-    fail "container ${container} did not exit within ${timeout}s"
     return 1
 }
 
@@ -135,6 +139,45 @@ explain_runner_kill() {
     fail "so no shutdown code — the plugin's included — ever got the chance to run. This is an"
     fail "infrastructure failure of the stop path, not a plugin regression:"
     grep -En "${RUNNER_KILL_PATTERN}" "$file" >&2 || true
+}
+
+# Says who is to blame when the container never exited, using the log already captured.
+#
+# This is the gap that produced two red CI runs attributed to the plugin. The exit wait ran BEFORE
+# the disable-banner assertions, so its bare failure bypassed every piece of attribution the harness
+# has and a slow container exit read as "the plugin did not unload" — with no HARNESS prefix, and
+# therefore with nobody looking at the harness.
+#
+# Three outcomes, in the order they can be distinguished:
+#
+#   1. a runner-kill signature — the stop path failed and killed the process. Harness.
+#   2. the plugin's disable banner is present — Heimdall unloaded cleanly and the SERVER is what
+#      failed to exit. Also the harness's problem (or the image's); the plugin did its part, and
+#      saying otherwise sends somebody looking through plugin code for a container lifecycle bug.
+#   3. neither — genuinely inconclusive. Say that, rather than picking the more convenient story.
+#      A shutdown that never started tells you nothing about whether it would have worked.
+#
+# Always returns 1: the row failed either way. What changes is what the failure claims.
+attribute_exit_timeout() {
+    local file="$1" container="$2" timeout="$3"
+
+    if explain_runner_kill "$file"; then
+        fail "HARNESS: ${container} was still running after ${timeout}s, having been killed above."
+        return 1
+    fi
+
+    if [ -f "$file" ] && grep -Eq "${DISABLE_PATTERN}" "$file"; then
+        fail "HARNESS: ${container} did not exit within ${timeout}s, but the plugin's disable"
+        fail "banner IS in the log — Heimdall unloaded cleanly and the server process is what"
+        fail "outlived its own shutdown. This is a container/image problem, not a plugin one:"
+        grep -En "${DISABLE_PATTERN}" "$file" >&2 || true
+        return 1
+    fi
+
+    fail "HARNESS: ${container} did not exit within ${timeout}s and never logged a disable banner."
+    fail "The shutdown did not complete, so nothing has been proven about the plugin either way —"
+    fail "do not read this as a plugin regression. Raise SMOKE_STOP_TIMEOUT or check the daemon."
+    return 1
 }
 
 # Waits for the `docker logs -f` follower to exit, so the captured log is complete.
