@@ -26,6 +26,7 @@
 #   SMOKE_STUB_DIST       stub-bot installDist directory (default: stub-bot/build/install/stub-bot)
 #   SMOKE_BOOT_TIMEOUT    seconds to wait for the enable banner (default 240)
 #   SMOKE_STOP_TIMEOUT    seconds to wait for a graceful stop (default 120)
+#   SMOKE_RCON_TIMEOUT    seconds to wait for RCON to answer before SIGTERM (default 120)
 #   SMOKE_KEEP            1 = leave containers and work dirs behind for inspection
 set -Eeuo pipefail
 
@@ -36,6 +37,7 @@ source "${SCRIPT_DIR}/lib.sh"
 
 BOOT_TIMEOUT="${SMOKE_BOOT_TIMEOUT:-240}"
 STOP_TIMEOUT="${SMOKE_STOP_TIMEOUT:-120}"
+RCON_TIMEOUT="${SMOKE_RCON_TIMEOUT:-120}"
 WORK_ROOT="${SCRIPT_DIR}/.work-connected"
 
 # The guild the stub answers `identify` with, and the shared HMAC secret. Both are stub-bot's own
@@ -54,8 +56,13 @@ GUILD_RESOLVED_PATTERN="resolved guild ${STUB_GUILD} from this server's token"
 # The v3 handshake completed. Departure D51 is a pair of misreads that each turned a perfectly good
 # v3 bot into a silent v2-compat downgrade, and both were invisible to every unit test we had.
 NEGOTIATED_PATTERN='tunnel negotiated protocol v3'
-# The whitelist pre-warm actually ran and reconciled rows. MirrorStore logs this itself.
-MIRROR_PATTERN='Mirror reconcile \(whitelist-mirror'
+# The whitelist pre-warm actually ran AND took rows.
+#
+# The `[1-9]` is the assertion. `Mirror reconcile (whitelist-mirror.json): 0 added, 0 refreshed,
+# 0 pruned (0 held)` is a perfectly well-formed line that a poll against an empty or unreachable
+# whitelist produces, so a pattern matching the prefix alone passes on a sync that fetched nothing —
+# which is the state this row exists to distinguish from a working one.
+MIRROR_PATTERN='Mirror reconcile \(whitelist-mirror\.json\): [1-9][0-9]* added'
 
 # ── What the stub must say ───────────────────────────────────────────────────────────────────
 
@@ -67,6 +74,13 @@ STUB_CONFIG_ACKED_PATTERN="config acked by ${STUB_SERVER_ID} at version"
 # Console streaming, end to end: the module batched lines off the server's own log4j tap and the
 # stub received the frame. Only visible with STUB_BOT_VERBOSE=true, which this harness sets.
 STUB_CONSOLE_PATTERN='ws recv console_line'
+# The whitelist sync really crossed the wire, as a signed request the stub accepted. The plugin's
+# own "Mirror reconcile" line proves it processed a response; only the stub can prove it asked.
+STUB_SYNC_PATTERN="GET /api/guilds/${STUB_GUILD}/minecraft/whitelist/sync"
+# The tunnel was still live at shutdown and closed deliberately. Without this the "disabled cleanly
+# with a live tunnel" claim rests on the disable banner alone, which says nothing about the tunnel —
+# a socket that had already dropped ten minutes earlier would look identical.
+STUB_CLEAN_CLOSE_PATTERN="ws disconnected: guild=${STUB_GUILD} server=${STUB_SERVER_ID}.*Plugin shutting down"
 
 # The plugin's own banners, shared with run.sh. Kept in step by the self-test below.
 ENABLE_PATTERN='Heimdall v[0-9][^ ]* enabled'
@@ -104,7 +118,12 @@ trap 'cleanup_on_signal TERM' TERM
 #
 # Same discipline as run.sh's: every assertion here is a grep, and a grep that matches nothing looks
 # exactly like a clean log. Each pattern is pointed at the real line it must catch and at the
-# nearest line it must NOT, and this runs in CI without Docker.
+# nearest line it must NOT.
+#
+# This runs in CI without Docker, in the `smoke-matrix` job alongside run.sh's own self-test, so a
+# broken pattern fails the build before any runner starts a server. The sample lines are copied out
+# of smoke/.work-connected from a green run rather than written from memory — a fabricated sample
+# only proves that the pattern matches the sample.
 
 selftest() {
     local failures=0
@@ -167,11 +186,64 @@ selftest() {
         "[stub-bot] ws recv health id=abc from ${STUB_SERVER_ID}" \
         no "console_line vs the heartbeat's health frame" || failures=$((failures + 1))
 
+    # Every sample below is copied verbatim out of smoke/.work-connected from a green run, not
+    # written from memory. A fabricated sample proves the pattern matches the sample.
+    check_match "${STUB_SYNC_PATTERN}" \
+        "[stub-bot 22:41:04.195] DEBUG GET /api/guilds/${STUB_GUILD}/minecraft/whitelist/sync" \
+        yes "stub served the whitelist sync" || failures=$((failures + 1))
+    check_match "${STUB_SYNC_PATTERN}" \
+        "[stub-bot 22:41:04.195] DEBUG POST /api/guilds/${STUB_GUILD}/minecraft/connection-attempt" \
+        no "whitelist sync vs another signed route" || failures=$((failures + 1))
+    check_match "${STUB_CLEAN_CLOSE_PATTERN}" \
+        "[stub-bot 22:34:48.206] ws disconnected: guild=${STUB_GUILD} server=${STUB_SERVER_ID} code=1000 reason=Plugin shutting down" \
+        yes "tunnel closed deliberately at shutdown" || failures=$((failures + 1))
+    check_match "${STUB_CLEAN_CLOSE_PATTERN}" \
+        "[stub-bot 22:34:48.206] ws disconnected: guild=${STUB_GUILD} server=${STUB_SERVER_ID} code=1001 reason=Heartbeat timeout" \
+        no "a deliberate close vs a link that had already died" || failures=$((failures + 1))
+
+    # The three banners this script greps but never checked. run.sh covers its own copies; these are
+    # separate constants in a separate file, and a divergence between them is invisible until a row
+    # times out waiting for a line the plugin stopped printing in that exact shape.
+    check_match "${ENABLE_PATTERN}" \
+        "[22:41:03 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT enabled — role standalone, ticks via paper (tps+mspt), console tap on" \
+        yes "enable banner (bukkit)" || failures=$((failures + 1))
+    check_match "${ENABLE_PATTERN}" \
+        "[22:34:45 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT enabled — role gatekeeper, text bridge ok, console tap on" \
+        yes "enable banner (velocity)" || failures=$((failures + 1))
+    check_match "${DISABLE_PATTERN}" \
+        "[22:41:07 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down" \
+        yes "disable banner" || failures=$((failures + 1))
+    check_match "${DISABLE_PATTERN}" \
+        "[13:49:18 INFO]: Thread RCON Client /0:0:0:0:0:0:0:1 shutting down" \
+        no "disable banner vs the RCON thread's own shutdown line" || failures=$((failures + 1))
+    check_match "${READY_PATTERN}" \
+        '[22:41:04 INFO]: Done (42.045s)! For help, type "help"' \
+        yes "ready line (bukkit)" || failures=$((failures + 1))
+    check_match "${READY_PATTERN}" "[22:34:45 INFO]: Done (1.12s)!" \
+        yes "ready line (velocity)" || failures=$((failures + 1))
+    check_match "${READY_PATTERN}" "[22:40:20 INFO]: Preparing spawn area: 36%" \
+        no "ready line vs mid-boot progress" || failures=$((failures + 1))
+
+    # The mirror pattern's whole point is the non-zero count, so both sides are pinned.
+    check_match "${MIRROR_PATTERN}" \
+        "[22:41:04 INFO]: [Heimdall] [whitelist] Mirror reconcile (whitelist-mirror.json): 2 added, 0 refreshed, 0 pruned (2 held)" \
+        yes "mirror reconcile with rows" || failures=$((failures + 1))
+    check_match "${MIRROR_PATTERN}" \
+        "[22:41:04 INFO]: [Heimdall] [whitelist] Mirror reconcile (whitelist-mirror.json): 0 added, 0 refreshed, 0 pruned (0 held)" \
+        no "a reconcile that took nothing proves nothing" || failures=$((failures + 1))
+
     local row name image type version platform memory
     for row in "${ROWS[@]}"; do
         IFS='|' read -r name image type version platform memory <<<"${row}"
-        if [ -z "${name}" ] || [ -z "${image}" ] || [ -z "${platform}" ]; then
+        if [ -z "${name}" ] || [ -z "${image}" ] || [ -z "${type}" ] || [ -z "${version}" ] \
+                || [ -z "${memory}" ]; then
             fail "malformed row: ${row}"
+            failures=$((failures + 1))
+        elif [ "${platform}" != "bukkit" ] && [ "${platform}" != "velocity" ]; then
+            # Every platform branch in this file is an if/else on these two strings, so a third
+            # value does not fail — it silently takes the velocity path, mounts the wrong
+            # directory, and reports a plugin that would not load.
+            fail "row ${name} has unknown platform '${platform}'"
             failures=$((failures + 1))
         fi
     done
@@ -212,13 +284,23 @@ find_stub() {
 
 # Writes the bootstrap the plugin will boot with.
 #
-# Deliberately NO guildId. That is what forces the discovery path (departure D54) and makes
-# GUILD_RESOLVED_PATTERN an assertion about the identify endpoint rather than about a cached value —
-# and it is also what a real fresh install looks like the moment after it is claimed.
+# Deliberately NO guildIdCache. That is what forces the discovery path (departure D54) and makes
+# GUILD_RESOLVED_PATTERN an assertion about the identify endpoint rather than about a value the
+# plugin cached on a previous run — and it is also what a real fresh install looks like the moment
+# after it is claimed.
+#
+# CHECKED, not assumed. Both writes below used to be bare, and `set -e` does not help: row_body's
+# result is tested by the caller, which disables errexit for everything inside it. A failed write
+# therefore sailed on and the row reported "the plugin never resolved its guild", which is a
+# plugin-shaped verdict for a harness-shaped problem — the same misattribution the exit-timeout
+# work fixed one level up.
 write_bootstrap() {
     local target="$1"
-    mkdir -p "$(dirname "${target}")"
-    cat >"${target}" <<YAML
+    if ! mkdir -p "$(dirname "${target}")"; then
+        fail "HARNESS: could not create $(dirname "${target}")"
+        return 1
+    fi
+    if ! cat >"${target}" <<YAML
 endpoint: "http://stub-bot:8080"
 tokenId: "smoke-token"
 token: "${STUB_SECRET}"
@@ -226,6 +308,46 @@ serverId: "${STUB_SERVER_ID}"
 role: "auto"
 debug: true
 YAML
+    then
+        fail "HARNESS: could not write ${target}"
+        return 1
+    fi
+    return 0
+}
+
+# Deletes a work directory that a container may have written into as root.
+#
+# This is B4, and it is the assertion-disarming kind of bug. The Bukkit row mounts its work
+# directory at /data/plugins, where the server runs as uid 1000 and Paper writes .paper-remapped —
+# so on Linux CI a host-side `rm -rf` fails with EPERM on files the runner does not own. The row
+# then reuses the PREVIOUS run's directory, which already contains a bootstrap.yml carrying a
+# guildIdCache and a config-cache.json. Both of the things this scenario exists to prove are
+# skipped: discovery never runs because the guild is already known (D54), and the capability
+# deadlock that D55 fixed cannot recur because the cached config enables the modules anyway.
+#
+# A green row that proved neither of its two headline claims is worse than a red one.
+#
+# So the delete happens from inside a throwaway container running as root, which can remove
+# anything under the mount. The host-side rm stays as the fast path and for the directories no
+# container ever touched.
+purge_work_dir() {
+    local dir="$1"
+    [ -e "${dir}" ] || return 0
+    rm -rf "${dir}" 2>/dev/null || true
+    [ -e "${dir}" ] || return 0
+
+    docker run --rm -v "$(host_path "${dir}"):/purge" eclipse-temurin:21-jre \
+        sh -c 'rm -rf /purge/..?* /purge/.[!.]* /purge/* 2>/dev/null || true' >/dev/null 2>&1 || true
+    rmdir "${dir}" 2>/dev/null || true
+
+    # Emptied is enough — the directory itself is recreated immediately below. What must not survive
+    # is a bootstrap.yml or a config cache from a previous run.
+    if [ -n "$(ls -A "${dir}" 2>/dev/null || true)" ]; then
+        fail "HARNESS: could not clear ${dir}; a previous run's bootstrap.yml or config cache would"
+        fail "be reused, which silently skips the guild-discovery and capability assertions"
+        return 1
+    fi
+    return 0
 }
 
 # ── One row ──────────────────────────────────────────────────────────────────────────────────
@@ -263,8 +385,13 @@ row_body() {
 
     docker rm -f "${server_container}" "${stub_container}" >/dev/null 2>&1 || true
     docker network rm "${network}" >/dev/null 2>&1 || true
-    rm -rf "${work}"
-    mkdir -p "${work}/plugins"
+    if ! purge_work_dir "${work}"; then
+        return 1
+    fi
+    if ! mkdir -p "${work}/plugins"; then
+        fail "HARNESS: could not create ${work}/plugins"
+        return 1
+    fi
     if ! cp "${jar}" "${work}/plugins/"; then
         fail "HARNESS: could not stage the jar into ${work}/plugins"
         return 1
@@ -321,7 +448,10 @@ row_body() {
         # host side. That is safe here and nowhere near production: this directory is created and
         # deleted by this script. Mounting only /data/plugins/Heimdall does NOT work — Docker then
         # creates the /data/plugins parent as root, and Paper fails exactly as described above.
-        write_bootstrap "${work}/data-plugins/Heimdall/bootstrap.yml"
+        if ! write_bootstrap "${work}/data-plugins/Heimdall/bootstrap.yml"; then
+            kill "${stub_tail}" 2>/dev/null || true
+            return 1
+        fi
         if ! cp "${jar}" "${work}/data-plugins/"; then
             fail "HARNESS: could not stage the jar into ${work}/data-plugins"
             kill "${stub_tail}" 2>/dev/null || true
@@ -340,12 +470,26 @@ row_body() {
         # The proxy image runs as root and writes into its plugins directory, so one writable mount
         # carries both the jar and the plugin's own data directory. Velocity's data directory is
         # named after the plugin id, which is lower-case `heimdall`.
-        write_bootstrap "${work}/plugins/heimdall/bootstrap.yml"
+        if ! write_bootstrap "${work}/plugins/heimdall/bootstrap.yml"; then
+            kill "${stub_tail}" 2>/dev/null || true
+            return 1
+        fi
         docker_args=(
             run -d --name "${server_container}" --network "${network}"
             -e "TYPE=${type}" -e "VELOCITY_VERSION=${version}" -e "MEMORY=${memory}"
             -v "$(host_path "${work}/plugins"):/server/plugins:rw"
         )
+    fi
+
+    # The premise, asserted rather than assumed. If a previous run's cache survived, the two
+    # headline claims below are silently vacuous — so this is checked here, where it is a harness
+    # failure, instead of being discovered as a mysteriously fast "guild resolved".
+    if grep -q "guildIdCache" "${work}"/*/Heimdall/bootstrap.yml \
+            "${work}"/*/heimdall/bootstrap.yml 2>/dev/null; then
+        fail "HARNESS: the bootstrap.yml carries a cached guild, so the discovery assertion would"
+        fail "pass without the identify endpoint ever being called"
+        kill "${stub_tail}" 2>/dev/null || true
+        return 1
     fi
 
     if ! docker "${docker_args[@]}" "${image}" >/dev/null; then
@@ -361,8 +505,30 @@ row_body() {
 
     # Stop the server first, so its disable banner and the stub's disconnect line both land.
     if [ "${platform}" = "bukkit" ]; then
-        docker_exec "${server_container}" 30 rcon-cli stop >/dev/null 2>&1 \
-            || docker stop -t "${STOP_TIMEOUT}" "${server_container}" >/dev/null
+        # Readiness and the action are separate commands, copied from run.sh where the separation
+        # cost five red runs to learn. Retrying `stop` conflates two outcomes it cannot tell apart:
+        # "RCON is not up yet" and "the stop was accepted and the connection dropped because the
+        # server is shutting down". The second is the NORMAL case, so a retry loop reports failures,
+        # falls through to SIGTERM against a server already on its way down, and the row dies on a
+        # missing disable banner that was never the plugin's fault.
+        #
+        # RCON opens some time AFTER the Done line, and on a loaded runner that gap has been seen
+        # past 30s — so the budget is generous and `list` is what is polled, being idempotent.
+        log "waiting for rcon to answer (budget ${RCON_TIMEOUT}s)"
+        local rcon_deadline=$(( $(date +%s) + RCON_TIMEOUT )) rcon_ready=0
+        while [ "$(date +%s)" -lt "${rcon_deadline}" ]; do
+            if timeout 20 docker exec "${server_container}" rcon-cli list >/dev/null 2>&1; then
+                rcon_ready=1
+                break
+            fi
+            sleep 3
+        done
+        if [ "${rcon_ready}" -eq 1 ]; then
+            timeout 30 docker exec "${server_container}" rcon-cli stop >/dev/null 2>&1 || true
+        else
+            warn "rcon never answered within ${RCON_TIMEOUT}s; falling back to SIGTERM"
+            docker stop -t "${STOP_TIMEOUT}" "${server_container}" >/dev/null
+        fi
     else
         docker stop -t "${STOP_TIMEOUT}" "${server_container}" >/dev/null
     fi
@@ -376,6 +542,11 @@ row_body() {
         if ! wait_for_pattern "${server_log}" "${DISABLE_PATTERN}" 30 "the plugin's disable banner"; then
             explain_runner_kill "${server_log}" \
                 || fail "no disable banner — the shutdown handler did not run, or threw first"
+            rc=1
+        elif ! wait_for_pattern "${stub_log}" "${STUB_CLEAN_CLOSE_PATTERN}" 30 \
+                "the stub to see the tunnel closed deliberately"; then
+            fail "the plugin logged its disable banner, but the stub never saw a deliberate close —"
+            fail "so 'with a live tunnel' is unproven: the socket may have dropped long before"
             rc=1
         else
             pass "plugin disabled cleanly with a live tunnel"
@@ -433,8 +604,13 @@ assert_row() {
     fi
     pass "config pushed and acked"
 
+    if ! wait_for_pattern "${stub_log}" "${STUB_SYNC_PATTERN}" 120 \
+            "the stub to serve a signed whitelist/sync"; then
+        fail "the claim below is about a signed HTTP round trip, so the STUB has to have seen it"
+        return 1
+    fi
     if ! wait_for_pattern "${server_log}" "${MIRROR_PATTERN}" 120 \
-            "the whitelist pre-warm to reconcile"; then
+            "the whitelist pre-warm to reconcile rows"; then
         return 1
     fi
     pass "whitelist mirror pre-warmed over the signed HTTP API"

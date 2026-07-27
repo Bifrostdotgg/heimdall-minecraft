@@ -193,6 +193,19 @@ wait_for_log_flush() {
     while kill -0 "${pid}" 2>/dev/null && [ "$(date +%s)" -lt "${deadline}" ]; do
         sleep 1
     done
+    # Killed before the wait, ALWAYS, and this is not tidiness.
+    #
+    # `docker logs -f` exits by itself when the container stops. If the container did NOT stop —
+    # a plugin deadlocked in onDisable, a wedged daemon — the follower is still attached when the
+    # loop above gives up, and `wait` on a live child blocks with no timeout of its own. The budget
+    # argument then buys nothing: CI hangs until the job's own limit kills it, twenty minutes later,
+    # and the log says the harness was waiting rather than what it was waiting for. That is the worst
+    # possible diagnosis of a plugin that would not shut down, which is exactly the bug the smoke
+    # matrix exists to catch.
+    #
+    # `|| true` because the overwhelmingly common case is that the follower has already exited and
+    # there is nothing left to signal.
+    kill "${pid}" 2>/dev/null || true
     wait "${pid}" 2>/dev/null || true
 }
 

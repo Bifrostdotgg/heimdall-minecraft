@@ -29,6 +29,9 @@ There are **two** scenarios, and they answer different questions.
 | `run.sh` | Does the jar load, work and unload with **no bot anywhere**? | six, the whole supported range |
 | `connected.sh` | Pointed at a real bot, does the plugin **actually talk to it**? | two, one per family |
 
+Both are CI gates. `connected.sh`'s two rows run as their own job, and both self-tests run in the
+Docker-free job that gates the matrix.
+
 `connected.sh` is phase 1d's addition and is described in its own section below.
 
 Needs Docker (or a Docker-API-compatible daemon — it is developed against both Docker and Podman)

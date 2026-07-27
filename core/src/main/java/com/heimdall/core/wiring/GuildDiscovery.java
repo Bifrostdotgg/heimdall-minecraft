@@ -190,6 +190,12 @@ public final class GuildDiscovery implements Registration {
         close();
         status = Status.RESOLVED;
         lastFailure = "";
+        // Logged HERE rather than in the caller, and unconditionally. The caller only speaks up
+        // when the answer differs from what it was already using, which is right for it and wrong
+        // as the only record: the confirming case is the one an operator needs to see to know the
+        // identify endpoint works at all, and it is what smoke/connected.sh asserts on. The S1
+        // rewrite briefly lost this line, and the connected row is what noticed.
+        logger.info("resolved guild " + guildId + " from this server's token");
         try {
             onResolved.accept(guildId);
         } catch (RuntimeException broken) {
