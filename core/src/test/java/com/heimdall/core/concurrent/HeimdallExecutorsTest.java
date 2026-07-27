@@ -2,6 +2,7 @@ package com.heimdall.core.concurrent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.log.LogLevel;
@@ -73,6 +74,25 @@ class HeimdallExecutorsTest {
     }
 
     @Test
+    @DisplayName("the tunnel scheduler is its own thread called heimdall-ws")
+    void wsSchedulerIsSeparateAndNamed() throws Exception {
+        try (HeimdallExecutors executors = new HeimdallExecutors(logger)) {
+            AtomicReference<String> name = new AtomicReference<String>();
+            CountDownLatch done = new CountDownLatch(1);
+
+            executors.ws().schedule(() -> {
+                name.set(Thread.currentThread().getName());
+                done.countDown();
+            }, 1, TimeUnit.MILLISECONDS);
+
+            assertTrue(done.await(5, TimeUnit.SECONDS));
+            assertTrue(name.get().startsWith("heimdall-ws"), "unhelpful thread name: " + name.get());
+            assertNotSame(executors.scheduler(), executors.ws(),
+                    "sharing one thread would put the heartbeat behind a slow whitelist poll");
+        }
+    }
+
+    @Test
     void ioPoolSizeIsClampedToAtLeastOne() throws Exception {
         try (HeimdallExecutors executors = new HeimdallExecutors(logger, 0)) {
             CountDownLatch done = new CountDownLatch(1);
@@ -93,6 +113,7 @@ class HeimdallExecutorsTest {
         assertTrue(executors.isShutdown());
         assertTrue(executors.io().isShutdown());
         assertTrue(executors.scheduler().isShutdown());
+        assertTrue(executors.ws().isShutdown());
         assertTrue(logger.at(LogLevel.SEVERE).isEmpty(), "a clean shutdown should say nothing");
     }
 
