@@ -9,9 +9,10 @@ dependencies {
     // relocation surface in one place and makes swapping any of these out a
     // core-local change instead of a repo-wide one.
     //
-    // `CoreSanity` touches a real class from each so their APIs are proven usable
-    // from Java 8 source; the shipped bytecode levels are proven separately by
-    // :app:verifyShadowJar, which is the only check that actually catches them.
+    // Real code exercises both from Java 8 source — Gson in `mirror`, SnakeYAML in `config` —
+    // which is what proves their APIs are reachable at this source level. The shipped bytecode
+    // levels are proven separately by :app:verifyShadowJar, the only check that actually
+    // catches them.
     implementation(libs.gson)
     implementation(libs.snakeyaml)
 
@@ -25,8 +26,10 @@ dependencies {
     // inconvenience. nv-websocket-client has no transitive dependencies and no
     // logging facade at all.
     //
-    // Phase 1 wraps this behind a core-owned socket interface so the library
-    // stays swappable if that constraint ever changes.
+    // Phase 1b wraps this behind a core-owned socket interface so the library stays swappable if
+    // that constraint ever changes. Nothing in core references it yet — it stays declared because
+    // Shadow bundles the runtime classpath whether or not our own code names a class, and
+    // :app:verifyShadowJar requires the com/heimdall/libs/nvws/ relocation to be populated.
     implementation(libs.nv.websocket.client)
 }
 
