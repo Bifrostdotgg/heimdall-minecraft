@@ -5,7 +5,7 @@ plugins {
 }
 
 dependencies {
-    testImplementation("com.tngtech.archunit:archunit:1.3.0")
+    testImplementation(libs.archunit)
 
     // Every module whose classes the rules are evaluated against. These land on
     // the test runtime classpath, which is what ClassFileImporter scans.
@@ -20,5 +20,5 @@ dependencies {
     testImplementation(project(":module-console"))
 
     // Only so the deliberate-violation fixture has a platform type to leak.
-    testImplementation("org.spigotmc:spigot-api:1.8.8-R0.1-SNAPSHOT")
+    testImplementation(libs.spigot.api)
 }

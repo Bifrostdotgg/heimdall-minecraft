@@ -12,8 +12,8 @@ dependencies {
     // `CoreSanity` touches a real class from each so their APIs are proven usable
     // from Java 8 source; the shipped bytecode levels are proven separately by
     // :app:verifyShadowJar, which is the only check that actually catches them.
-    implementation("com.google.code.gson:gson:2.10.1")
-    implementation("org.yaml:snakeyaml:2.4")
+    implementation(libs.gson)
+    implementation(libs.snakeyaml)
 
     // The WebSocket client carries one constraint that is not obvious from the
     // outside: it must stay zero-dependency and free of any logging facade.
@@ -27,7 +27,7 @@ dependencies {
     //
     // Phase 1 wraps this behind a core-owned socket interface so the library
     // stays swappable if that constraint ever changes.
-    implementation("com.neovisionaries:nv-websocket-client:2.14")
+    implementation(libs.nv.websocket.client)
 }
 
 // The Velocity `@Plugin` annotation needs the version as a compile-time

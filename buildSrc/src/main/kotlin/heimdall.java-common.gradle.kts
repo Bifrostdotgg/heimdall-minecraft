@@ -1,3 +1,5 @@
+import org.gradle.api.artifacts.VersionCatalogsExtension
+
 plugins {
     java
 }
@@ -19,11 +21,15 @@ java {
     }
 }
 
+// Precompiled script plugins do not get the generated `libs` accessor, so the
+// catalog is looked up by hand. The coordinates still live in exactly one place.
+val libs = extensions.getByType<VersionCatalogsExtension>().named("libs")
+
 dependencies {
-    "testImplementation"(platform("org.junit:junit-bom:5.10.2"))
-    "testImplementation"("org.junit.jupiter:junit-jupiter")
-    "testRuntimeOnly"("org.junit.platform:junit-platform-launcher")
-    "testImplementation"("org.mockito:mockito-core:4.11.0")
+    "testImplementation"(platform(libs.findLibrary("junit-bom").get()))
+    "testImplementation"(libs.findLibrary("junit-jupiter").get())
+    "testRuntimeOnly"(libs.findLibrary("junit-platform-launcher").get())
+    "testImplementation"(libs.findLibrary("mockito-core").get())
 }
 
 tasks.withType<JavaCompile>().configureEach {

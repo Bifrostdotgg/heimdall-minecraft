@@ -1,0 +1,50 @@
+# Single source of truth for every dependency coordinate in the build.
+# Module build files reference `libs.<alias>` only — no inline coordinates.
+
+[versions]
+# Shaded into the plugin jar and relocated under com.heimdall.libs.
+gson = "2.10.1"
+snakeyaml = "2.4"
+# Must stay zero-dependency and free of any logging facade: legacy Spigot ships
+# no slf4j. See the comment in core/build.gradle.kts.
+nv-websocket-client = "2.14"
+adventure-platform = "4.3.4"
+
+# Server platform APIs. compileOnly everywhere — none of this reaches the jar,
+# which is what makes the remaining -SNAPSHOTs tolerable: a re-resolved snapshot
+# can break compilation on a cold CI runner, but it can never change what ships.
+#
+# spigot-api and paper-api publish -SNAPSHOT only; there is no release to pin.
+spigot-api = "1.8.8-R0.1-SNAPSHOT"
+paper-api = "1.16.5-R0.1-SNAPSHOT"
+# velocity-api does publish releases, so 3.4.0 is pinned rather than
+# 3.4.0-SNAPSHOT. (It still pulls velocity-brigadier:1.0.0-SNAPSHOT
+# transitively, which upstream has never released — also compileOnly.)
+velocity-api = "3.4.0"
+
+# Test and verification tooling.
+junit = "5.10.2"
+mockito = "4.11.0"
+archunit = "1.3.0"
+
+# Applied in the root build script.
+shadow = "8.3.6"
+
+[libraries]
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+snakeyaml = { module = "org.yaml:snakeyaml", version.ref = "snakeyaml" }
+nv-websocket-client = { module = "com.neovisionaries:nv-websocket-client", version.ref = "nv-websocket-client" }
+adventure-platform-bukkit = { module = "net.kyori:adventure-platform-bukkit", version.ref = "adventure-platform" }
+
+spigot-api = { module = "org.spigotmc:spigot-api", version.ref = "spigot-api" }
+paper-api = { module = "com.destroystokyo.paper:paper-api", version.ref = "paper-api" }
+velocity-api = { module = "com.velocitypowered:velocity-api", version.ref = "velocity-api" }
+
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+archunit = { module = "com.tngtech.archunit:archunit", version.ref = "archunit" }
+
+[plugins]
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }

@@ -9,7 +9,7 @@ plugins {
     // level never reaches the artifact. A 1.8.8 server still only ever loads the
     // Java 8 classes.
     id("heimdall.java17")
-    id("com.gradleup.shadow")
+    alias(libs.plugins.shadow)
 }
 
 dependencies {
