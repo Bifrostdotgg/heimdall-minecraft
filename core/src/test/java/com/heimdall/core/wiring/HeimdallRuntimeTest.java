@@ -41,10 +41,21 @@ class HeimdallRuntimeTest {
                 .bootstrapStore(store);
     }
 
-    /** A module that records whether it was started, so "modules still load" is checkable. */
+    /**
+     * A module that counts its own lifecycle calls.
+     *
+     * <p>A counter rather than a boolean, because the property that actually matters for the
+     * idempotence tests is "enabled exactly once" — a second enable is what a repeated start would
+     * produce, and a boolean cannot tell that apart from the first one.
+     */
     private static final class Marker implements HeimdallModule {
 
-        boolean enabled;
+        int enableCount;
+        int disableCount;
+
+        boolean enabled() {
+            return enableCount > disableCount;
+        }
 
         @Override
         public String id() {
@@ -63,12 +74,12 @@ class HeimdallRuntimeTest {
 
         @Override
         public void enable(ModuleContext context) {
-            enabled = true;
+            enableCount++;
         }
 
         @Override
         public void disable() {
-            enabled = false;
+            disableCount++;
         }
     }
 
@@ -122,7 +133,7 @@ class HeimdallRuntimeTest {
             // is live and the module is registered rather than rejected.
             runtime.start();
             assertEquals(ModuleState.STOPPED, runtime.modules().state("marker"));
-            assertFalse(marker.enabled);
+            assertFalse(marker.enabled());
             runtime.close();
         }
     }
@@ -219,10 +230,104 @@ class HeimdallRuntimeTest {
         runtime.start();
 
         assertEquals(afterFirst, logger.records().size(),
-                "a second start must do nothing at all — repeating it would double the config "
-                        + "listeners and the module registrations, and nothing unwinds the "
-                        + "duplicates: " + logger.records());
+                "a second start must do nothing at all: " + logger.records());
+        assertEquals(0, marker.enableCount,
+                "nothing is desired without config, so the module must not have started at all");
         runtime.close();
+        assertEquals(0, marker.disableCount);
+    }
+
+    @Test
+    @DisplayName("a second start is inert even on a configured server, tunnel included")
+    void startIsIdempotentWhenConfigured(@TempDir Path dataDir) throws IOException {
+        BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+        store.save(BootstrapConfig.builder()
+                .endpoint("http://127.0.0.1:1")
+                .tokenId("token-id")
+                .token("secret")
+                .serverId("survival")
+                // Cached, so there is no discovery in the way and start() really does reach the
+                // dial. This is the /hd reload risk: reload calls start() again.
+                .guildId("123456789012345678")
+                .build());
+        HeimdallRuntime runtime = runtime(dataDir, store).build();
+
+        runtime.start();
+
+        // Registered BETWEEN the two starts, which is what makes this deterministic rather than a
+        // race against an asynchronous connect: if the second start ran ANY of start()'s body —
+        // the config load, the reconcile, the dial — this module would be enabled by the reconcile
+        // that precedes the dial. It is not, so nothing after the latch ran either.
+        Marker marker = new Marker();
+        runtime.modules().register(marker);
+        runtime.remoteConfig().onConfigPush(com.heimdall.core.json.Payload.builder()
+                .put("version", 1)
+                .put("modules", com.heimdall.core.json.Payload.builder()
+                        .put("marker", com.heimdall.core.json.Payload.builder()
+                                .put("enabled", true)
+                                .build())
+                        .build())
+                .build());
+        int enabledByThePush = marker.enableCount;
+
+        runtime.start();
+
+        assertEquals(enabledByThePush, marker.enableCount,
+                "the second start must not re-run the reconcile — and by the same latch, must not "
+                        + "dial a second socket beside the one already connecting");
+        runtime.close();
+    }
+
+    @Test
+    @DisplayName("an Error out of a module's disable still stops the pools")
+    void anErrorOnTheWayOutDoesNotSkipTheRest(@TempDir Path dataDir) {
+        BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+        HeimdallRuntime runtime = runtime(dataDir, store).build();
+        runtime.modules().register(new HeimdallModule() {
+            @Override
+            public String id() {
+                return "explodes-on-the-way-out";
+            }
+
+            @Override
+            public Set<String> capabilities() {
+                return Collections.emptySet();
+            }
+
+            @Override
+            public Set<ServerRole> roles() {
+                return Collections.emptySet();
+            }
+
+            @Override
+            public void enable(ModuleContext context) {
+            }
+
+            @Override
+            public void disable() {
+                // Not a RuntimeException, deliberately. The failure class that actually escapes on
+                // the way out is a NoSuchMethodError from an API that moved between server versions
+                // — departures D43/D44/D45 — and a guard that only caught RuntimeException would
+                // let it skip the pool shutdown below and, in the platform bootstraps, the console
+                // tap detach.
+                throw new NoSuchMethodError("org.bukkit.Something.gone()");
+            }
+        });
+        runtime.start();
+        runtime.remoteConfig().onConfigPush(com.heimdall.core.json.Payload.builder()
+                .put("version", 1)
+                .put("modules", com.heimdall.core.json.Payload.builder()
+                        .put("explodes-on-the-way-out", com.heimdall.core.json.Payload.builder()
+                                .put("enabled", true)
+                                .build())
+                        .build())
+                .build());
+
+        runtime.close();
+
+        assertTrue(runtime.executors().isShutdown(),
+                "the pools are the LAST teardown step, so an uncontained Error on the way out is "
+                        + "exactly what strands them");
     }
 
     @Test

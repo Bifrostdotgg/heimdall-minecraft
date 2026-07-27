@@ -32,6 +32,12 @@ import java.util.function.Consumer;
  *       every log line the server writes.
  *   <li><strong>A consumer must not throw.</strong> Implementations swallow what does escape, but
  *       a broken tap silently dropping half the console is worse than one that never threw.
+ *   <li><strong>A consumer must not attach or detach a tap from inside itself.</strong> The
+ *       implementation's attach and detach are serialised against each other; a consumer that
+ *       called one of them while another thread was part-way through the other would be waiting
+ *       for a lock held by something that is waiting for the delivery this consumer is in the
+ *       middle of. Detaching in response to a line is a legitimate thing to want — a module
+ *       switching itself off — and the way to do it is to hand the work to another thread.
  * </ul>
  *
  * <p>Implementations are safe to call from any thread.

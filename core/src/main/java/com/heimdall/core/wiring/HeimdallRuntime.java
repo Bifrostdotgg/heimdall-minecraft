@@ -329,11 +329,27 @@ public final class HeimdallRuntime implements AutoCloseable {
         });
     }
 
+    /**
+     * Runs one teardown step without letting its failure skip the steps after it.
+     *
+     * <p><strong>{@code Throwable}, not {@code RuntimeException}</strong>, and the difference is not
+     * theoretical. The failure class that actually shows up on the way out is a
+     * {@code NoSuchMethodError} or {@code NoClassDefFoundError} from an API that moved between
+     * server versions — the same class of failure departures D43, D44 and D45 are about, and the
+     * lesson the login and chat listeners already learned. An {@code Error} escaping here skips
+     * every remaining step, and the last of them is the one that stops the threads while the one
+     * after this method returns is the platform close that detaches the root log4j appender. A
+     * module throwing an {@code Error} from {@code disable()} would therefore leak an appender per
+     * reload and, on Velocity, swallow the shutdown line the smoke matrix asserts on.
+     *
+     * <p>Rethrowing after logging is not an option for the same reason: there is nobody left to
+     * handle it, and the cost of continuing is a log line while the cost of stopping is a leak.
+     */
     private void guarded(String what, Runnable step) {
         try {
             step.run();
-        } catch (RuntimeException e) {
-            logger.error(what + " failed; continuing with the rest of shutdown", e);
+        } catch (Throwable failed) {
+            logger.error(what + " failed; continuing with the rest of shutdown", failed);
         }
     }
 
