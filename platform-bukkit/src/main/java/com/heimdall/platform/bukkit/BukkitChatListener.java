@@ -73,8 +73,21 @@ final class BukkitChatListener implements Listener {
             // Throwable, not RuntimeException. The failure class this whole binding is careful about
             // — a NoSuchMethodError from an API that moved between server versions — is an Error,
             // and it would sail straight past a RuntimeException catch into Bukkit's event
-            // machinery. Fail open either way: a bug in the relay must not silence a server's chat.
-            logger.error("the chat pipeline threw; letting the message through", broken);
+            // machinery. Fail open: a bug in the relay must not silence a server's chat.
+            //
+            // What is reported depends on how far it got, because the two outcomes are opposite and
+            // the log is the only place anyone will see the difference. A throw from dispatch means
+            // the message really did go through. A throw from the send AFTER setCancelled(true) —
+            // the messenger's Adventure path is exactly where a version-specific Error would come
+            // from — means the message was blocked and only the explanation was lost, and saying
+            // "letting the message through" there sends whoever reads it looking for a message that
+            // was never delivered.
+            if (event.isCancelled()) {
+                logger.error("chat from " + sender.getName() + " was blocked, but telling them why "
+                        + "failed; they were cut off with no explanation", broken);
+            } else {
+                logger.error("the chat pipeline threw; letting the message through", broken);
+            }
         }
     }
 }

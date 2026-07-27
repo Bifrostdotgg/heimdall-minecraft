@@ -37,17 +37,53 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     private final BukkitCommandRegistrar commands;
     private final BukkitIntegrations integrations;
 
+    /**
+     * Builds every collaborator, and cleans up after itself if one of them throws.
+     *
+     * <p>Two of these hold something the <em>server</em> owns — the messenger holds an Adventure
+     * audience provider, and the tap is about to be able to hold a root log4j appender. If a
+     * constructor after either of them throws, this object never reaches
+     * {@code BukkitBootstrap.enable()}'s field, so {@link #close()} will never be called on it and
+     * nothing else holds a reference. On a server that is reloaded that is a leak per cycle, of
+     * exactly the kind {@code close()} exists to prevent.
+     *
+     * <p>So the tail is wrapped: anything already built is closed and the original failure is
+     * rethrown unchanged, because it is the one the operator needs to see.
+     */
     BukkitPlatform(
             Plugin plugin, HeimdallLogger logger, ServerRole role, HeimdallExecutors executors) {
         this.role = role;
         this.dataDirectory = plugin.getDataFolder().toPath();
         this.mainThread = new BukkitMainThread(plugin, logger);
         this.messenger = new BukkitMessenger(plugin, logger);
-        this.players = new BukkitPlayerDirectory(mainThread, messenger);
-        this.consoleTap = new Log4jConsoleTap(logger, executors.io());
-        this.console = new BukkitConsoleBridge(logger, mainThread, consoleTap);
-        this.commands = new BukkitCommandRegistrar(plugin, logger, messenger);
-        this.integrations = new BukkitIntegrations(logger, executors.io());
+        BukkitPlayerDirectory builtPlayers = null;
+        Log4jConsoleTap builtTap = null;
+        try {
+            builtPlayers = new BukkitPlayerDirectory(mainThread, messenger);
+            builtTap = new Log4jConsoleTap(logger, executors.io());
+            this.players = builtPlayers;
+            this.consoleTap = builtTap;
+            this.console = new BukkitConsoleBridge(logger, mainThread, consoleTap);
+            this.commands = new BukkitCommandRegistrar(plugin, logger, messenger);
+            this.integrations = new BukkitIntegrations(logger, executors.io());
+        } catch (Throwable halfBuilt) {
+            closeQuietly(builtTap);
+            closeQuietly(messenger);
+            throw halfBuilt;
+        }
+    }
+
+    private static void closeQuietly(AutoCloseable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (Throwable ignored) {
+            // Unwinding a construction that has already failed. The failure being unwound is the
+            // one worth reporting, and it is about to be rethrown; a second one from the cleanup
+            // would only replace it with something less useful.
+        }
     }
 
     /**

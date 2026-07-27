@@ -137,30 +137,74 @@ final class BukkitBootstrap {
      * would otherwise own them was never built.
      */
     void disable() {
-        TunnelSpiService.uninstall(spi);
+        guarded("uninstalling the tunnel SPI", new Runnable() {
+            @Override
+            public void run() {
+                TunnelSpiService.uninstall(spi);
+            }
+        });
         spi = null;
-        try {
-            Bukkit.getServicesManager().unregisterAll(plugin);
-        } catch (RuntimeException ignored) {
-            // Bukkit unregisters a disabling plugin's services itself; this is belt and braces for
-            // the /reload path, where it does not always get that far.
-        }
-        if (runtime != null) {
-            // Closes the executors too — ownership transferred when they were handed to the builder.
-            runtime.close();
-            runtime = null;
-        } else if (executors != null) {
-            // enable() threw between constructing the pools and constructing the runtime. Nothing
-            // else holds them, and three pools of daemon threads outliving a failed enable is a
-            // leak per /reload.
-            executors.shutdown();
-        }
+
+        guarded("unregistering Bukkit services", new Runnable() {
+            @Override
+            public void run() {
+                // Bukkit unregisters a disabling plugin's services itself; this is belt and braces
+                // for the /reload path, where it does not always get that far.
+                Bukkit.getServicesManager().unregisterAll(plugin);
+            }
+        });
+
+        guarded("stopping the runtime", new Runnable() {
+            @Override
+            public void run() {
+                if (runtime != null) {
+                    // Closes the executors too — ownership transferred when they were handed to the
+                    // builder.
+                    runtime.close();
+                } else if (executors != null) {
+                    // enable() threw between constructing the pools and constructing the runtime.
+                    // Nothing else holds them, and three pools of daemon threads outliving a failed
+                    // enable is a leak per /reload.
+                    executors.shutdown();
+                }
+            }
+        });
+        runtime = null;
         executors = null;
-        if (platform != null) {
-            platform.close();
-            platform = null;
-        }
+
+        guarded("closing the platform", new Runnable() {
+            @Override
+            public void run() {
+                if (platform != null) {
+                    platform.close();
+                }
+            }
+        });
+        platform = null;
+
         logger.info("Heimdall v" + BuildConstants.VERSION + " shutting down");
+    }
+
+    /**
+     * Runs one teardown step so its failure cannot skip the steps after it.
+     *
+     * <p>{@code Throwable}, not {@code RuntimeException}. What actually escapes on the way out is a
+     * {@code NoSuchMethodError} or {@code NoClassDefFoundError} from an API that moved between
+     * server versions — the failure class departures D43, D44 and D45 are about, and the one this
+     * platform's listeners already catch. Left uncontained it skips the platform close, which is
+     * what detaches the root log4j appender: a module throwing an {@code Error} from
+     * {@code disable()} would leak one appender per {@code /reload} and swallow the shutdown banner
+     * the boot-smoke matrix asserts on.
+     *
+     * <p>The field is nulled by the caller after each step rather than inside it, so a step that
+     * fails part-way still leaves nothing for a second {@code disable()} to trip over.
+     */
+    private void guarded(String what, Runnable step) {
+        try {
+            step.run();
+        } catch (Throwable failed) {
+            logger.error(what + " failed; continuing with the rest of shutdown", failed);
+        }
     }
 
     // ── Wiring ───────────────────────────────────────────────────────────────
