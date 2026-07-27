@@ -9,6 +9,14 @@ snakeyaml = "2.4"
 # no slf4j. See the comment in core/build.gradle.kts.
 nv-websocket-client = "2.14"
 adventure-platform = "4.3.4"
+# Pinned to exactly what adventure-platform-bukkit 4.3.4 resolves adventure-api to.
+# core needs the platform-free half of Adventure on its OWN classpath (the Msg
+# renderer and the pipeline deny-reasons speak Component), and letting the two
+# arrive at different versions would mean the shaded jar carries whichever
+# Gradle's conflict resolution picked rather than the one platform-bukkit was
+# compiled against. 4.13.x is also still Java 8 bytecode, which
+# :app:verifyShadowJar's major-52 ceiling proves on every build.
+adventure = "4.13.1"
 
 # Server platform APIs. compileOnly everywhere — none of this reaches the jar,
 # which is what makes the remaining -SNAPSHOTs tolerable: a re-resolved snapshot
@@ -48,6 +56,8 @@ gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 snakeyaml = { module = "org.yaml:snakeyaml", version.ref = "snakeyaml" }
 nv-websocket-client = { module = "com.neovisionaries:nv-websocket-client", version.ref = "nv-websocket-client" }
 adventure-platform-bukkit = { module = "net.kyori:adventure-platform-bukkit", version.ref = "adventure-platform" }
+adventure-api = { module = "net.kyori:adventure-api", version.ref = "adventure" }
+adventure-text-serializer-legacy = { module = "net.kyori:adventure-text-serializer-legacy", version.ref = "adventure" }
 
 spigot-api = { module = "org.spigotmc:spigot-api", version.ref = "spigot-api" }
 paper-api = { module = "com.destroystokyo.paper:paper-api", version.ref = "paper-api" }

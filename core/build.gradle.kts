@@ -2,6 +2,12 @@ import org.gradle.api.attributes.java.TargetJvmVersion
 
 plugins {
     id("heimdall.java8")
+    // Only core needs the `api` configuration, and only for Adventure — see the long comment on
+    // that dependency below. Applied here rather than in the shared convention so every other
+    // module keeps a build file where `implementation` is the only choice available, which is the
+    // right default: an accidental `api` is how a shaded library ends up on a consumer's compile
+    // classpath without anyone deciding it should be.
+    `java-library`
 }
 
 dependencies {
@@ -33,6 +39,24 @@ dependencies {
     // Shadow bundles the runtime classpath whether or not our own code names a class, and
     // :app:verifyShadowJar requires the com/heimdall/libs/nvws/ relocation to be populated.
     implementation(libs.nv.websocket.client)
+
+    // The one deliberate exception to the `implementation` rule above.
+    //
+    // Adventure's platform-free half is not a private implementation choice: `Component` is in
+    // core's own public signatures — `Msg` returns one, and a pipeline `Verdict.deny(reason)`
+    // carries one — so a feature module cannot call those methods without the type on its compile
+    // classpath. Hiding it behind `implementation` would either force every message through a
+    // String (throwing away the whole reason for using Adventure) or push a re-export shim into
+    // every consumer's build file.
+    //
+    // The serializer stays `implementation`: it is how `Msg.legacy` is built, not part of what it
+    // promises. Swapping legacy §-codes for MiniMessage when the dashboard-template work lands is
+    // then a core-local change.
+    //
+    // `net.kyori` is already in :app's relocation list and in verifyShadowJar's required set, so
+    // both jars land under com/heimdall/libs/kyori/ like everything else.
+    api(libs.adventure.api)
+    implementation(libs.adventure.text.serializer.legacy)
 
     // The wire contract, executable. core's integration tests run the real ApiClient against
     // :stub-bot rather than against hand-written fixtures, so "the plugin parses what the bot
