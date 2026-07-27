@@ -18,5 +18,24 @@
  *
  * <p>Implementations live in {@code :platform-bukkit}, {@code :platform-velocity} and the shared
  * {@code :platform-common}.
+ *
+ * <h2>What is deliberately not here: join and quit</h2>
+ *
+ * <p>Nothing in this package carries a player joining or leaving, and phase 1c registers no listener
+ * for either. The shape is decided rather than open, and phase 1d builds it — see
+ * {@code docs/v2-departures.md} § "Seams named but not built".
+ *
+ * <p>They arrive as <strong>notifications</strong>, through a {@code PlayerSessionEvents}
+ * dispatcher: a platform adapter pushes a {@link com.heimdall.core.platform.PlayerHandle} and a
+ * timestamp, and modules subscribe through {@code ModuleContext} so the registration is tracked and
+ * unwound with the module like every other one.
+ *
+ * <p>Not a third {@code Pipeline} — a pipeline arbitrates a decision, and there is none to arbitrate
+ * once a player is already in or already gone. Not more methods on
+ * {@link com.heimdall.core.platform.PlatformFacade} either: the facade is core asking the platform a
+ * question, and this is the platform telling core something happened.
+ *
+ * <p>1c ships nothing rather than dead listeners. The first real consumer is the whitelist mirror's
+ * join/quit window in 1d, and a listener with no consumer is one nobody notices has stopped working.
  */
 package com.heimdall.core.platform;

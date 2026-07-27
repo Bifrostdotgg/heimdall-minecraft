@@ -181,6 +181,77 @@ class HeimdallRuntimeTest {
     }
 
     @Test
+    @DisplayName("start is idempotent — the reload path calls it again")
+    void startIsIdempotent(@TempDir Path dataDir) {
+        BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+        HeimdallRuntime runtime = runtime(dataDir, store).build();
+        Marker marker = new Marker();
+        runtime.modules().register(marker);
+
+        runtime.start();
+        int afterFirst = logger.records().size();
+        runtime.start();
+
+        assertEquals(afterFirst, logger.records().size(),
+                "a second start must do nothing at all — repeating it would double the config "
+                        + "listeners and the module registrations, and nothing unwinds the "
+                        + "duplicates: " + logger.records());
+        runtime.close();
+    }
+
+    @Test
+    @DisplayName("close after a start that never happened still stops the pools")
+    void closeWithoutStart(@TempDir Path dataDir) {
+        BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+        HeimdallRuntime runtime = runtime(dataDir, store).build();
+
+        // The half-built-enable shape: something threw between build() and start(), and the
+        // platform's disable() is the only thing that will ever run again. The pools exist from
+        // construction, so this is the case where they would otherwise be stranded.
+        runtime.close();
+
+        assertTrue(runtime.executors().isShutdown());
+    }
+
+    @Test
+    @DisplayName("a module that throws on enable does not stop the runtime starting")
+    void aFailedModuleIsContained(@TempDir Path dataDir) throws IOException {
+        BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+        HeimdallRuntime runtime = runtime(dataDir, store).build();
+        runtime.modules().register(new HeimdallModule() {
+            @Override
+            public String id() {
+                return "explodes";
+            }
+
+            @Override
+            public Set<String> capabilities() {
+                return Collections.emptySet();
+            }
+
+            @Override
+            public Set<ServerRole> roles() {
+                return Collections.emptySet();
+            }
+
+            @Override
+            public void enable(ModuleContext context) {
+                throw new IllegalStateException("no");
+            }
+
+            @Override
+            public void disable() {
+            }
+        });
+
+        runtime.start();
+        runtime.close();
+
+        assertTrue(runtime.executors().isShutdown(),
+                "one broken module must not leave the pools running");
+    }
+
+    @Test
     @DisplayName("close is idempotent and stops the pools")
     void closeIsIdempotent(@TempDir Path dataDir) {
         BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
