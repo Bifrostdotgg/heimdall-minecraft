@@ -279,7 +279,9 @@ class StubBotApiClientTest {
 
             assertTrue(unchanged.notModified(), "an unchanged whitelist must not re-send the dump");
             assertTrue(unchanged.players().isEmpty());
-            assertNotNull(unchanged.etag());
+            assertEquals(first.etag(), unchanged.etag(),
+                    "a 304 has to carry the SAME etag back, or the next poll sends a stale one and "
+                            + "pulls a full dump it already has");
 
             // Revoke one of them: membership changes, so the ETag must stop matching.
             bot.fixtures().put(PlayerFixture.of(EXISTING_LINK, "LegacyLee", Outcome.DENY));

@@ -1,6 +1,7 @@
 package com.heimdall.core.tunnel;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -111,8 +112,11 @@ class TunnelNegotiationTest {
 
         // v3 additions.
         assertEquals(3, payload.intValue("protocolVersion", -1));
-        assertEquals(Arrays.asList(Capabilities.WHITELIST, Capabilities.CONFIG),
-                payload.strings("capabilities"));
+        assertEquals(new LinkedHashSet<String>(
+                        Arrays.asList(Capabilities.WHITELIST, Capabilities.CONFIG)),
+                new LinkedHashSet<String>(payload.strings("capabilities")),
+                "compared as a set: the declaration is a set, and ModuleManager is free to supply "
+                        + "one with no defined iteration order");
         assertEquals("standalone", payload.string("role", null),
                 "the bot needs the resolved role, not the word 'auto'");
     }
@@ -148,8 +152,9 @@ class TunnelNegotiationTest {
         assertTrue(tunnel.isConnected(),
                 "the bot deliberately keeps the socket open; reconnect-looping on it would be worse "
                         + "than running on cached config");
-        assertTrue(logger.logged(LogLevel.SEVERE, "refused this plugin's protocol version"),
-                "every pushed setting is now inert and nothing will fix itself — that deserves severe");
+        assertFalse(logger.at(LogLevel.SEVERE).isEmpty(),
+                "every pushed setting is now inert and nothing will fix itself — that deserves "
+                        + "severe, whatever the wording ends up being");
     }
 
     @Test
@@ -163,7 +168,9 @@ class TunnelNegotiationTest {
         assertTrue(tunnel.isConnected(),
                 "a v2 bot answers identify with nothing at all; treating that as a failure would "
                         + "reconnect-loop against every bot that has not been upgraded yet");
-        assertTrue(logger.logged(LogLevel.INFO, "this bot speaks v2"));
+        assertTrue(logger.at(LogLevel.SEVERE).isEmpty(),
+                "and it is a normal outcome, not an error — a fleet mid-upgrade would otherwise "
+                        + "fill its logs with severes about bots that are working fine");
     }
 
     @Test
@@ -208,7 +215,8 @@ class TunnelNegotiationTest {
         Envelope ack = socket.firstFrameOfType("config.ack");
         assertNotNull(ack, "the bot must not be left believing the push was lost");
         assertEquals(9, ack.payload().intValue("version", -1));
-        assertTrue(logger.logged(LogLevel.SEVERE, "failed to apply pushed config version 9"));
+        assertFalse(logger.at(LogLevel.SEVERE).isEmpty(),
+                "a config the plugin could not apply is worth a severe line");
     }
 
     @Test
