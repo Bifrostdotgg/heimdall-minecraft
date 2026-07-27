@@ -418,6 +418,25 @@ lookup at whatever version that Paper line carries. Relocation cannot be exclude
 `AsyncPlayerChatEvent` is a plain `String`, fires from 1.8.8 to current, and has none of that
 problem. Deprecated is not the same as absent.
 
+**Two residual risks, neither of them closed.** They are written down here rather than in a comment
+because the day either one bites, this is the file somebody will search.
+
+1. *Deprecated-for-removal is a countdown.* Paper has marked `AsyncPlayerChatEvent` for removal, and
+   the choice above is a bet that it outlives the shading constraint. If Paper drops it first, the
+   options are a reflective `AsyncChatEvent` bridge that never names a `net.kyori` type (the
+   `VelocityText` technique in D44, applied to a Bukkit event), or un-relocating Adventure and
+   pinning a version that satisfies `adventure-platform-bukkit` on every supported Paper — which is
+   the harder problem, not the easier one.
+2. *Cancellation of signed chat is asserted, not verified.* Since 1.19 a client signs its messages,
+   and cancelling a chat event on a modern Paper is believed to suppress the message without
+   producing a client-side "chat validation failure" disconnect. Nothing in this repo has
+   demonstrated that: the smoke matrix boots servers, it does not join them, so no chat has ever
+   been cancelled on 1.21 by any test.
+
+TODO(1d): a headless-client join on the `paper-1.21.8` row — connect, send a message, assert it is
+suppressed and that the client stays connected. That single test settles risk 2 and turns the chat
+interceptor from a design into a behaviour.
+
 ### D44 — Velocity's text boundary is crossed reflectively
 
 **v2:** no shading, so Velocity's `Component` was simply *the* `Component`.
@@ -679,3 +698,65 @@ update metadata would make every dashboard toggle a brief outage, which is a wor
 delayed config push. Whether the protocol should instead gain a live capability update is a bot-side
 decision for phase 1f — not invented here, because a client announcing capabilities in a way the bot
 does not understand looks correct in testing and is ignored in production.
+
+### N7 — a role sync diffs against *inherited* groups, and that is v2's behaviour
+
+`GroupDiff` is fed what LuckPerms reports from `user.getInheritedGroups(...)`, which includes groups
+held transitively through another group rather than directly. Two consequences follow, and both are
+v2's, reproduced deliberately:
+
+- a managed group the player inherits (rather than holds) is already in "current", so it is never
+  *added* — correct, since granting it would change nothing;
+- the same group, when the dashboard drops it from the target set, **is** listed for removal, and
+  removing the direct node does nothing because the player still inherits it. The sync then logs a
+  removal that did not take effect.
+
+The alternative — diffing against directly-held nodes only — changes which groups get written on
+every sync for every server that uses group inheritance, which is most of them. That is a behaviour
+change with a real blast radius and no reported complaint behind it.
+
+**Do not "fix" this in 1d without deciding it explicitly.** The decision needs the bot side in the
+room: what the dashboard means by "this player has this group" is the actual question, and the
+plugin's diff is downstream of the answer.
+
+### N8 — v2's `cleanupUser` is not ported yet
+
+v2's Velocity LuckPerms manager exposed `cleanupUser(uuid)`, which drops a user from LuckPerms'
+in-memory cache so the next read comes from storage. Nothing called it on a schedule; it existed for
+callers who needed fresh data.
+
+`LuckPermsBridge` has no equivalent, because in 1c nothing reads groups on a cadence — the login
+path loads the user itself and the role-sync module does not exist yet. **1d prerequisite:** decide
+whether the role-sync module needs it before it starts polling. A module that reads cached groups in
+a loop and never invalidates is a module that acts on a stale answer indefinitely, which is the
+shape of the 2.4.0 outage (D7) in a different place.
+
+---
+
+## Seams named but not built
+
+Shapes that phase 1c decided and phase 1d implements. They are recorded here so 1d builds the agreed
+thing rather than improvising one, and so a reviewer can object *now* rather than to the code.
+
+### S1 — join and quit arrive as notifications, not as a third pipeline
+
+Platform adapters push join and quit into core through a `PlayerSessionEvents` dispatcher: the
+adapter supplies a `PlayerHandle` and a timestamp, modules subscribe through `ModuleContext` with
+the usual tracked registrations, and the handle is unwound when the module is disabled like every
+other registration.
+
+Two things it is deliberately **not**:
+
+- **Not a third `Pipeline`.** A pipeline exists to arbitrate a decision — allow, deny, abstain,
+  ordered by priority, first denial wins. Join and quit have no decision to arbitrate: the player is
+  already in or already gone. Modelling them as one would invite an interceptor to "deny" a quit,
+  and the pipeline's whole vocabulary would be wrong.
+- **Not more `PlatformFacade` methods.** The facade answers questions core asks the platform.
+  This is the platform telling core something happened, which is the opposite direction, and
+  bolting it on would make every platform implement a listener registry as well as a set of
+  accessors.
+
+1c deliberately ships no join/quit listeners at all rather than dead ones: nothing consumes the
+events until the whitelist mirror lands in 1d (its `extendOnEvent` window is the first real
+consumer), and a listener with no consumer is a listener nobody will notice has stopped working.
+
