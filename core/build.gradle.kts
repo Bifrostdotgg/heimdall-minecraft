@@ -1,3 +1,5 @@
+import org.gradle.api.attributes.java.TargetJvmVersion
+
 plugins {
     id("heimdall.java8")
 }
@@ -31,6 +33,42 @@ dependencies {
     // Shadow bundles the runtime classpath whether or not our own code names a class, and
     // :app:verifyShadowJar requires the com/heimdall/libs/nvws/ relocation to be populated.
     implementation(libs.nv.websocket.client)
+
+    // The wire contract, executable. core's integration tests run the real ApiClient against
+    // :stub-bot rather than against hand-written fixtures, so "the plugin parses what the bot
+    // sends" is checked by something other than two of our own files agreeing with each other.
+    //
+    // The bytecode mismatch here is deliberate and fine, stated so nobody "fixes" it: :stub-bot
+    // compiles at --release 21 and this module at --release 8. `--release` constrains which JDK
+    // APIs OUR sources may call and the bytecode WE emit; javac reads a newer classfile off the
+    // compile classpath without complaint. The tests then RUN on the JDK 21 toolchain (see
+    // heimdall.java-common), so the stub's bytecode is never asked to load on a Java 8 JVM.
+    // :app does not depend on :stub-bot, and :app:verifyShadowJar's allowlist would fail the
+    // build if it somehow did.
+    testImplementation(project(":stub-bot"))
+}
+
+/**
+ * Lets the TEST classpaths — and only the test classpaths — accept a Java 21 artifact.
+ *
+ * `options.release = 8` makes Gradle stamp `org.gradle.jvm.version = 8` on every one of this
+ * module's configurations, and variant-aware resolution then refuses :stub-bot outright, before
+ * javac is ever asked whether it minds ("only compatible with JVM runtime version 21 or newer").
+ * That check is about what a *consumer* of the published artifact could run, which is exactly the
+ * right question for the main classpath and the wrong one for a test fixture that only ever runs
+ * on this build's own toolchain.
+ *
+ * So the attribute is raised on testCompileClasspath and testRuntimeClasspath alone. The main
+ * classpaths keep 8, `compileJava` and `compileTestJava` both keep `--release 8`, and the shipped
+ * jar is untouched — :app:verifyShadowJar still reads every class in it and fails on anything
+ * above classfile major 52. What this changes is one resolution decision, not a bytecode level.
+ */
+listOf(configurations.testCompileClasspath, configurations.testRuntimeClasspath).forEach { classpath ->
+    classpath.configure {
+        attributes {
+            attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 21)
+        }
+    }
 }
 
 // The Velocity `@Plugin` annotation needs the version as a compile-time

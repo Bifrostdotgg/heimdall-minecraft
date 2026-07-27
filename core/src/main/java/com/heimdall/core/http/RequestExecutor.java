@@ -99,7 +99,12 @@ final class RequestExecutor {
         if (call.hasBody()) {
             byte[] payload = call.body().getBytes(StandardCharsets.UTF_8);
             connection.setDoOutput(true);
-            connection.setFixedLengthStreamingMode(payload.length);
+            // Deliberately NOT setFixedLengthStreamingMode: in streaming mode the JDK cannot
+            // buffer the request, and on an error response it returns null from getErrorStream()
+            // rather than the body. That silently costs us the bot's error code on every failed
+            // POST — the 401 {"error":"Unauthorized"} becomes a bare "HTTP 401" with no
+            // explanation. Caught by the stub-bot integration suite. Request bodies here are a
+            // few hundred bytes, so buffering them is free.
             OutputStream out = connection.getOutputStream();
             try {
                 out.write(payload);
