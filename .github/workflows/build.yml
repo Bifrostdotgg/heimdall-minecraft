@@ -1,9 +1,17 @@
 name: Build
 
-# `./gradlew build` is the whole gate: it compiles every module at its own
-# release level, runs the unit tests, runs the ArchUnit conformance rules, and
-# then verifies the shaded jar itself (bytecode levels, relocations, plugin.yml
-# and velocity-plugin.json). There is deliberately nothing else to add here.
+# Two gates.
+#
+# `./gradlew build` compiles every module at its own release level, runs the unit
+# tests (including :stub-bot's), runs the ArchUnit conformance rules, and then
+# verifies the shaded jar itself (bytecode levels, relocations, plugin.yml and
+# velocity-plugin.json). That covers everything visible by reading the jar.
+#
+# The `smoke` matrix covers what is not: whether a real server of each supported
+# generation actually loads and unloads the thing. A plugin can pass every static
+# check and still be refused at runtime — a descriptor the loader parses
+# differently, a class that resolves on Java 21 and not on Java 8. One row per
+# runner, in parallel, so the wall time is the slowest row rather than their sum.
 #
 # Actions are pinned to commit SHAs rather than tags. A tag is mutable, so `@v4`
 # means "whatever the action's owner points it at today" — including after a
@@ -51,3 +59,54 @@ jobs:
           name: test-reports
           path: "**/build/reports/tests/**"
           if-no-files-found: ignore
+
+  # The row list is read out of smoke/run.sh rather than written here. Two copies
+  # of a matrix drift, and the failure mode is silent: a row added to the script
+  # but not to the workflow simply never runs, and nobody finds out.
+  smoke-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      rows: ${{ steps.rows.outputs.rows }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - id: rows
+        run: |
+          rows="$(smoke/run.sh --list | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+          echo "rows=${rows}" >> "$GITHUB_OUTPUT"
+          echo "smoke rows: ${rows}"
+
+  smoke:
+    name: smoke (${{ matrix.row }})
+    needs: [build, smoke-matrix]
+    runs-on: ubuntu-latest
+    # A row failing tells you which server generation broke; the other rows tell
+    # you whether it is that generation or the jar. Stopping at the first failure
+    # would throw that away.
+    strategy:
+      fail-fast: false
+      matrix:
+        row: ${{ fromJson(needs.smoke-matrix.outputs.rows) }}
+    # Each row is bounded internally (SMOKE_BOOT_TIMEOUT), so this is a backstop
+    # against a hung pull or a wedged daemon, not the primary limit.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download the jar built by the build job
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: heimdall-whitelist-snapshot
+          # smoke/run.sh looks in app/build/libs and dist/, so no wiring needed.
+          path: dist
+
+      - name: Boot smoke
+        run: smoke/run.sh "${{ matrix.row }}"
+
+      - name: Upload the server log on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-log-${{ matrix.row }}
+          path: smoke/.work/**/server.log
+          if-no-files-found: warn
