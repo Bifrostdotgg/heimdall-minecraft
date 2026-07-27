@@ -43,7 +43,11 @@ VELOCITY_SHUTDOWN_PATTERN='Shutting down the proxy'
 # Part of the enable banner. Attaching a root log4j appender is the single most version-sensitive
 # thing the plugin does — the API that works on Minecraft 1.8.8's log4j 2.0-beta9 is not the one v2
 # used — and asserting it here is what turns "it compiled" into "it attached on all six servers".
-CONSOLE_TAP_PATTERN='console tap on'
+# Anchored, and the anchor is load-bearing: the failure line begins "console tap unavailable on
+# this server: ..." and is one copy-edit away from containing the success substring. The banner ends
+# with either "console tap on" or "console tap off", so end-of-line is what tells them apart.
+# [[:space:]]* tolerates a trailing CR from a log captured on Windows.
+CONSOLE_TAP_PATTERN='console tap on[[:space:]]*$'
 # What /hd prints, as it lands in the server log.
 #
 # `.*` between the name and the version is not laziness. The plugin answers in §-coded text and the
@@ -182,6 +186,15 @@ selftest() {
     expect_match "${CONSOLE_TAP_PATTERN}" \
         "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT enabled — role standalone, ticks via nms-reflection, console tap off" \
         no "console tap attached vs a boot where it did not" || failures=$((failures + 1))
+    # Why the pattern is anchored to end-of-line. These are the two real failure lines, and each is
+    # one rewording away from containing the success phrase as a substring — the kind of edit
+    # nobody re-runs the matrix for.
+    expect_match "${CONSOLE_TAP_PATTERN}" \
+        "[13:50:10 WARN]: [Heimdall] console tap unavailable on this server: java.lang.NoSuchMethodError" \
+        no "console tap on vs the unavailable line" || failures=$((failures + 1))
+    expect_match "${CONSOLE_TAP_PATTERN}" \
+        "[13:50:10 WARN]: [Heimdall] console tap attached but did not capture its own probe line" \
+        no "console tap on vs the attached-but-deaf line" || failures=$((failures + 1))
     # Exactly what rcon-cli hands back: the plugin answers in §-codes and rcon-cli rewrites them
     # into ANSI, so the version is not adjacent to the name. A pattern written against the plain
     # text passes this self-test and fails every real row — which is what happened.
@@ -387,8 +400,11 @@ row_body() {
     fi
     pass "plugin enabled: $(grep -Eo "${ENABLE_PATTERN}.*" "${log_file}" | head -n 1)"
 
-    # The tap is attached eagerly at enable precisely so this row exercises it. Asserting it is what
-    # makes the log4j 2.0-beta9 compatibility on the 1.8.8 row a tested fact rather than a comment.
+    # The tap is attached eagerly at enable precisely so this row exercises it, and attach() only
+    # reports success after logging a probe line and receiving it back through the whole capture
+    # path — level filter, ANSI strip, queue, drain executor, consumer. So this one grep covers the
+    # log4j-2.0-beta9-sensitive accessors (departure D45) on every supported server, which is what
+    # "the appender attached" on its own never did.
     if ! grep -Eq "${CONSOLE_TAP_PATTERN}" "${log_file}"; then
         fail "the console tap did not attach — the log4j appender is not usable on this server"
         dump_log "${log_file}"
