@@ -433,9 +433,14 @@ because the day either one bites, this is the file somebody will search.
    demonstrated that: the smoke matrix boots servers, it does not join them, so no chat has ever
    been cancelled on 1.21 by any test.
 
-TODO(1d): a headless-client join on the `paper-1.21.8` row — connect, send a message, assert it is
-suppressed and that the client stays connected. That single test settles risk 2 and turns the chat
-interceptor from a design into a behaviour.
+TODO(**1e**, moved from 1d): a headless-client join on the `paper-1.21.8` row — connect, send a
+message, assert it is suppressed and that the client stays connected. That single test settles risk 2
+and turns the chat interceptor from a design into a behaviour.
+
+1d added `smoke/connected.sh`, which boots a server against a real bot and asserts the whole wire, but
+it still never joins a player: there is no headless client in the harness. Risk 2 therefore remains
+exactly as open as it was. What 1d *did* do is build the container topology a headless client would
+plug into, so the remaining work is the client itself rather than the scenario around it.
 
 ### D44 — Velocity's text boundary is crossed reflectively
 
@@ -516,6 +521,175 @@ The module commands added in 1d follow the same rule from the other direction: `
 `/link` and `/offend` are registered **identically on both platforms**, because unlike the admin
 command they mean the same thing wherever they are typed. A player linking their account does not
 care whether the proxy or the backend answered.
+
+### D52 — session handlers run off the event thread, and carry their own timestamp
+
+**New in 1d**, and the two parts of S1 that were left to the implementation.
+
+`PlayerSessionEvents.join(handle, timestampMs)` hands off to `heimdall-io` and returns. On Bukkit,
+`PlayerJoinEvent` is on the main server thread, so a listener that wrote a mirror entry — let alone
+one that made a network call — would put that on the tick loop for every join. What actually runs
+there is building a handle and queueing a task.
+
+Two consequences, both deliberate:
+
+- **join and quit are no longer ordered relative to each other.** A quit for somebody who
+  reconnected immediately can in principle be delivered after the second join. This is the same
+  trade departure D27 made for tunnel handlers, for the same reason, and it is why the timestamp is
+  stamped on the event thread and carried rather than read by the listener — "now" at delivery is an
+  unknown distance after the thing that happened.
+- **A rejected hand-off is dropped with a debug line.** That only happens while the pools are
+  shutting down, which is the one moment a missed cache extension costs nothing, and throwing would
+  put a plugin fault in the server log for something the plugin was already stopping for.
+
+Bukkit uses `PlayerJoinEvent` / `PlayerQuitEvent` at `MONITOR`. Velocity uses `PostLoginEvent`
+rather than `LoginEvent` (the latter can still refuse the connection, so a join reported from it is
+sometimes a join that never happened) and `DisconnectEvent` rather than `ServerDisconnectEvent` (a
+player moving between backends has not left the network, and treating a `/server` as a quit would
+slide a cache window on every one).
+
+### D53 — a command is a registration, not a branch in the entry point
+
+**v2:** every command was an `if (commandName.equalsIgnoreCase(...))` inside a 1,086-line
+`JavaPlugin`, and there was no way to unregister one. A feature that was "off" still answered.
+**v3:** `CommandRegistrar` is the fifth focused interface behind `PlatformFacade`; a module builds a
+`CommandSpec` and hands it to `ModuleContext.registerCommand`, and the handle is unwound with
+everything else when the module is disabled (departure D30 applied to commands).
+
+The platforms differ in one visible way, and it is worth stating rather than smoothing over.
+**Velocity really unregisters**; Bukkit cannot. A Bukkit command's existence and its aliases are
+fixed at load time by `plugin.yml`, so disabling a module puts its executor back to the plugin's own
+— the verb still exists and prints its usage line, but it no longer reaches the module. The command
+map can be reached reflectively; v2 did not, and neither does v3. That map's shape has changed
+across the decade of servers this jar supports, the reflective path is invisible to the conformance
+rules, and the failure mode is a verb that silently does not exist on one server generation.
+
+The same asymmetry is why `CommandSpec.aliases()` is documented as *advertised* rather than
+guaranteed, and why `BukkitCommandRegistrar` warns when a spec names an alias the descriptor does
+not. A silent difference between the two platforms is exactly how "it works on my proxy" is born.
+
+### D54 — the guild is discovered from the token, never configured
+
+**v2:** `api.guildId` in `config.yml`, filled in by hand.
+**v3:** no guild field to configure at all. On start with credentials, `HeimdallRuntime` calls
+`POST /api/minecraft/identify` (HMAC-signed, with an optional `X-Token-Id` header) and uses what the
+bot answers.
+
+v2's field was the single most common support problem, and its failure mode is the worst available:
+a snowflake copied from the wrong server, or out of a message link, signs perfectly and is refused —
+or, worse, succeeds against a guild the operator does not own. The token already encodes the answer,
+so the token is asked.
+
+Three details follow from it:
+
+- **"Discovering" is a first-class state, beside "not set up".** While `GuildDiscovery` is retrying,
+  commands answer and modules run; the one thing missing is the tunnel, whose URL is keyed by guild.
+  The state is logged once at start, and the retry backs off from 5 s to 5 minutes and never gives
+  up — a bot that is down for an hour must not leave a server unable to connect without a restart.
+  The first failure is a warning and every one after it is debug, so an hour of downtime does not
+  bury the rest of the log.
+- **`bootstrap.yml` gains a `guildId` key, and it is a cache.** It is written by the plugin, never
+  asked for by the setup flow, and overwritten by whatever `identify` next answers. It exists so a
+  restart *during* a bot outage can still dial the tunnel it dialled yesterday instead of sitting in
+  the discovering state until the bot returns. Persisting is best-effort: a read-only data directory
+  costs one `identify` per boot, which is much better than refusing to connect.
+- **A blank `guildId` in the response is an error, not an empty string.** Everything downstream
+  builds a path out of it, so an empty guild yields `/api/guilds//minecraft/…` — a 404 on every
+  endpoint, from a client that believes it is fully configured.
+
+### D55 — the declared capability set is what the build CAN run, not what is running
+
+**New in 1d**, and a correction to v3's own first attempt.
+
+`ModuleManager.capabilities()` was the union over **enabled** modules, on the reasoning that
+claiming one for a switched-off module means receiving settings nothing reads. That reasoning is
+right about the cost and wrong about the alternative, and the alternative is a deadlock:
+
+- the bot narrows its `config.push` to the base ids of the capabilities the client declared;
+- a module is enabled only because a push said it should be;
+- so a server with no config cache has nothing enabled, declares nothing, receives no config, and
+  can never enable anything — and every subsequent boot is in the same state.
+
+It is worse than a missing feature. An **empty `capabilities` array is not a v3 handshake at all**
+as far as the bot is concerned (`stub-bot/README.md`: the handshake is triggered by a non-empty
+array alone), so the connection silently negotiates down to v2-compat and the plugin runs on its
+built-in defaults with no dashboard control whatsoever, while the bot believes it is talking to a v2
+plugin and behaves accordingly.
+
+The set is now the union over **registered and eligible** modules, recomputed at registration rather
+than only on a lifecycle transition. An `INELIGIBLE` module still declares nothing, and that
+exclusion is the one that survives the argument above: it cannot run on this instance whatever the
+dashboard says, so config for it really would be settings nothing reads. A `FAILED` one stays
+declared — an operator fixing it should not also have to reconnect the tunnel.
+
+**Found by `smoke/connected.sh` on its first run**, which was the first boot in the project's history
+with real modules and a real bot in one process. 434 unit tests could not see it: the module tests
+had no tunnel, and the tunnel tests had no modules. That is the whole argument for the connected
+scenario existing.
+
+### D56 — a module reaches the API client through its constructor, not its context
+
+**New in 1d**, and recorded because it is a seam that will have to change.
+
+`ModuleContext` exposes the tunnel, the pipelines, the scheduler, the mirror factory, the platform
+and the settings — but not `ApiClient`. Three of the four feature modules need it, so each takes it
+as a constructor argument from the wiring in `HeimdallModules`, and each tolerates `null` (a server
+that was never set up) rather than refusing to register.
+
+Nullable constructor arguments in three places is not a good long-term answer, and the reason it is
+the 1d answer is scope: exposing the client on `ModuleContext` means deciding what a module sees
+when there is no client and when the guild is still being discovered, and that decision is better
+made alongside the setup flow in 1e than in passing here. **Prerequisite for 1e:** decide between
+`ModuleContext.api()` returning an `Optional`, and a core-owned gateway that queues or fails calls
+made before the guild resolves. Do not add a fourth nullable constructor argument first.
+
+### D57 — a mirror's window and ceiling are fixed when it is opened
+
+**New in 1d.**
+
+Everything the whitelist module reads from its settings is read live, at the point of use, because a
+settings change does not re-enable a module and a field captured in `enable()` is permanently stale
+after the first dashboard edit. Two values are the exception: `cacheWindow` and `maxExtensionHours`
+are baked into the `MirrorPolicy` when the store is opened, so a change to either takes effect the
+next time the module is enabled — toggling it off and on is enough.
+
+Reopening the store in place was rejected. Two `MirrorStore`s over one file, one of them with a
+debounced write still pending, is a way to lose the file — and losing the whitelist mirror is
+precisely the thing that turns a bot outage into an outage for every player.
+
+The module logs a warning naming both settings when it sees one of them change, because a setting
+that appears to save and silently does nothing is worse than one that says when it will apply.
+
+### D58 — an offline target is refused on every platform
+
+**v2:** the Bukkit path resolved an offline player through `getOfflinePlayerIfCached`; the proxy path
+refused outright.
+**v3:** refused on both.
+
+`PlayerDirectory` is online-only, and that is a decision rather than an omission: "resolve this name
+to a UUID" has a different answer on every platform — Bukkit has a cache of everyone who has ever
+joined, a Velocity proxy has nothing at all — the wrong answer is silent, and the bot already knows
+the mapping.
+
+v3 applies the proxy's behaviour everywhere rather than being right on one platform and differently
+right on the other, because the failure mode is bad: a fabricated or mis-resolved UUID files the
+infraction under an identity that never matches the player's real one, history splits in two, and
+every escalation tier is computed from half a record (issue #797 / MC-7). It is discovered when a
+repeat offender receives a first-offence warning.
+
+Offending a logged-out player is a real workflow, so this is a **stated gap, not a closed question**.
+Closing it properly means asking the bot to resolve the name, since it holds the link records and its
+answer is identical on every platform. That is a new endpoint, so 1e or 1f — not a `PlayerDirectory`
+extension invented in a module.
+
+### D59 — `/offend` always dispatches as the console
+
+**v2:** `player.performCommand(...)` when a player issued it, console dispatch otherwise.
+**v3:** always the console.
+
+v2's split meant the punishment plugin re-checked *the moderator's* permissions, so the same offence
+landed or did not depending on who reported it — while the bot recorded the infraction either way.
+An infraction with no punishment attached to it, silently, for some staff and not others.
 
 ---
 
@@ -643,81 +817,6 @@ server's bundled SnakeYAML, whose API changed incompatibly at 2.0, so the answer
 which version the server happens to carry. Reading it ourselves also makes the whole thing testable
 against a fixture directory — which is how the role matrix is tested at all.
 
-### D52 — session handlers run off the event thread, and carry their own timestamp
-
-**New in 1d**, and the two parts of S1 that were left to the implementation.
-
-`PlayerSessionEvents.join(handle, timestampMs)` hands off to `heimdall-io` and returns. On Bukkit,
-`PlayerJoinEvent` is on the main server thread, so a listener that wrote a mirror entry — let alone
-one that made a network call — would put that on the tick loop for every join. What actually runs
-there is building a handle and queueing a task.
-
-Two consequences, both deliberate:
-
-- **join and quit are no longer ordered relative to each other.** A quit for somebody who
-  reconnected immediately can in principle be delivered after the second join. This is the same
-  trade departure D27 made for tunnel handlers, for the same reason, and it is why the timestamp is
-  stamped on the event thread and carried rather than read by the listener — "now" at delivery is an
-  unknown distance after the thing that happened.
-- **A rejected hand-off is dropped with a debug line.** That only happens while the pools are
-  shutting down, which is the one moment a missed cache extension costs nothing, and throwing would
-  put a plugin fault in the server log for something the plugin was already stopping for.
-
-Bukkit uses `PlayerJoinEvent` / `PlayerQuitEvent` at `MONITOR`. Velocity uses `PostLoginEvent`
-rather than `LoginEvent` (the latter can still refuse the connection, so a join reported from it is
-sometimes a join that never happened) and `DisconnectEvent` rather than `ServerDisconnectEvent` (a
-player moving between backends has not left the network, and treating a `/server` as a quit would
-slide a cache window on every one).
-
-### D53 — a command is a registration, not a branch in the entry point
-
-**v2:** every command was an `if (commandName.equalsIgnoreCase(...))` inside a 1,086-line
-`JavaPlugin`, and there was no way to unregister one. A feature that was "off" still answered.
-**v3:** `CommandRegistrar` is the fifth focused interface behind `PlatformFacade`; a module builds a
-`CommandSpec` and hands it to `ModuleContext.registerCommand`, and the handle is unwound with
-everything else when the module is disabled (departure D30 applied to commands).
-
-The platforms differ in one visible way, and it is worth stating rather than smoothing over.
-**Velocity really unregisters**; Bukkit cannot. A Bukkit command's existence and its aliases are
-fixed at load time by `plugin.yml`, so disabling a module puts its executor back to the plugin's own
-— the verb still exists and prints its usage line, but it no longer reaches the module. The command
-map can be reached reflectively; v2 did not, and neither does v3. That map's shape has changed
-across the decade of servers this jar supports, the reflective path is invisible to the conformance
-rules, and the failure mode is a verb that silently does not exist on one server generation.
-
-The same asymmetry is why `CommandSpec.aliases()` is documented as *advertised* rather than
-guaranteed, and why `BukkitCommandRegistrar` warns when a spec names an alias the descriptor does
-not. A silent difference between the two platforms is exactly how "it works on my proxy" is born.
-
-### D54 — the guild is discovered from the token, never configured
-
-**v2:** `api.guildId` in `config.yml`, filled in by hand.
-**v3:** no guild field to configure at all. On start with credentials, `HeimdallRuntime` calls
-`POST /api/minecraft/identify` (HMAC-signed, with an optional `X-Token-Id` header) and uses what the
-bot answers.
-
-v2's field was the single most common support problem, and its failure mode is the worst available:
-a snowflake copied from the wrong server, or out of a message link, signs perfectly and is refused —
-or, worse, succeeds against a guild the operator does not own. The token already encodes the answer,
-so the token is asked.
-
-Three details follow from it:
-
-- **"Discovering" is a first-class state, beside "not set up".** While `GuildDiscovery` is retrying,
-  commands answer and modules run; the one thing missing is the tunnel, whose URL is keyed by guild.
-  The state is logged once at start, and the retry backs off from 5 s to 5 minutes and never gives
-  up — a bot that is down for an hour must not leave a server unable to connect without a restart.
-  The first failure is a warning and every one after it is debug, so an hour of downtime does not
-  bury the rest of the log.
-- **`bootstrap.yml` gains a `guildId` key, and it is a cache.** It is written by the plugin, never
-  asked for by the setup flow, and overwritten by whatever `identify` next answers. It exists so a
-  restart *during* a bot outage can still dial the tunnel it dialled yesterday instead of sitting in
-  the discovering state until the bot returns. Persisting is best-effort: a read-only data directory
-  costs one `identify` per boot, which is much better than refusing to connect.
-- **A blank `guildId` in the response is an error, not an empty string.** Everything downstream
-  builds a path out of it, so an empty guild yields `/api/guilds//minecraft/…` — a 404 on every
-  endpoint, from a client that believes it is fully configured.
-
 ---
 
 ## Deliberate non-departures
@@ -730,6 +829,22 @@ It assigns `now + windowMs` (capped), so a **shorter** window shortens an entry'
 120-minute join extension landing after a 180-minute leave extension pulls the expiry back in. That
 is v2 verbatim. The plausible improvement is `max(current, capped)`, deferred to 1d so that a
 behaviour change and the first real caller do not land in the same commit.
+
+**1d has the first real caller now — the whitelist module's join and quit windows — and the decision
+is to leave it alone.** Two reasons, and the second is the one that settles it:
+
+- the reachable case is narrow. It needs a quit to land before the join that preceded it, which the
+  asynchronous dispatch (D52) makes possible but rare, and the cost when it happens is an entry that
+  expires an hour early and is then re-verified against the bot on the next login. That is the system
+  working, just with one extra request;
+- `max(current, capped)` is not obviously the safer rule. It makes every window a floor, so a leave
+  extension can only ever push an entry further out, and the thing standing between that and
+  indefinite access is the #771 ceiling alone. Weakening one bound and leaning harder on the other is
+  a change that wants its own reasoning and its own tests, not a line changed in passing while
+  shipping the first consumer.
+
+Left as a real option rather than closed: if a server is ever seen re-verifying far more often than
+its windows suggest it should, this is the first thing to look at.
 
 ### N2 — the whitelist-sync ETag asymmetry between HTTP and WebSocket signing
 
@@ -772,7 +887,19 @@ Left in this file rather than deleted: the entry is why `Capabilities.moduleId()
 `Capabilities.version()` exist, and the failure it describes is the one somebody will go looking for
 the next time a module runs with no configuration.
 
-### N6 — the declared capability set is a snapshot taken when the socket opened
+### N6 — the declared capability set is a snapshot taken when the socket opened (RESOLVED in 1d)
+
+**Superseded by departure D55, and left here because the reasoning below is still how somebody will
+arrive at the question.**
+
+The hazard was real and its fix came from the opposite direction to the one this entry expected. The
+set is no longer the *enabled* modules but the *registered* ones, and registration happens before
+`start()` and never changes — so there is nothing left for a mid-connection toggle to make stale, and
+the asymmetry described below no longer exists in either half. What forced the change was not this
+entry but a deadlock: an empty set is not a v3 handshake at all, so a fresh install never negotiated
+v3 and never received the config that would have enabled anything.
+
+The original entry follows.
 
 `identify` is sent once per connection, so the capability set the bot has been told about is
 whatever was enabled at that moment. A module toggled while the tunnel is up is not reflected until
@@ -814,11 +941,26 @@ v2's Velocity LuckPerms manager exposed `cleanupUser(uuid)`, which drops a user 
 in-memory cache so the next read comes from storage. Nothing called it on a schedule; it existed for
 callers who needed fresh data.
 
-`LuckPermsBridge` has no equivalent, because in 1c nothing reads groups on a cadence — the login
-path loads the user itself and the role-sync module does not exist yet. **1d prerequisite:** decide
-whether the role-sync module needs it before it starts polling. A module that reads cached groups in
-a loop and never invalidates is a module that acts on a stale answer indefinitely, which is the
-shape of the 2.4.0 outage (D7) in a different place.
+`LuckPermsBridge` has no equivalent, because in 1c nothing read groups on a cadence — the login path
+loads the user itself and the role-sync module did not exist yet.
+
+**Decided in 1d: it is not needed, because there is no loop.** The role-sync module has no polling at
+all. It reacts to a pushed snapshot and to a login answer, and in both cases the snapshot is the
+*bot's*, carried on the event, rather than something read back out of LuckPerms. The only read of
+LuckPerms' own state is the one `setPlayerGroups` does internally to compute the diff, and that loads
+the user from storage when it is not cached — which is the behaviour `cleanupUser` exists to force.
+Invalidating beforehand would buy nothing and cost a storage round trip on every sync.
+
+The condition that would change the answer is worth writing down, because it is the shape of the
+2.4.0 outage (D7) in a different place: **if the role-sync module ever grows a periodic reconcile
+that reads current groups and compares them against a snapshot it is holding, it needs an
+invalidation step**, and `LuckPermsBridge` needs a method for it. Until then, adding one would be
+adding a cache-management API with no cache to manage.
+
+Separately, 1d did close a *different* staleness hole in the same bridge: a resolved `LuckPerms`
+handle is now dropped whenever a call using it fails, so a LuckPerms hot-reloaded under a running
+server heals on the next call instead of leaving `isAvailable()` answering `true` about a shut-down
+instance forever.
 
 ---
 
