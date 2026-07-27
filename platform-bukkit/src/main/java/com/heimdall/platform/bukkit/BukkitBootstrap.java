@@ -3,6 +3,7 @@ package com.heimdall.platform.bukkit;
 import com.heimdall.api.HeimdallTunnel;
 import com.heimdall.core.BuildConstants;
 import com.heimdall.core.concurrent.HeimdallExecutors;
+import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.HeimdallLogger;
@@ -45,14 +46,26 @@ import org.bukkit.plugin.java.JavaPlugin;
  *       thing that handles it exists.
  * </ol>
  *
- * <p>Teardown is the exact reverse and every step is contained, because the step that matters most
- * — stopping the pools — is the last one.
+ * <p>Teardown is the reverse of whatever actually got built, and every step is contained. Not "the
+ * exact reverse": {@code onEnable} catches everything, so a throw half-way through this leaves a
+ * server running with some of it constructed, and {@link #disable()} is the only thing that will
+ * ever be called again. It null-guards each step independently rather than assuming the one before
+ * it ran.
  */
 final class BukkitBootstrap {
 
     private final JavaPlugin plugin;
     private final HeimdallLogger logger;
     private final long startedAtMs = System.currentTimeMillis();
+
+    /**
+     * Held rather than kept in a local, because a throw part-way through {@link #enable()} would
+     * otherwise strand three thread pools with nothing holding a reference to them.
+     *
+     * <p>Ownership passes to the runtime once it is built, so {@link #disable()} closes these
+     * directly only in the window where the runtime does not exist yet.
+     */
+    private HeimdallExecutors executors;
 
     private BukkitPlatform platform;
     private HeimdallRuntime runtime;
@@ -81,12 +94,16 @@ final class BukkitBootstrap {
 
         BootstrapStore store =
                 new BootstrapStore(logger, dataFolder.toPath().resolve("bootstrap.yml"));
+        // Read once and passed to both consumers. Two reads would be two chances to disagree about
+        // what is on disk if a setup command wrote between them, and it is a file parse on the
+        // boot path either way.
+        BootstrapConfig bootstrap = store.load();
         ServerRole role = InstanceRoleDetector.resolve(
-                store.load().role(),
+                bootstrap.role(),
                 new BukkitRoleDetector(Bukkit.getWorldContainer(), logger),
                 logger);
 
-        HeimdallExecutors executors = new HeimdallExecutors(logger);
+        executors = new HeimdallExecutors(logger);
         platform = new BukkitPlatform(plugin, logger, role, executors);
 
         TickSource ticks = BukkitAdapters.tickSource(logger);
@@ -109,7 +126,16 @@ final class BukkitBootstrap {
                 + ", ticks via " + ticks.describe() + ", console tap " + (tapped ? "on" : "off"));
     }
 
-    /** Shuts everything down in reverse. Contained step by step; the pools stop last. */
+    /**
+     * Shuts everything down in reverse. Contained step by step; the pools stop last.
+     *
+     * <p><strong>It also has to unwind a half-built enable.</strong> {@code onEnable} catches
+     * everything, so a throw part-way through {@link #enable()} leaves the server running with
+     * whatever had been constructed by then — pools, an attached appender — and this is the only
+     * thing that will ever be called again. So every step is null-guarded independently rather than
+     * assuming the previous one ran, and the executors are closed directly when the runtime that
+     * would otherwise own them was never built.
+     */
     void disable() {
         TunnelSpiService.uninstall(spi);
         spi = null;
@@ -123,7 +149,13 @@ final class BukkitBootstrap {
             // Closes the executors too — ownership transferred when they were handed to the builder.
             runtime.close();
             runtime = null;
+        } else if (executors != null) {
+            // enable() threw between constructing the pools and constructing the runtime. Nothing
+            // else holds them, and three pools of daemon threads outliving a failed enable is a
+            // leak per /reload.
+            executors.shutdown();
         }
+        executors = null;
         if (platform != null) {
             platform.close();
             platform = null;
@@ -139,7 +171,8 @@ final class BukkitBootstrap {
                         logger, runtime.loginPipeline(), platform.integrations().floodgate()),
                 plugin);
         Bukkit.getPluginManager().registerEvents(
-                new BukkitChatListener(logger, runtime.chatPipeline()), plugin);
+                new BukkitChatListener(logger, runtime.chatPipeline(), platform.messenger()),
+                plugin);
     }
 
     private void registerCommand(ServerRole role) {

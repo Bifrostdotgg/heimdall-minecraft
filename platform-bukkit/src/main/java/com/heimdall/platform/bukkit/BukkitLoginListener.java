@@ -56,7 +56,10 @@ final class BukkitLoginListener implements Listener {
         this.floodgate = floodgate;
     }
 
-    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    // No ignoreCancelled: AsyncPlayerPreLoginEvent is not a Cancellable, so the flag is inert on it
+    // — Bukkit reads it off the annotation and it never applies. Leaving it there would read as a
+    // deliberate "skip logins another plugin already refused", which is not what it does.
+    @EventHandler(priority = EventPriority.LOW)
     public void onPreLogin(AsyncPlayerPreLoginEvent event) {
         try {
             Verdict verdict = pipeline.dispatch(attemptFrom(event));
@@ -65,12 +68,22 @@ final class BukkitLoginListener implements Listener {
                         AsyncPlayerPreLoginEvent.Result.KICK_WHITELIST,
                         Msg.toLegacy(verdict.reason()));
             }
-        } catch (RuntimeException broken) {
-            // Fail open, loudly. The pipeline's own interceptors decide what their failure means
-            // (departure D39); this is the last resort for a bug in the glue, and a bug in the glue
-            // must not be able to lock everybody out of a server.
+        } catch (Throwable broken) {
+            // Throwable, not RuntimeException, and the difference is not theoretical: the failure
+            // class this binding exists to be careful about — a NoSuchMethodError or
+            // NoClassDefFoundError from an API that moved between server versions, which is exactly
+            // what departures D43 and D44 are about — is an Error. Pipeline.dispatch catches
+            // RuntimeException per interceptor and applies its declared failureVerdict (D39), so
+            // anything arriving here already escaped that: it is a bug in the glue, not in a check.
+            //
+            // The outcome is the pipeline's own default decision, which for login is admit. A bug
+            // in the glue must not be able to lock everybody out of a server, and a Heimdall that
+            // silently starts refusing every login is far worse than one that says it is broken.
+            // error() is already SEVERE with the cause attached; a separate severe() line would
+            // only put the same failure in the log twice.
             logger.error("the login pipeline threw for " + event.getName()
-                    + "; admitting them rather than locking the server", broken);
+                    + "; admitting them (the pipeline's default decision) rather than locking the "
+                    + "server", broken);
         }
     }
 

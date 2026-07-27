@@ -38,11 +38,12 @@ public final class PaperSupport {
 
     private static boolean hasServerMethod(String name) {
         try {
-            // Asked of the interface rather than of the running instance: CraftBukkit's Server
-            // implementation is obfuscated on some builds, and the API interface is what a direct
-            // call would be compiled against anyway.
-            Method method = Bukkit.getServer().getClass().getMethod(name);
-            return method != null;
+            // Asked of the running server's own class, which is what a virtual call would dispatch
+            // on. getMethod walks up to the API interface, so a method declared only on Paper's
+            // org.bukkit.Server is found either way — and a fork that adds one without implementing
+            // the interface is found too, which is the point of probing for the capability rather
+            // than for the brand.
+            return Bukkit.getServer().getClass().getMethod(name) != null;
         } catch (Throwable absent) {
             return false;
         }

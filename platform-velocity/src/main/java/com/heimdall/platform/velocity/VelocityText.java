@@ -3,6 +3,8 @@ package com.heimdall.platform.velocity;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.text.Msg;
 import java.lang.reflect.Method;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -71,6 +73,9 @@ final class VelocityText {
 
     /** {@code ResultedEvent.ComponentResult.denied(Component)}. */
     private final Method denied;
+
+    /** Per-receiver-type method lookups, resolved once. See {@link #lookup}. */
+    private final Map<String, Method> methods = new ConcurrentHashMap<String, Method>();
 
     VelocityText(HeimdallLogger logger) {
         this.logger = logger;
@@ -198,12 +203,47 @@ final class VelocityText {
 
     private void invokeWithComponent(Object target, String methodName, Object component) {
         try {
-            Method method = target.getClass().getMethod(methodName, componentType);
-            method.setAccessible(true);
+            Method method = lookup(target.getClass(), methodName);
+            if (method == null) {
+                return;
+            }
             method.invoke(target, component);
         } catch (Throwable failed) {
             logger.debug(() -> "could not call " + methodName + " on " + target.getClass()
                     + ": " + failed);
+        }
+    }
+
+    /**
+     * The reflective lookup, done once per concrete receiver type.
+     *
+     * <p>{@code getMethod} walks the class hierarchy and copies the {@link Method} it returns on
+     * every call, and these two sit on the message path — every chat line a module relays and every
+     * disconnect goes through one. Velocity has a handful of implementation classes and they are
+     * created once, so the map is bounded by the proxy's own type set rather than by traffic.
+     *
+     * <p>Keyed by the receiver's class, not by the method name alone: the same name resolves
+     * differently on a {@code Player} and on a {@code ConsoleCommandSource}.
+     */
+    private Method lookup(Class<?> receiver, String methodName) {
+        String key = receiver.getName() + "#" + methodName;
+        Method cached = methods.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            Method resolved = receiver.getMethod(methodName, componentType);
+            resolved.setAccessible(true);
+            methods.put(key, resolved);
+            return resolved;
+        } catch (Throwable absent) {
+            // Deliberately not cached. A negative here means the receiver's class does not have the
+            // method, which is a fact about a type — but it can also mean the accessibility check
+            // failed under a module system, and that is not worth making permanent for a path that
+            // already degrades to "the player sees the proxy's default text".
+            logger.debug(() -> "no " + methodName + " taking a Component on " + receiver + ": "
+                    + absent);
+            return null;
         }
     }
 

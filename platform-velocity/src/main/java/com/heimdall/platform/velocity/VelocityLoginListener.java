@@ -83,12 +83,19 @@ final class VelocityLoginListener {
             // the symptom is a whitelist that silently admits everybody.
             logger.severe("refusing " + player.getUsername() + " is impossible on this proxy: no "
                     + "usable Adventure to express a denial with. Admitting them.");
-        } catch (RuntimeException broken) {
-            // Fail open, loudly. Interceptors decide what their own failure means (departure D39);
-            // this is the last resort for a bug in the glue, and a bug in the glue must not lock
-            // everybody out of a network.
+        } catch (Throwable broken) {
+            // Throwable, not RuntimeException, and on this platform that is the likeliest failure
+            // there is: VelocityText resolves Adventure reflectively (departure D44), so a proxy
+            // whose API shape differs produces a NoSuchMethodError — an Error, which sails past a
+            // RuntimeException catch and out into Velocity's event machinery.
+            //
+            // Pipeline.dispatch already catches RuntimeException per interceptor and applies its
+            // declared failureVerdict (D39), so anything arriving here escaped that: it is a bug in
+            // the glue, not in a check. The outcome is the pipeline's own default decision, which
+            // for login is admit — a bug in the glue must not lock everybody out of a network.
             logger.error("the login pipeline threw for " + player.getUsername()
-                    + "; admitting them rather than locking the network", broken);
+                    + "; admitting them (the pipeline's default decision) rather than locking the "
+                    + "network", broken);
         }
     }
 

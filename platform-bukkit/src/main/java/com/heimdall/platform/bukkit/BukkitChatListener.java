@@ -40,10 +40,12 @@ final class BukkitChatListener implements Listener {
 
     private final HeimdallLogger logger;
     private final ChatPipeline pipeline;
+    private final BukkitMessenger messenger;
 
-    BukkitChatListener(HeimdallLogger logger, ChatPipeline pipeline) {
+    BukkitChatListener(HeimdallLogger logger, ChatPipeline pipeline, BukkitMessenger messenger) {
         this.logger = logger;
         this.pipeline = pipeline;
+        this.messenger = messenger;
     }
 
     @SuppressWarnings("deprecation")
@@ -58,12 +60,20 @@ final class BukkitChatListener implements Listener {
                     ChatMessage.of(sender.getUniqueId(), sender.getName(), event.getMessage()));
             if (verdict.isDeny()) {
                 event.setCancelled(true);
+                // Through the messenger, like every other player-facing send. Serialising here
+                // instead would make this the one place that bypasses Adventure — and it would
+                // inherit whatever the legacy serializer's dialect happens to be rather than the
+                // one Msg is configured for.
+                //
                 // The reason goes to the sender only. Chat moderation that announced itself would
                 // repeat the blocked message to everyone who had not seen it.
-                sender.sendMessage(com.heimdall.core.text.Msg.toLegacy(verdict.reason()));
+                messenger.send(sender, verdict.reason());
             }
-        } catch (RuntimeException broken) {
-            // Fail open: a bug in the relay must not silence a server's chat.
+        } catch (Throwable broken) {
+            // Throwable, not RuntimeException. The failure class this whole binding is careful about
+            // — a NoSuchMethodError from an API that moved between server versions — is an Error,
+            // and it would sail straight past a RuntimeException catch into Bukkit's event
+            // machinery. Fail open either way: a bug in the relay must not silence a server's chat.
             logger.error("the chat pipeline threw; letting the message through", broken);
         }
     }

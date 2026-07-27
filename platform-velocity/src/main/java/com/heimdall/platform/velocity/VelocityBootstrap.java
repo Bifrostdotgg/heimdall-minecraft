@@ -2,6 +2,7 @@ package com.heimdall.platform.velocity;
 
 import com.heimdall.core.BuildConstants;
 import com.heimdall.core.concurrent.HeimdallExecutors;
+import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.HeimdallLogger;
@@ -34,6 +35,14 @@ final class VelocityBootstrap {
     private final Path dataDirectory;
     private final long startedAtMs = System.currentTimeMillis();
 
+    /**
+     * Held rather than kept in a local: a throw part-way through {@link #enable()} would otherwise
+     * strand three thread pools with nothing holding a reference to them. Ownership passes to the
+     * runtime once it exists, so {@link #disable()} closes these directly only in the window where
+     * it does not.
+     */
+    private HeimdallExecutors executors;
+
     private VelocityText text;
     private VelocityPlatform platform;
     private HeimdallRuntime runtime;
@@ -65,7 +74,9 @@ final class VelocityBootstrap {
         // A proxy IS the gatekeeper — there is nothing to detect, and the question the Bukkit side
         // has to answer ("is something in front of me?") has one answer here. An explicit role in
         // bootstrap.yml still wins, for the operator running a proxy behind another proxy.
-        ServerRole configured = store.load().role();
+        // Read once and passed on, rather than loaded again by whoever needs it next.
+        BootstrapConfig bootstrap = store.load();
+        ServerRole configured = bootstrap.role();
         ServerRole role = configured == ServerRole.AUTO ? ServerRole.GATEKEEPER : configured;
         logger.info("server role: " + role.wireName()
                 + (configured == ServerRole.AUTO ? " (a proxy owns the login decision)"
@@ -73,7 +84,7 @@ final class VelocityBootstrap {
 
         text = new VelocityText(logger);
 
-        HeimdallExecutors executors = new HeimdallExecutors(logger);
+        executors = new HeimdallExecutors(logger);
         platform = new VelocityPlatform(
                 plugin, proxy, logger, role, dataDirectory, executors, text);
 
@@ -111,7 +122,12 @@ final class VelocityBootstrap {
             // Closes the executors too — ownership transferred when they were handed to the builder.
             runtime.close();
             runtime = null;
+        } else if (executors != null) {
+            // enable() threw between constructing the pools and constructing the runtime. Nothing
+            // else holds them, and daemon pools outliving a failed enable is a leak per reload.
+            executors.shutdown();
         }
+        executors = null;
         if (platform != null) {
             platform.close();
             platform = null;
@@ -129,7 +145,14 @@ final class VelocityBootstrap {
     }
 
     private void registerCommand(ServerRole role) {
-        CommandMeta meta = proxy.getCommandManager().metaBuilder("hdp").build();
+        // "heimdallproxy" spelled out, for the same reason the primary verb is /hdp rather than
+        // /hd: in a proxied network both plugins are installed and the proxy claims a name before
+        // the backend ever sees it, so the two need names that cannot collide — and an operator who
+        // does not remember which abbreviation is which has a word to type instead.
+        CommandMeta meta = proxy.getCommandManager()
+                .metaBuilder("hdp")
+                .aliases("heimdallproxy")
+                .build();
         proxy.getCommandManager()
                 .register(meta, new HeimdallVelocityCommand(runtime, text, role));
     }

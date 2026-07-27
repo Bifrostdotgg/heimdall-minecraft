@@ -38,9 +38,34 @@ final class VelocityIntegrations implements Integrations {
         this.floodgate = FloodgateIdentityProvider.create();
     }
 
+    /**
+     * Cached once resolved, re-resolved while {@code null}.
+     *
+     * <p>Both halves matter and they pull in opposite directions. Never caching a <em>negative</em>
+     * is the fix for #796 / MC-10: there is no load-order guarantee between plugins, and v2's Bukkit
+     * implementation resolved once at construction, so a server where LuckPerms started second had
+     * role sync dead for the whole session.
+     *
+     * <p>Caching the <em>positive</em> is what stops a fresh bridge being built per lookup. Each new
+     * one announces "LuckPerms integration enabled" the first time it resolves, and "first time" is
+     * per instance — so a throwaway per call turns a one-off boot line into one INFO line per role
+     * sync, which is a log nobody can read.
+     */
+    private volatile LuckPermsBridge luckPerms;
+
     @Override
     public Optional<LuckPermsBridge> luckPerms() {
-        return LuckPermsSupport.resolve(logger, ioExecutor);
+        LuckPermsBridge resolved = luckPerms;
+        if (resolved != null) {
+            return Optional.of(resolved);
+        }
+        Optional<LuckPermsBridge> fresh = LuckPermsSupport.resolve(logger, ioExecutor);
+        if (fresh.isPresent()) {
+            // A benign race: two callers can both build one and one wins. The loser is discarded and
+            // holds nothing — a bridge is a stateless view onto LuckPerms' own singleton.
+            luckPerms = fresh.get();
+        }
+        return fresh;
     }
 
     @Override

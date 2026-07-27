@@ -15,8 +15,14 @@ import com.velocitypowered.api.command.SimpleCommand;
  * verb means "am I asking the gatekeeper or this backend?" is answered by what you typed rather
  * than by where you were standing.
  *
- * <p>Registered in phase 1c so the smoke matrix can prove the registration works at all; the
- * subcommand tree lands in 1e.
+ * <p>The {@code heimdallproxy} alias is the spelled-out form, for the operator who does not
+ * remember which abbreviation belongs to which component.
+ *
+ * <p>Registered in phase 1c so the registration path runs on every boot; the subcommand tree lands
+ * in 1e. Unlike the Bukkit side, the smoke matrix cannot invoke it — the proxy image has no console
+ * pipe and no RCON — so the coverage there is that the enable banner is logged immediately after
+ * registration, and a throw during it would have surfaced as an enable failure instead.
+ * TODO(1d): assert it for real from the headless-client row that D43 also needs.
  */
 final class HeimdallVelocityCommand implements SimpleCommand {
 
