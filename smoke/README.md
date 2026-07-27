@@ -1,8 +1,14 @@
 # Boot-smoke matrix
 
-Does the one jar load, and unload cleanly, on real servers across the whole supported range?
+Does the one jar load, do real work, and unload cleanly, on real servers across the whole
+supported range?
 
-That is the entire phase 0 question, and it is not one the Gradle build can answer.
+From phase 1c the plugin actually builds its runtime on enable — role detection, a log4j console
+tap, event listeners, a registered command — with no bot anywhere to talk to. These rows are what
+prove that not-configured path stays green on every supported server, which is the state every
+fresh install is in.
+
+That is not a question the Gradle build can answer.
 `:app:verifyShadowJar` checks bytecode levels, relocations and descriptors — everything that is
 visible by reading the jar. What it cannot see is a server refusing the plugin for a reason that
 only exists at runtime: a missing `api-version`, a loader that rejects a descriptor it parses
@@ -74,23 +80,33 @@ problem, and Velocity does write in there (bStats).
 ## What each row asserts
 
 1. The server starts and the plugin logs its enable banner, within `SMOKE_BOOT_TIMEOUT`.
+1a. The banner says `console tap on`. Attaching a root Log4j appender is the single most
+   version-sensitive thing the plugin does — the API that works on Minecraft 1.8.8's Log4j
+   `2.0-beta9` is not the one v2 used, and the five-argument `AbstractAppender` constructor v2 called
+   did not exist until 2.11.2. The tap is attached eagerly at enable precisely so every row
+   exercises it, and a boot where it failed still logs a perfectly good enable banner — so this is a
+   separate assertion, not a substring of that one.
 2. The **server** then logs its own `Done (Xs)` line. A plugin enables *during* startup, seconds
    before the server opens its RCON port, so stopping on the plugin banner alone races the rest of
    the boot — and losing that race does not fail cleanly: RCON is refused, the fallback SIGTERM
    reaches a server not yet reading stdin, and the row dies a minute later on "Took too long, so
    killing server process". That is a flake, not a finding, and it cost one CI run to learn.
 3. No error in the boot log is attributable to the plugin.
+3a. Bukkit rows: `/hd` over RCON answers with the version line. A `commands:` block in `plugin.yml`
+   that the entry point never claims yields "Unknown command" with nothing in any log to say why,
+   and the plugin loads perfectly either way. Retried a few times, unlike `stop`, because it is
+   read-only and idempotent and legacy RCON drops the odd connection — the 1.8.8 row answered
+   `list` and then had the very next call reset by peer.
 4. The server stops **gracefully** — over RCON (`rcon-cli stop`, retried a few times) for the Bukkit
    family, so the server's own shutdown path runs and `onDisable` is actually called. `docker stop`
    would also work, but only because the image traps the signal, and asserting through a path the
    plugin will never see in production proves less.
-5. Bukkit rows log the disable banner. Velocity has no disable banner in phase 0 (the scaffold
-   registers no shutdown listener), so those rows assert the proxy's own `Shutting down the proxy`
-   line instead — "no errors" alone would be far too weak, since a proxy killed outright also logs
-   no errors. **The Velocity rows are therefore boot-only:** they prove the jar loads and the proxy
-   stops cleanly, not that the plugin unloads. Once `:platform-velocity` gains a
-   `ProxyShutdownEvent` listener, those rows assert the disable banner like the rest (there is a
-   `TODO(phase 1)` on the branch in `run.sh`).
+5. **Every** row logs the disable banner. The Velocity rows were boot-only until phase 1c — the
+   scaffold registered no `ProxyShutdownEvent` listener, so it had no banner of its own and those
+   rows could only prove the jar loaded and the proxy stopped, nothing about Heimdall unloading. It
+   has one now. The proxy's own `Shutting down the proxy` line is still asserted alongside ours,
+   because our banner alone would not distinguish a graceful stop from a proxy killed part-way
+   through teardown, and "no errors" is weaker still — a SIGKILL logs nothing at all.
 6. No error in the shutdown log is attributable to the plugin.
 
 Before any of the shutdown assertions run, the harness waits for the `docker logs -f` follower to
@@ -127,12 +143,12 @@ a POSIX bracket expression means "not a backslash and not the letter `n`" — so
 match `Could not enable Heimdall` and most of what it was written to catch. Nothing about a passing
 smoke run would ever have revealed it.
 
-## Phase 1
+## Next: the stub bot
 
 `docker-compose.yml` has the next topology already wired: the stub bot (see `stub-bot/README.md`)
 next to a server with the plugin, with fixtures in `fixtures/players.json`. **`run.sh` does not use
-it and CI does not run it** — phase 0's exit criterion is that the jar loads, and the plugin does
-not dial the bot yet, so there is nothing to connect and nothing to assert.
+it and CI does not run it** — the plugin builds its tunnel but has no guild id to dial with until
+the setup flow lands, so there is still nothing to connect and nothing to assert.
 
 It is committed now, runnable by hand, so the wiring is written down while that is true rather than
 being invented in a hurry the day the tunnel lands. The header of that file lists the assertions to

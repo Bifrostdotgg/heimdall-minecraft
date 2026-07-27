@@ -9,9 +9,11 @@
 #   smoke/run.sh --list
 #   smoke/run.sh --selftest      # verify the log assertions themselves; needs no Docker
 #
-# Phase 0 asserts load and unload only. The plugin does not dial the bot yet, so there is nothing
-# to point at a stub bot and nothing to assert about a tunnel; smoke/docker-compose.yml has that
-# topology wired and waiting for phase 1.
+# Asserts load, real work at boot, and clean unload. From phase 1c the plugin actually builds its
+# runtime on enable — role detection, a log4j console tap, listeners, a registered command — with no
+# bot to talk to, so these rows are what proves the not-configured path stays green on every
+# supported server. The tunnel itself still has nothing to connect to; smoke/docker-compose.yml has
+# that topology wired and waiting.
 #
 # Environment:
 #   SMOKE_JAR             path to the shaded jar (default: newest app/build/libs/heimdall-whitelist-*.jar)
@@ -31,11 +33,26 @@ STOP_TIMEOUT="${SMOKE_STOP_TIMEOUT:-120}"
 RCON_TIMEOUT="${SMOKE_RCON_TIMEOUT:-120}"
 WORK_ROOT="${SCRIPT_DIR}/.work"
 
-# The plugin's own banner. Phase 1 changes this text — update it here, in one place.
-ENABLE_PATTERN='Heimdall v[0-9][^ ]* \(phase 0 scaffold\)'
+# The plugin's own banners. Change the text in the plugin and here, in one place.
+ENABLE_PATTERN='Heimdall v[0-9][^ ]* enabled'
 DISABLE_PATTERN='Heimdall v[0-9][^ ]* shutting down'
-# Velocity's own shutdown line, not ours — see the assertion for why it is worth checking.
+# Velocity's own shutdown line, not ours. Still checked alongside our disable banner: it is what
+# distinguishes a graceful stop from a SIGKILL, and our banner alone could in principle be logged by
+# a shutdown handler on a proxy that was then killed mid-teardown.
 VELOCITY_SHUTDOWN_PATTERN='Shutting down the proxy'
+# Part of the enable banner. Attaching a root log4j appender is the single most version-sensitive
+# thing the plugin does — the API that works on Minecraft 1.8.8's log4j 2.0-beta9 is not the one v2
+# used — and asserting it here is what turns "it compiled" into "it attached on all six servers".
+CONSOLE_TAP_PATTERN='console tap on'
+# What /hd prints. Proves the command is actually registered: a commands: block in plugin.yml that
+# the entry point never claims yields "Unknown command" with nothing in any log to say why, and the
+# plugin loads perfectly either way.
+#
+# `.*` between the name and the version is not laziness. The plugin answers in §-coded text and
+# rcon-cli rewrites those into ANSI escapes, so what actually comes back is
+# `<esc>[33mHeimdall <esc>[37mv3.0.0-SNAPSHOT` — a literal 'Heimdall v3' never matches. The
+# self-test carries that exact shape.
+COMMAND_PATTERN='Heimdall.*v[0-9]+\.[0-9]'
 # The server's own "I have finished starting" line. Both families print it.
 #
 # Waiting for this as well as for the plugin banner is not belt-and-braces. A plugin enables during
@@ -109,9 +126,10 @@ readonly SELFTEST_ERRORS=(
 
 # Real lines from the captured logs of a PASSING run. Flagging any of these makes the check useless.
 readonly SELFTEST_CLEAN=(
-    "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT (phase 0 scaffold) on 1.21.8-60-29c8822 (MC: 1.21.8)"
+    "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT enabled — role standalone, ticks via paper (tps+mspt), console tap on"
     "[13:50:13 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down"
-    "[13:51:44 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT (phase 0 scaffold) on Velocity 3.4.0"
+    "[13:51:44 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT enabled — role gatekeeper, text bridge ok, console tap on"
+    "[13:50:09 INFO]: [Heimdall] server role: standalone (auto — no proxy forwarding is configured)"
     "[13:50:05 WARN]: [Heimdall] Legacy plugin detected: it has not specified an api-version"
     "[13:49:18 INFO]: Thread RCON Client /0:0:0:0:0:0:0:1 shutting down"
     "[13:50:01 ERROR]: Failed to fetch telemetry from api.mojang.com"
@@ -147,11 +165,28 @@ selftest() {
     done
 
     expect_match "${ENABLE_PATTERN}" \
-        "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT (phase 0 scaffold) on 1.21.8-60-29c8822 (MC: 1.21.8)" \
+        "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT enabled — role standalone, ticks via paper (tps+mspt), console tap on" \
         yes "enable banner (bukkit)" || failures=$((failures + 1))
     expect_match "${ENABLE_PATTERN}" \
-        "[13:51:44 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT (phase 0 scaffold) on Velocity 3.4.0" \
+        "[13:51:44 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT enabled — role gatekeeper, text bridge ok, console tap on" \
         yes "enable banner (velocity)" || failures=$((failures + 1))
+    # The near-miss that matters most here: a boot where the log4j appender could NOT attach still
+    # logs a perfectly good enable banner, so ENABLE_PATTERN alone would pass on it.
+    expect_match "${CONSOLE_TAP_PATTERN}" \
+        "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT enabled — role standalone, ticks via nms-reflection, console tap on" \
+        yes "console tap attached" || failures=$((failures + 1))
+    expect_match "${CONSOLE_TAP_PATTERN}" \
+        "[13:50:10 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT enabled — role standalone, ticks via nms-reflection, console tap off" \
+        no "console tap attached vs a boot where it did not" || failures=$((failures + 1))
+    # Exactly what rcon-cli hands back: the plugin answers in §-codes and rcon-cli rewrites them
+    # into ANSI, so the version is not adjacent to the name. A pattern written against the plain
+    # text passes this self-test and fails every real row — which is what happened.
+    expect_match "${COMMAND_PATTERN}" $'\033[33mHeimdall \033[37mv3.0.0-SNAPSHOT' \
+        yes "/hd output as rcon-cli renders it" || failures=$((failures + 1))
+    expect_match "${COMMAND_PATTERN}" "Heimdall v3.0.0-SNAPSHOT" \
+        yes "/hd output, uncoloured" || failures=$((failures + 1))
+    expect_match "${COMMAND_PATTERN}" "Unknown command. Type \"/help\" for help." \
+        no "/hd output vs an unregistered command" || failures=$((failures + 1))
     expect_match "${DISABLE_PATTERN}" \
         "[13:50:13 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down" \
         yes "disable banner" || failures=$((failures + 1))
@@ -343,6 +378,15 @@ row_body() {
     fi
     pass "plugin enabled: $(grep -Eo "${ENABLE_PATTERN}.*" "${log_file}" | head -n 1)"
 
+    # The tap is attached eagerly at enable precisely so this row exercises it. Asserting it is what
+    # makes the log4j 2.0-beta9 compatibility on the 1.8.8 row a tested fact rather than a comment.
+    if ! grep -Eq "${CONSOLE_TAP_PATTERN}" "${log_file}"; then
+        fail "the console tap did not attach — the log4j appender is not usable on this server"
+        dump_log "${log_file}"
+        return 1
+    fi
+    pass "console tap attached"
+
     # The plugin enables DURING startup, before the server opens its RCON port. Stopping now would
     # race the rest of the boot, and losing that race does not fail cleanly — see READY_PATTERN.
     if ! wait_for_pattern "${log_file}" "${READY_PATTERN}" "${BOOT_TIMEOUT}" \
@@ -391,6 +435,33 @@ row_body() {
         done
 
         if [ "${ready}" -eq 1 ]; then
+            # Prove the command is registered before stopping. Console is op-equivalent, so /hd
+            # answers without a permission dance. Failure here is a real finding: plugin.yml and the
+            # entry point can disagree silently, and the plugin loads either way.
+            #
+            # Retried, unlike `stop`. Every rcon-cli invocation opens its own connection, and
+            # legacy RCON drops one now and then — the 1.8.8 row answered `list` and then had `hd`
+            # reset by peer on the very next call. Retrying is safe here precisely because /hd is
+            # read-only and idempotent, which is exactly what `stop` is not (see below).
+            local hd_output="" hd_attempt=0 hd_ok=0
+            while [ "${hd_attempt}" -lt 5 ]; do
+                hd_output="$(docker exec "${container}" rcon-cli hd 2>&1 || true)"
+                if printf '%s\n' "${hd_output}" | grep -Eq "${COMMAND_PATTERN}"; then
+                    hd_ok=1
+                    break
+                fi
+                hd_attempt=$(( hd_attempt + 1 ))
+                sleep 3
+            done
+            if [ "${hd_ok}" -eq 1 ]; then
+                pass "/hd is registered: $(printf '%s' "${hd_output}" | head -n 1)"
+            else
+                fail "/hd did not answer — the command is declared in plugin.yml but not claimed"
+                printf '       rcon said: %s\n' "${hd_output}" >&2
+                dump_log "${log_file}"
+                return 1
+            fi
+
             log "stopping via rcon-cli"
             # Exit status deliberately ignored: see above. wait_for_exit decides whether it worked.
             docker exec "${container}" rcon-cli stop >/dev/null 2>&1 || true
@@ -424,43 +495,40 @@ row_body() {
     wait_for_log_flush "${ROW_TAIL_PID}" 30
     ROW_TAIL_PID=""
 
-    if [ "${platform}" = "bukkit" ]; then
-        # Polled with a short budget rather than a single grep: on a slow daemon the follower can
-        # exit before the last buffered lines have landed in the file.
-        if ! wait_for_pattern "${log_file}" "${DISABLE_PATTERN}" 30 "the plugin's disable banner"; then
-            # Two very different stories end here, and the log can tell them apart. If
-            # mc-server-runner logged that it killed the server, onDisable never got the chance
-            # to run and blaming the plugin would be wrong — that is the harness failing to stop
-            # the server, and explain_runner_kill says so. Only a log with no kill signature
-            # means the shutdown genuinely ran and the plugin stayed silent.
-            explain_runner_kill "${log_file}" \
-                || fail "no disable banner — onDisable did not run, or threw before logging"
-            dump_log "${log_file}"
-            return 1
-        fi
-        pass "plugin disabled cleanly"
-    else
-        # The phase 0 Velocity scaffold registers no shutdown listener, so it has no banner of its
-        # own to assert on. "No errors" alone would be far too weak here — a proxy killed outright
-        # also logs no errors. Asserting the proxy's OWN shutdown line is what distinguishes a
-        # graceful stop, with plugin unloading, from a SIGKILL.
-        #
-        # TODO(phase 1): the Velocity rows are boot-only. Once :platform-velocity registers a
-        # ProxyShutdownEvent listener and logs its own banner, assert DISABLE_PATTERN here exactly
-        # as the Bukkit rows do, and drop this branch to a shared code path.
+    # Velocity only, and still worth checking now that the plugin has a banner of its own: the
+    # proxy's line is what distinguishes a graceful stop from a proxy killed part-way through
+    # teardown. "No errors" would be weaker still — a SIGKILL logs nothing at all.
+    if [ "${platform}" = "velocity" ]; then
         if ! wait_for_pattern "${log_file}" "${VELOCITY_SHUTDOWN_PATTERN}" 30 \
                 "the proxy's own shutdown line"; then
-            # Same split as the Bukkit branch: a runner-kill signature means the harness's stop
-            # never reached the proxy, which is its failure and not the plugin's.
-            explain_runner_kill "${log_file}" || {
-                fail "the proxy never logged its shutdown — it was killed rather than stopped, so"
-                fail "nothing was proven about unloading the plugin"
-            }
+            # A runner-kill signature means the harness's stop never reached the proxy, which is
+            # its failure and not the plugin's.
+            explain_runner_kill "${log_file}" \
+                || fail "the proxy never logged its shutdown — it was killed rather than stopped"
             dump_log "${log_file}"
             return 1
         fi
-        pass "proxy shut down gracefully (the scaffold has no disable banner of its own yet)"
+        pass "proxy shut down gracefully"
     fi
+
+    # Both families now. The Velocity rows were boot-only until phase 1c: the scaffold registered no
+    # ProxyShutdownEvent listener, so it had no banner, and those rows proved the jar loaded and the
+    # proxy stopped but nothing at all about Heimdall unloading. It has one now.
+    #
+    # Polled with a short budget rather than a single grep: on a slow daemon the log follower can
+    # exit before the last buffered lines have landed in the file.
+    if ! wait_for_pattern "${log_file}" "${DISABLE_PATTERN}" 30 "the plugin's disable banner"; then
+        # Two very different stories end here, and the log can tell them apart. If mc-server-runner
+        # logged that it killed the server, the shutdown handler never got the chance to run and
+        # blaming the plugin would be wrong — that is the harness failing to stop the server, and
+        # explain_runner_kill says so. Only a log with no kill signature means the shutdown
+        # genuinely ran and the plugin stayed silent.
+        explain_runner_kill "${log_file}" \
+            || fail "no disable banner — the shutdown handler did not run, or threw before logging"
+        dump_log "${log_file}"
+        return 1
+    fi
+    pass "plugin disabled cleanly"
 
     if ! assert_no_heimdall_errors "${log_file}" "shutdown"; then
         dump_log "${log_file}"
