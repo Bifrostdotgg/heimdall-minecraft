@@ -27,6 +27,19 @@ junit = "5.10.2"
 mockito = "4.11.0"
 archunit = "1.3.0"
 
+# :stub-bot only — the CI-side fixture that speaks the bot's wire contract.
+#
+# Java-WebSocket is the library `core` deliberately rejected (see the long
+# comment in core/build.gradle.kts: it calls org.slf4j.LoggerFactory from three
+# constructors, and legacy Spigot ships no slf4j). That constraint is about the
+# SHIPPED jar. The stub is a server, runs only on CI and dev machines on the
+# JDK 21 toolchain, and is never shaded in — :app does not depend on it, and
+# :app:verifyShadowJar's allowlist would fail the build if it somehow were. So
+# here slf4j is just another jar on the classpath, and the mature server-side
+# implementation is worth more than the zero-dependency constraint.
+java-websocket = "1.6.0"
+slf4j = "2.0.17"
+
 # Applied in the root build script.
 shadow = "8.3.6"
 
@@ -45,6 +58,9 @@ junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
 archunit = { module = "com.tngtech.archunit:archunit", version.ref = "archunit" }
+
+java-websocket = { module = "org.java-websocket:Java-WebSocket", version.ref = "java-websocket" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
 
 [plugins]
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
