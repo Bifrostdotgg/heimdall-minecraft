@@ -1,6 +1,19 @@
 # Gradle
-.gradle/
-build/
+#
+# Every one of these is ANCHORED with a leading slash on purpose. An unanchored
+# `build/` matches a directory called `build` at ANY depth — including the Java
+# package directory buildSrc/src/main/kotlin/com/heimdall/build/, whose sources
+# were silently swallowed and never committed, leaving main unbuildable from a
+# fresh clone while `git status` reported a clean tree. `out` and `bin` are just
+# as plausible as package names, so they are anchored too.
+#
+# Add a deeper level here if a module is ever nested more than two directories
+# down, rather than removing the anchors.
+/.gradle/
+/*/.gradle/
+/build/
+/*/build/
+/*/*/build/
 !gradle/wrapper/gradle-wrapper.jar
 
 # IDE
@@ -12,8 +25,12 @@ build/
 .settings/
 .classpath
 .project
-out/
-bin/
+/out/
+/*/out/
+/*/*/out/
+/bin/
+/*/bin/
+/*/*/bin/
 
 # OS
 .DS_Store
