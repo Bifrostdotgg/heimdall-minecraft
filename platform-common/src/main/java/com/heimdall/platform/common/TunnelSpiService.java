@@ -38,6 +38,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * a {@code null} bus. {@link #isConnected()} is then permanently false, {@link #publish} drops, and
  * {@link #request} fails fast — which is the same behaviour a consumer sees during a reconnect, so
  * nobody has to write a second code path for "Heimdall exists but is not set up".
+ *
+ * <p><strong>Permanently, though.</strong> The bus is captured when the service is installed, at
+ * enable, so a server set up <em>after</em> boot keeps an SPI wired to nothing until it restarts.
+ * That is correct for phase 1c, where nothing can create a tunnel after enable — there is no setup
+ * flow yet — and it stops being correct the moment there is one.
+ *
+ * <p>TODO(1e): re-install the service when the setup command builds a tunnel, so a freshly claimed
+ * server does not need a restart before other plugins can use the SPI. The compare-and-clear in
+ * {@link com.heimdall.api.HeimdallTunnelProvider#uninstall} already makes replacing an instance
+ * safe.
  */
 public final class TunnelSpiService implements HeimdallTunnel {
 

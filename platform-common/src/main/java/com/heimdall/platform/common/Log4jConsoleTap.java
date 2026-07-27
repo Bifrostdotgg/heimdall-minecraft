@@ -132,6 +132,22 @@ public final class Log4jConsoleTap implements AutoCloseable {
     private final AtomicInteger queued = new AtomicInteger();
     private final AtomicBoolean draining = new AtomicBoolean();
 
+    /**
+     * How many consumers have been dropped for throwing, ever.
+     *
+     * <p>Counted because the drop is otherwise completely silent — by necessity: the drop happens
+     * inside the delivery guard, where logging would be captured and fed back into the loop the
+     * guard exists to break. So the count is recorded here and reported from
+     * {@link #droppedConsumers()}, out of band, by whoever is in a position to say something.
+     *
+     * <p>TODO(1e): surface this in {@code /hd status}. "The dashboard console went quiet" and "a
+     * plugin's tap threw and was unsubscribed" look identical from the outside today.
+     */
+    private final AtomicInteger droppedConsumers = new AtomicInteger();
+
+    /** Whether a dropped consumer has already been mentioned. One WARN, not one per drop. */
+    private final AtomicBoolean warnedAboutDrops = new AtomicBoolean();
+
     private volatile AbstractAppender appender;
     private volatile LoggerConfig attachedTo;
 
@@ -241,6 +257,36 @@ public final class Log4jConsoleTap implements AutoCloseable {
     /** Whether the appender is currently attached. */
     public boolean isAttached() {
         return appender != null;
+    }
+
+    /**
+     * How many consumers have been unsubscribed for throwing.
+     *
+     * <p>Read from outside the delivery guard, which is the only place it is safe to say anything
+     * about. A non-zero count means somebody's console feed stopped without anybody being told —
+     * see the field for why the drop itself cannot log.
+     */
+    public int droppedConsumers() {
+        return droppedConsumers.get();
+    }
+
+    /**
+     * Logs once, at WARN, if any consumer has been dropped since the last time this was asked to.
+     *
+     * <p>Called from outside the capture path — a scheduled sweep, or a status command — never from
+     * inside it. Once, not once per drop: a tap that throws on every line would otherwise fill the
+     * log with the story of its own failure.
+     *
+     * @return whether a warning was emitted
+     */
+    public boolean reportDroppedConsumers() {
+        int dropped = droppedConsumers.get();
+        if (dropped == 0 || !warnedAboutDrops.compareAndSet(false, true)) {
+            return false;
+        }
+        logger.warn(dropped + " console consumer(s) threw and were unsubscribed; whatever was "
+                + "reading the console feed has stopped receiving it");
+        return true;
     }
 
     /**
@@ -357,9 +403,11 @@ public final class Log4jConsoleTap implements AutoCloseable {
                     try {
                         tap.accept(line);
                     } catch (RuntimeException broken) {
-                        // Contained, and still not logged: this runs under the delivery guard, so a
-                        // log here would be captured and could feed the loop it is guarding against.
+                        // Contained, and still not logged here: this runs under the delivery guard,
+                        // so a log would be captured and could feed the loop the guard exists to
+                        // break. Counted instead, and reported by whoever asks.
                         taps.remove(tap);
+                        droppedConsumers.incrementAndGet();
                     }
                 }
             }

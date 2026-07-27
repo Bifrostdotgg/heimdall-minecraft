@@ -355,6 +355,39 @@ class Log4jConsoleTapTest {
         }
 
         @Test
+        @DisplayName("a dropped consumer is counted, and reported once when asked")
+        void droppedConsumersAreCounted() {
+            inlineTap().addTap(new Consumer<LogLine>() {
+                @Override
+                public void accept(LogLine line) {
+                    throw new IllegalStateException("a broken consumer");
+                }
+            });
+
+            assertEquals(0, tap.droppedConsumers());
+            tap.capture(event(Level.INFO, "first"));
+            assertEquals(1, tap.droppedConsumers(),
+                    "the drop is silent by necessity, so it has to be countable");
+
+            assertTrue(tap.reportDroppedConsumers(), "the first ask should say something");
+            assertFalse(tap.reportDroppedConsumers(),
+                    "a tap that throws on every line would otherwise fill the log with the story "
+                            + "of its own failure");
+            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "unsubscribed"),
+                    "the report has to name what stopped working: " + logger.records());
+        }
+
+        @Test
+        @DisplayName("nothing to report when no consumer has misbehaved")
+        void nothingToReport() {
+            inlineTap().addTap(new Collector());
+            tap.capture(event(Level.INFO, "fine"));
+
+            assertEquals(0, tap.droppedConsumers());
+            assertFalse(tap.reportDroppedConsumers());
+        }
+
+        @Test
         @DisplayName("capture never logs — logging from an appender re-enters log4j")
         void captureNeverLogs() {
             inlineTap().addTap(new Consumer<LogLine>() {
