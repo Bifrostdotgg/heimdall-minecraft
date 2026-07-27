@@ -133,16 +133,21 @@ final class HandshakeNegotiator {
     }
 
     private void handleIdentifyAck(Envelope envelope) {
-        cancelDeadline();
-
         String expected = identifyId;
         if (expected != null && !expected.equals(envelope.id())) {
             // The bot echoes the identify's id. A mismatch means this ack belongs to a handshake
             // from a previous socket, arriving late — accepting it would let a stale frame decide
             // the mode of a connection it was never part of.
+            //
+            // The deadline is cancelled AFTER this check, never before. Disarming on a stale ack
+            // would leave the live handshake with no deadline at all, so a bot that then went
+            // silent would wedge this connection at UNKNOWN forever — never negotiating v3 and
+            // never falling back to v2 either.
             logger.debug("ignoring identify_ack for a stale handshake id " + envelope.id());
             return;
         }
+
+        cancelDeadline();
 
         boolean accepted = envelope.payload().bool("accepted", false);
         if (!accepted) {
@@ -241,10 +246,14 @@ final class HandshakeNegotiator {
             deadline = wsScheduler.schedule(new Runnable() {
                 @Override
                 public void run() {
-                    if (mode == ProtocolMode.UNKNOWN) {
+                    // The check and the transition must happen together, under the lock. Reading
+                    // the mode here and transitioning afterwards leaves a window in which an ack
+                    // arriving in between is overwritten — and because a mode is negotiated once
+                    // per connection, that demotes a perfectly good v3 link to v2 compatibility for
+                    // the entire life of the socket, on cached config, with nothing to say why.
+                    if (transitionIfUnknown(ProtocolMode.V2_COMPAT)) {
                         logger.info("no identify_ack within the negotiation window — this bot "
                                 + "speaks v2; using cached configuration");
-                        transitionTo(ProtocolMode.V2_COMPAT);
                     }
                 }
             }, Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
@@ -260,6 +269,24 @@ final class HandshakeNegotiator {
         if (armed != null) {
             armed.cancel(false);
         }
+    }
+
+    /**
+     * Transitions only if the handshake is still undecided — the deadline's compare-and-set.
+     *
+     * <p>Exists so the deadline's "has an ack arrived yet?" test and its transition are one atomic
+     * step. They are the two ends of a genuine race: the ack arrives on the socket's reading thread
+     * and the deadline fires on {@code heimdall-ws}, and the loser must lose completely.
+     *
+     * @return whether this call was the one that moved the mode, so the caller can log only when
+     *     something actually happened rather than describing a transition that lost the race
+     */
+    private synchronized boolean transitionIfUnknown(ProtocolMode next) {
+        if (mode != ProtocolMode.UNKNOWN) {
+            return false;
+        }
+        transitionTo(next);
+        return true;
     }
 
     /**
