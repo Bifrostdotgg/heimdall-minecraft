@@ -138,12 +138,18 @@ class HmacTest {
             String signature = Hmac.sign(SECRET, TIMESTAMP, "GET", "/x", "");
             long signedAt = 1_700_000_000_000L;
 
+            // The bound is pinned to a literal, and the offsets are literals too. Expressing both
+            // sides in terms of MAX_AGE_MS made the test agree with the constant rather than with
+            // the protocol: change the constant to an hour and it would still have passed, while
+            // the real bot went on rejecting anything older than five minutes.
+            assertEquals(300_000L, Hmac.MAX_AGE_MS, "the bot's window is five minutes");
+
             assertTrue(Hmac.verify(SECRET, "GET", "/x", "", signature, TIMESTAMP,
-                    signedAt + Hmac.MAX_AGE_MS - 1000), "4m59s old is still fresh");
+                    signedAt + 299_000L), "4m59s old is still fresh");
             assertFalse(Hmac.verify(SECRET, "GET", "/x", "", signature, TIMESTAMP,
-                    signedAt + Hmac.MAX_AGE_MS + 1000), "5m01s old is a replay");
+                    signedAt + 301_000L), "5m01s old is a replay");
             assertFalse(Hmac.verify(SECRET, "GET", "/x", "", signature, TIMESTAMP,
-                    signedAt - Hmac.MAX_AGE_MS - 1000), "a timestamp from the future is rejected too");
+                    signedAt - 301_000L), "a timestamp from the future is rejected too");
         }
 
         @Test
