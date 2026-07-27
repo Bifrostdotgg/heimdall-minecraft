@@ -32,6 +32,11 @@
 /*/bin/
 /*/*/bin/
 
+# Boot-smoke scratch: per-row plugin mounts and captured server logs. Anchored to
+# the one directory that produces it, for the same reason as the Gradle entries
+# above — an unanchored `.work/` would be a trap for whatever needs that name next.
+/smoke/.work/
+
 # OS
 .DS_Store
 Thumbs.db

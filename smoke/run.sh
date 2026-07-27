@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+#
+# Boot-smoke matrix: does the one jar load, and unload cleanly, on real servers across the whole
+# supported range?
+#
+#   smoke/run.sh                 # every row, sequentially
+#   smoke/run.sh all
+#   smoke/run.sh paper-1.8.8     # one row (what CI runs, one row per runner)
+#   smoke/run.sh --list
+#
+# Phase 0 asserts load and unload only. The plugin does not dial the bot yet, so there is nothing
+# to point at a stub bot and nothing to assert about a tunnel; smoke/docker-compose.yml has that
+# topology wired and waiting for phase 1.
+#
+# Environment:
+#   SMOKE_JAR             path to the shaded jar (default: newest app/build/libs/heimdall-whitelist-*.jar)
+#   SMOKE_BOOT_TIMEOUT    seconds to wait for the enable line (default 240)
+#   SMOKE_STOP_TIMEOUT    seconds to wait for a graceful stop (default 120)
+#   SMOKE_KEEP            1 = leave containers and work dirs behind for inspection
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck source=smoke/lib.sh
+source "${SCRIPT_DIR}/lib.sh"
+
+BOOT_TIMEOUT="${SMOKE_BOOT_TIMEOUT:-240}"
+STOP_TIMEOUT="${SMOKE_STOP_TIMEOUT:-120}"
+WORK_ROOT="${SCRIPT_DIR}/.work"
+
+# The plugin's own banner. Phase 1 changes this text — update it here, in one place.
+ENABLE_PATTERN='Heimdall v[0-9][^ ]* \(phase 0 scaffold\)'
+DISABLE_PATTERN='Heimdall v[0-9][^ ]* shutting down'
+# Velocity's own shutdown line, not ours — see the assertion for why it is worth checking.
+VELOCITY_SHUTDOWN_PATTERN='Shutting down the proxy'
+
+# ── The matrix ───────────────────────────────────────────────────────────────────────────────
+#
+# Image tags are pinned to a dated itzg release rather than `:java8` / `:java21`, which are moving
+# tags. A smoke matrix that silently changes what it tests is worse than no matrix, because a
+# failure then has two candidate causes.
+#
+# Every Minecraft row is PAPER. Paper's own API serves 1.8.8 through 1.21 from one place, so a
+# single TYPE covers the whole range; SPIGOT would mean either a BuildTools compile (minutes per
+# row) or getbukkit.org, whose availability is not something CI should depend on. Paper is also
+# what the overwhelming majority of the deployed fleet actually runs.
+#
+#   row | image | TYPE | VERSION | why this row exists
+ROWS=(
+    # The floor. Java 8 bytecode, the oldest API the plugin compiles against, and the row that
+    # catches anything accidentally compiled or shaded above release 8.
+    "paper-1.8.8|itzg/minecraft-server:2026.7.2-java8|PAPER|1.8.8|bukkit|1G"
+    # Mid-legacy: still Java 8, but a different server generation and plugin loader.
+    "paper-1.12.2|itzg/minecraft-server:2026.7.2-java8|PAPER|1.12.2|bukkit|1G"
+    # Pre-modern, on a mid JRE — the transition where Paper stopped being a Spigot fork in spirit.
+    "paper-1.16.5|itzg/minecraft-server:2026.7.2-java11|PAPER|1.16.5|bukkit|2G"
+    # Current. Java 21, modern plugin loader, and the row that catches a jar that only works on old
+    # servers (e.g. a missing api-version handled differently, or a relocation clash).
+    "paper-1.21.8|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G"
+    # The proxy. A completely different entry point, loader and lifecycle from the Bukkit family —
+    # the one-jar design lives or dies on these rows loading the Java 17 classes while the Bukkit
+    # rows load the Java 8 ones out of the same file.
+    #
+    # Two rows, because Velocity moved its own floor and the two ends now disagree:
+    #
+    #   3.4.0 is the version :platform-velocity compiles against (pinned in libs.versions.toml) and
+    #         the last one that runs on Java 17, which is the level that module targets. This row is
+    #         the compile-target floor.
+    #   3.5.1 is current, and is compiled at class file version 65 — it will not even start on a
+    #         Java 17 JRE. This row is what customers actually run.
+    #
+    # Collapsing them would mean either not testing what we compile against or not testing what is
+    # deployed. Both rows run in parallel on CI, so the pair costs nothing there.
+    "velocity-3.4.0|itzg/mc-proxy:2026.7.1-java17|VELOCITY|3.4.0|velocity|1G"
+    "velocity-3.5.1|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G"
+)
+
+row_names() {
+    local row
+    for row in "${ROWS[@]}"; do
+        printf '%s\n' "${row%%|*}"
+    done
+}
+
+find_jar() {
+    if [ -n "${SMOKE_JAR:-}" ]; then
+        [ -f "${SMOKE_JAR}" ] || { fail "SMOKE_JAR=${SMOKE_JAR} does not exist"; return 1; }
+        printf '%s' "${SMOKE_JAR}"
+        return 0
+    fi
+    # `original-` is shadow's unshaded intermediate; the self-updater skips it and so do we.
+    local found
+    found="$(find "${REPO_ROOT}/app/build/libs" "${REPO_ROOT}/dist" -maxdepth 1 \
+        -name 'heimdall-whitelist-*.jar' ! -name 'original-*' 2>/dev/null | sort | tail -n 1)"
+    if [ -z "${found}" ]; then
+        fail "no shaded jar found — run ./gradlew build, or set SMOKE_JAR"
+        return 1
+    fi
+    printf '%s' "${found}"
+}
+
+# ── One row ──────────────────────────────────────────────────────────────────────────────────
+
+# run_row owns setup and teardown; row_body owns the assertions and may return early from
+# anywhere. Splitting them is not style: a `trap … RETURN` set inside a function stays installed on
+# the shell and then fires again when *every later* function returns, which is how the first version
+# of this script reported "all rows passed" and immediately printed an unbound-variable error from
+# its own cleanup handler.
+run_row() {
+    ROW_NAME="$1"
+    ROW_IMAGE="$2"
+    ROW_TYPE="$3"
+    ROW_VERSION="$4"
+    ROW_PLATFORM="$5"
+    ROW_MEMORY="$6"
+    ROW_JAR="$7"
+
+    ROW_CONTAINER="heimdall-smoke-${ROW_NAME}"
+    ROW_WORK="${WORK_ROOT}/${ROW_NAME}"
+    ROW_LOG="${ROW_WORK}/server.log"
+    ROW_TAIL_PID=""
+
+    local rc=0
+    row_body || rc=$?
+
+    if [ -n "${ROW_TAIL_PID}" ]; then
+        kill "${ROW_TAIL_PID}" 2>/dev/null || true
+        wait "${ROW_TAIL_PID}" 2>/dev/null || true
+    fi
+    if [ "${SMOKE_KEEP:-0}" != "1" ]; then
+        docker rm -f "${ROW_CONTAINER}" >/dev/null 2>&1 || true
+    else
+        log "SMOKE_KEEP=1 — container ${ROW_CONTAINER} and ${ROW_WORK} left in place"
+    fi
+    return "${rc}"
+}
+
+row_body() {
+    local name="${ROW_NAME}" image="${ROW_IMAGE}" type="${ROW_TYPE}" version="${ROW_VERSION}"
+    local platform="${ROW_PLATFORM}" memory="${ROW_MEMORY}" jar="${ROW_JAR}"
+    local container="${ROW_CONTAINER}" work="${ROW_WORK}" log_file="${ROW_LOG}"
+
+    log "── ${name}: ${type} ${version} on ${image}"
+
+    docker rm -f "${container}" >/dev/null 2>&1 || true
+    rm -rf "${work}"
+    mkdir -p "${work}/plugins"
+    cp "${jar}" "${work}/plugins/"
+
+    # Deliberately no `--rm`: it removes the container the instant it exits, taking the logs with
+    # it — which is exactly when a shutdown assertion needs them. Cleanup is explicit instead.
+    # The two families differ in more than a flag: the proxy image takes VELOCITY_VERSION rather
+    # than VERSION, keeps its data under /server rather than /data, and has no EULA or RCON at all.
+    local -a docker_args
+    if [ "${platform}" = "bukkit" ]; then
+        docker_args=(
+            run -d --name "${container}"
+            -e EULA=TRUE
+            -e "TYPE=${type}"
+            -e "VERSION=${version}"
+            -e "MEMORY=${memory}"
+            -e ONLINE_MODE=FALSE
+            -e USE_AIKAR_FLAGS=false
+            # Nothing here needs a world worth generating, and spawn-area generation is most of a
+            # cold legacy boot.
+            -e VIEW_DISTANCE=4
+            -e SPAWN_PROTECTION=0
+            -e ENABLE_RCON=true
+            -e RCON_PASSWORD=smoke
+            -v "$(host_path "${work}/plugins"):/data/plugins:rw"
+        )
+    else
+        docker_args=(
+            run -d --name "${container}"
+            -e "TYPE=${type}"
+            -e "VELOCITY_VERSION=${version}"
+            -e "MEMORY=${memory}"
+            -v "$(host_path "${work}/plugins"):/server/plugins:rw"
+        )
+    fi
+
+    docker "${docker_args[@]}" "${image}" >/dev/null
+
+    # Stream to a file from the start. `docker logs` after the fact would do for a container we
+    # keep, but streaming means the log survives even if the container is lost, and it lets the
+    # wait loop poll a plain file.
+    docker logs -f "${container}" >"${log_file}" 2>&1 &
+    ROW_TAIL_PID=$!
+
+    if ! wait_for_pattern "${log_file}" "${ENABLE_PATTERN}" "${BOOT_TIMEOUT}" \
+            "the plugin's enable banner"; then
+        dump_log "${log_file}"
+        return 1
+    fi
+    pass "plugin enabled: $(grep -Eo "${ENABLE_PATTERN}.*" "${log_file}" | head -n 1)"
+
+    if ! assert_no_heimdall_errors "${log_file}" "boot"; then
+        dump_log "${log_file}"
+        return 1
+    fi
+
+    # ── Graceful stop ────────────────────────────────────────────────────────────────────────
+    if [ "${platform}" = "bukkit" ]; then
+        # `stop` over RCON is the server's own shutdown path, so onDisable actually runs. A
+        # `docker stop` would work too, but only because itzg traps the signal — asserting the
+        # disable line through a code path the plugin will never see in production proves less.
+        log "stopping via rcon-cli"
+        docker exec "${container}" rcon-cli stop >/dev/null 2>&1 || {
+            warn "rcon-cli stop failed, falling back to SIGTERM"
+            docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
+        }
+    else
+        # Velocity has no RCON. SIGTERM runs its shutdown hook.
+        log "stopping via SIGTERM"
+        docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
+    fi
+
+    if ! wait_for_exit "${container}" "${STOP_TIMEOUT}"; then
+        dump_log "${log_file}"
+        return 1
+    fi
+    # Let the log stream flush the final lines before asserting on them.
+    sleep 2
+
+    if [ "${platform}" = "bukkit" ]; then
+        if ! grep -Eq "${DISABLE_PATTERN}" "${log_file}"; then
+            fail "no disable banner — onDisable did not run, or threw before logging"
+            dump_log "${log_file}"
+            return 1
+        fi
+        pass "plugin disabled cleanly"
+    else
+        # The phase 0 Velocity scaffold registers no shutdown listener, so it has no banner of its
+        # own to assert on. "No errors" alone would be far too weak here — a proxy killed outright
+        # also logs no errors. Asserting the proxy's OWN shutdown line is what distinguishes a
+        # graceful stop, with plugin unloading, from a SIGKILL.
+        if ! grep -Eq "${VELOCITY_SHUTDOWN_PATTERN}" "${log_file}"; then
+            fail "the proxy never logged its shutdown — it was killed rather than stopped, so "
+            fail "nothing was proven about unloading the plugin"
+            dump_log "${log_file}"
+            return 1
+        fi
+        pass "proxy shut down gracefully (the scaffold has no disable banner of its own yet)"
+    fi
+
+    if ! assert_no_heimdall_errors "${log_file}" "shutdown"; then
+        dump_log "${log_file}"
+        return 1
+    fi
+
+    # Informational only. It is not an assertion because the two families legitimately differ:
+    # an RCON `stop` exits 0, while a SIGTERM'd Velocity exits 143, and some daemons report
+    # nothing at all once the container has been reaped.
+    local exit_code
+    exit_code="$(docker inspect -f '{{.State.ExitCode}}' "${container}" 2>/dev/null || true)"
+    log "${name}: container exit code ${exit_code:-unavailable}"
+
+    return 0
+}
+
+# ── Entry point ──────────────────────────────────────────────────────────────────────────────
+
+main() {
+    local target="${1:-all}"
+
+    if [ "${target}" = "--list" ] || [ "${target}" = "-l" ]; then
+        row_names
+        return 0
+    fi
+    if [ "${target}" = "--help" ] || [ "${target}" = "-h" ]; then
+        sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        return 0
+    fi
+
+    command -v docker >/dev/null 2>&1 || { fail "docker is not on PATH"; return 1; }
+    docker version >/dev/null 2>&1 || { fail "the Docker daemon is not reachable"; return 1; }
+
+    local jar
+    jar="$(find_jar)" || return 1
+    log "using jar: ${jar}"
+
+    local -a selected=()
+    local row
+    for row in "${ROWS[@]}"; do
+        if [ "${target}" = "all" ] || [ "${row%%|*}" = "${target}" ]; then
+            selected+=("${row}")
+        fi
+    done
+    if [ "${#selected[@]}" -eq 0 ]; then
+        fail "unknown row '${target}'. Known rows:"
+        row_names >&2
+        return 1
+    fi
+
+    local failures=0
+    local -a failed=()
+    for row in "${selected[@]}"; do
+        IFS='|' read -r name image type version platform memory <<<"${row}"
+        if run_row "${name}" "${image}" "${type}" "${version}" "${platform}" "${memory}" "${jar}"; then
+            pass "${name}"
+        else
+            fail "${name}"
+            failures=$(( failures + 1 ))
+            failed+=("${name}")
+        fi
+    done
+
+    printf '\n'
+    if [ "${failures}" -eq 0 ]; then
+        pass "all ${#selected[@]} row(s) passed"
+        return 0
+    fi
+    fail "${failures} of ${#selected[@]} row(s) failed: ${failed[*]}"
+    return 1
+}
+
+main "$@"

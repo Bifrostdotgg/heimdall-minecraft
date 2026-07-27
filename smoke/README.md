@@ -1,0 +1,100 @@
+# Boot-smoke matrix
+
+Does the one jar load, and unload cleanly, on real servers across the whole supported range?
+
+That is the entire phase 0 question, and it is not one the Gradle build can answer.
+`:app:verifyShadowJar` checks bytecode levels, relocations and descriptors — everything that is
+visible by reading the jar. What it cannot see is a server refusing the plugin for a reason that
+only exists at runtime: a missing `api-version`, a loader that rejects a descriptor it parses
+differently, a class that resolves fine on Java 21 and not on Java 8. Only starting the servers
+answers that.
+
+```bash
+./gradlew build              # produce the jar first
+smoke/run.sh                 # every row, sequentially (~15 min cold)
+smoke/run.sh paper-1.8.8     # one row — what CI runs, one row per runner
+smoke/run.sh --list
+```
+
+Needs Docker (or a Docker-API-compatible daemon — it is developed against both Docker and Podman)
+and network access to pull the images and the server jars. Runs on CI's Ubuntu and, unchanged,
+under Git Bash on Windows.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `SMOKE_JAR` | newest `app/build/libs/heimdall-whitelist-*.jar`, else `dist/` | CI points this at the downloaded artifact. |
+| `SMOKE_BOOT_TIMEOUT` | `240` | Seconds to wait for the enable banner. A cold 1.8.8 boot generates its spawn area first. |
+| `SMOKE_STOP_TIMEOUT` | `120` | Seconds to wait for a graceful stop. |
+| `SMOKE_KEEP` | `0` | `1` leaves containers and `smoke/.work/<row>/server.log` behind. |
+
+## The matrix
+
+| Row | Image | Server | Java | Why this row |
+| --- | --- | --- | --- | --- |
+| `paper-1.8.8` | `itzg/minecraft-server:2026.7.2-java8` | Paper 1.8.8 | 8 | The floor. Catches anything accidentally compiled or shaded above release 8. |
+| `paper-1.12.2` | `itzg/minecraft-server:2026.7.2-java8` | Paper 1.12.2 | 8 | Mid-legacy: same JRE, different server generation and plugin loader. |
+| `paper-1.16.5` | `itzg/minecraft-server:2026.7.2-java11` | Paper 1.16.5 | 11 | Pre-modern, on a mid JRE. |
+| `paper-1.21.8` | `itzg/minecraft-server:2026.7.2-java21` | Paper 1.21.8 | 21 | Current. Catches a jar that only works on old servers. |
+| `velocity-3.4.0` | `itzg/mc-proxy:2026.7.1-java17` | Velocity 3.4.0 | 17 | The compile-target floor: the API version `:platform-velocity` is pinned to, on the Java level it targets. |
+| `velocity-3.5.1` | `itzg/mc-proxy:2026.7.1-java21` | Velocity 3.5.1 | 21 | Current Velocity — what customers actually run. |
+
+The proxy rows are where the one-jar design is really tested: they load the Java 17 classes while
+the Bukkit rows load the Java 8 ones, out of the same file.
+
+**Why two Velocity rows.** Velocity moved its own floor and the two ends now disagree. 3.4.0 is the
+version `:platform-velocity` compiles against and the last that runs on Java 17; 3.5.1 is compiled
+at class file version 65 and will not even start on a Java 17 JRE — which is exactly how the first
+draft of this matrix failed, with a `java17` tag and `VELOCITY_VERSION=3.5.1`. Collapsing them would
+mean either not testing what we compile against or not testing what is deployed.
+
+**Why Paper for every Minecraft row, including 1.8.8.** Paper's own API serves 1.8.8 through 1.21
+from one place, so a single `TYPE` covers the range and every row fetches its server the same way.
+`TYPE=SPIGOT` would mean either a BuildTools compile (minutes per row, and a JDK-version minefield
+on the legacy rows) or `getbukkit.org`, whose availability is not something CI should depend on.
+Paper is also what the overwhelming majority of the deployed fleet actually runs, so this is the
+more representative choice as well as the more reliable one.
+
+**Why dated image tags.** `:java8` and `:java21` are moving tags. A matrix that silently changes
+what it tests is worse than no matrix, because a failure then has two candidate causes.
+
+## What each row asserts
+
+1. The server starts and the plugin logs its enable banner, within `SMOKE_BOOT_TIMEOUT`.
+2. No error in the boot log is attributable to the plugin.
+3. The server stops **gracefully** — over RCON (`rcon-cli stop`) for the Bukkit family, so the
+   server's own shutdown path runs and `onDisable` is actually called. `docker stop` would also
+   work, but only because the image traps the signal, and asserting through a path the plugin will
+   never see in production proves less.
+4. Bukkit rows log the disable banner. Velocity has no disable banner in phase 0 (the scaffold
+   registers no shutdown listener), so that row asserts only that unloading does not throw.
+5. No error in the shutdown log is attributable to the plugin.
+
+On failure the row prints the tail of the server log and the whole run exits non-zero.
+
+### "Attributable to the plugin" is deliberately narrow
+
+A run across five server generations picks up plenty of noise that has nothing to do with us —
+deprecation warnings, missing optional dependencies, Mojang telemetry that cannot reach the network,
+and on modern Paper a "legacy plugin" warning caused by our deliberate omission of `api-version`
+(declaring one makes 1.8.8 refuse to load the plugin at all). A check that failed on all of that
+would be muted within a week.
+
+What is left is: a log line naming Heimdall at `ERROR` or worse, a stack frame in `com.heimdall.`,
+and the two messages Bukkit prints when a plugin fails to load or throws in `onEnable`/`onDisable`.
+The pattern lives in `lib.sh` as `HEIMDALL_ERROR_PATTERN`.
+
+## Phase 1
+
+`docker-compose.yml` has the next topology already wired: the stub bot (see `stub-bot/README.md`)
+next to a server with the plugin, with fixtures in `fixtures/players.json`. **`run.sh` does not use
+it and CI does not run it** — phase 0's exit criterion is that the jar loads, and the plugin does
+not dial the bot yet, so there is nothing to connect and nothing to assert.
+
+It is committed now, runnable by hand, so the wiring is written down while that is true rather than
+being invented in a hurry the day the tunnel lands. The header of that file lists the assertions to
+add, in order.
+
+```bash
+./gradlew build
+docker compose -f smoke/docker-compose.yml up
+```

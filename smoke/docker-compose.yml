@@ -1,0 +1,89 @@
+# Phase 1 topology: a Minecraft server with the plugin, talking to the stub bot.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+#  NOT ASSERTED YET. `smoke/run.sh` does not use this file, and CI does not run it.
+#
+#  Phase 0's exit criterion is "the jar loads on all matrix servers", and the plugin does not
+#  dial the bot yet — there is nothing to connect and nothing to assert. This file exists so the
+#  wiring is written down and stays runnable by hand while that is true, rather than being
+#  invented in a hurry the day the tunnel lands.
+#
+#  When phase 1 turns it on, the assertions to add are, roughly in order:
+#    1. the stub logs `ws connected: guild=… server=…` within N seconds of the server booting;
+#    2. `identify` arrives, with the v3 `protocolVersion` + `capabilities` (stub-bot/README.md
+#       § "identify, and the v3 capability handshake");
+#    3. a join by 11111111-… is allowed and one by 22222222-… is denied, per the fixtures below;
+#    4. restarting the stub does not stop the plugin serving the pre-warmed whitelist.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+#
+# Run it by hand:
+#
+#   ./gradlew build                       # produces the jar AND stub-bot/build/install/
+#   docker compose -f smoke/docker-compose.yml up
+#
+# Then, from another shell, drive the stub over its own contract — see stub-bot/README.md for the
+# signing rules; every request needs X-Signature and X-Timestamp.
+
+name: heimdall-smoke
+
+services:
+  # The fake bot. No image build: the Gradle `installDist` output is mounted into a stock JRE.
+  # Building an image would mean either a Docker-side Gradle build (slow, needs the network) or a
+  # repo-root build context, and neither buys anything for a fixture that is rebuilt every time
+  # the code changes anyway.
+  stub-bot:
+    image: eclipse-temurin:21-jre
+    working_dir: /opt/stub-bot
+    volumes:
+      - ../stub-bot/build/install/stub-bot:/opt/stub-bot:ro
+      - ./fixtures:/fixtures:ro
+    command: ["/opt/stub-bot/bin/stub-bot"]
+    environment:
+      STUB_BOT_BIND: "0.0.0.0"
+      STUB_BOT_PORT: "8080"
+      STUB_BOT_GUILD_ID: "123456789012345678"
+      STUB_BOT_API_KEY: "smoke-shared-secret"
+      STUB_BOT_PLAYERS_FILE: "/fixtures/players.json"
+      STUB_BOT_VERBOSE: "true"
+    ports:
+      # Exposed so the contract can be poked at from the host while debugging.
+      - "18080:8080"
+    healthcheck:
+      # Deliberately crude: every real endpoint requires a signature, and a healthcheck that had
+      # to sign would need the HMAC implementation inside this container. A TCP connect proves the
+      # port is up, which is all `depends_on` needs.
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/8080' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  server:
+    image: itzg/minecraft-server:2026.7.2-java21
+    depends_on:
+      stub-bot:
+        condition: service_healthy
+    volumes:
+      - ../app/build/libs:/plugins-src:ro
+      - server-data:/data
+    environment:
+      EULA: "TRUE"
+      TYPE: "PAPER"
+      VERSION: "1.21.8"
+      MEMORY: "2G"
+      ONLINE_MODE: "FALSE"
+      USE_AIKAR_FLAGS: "false"
+      VIEW_DISTANCE: "4"
+      SPAWN_PROTECTION: "0"
+      ENABLE_RCON: "TRUE"
+      RCON_PASSWORD: "smoke"
+      # itzg copies anything matching this into plugins/ on start, which avoids hard-coding the
+      # version into a bind mount.
+      PLUGINS_SYNC_UPDATE: "true"
+      COPY_PLUGINS_SRC: "/plugins-src/heimdall-whitelist-*.jar"
+    ports:
+      - "25565:25565"
+      - "25575:25575"
+
+volumes:
+  server-data:
