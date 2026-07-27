@@ -50,22 +50,47 @@ final class VelocityCommandRegistrar implements CommandRegistrar {
                 aliases.add(alias.trim().toLowerCase(Locale.ROOT));
             }
         }
+        // Checked BEFORE registering, because Velocity does not refuse a collision — it takes the
+        // name over silently. So the failure without this is not "Heimdall's command did not work":
+        // it is another plugin's command quietly ceasing to exist the moment Heimdall loads, and
+        // then reappearing when a module is toggled off. Nothing in any log would connect the two.
+        //
+        // Registered anyway, deliberately: on a proxy Heimdall's /linkdiscord is far more likely to
+        // be the one the operator wants than whatever also claimed it, and refusing would leave a
+        // module with no command and no way to get one. What changes is that it is now said out
+        // loud, and that the takeover is not silently reversed on the way out.
+        boolean takingOver = ownedByAnother(spec.name(), aliases);
+        if (takingOver) {
+            logger.warn("/" + spec.name() + " is already registered on this proxy — Heimdall is "
+                    + "taking the name over, and whatever owned it will stop responding. It will "
+                    + "NOT be handed back when this module is disabled; restart the proxy for that.");
+        }
+
         final CommandMeta meta = manager.metaBuilder(spec.name())
                 .aliases(aliases.toArray(new String[0]))
                 .build();
         try {
             manager.register(meta, new Bridge(spec));
         } catch (RuntimeException refused) {
-            // Another plugin already owns the name. Not fatal — the module still works through
-            // whatever else it registered — but silent otherwise, and "why does /link do something
-            // else on the proxy" has no other answer in any log.
             logger.warn("the proxy refused to register /" + spec.name()
                     + " (another plugin probably owns it): " + refused);
             return Registration.NONE;
         }
+
+        final boolean unregisterOnClose = !takingOver;
         return Registration.once(new Runnable() {
             @Override
             public void run() {
+                if (!unregisterOnClose) {
+                    // Unregistering a name we took from somebody else does not give it back — the
+                    // previous owner's registration was replaced, not stacked — it just deletes the
+                    // command outright. Leaving ours bound at least keeps a working verb that says
+                    // the feature is disabled, rather than turning a toggle into a command that
+                    // vanishes from the whole network.
+                    logger.debug(() -> "leaving /" + spec.name() + " registered: Heimdall took the "
+                            + "name from another plugin and unregistering would delete it entirely");
+                    return;
+                }
                 try {
                     manager.unregister(meta);
                 } catch (RuntimeException alreadyGone) {
@@ -73,6 +98,19 @@ final class VelocityCommandRegistrar implements CommandRegistrar {
                 }
             }
         });
+    }
+
+    /** Whether the proxy already has any of these names bound to something. */
+    private boolean ownedByAnother(String name, List<String> aliases) {
+        if (manager.hasCommand(name)) {
+            return true;
+        }
+        for (String alias : aliases) {
+            if (manager.hasCommand(alias)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** One command, bridged onto the proxy's simplest command shape. */

@@ -67,20 +67,87 @@ final class BukkitCommandRegistrar implements CommandRegistrar {
         }
         warnAboutUndeclaredAliases(spec, command);
 
-        Bridge bridge = new Bridge(spec);
+        final Bridge bridge = new Bridge(spec);
         command.setExecutor(bridge);
         command.setTabCompleter(bridge);
+
+        // Read back, rather than assumed. setExecutor has no return value and no failure mode of its
+        // own, but the binding is a mutable field on an object the whole server can reach: another
+        // plugin doing the same thing to the same PluginCommand — a command-manager plugin, or one
+        // that "fixes" conflicts by re-pointing them — silently wins, and every symptom afterwards
+        // is Heimdall's command doing somebody else's thing with no line anywhere to explain it.
+        if (command.getExecutor() != bridge) {
+            logger.warn("something else claimed /" + spec.name() + " immediately after Heimdall "
+                    + "registered it (now " + describe(command.getExecutor()) + ") — that command "
+                    + "will not reach Heimdall. A command-manager plugin is the usual cause.");
+        }
+
         return Registration.once(new Runnable() {
             @Override
             public void run() {
-                // Only if it is still ours. A second module registering the same verb would
-                // otherwise have its binding torn out by the first one's disable.
+                // Only if it is still ours. Unbinding a command another plugin has since taken over
+                // would break THEIR command as a side effect of disabling one of our modules, which
+                // is a far worse failure than leaving a verb bound to a module that is off — and
+                // that case is handled: the bridge answers "this feature is disabled".
                 if (command.getExecutor() == bridge) {
-                    command.setExecutor(null);
-                    command.setTabCompleter(null);
+                    // Swapped for a stub rather than cleared. setExecutor(null) makes Bukkit fall
+                    // back to the plugin's own onCommand, which returns false, which prints the
+                    // descriptor's usage line — so a player who runs /offend while the module is off
+                    // is told the argument syntax for a command that will not do anything. Telling
+                    // them the feature is disabled is the answer to the question they asked.
+                    //
+                    // The completer is replaced rather than cleared for the same reason it returns
+                    // empty on a permission failure: a null completer falls through to Bukkit's own
+                    // online-player completion, so a disabled command would still be quietly
+                    // listing who is on the server.
+                    Disabled disabled = new Disabled(spec.name());
+                    command.setExecutor(disabled);
+                    command.setTabCompleter(disabled);
                 }
             }
         });
+    }
+
+    /**
+     * What a command answers while the module that owns it is switched off.
+     *
+     * <p>Bukkit cannot remove a {@code plugin.yml} command at runtime, so the verb exists whatever
+     * the dashboard says. The honest thing for it to do is say which of the three possible reasons
+     * applies — and "this feature is disabled" is the only one an operator can act on, because the
+     * other two (no permission, wrong arguments) are already answered elsewhere.
+     */
+    private final class Disabled implements CommandExecutor, TabCompleter {
+
+        private final String name;
+
+        Disabled(String name) {
+            this.name = name;
+        }
+
+        @Override
+        public boolean onCommand(
+                CommandSender sender, Command command, String label, String[] args) {
+            messenger.send(sender, Msg.legacy(
+                    "§cThat feature is switched off. Enable §f" + name
+                            + "§c on the Minecraft page of the Heimdall dashboard."));
+            return true;
+        }
+
+        @Override
+        public List<String> onTabComplete(
+                CommandSender sender, Command command, String alias, String[] args) {
+            // Empty, not null: null falls through to Bukkit's own player-name completion, and a
+            // switched-off command has no business advertising who is online.
+            return Collections.emptyList();
+        }
+    }
+
+    /** Names whatever currently owns a command, for the collision warning. */
+    private static String describe(Object executor) {
+        if (executor == null) {
+            return "unbound";
+        }
+        return executor.getClass().getName();
     }
 
     /**

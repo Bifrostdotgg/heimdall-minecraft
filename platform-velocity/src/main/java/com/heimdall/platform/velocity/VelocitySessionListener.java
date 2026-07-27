@@ -53,9 +53,46 @@ public final class VelocitySessionListener {
     public void onDisconnect(DisconnectEvent event) {
         long observedAt = System.currentTimeMillis();
         try {
+            if (!reachedTheNetwork(event.getLoginStatus())) {
+                // A player the proxy refused also produces a DisconnectEvent, and reporting it as a
+                // quit is not merely noise: the whitelist module's quit window slides that player's
+                // mirror expiry FORWARD by the leave window. So the effect of being denied would be
+                // to extend the cached decision that admits them, which is backwards, and a player
+                // bouncing off a login gate does it repeatedly.
+                logger.debug(() -> "not reporting a quit for " + event.getPlayer().getUsername()
+                        + ": they never joined (" + event.getLoginStatus() + ")");
+                return;
+            }
             sessions.quit(new VelocityPlayerHandle(event.getPlayer(), text), observedAt);
         } catch (Throwable broken) {
             logger.error("could not report the quit of " + event.getPlayer().getUsername(), broken);
         }
+    }
+
+    /**
+     * Whether this disconnect follows a session that actually existed.
+     *
+     * <p>An allow-list rather than a deny-list, and the enum is read by name rather than by constant
+     * so a Velocity release that adds a status cannot silently start counting as a join.
+     *
+     * <ul>
+     *   <li>{@code SUCCESSFUL_LOGIN} — they were on the network. The only unambiguous yes.
+     *   <li>{@code PRE_SERVER_JOIN} — connected to the proxy but never reached a backend. Counted:
+     *       {@code PostLoginEvent} has already fired by then, so this is the matching quit for a
+     *       join that was reported, and skipping it would leak a session that never closes.
+     *   <li>everything else — {@code CANCELLED_BY_PROXY} (the login gate refusing them),
+     *       {@code CONFLICTING_LOGIN}, and the two user-cancelled states — is somebody who never
+     *       joined.
+     * </ul>
+     */
+    private static boolean reachedTheNetwork(DisconnectEvent.LoginStatus status) {
+        if (status == null) {
+            // Older API, or a status this build does not know. Reporting the quit is the safer of
+            // the two wrongs: a missed extension costs one re-verification, whereas a missed quit
+            // for a real session leaves an entry that nothing ever slides or closes.
+            return true;
+        }
+        String name = status.name();
+        return "SUCCESSFUL_LOGIN".equals(name) || "PRE_SERVER_JOIN".equals(name);
     }
 }
