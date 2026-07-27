@@ -87,9 +87,13 @@ public final class VelocitySessionListener {
      */
     private static boolean reachedTheNetwork(DisconnectEvent.LoginStatus status) {
         if (status == null) {
-            // Older API, or a status this build does not know. Reporting the quit is the safer of
-            // the two wrongs: a missed extension costs one re-verification, whereas a missed quit
-            // for a real session leaves an entry that nothing ever slides or closes.
+            // Unreachable through velocity-api 3.4.0, whose DisconnectEvent constructor rejects a
+            // null status outright — kept against an API that stops doing so, and untested for
+            // exactly that reason (the event is final, so the case cannot be constructed).
+            //
+            // Reporting is the safer of the two wrongs: a missed extension costs one
+            // re-verification against the bot, whereas a missed quit for a real session leaves a
+            // mirror entry that nothing ever slides or closes.
             return true;
         }
         String name = status.name();
