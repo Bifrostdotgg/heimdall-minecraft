@@ -36,7 +36,15 @@ final class Slf4jLogger extends AbstractHeimdallLogger {
     protected void write(LogLevel level, String message, Throwable throwable) {
         switch (level) {
             case DEBUG:
-                delegate.info("[DEBUG] {}", message, throwable);
+                // Two overloads, chosen by hand. With a null throwable the varargs form is selected
+                // and slf4j counts it as a second argument for a one-placeholder pattern, so every
+                // debug line the plugin writes is preceded by "found 1 argument placeholders, but
+                // provided 2" from slf4j itself — which on a debug-enabled proxy doubles the log.
+                if (throwable == null) {
+                    delegate.info("[DEBUG] {}", message);
+                } else {
+                    delegate.info("[DEBUG] " + message, throwable);
+                }
                 break;
             case WARN:
                 delegate.warn(message, throwable);
