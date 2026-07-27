@@ -2,7 +2,6 @@ package com.heimdall.core.mirror;
 
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.util.Strings;
-import java.lang.reflect.Type;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashSet;
@@ -13,7 +12,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiFunction;
-import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 /**
@@ -74,7 +72,6 @@ public final class MirrorStore<T> implements AutoCloseable {
 
     private final HeimdallLogger logger;
     private final MirrorPolicy policy;
-    private final LongSupplier clock;
     private final ConcurrentHashMap<String, MirrorEntry<T>> entries =
             new ConcurrentHashMap<String, MirrorEntry<T>>();
     private final MirrorFile<T> file;
@@ -82,52 +79,35 @@ public final class MirrorStore<T> implements AutoCloseable {
     private volatile String lastEtag;
 
     /**
-     * Opens a mirror, loading whatever is already on disk.
+     * Starts describing a mirror to open.
+     *
+     * <p>A builder rather than a factory method because there were two of them, differing only in
+     * whether the clock was injected, and a third argument would have meant a third overload. The
+     * clock now lives on {@link MirrorPolicy}, where it belongs.
      *
      * @param path where the mirror is persisted; parent directories are created on first save
      * @param valueType the mirrored value's type, needed because Gson cannot see {@code T}
-     * @param scheduler where debounced saves run — typically {@code HeimdallExecutors.scheduler()}
      */
-    public static <T> MirrorStore<T> open(
-            HeimdallLogger logger,
-            Path path,
-            Class<T> valueType,
-            MirrorPolicy policy,
-            ScheduledExecutorService scheduler) {
-        return open(logger, path, (Type) valueType, policy, scheduler, new LongSupplier() {
-            @Override
-            public long getAsLong() {
-                return System.currentTimeMillis();
-            }
-        });
+    public static <T> Builder<T> builder(HeimdallLogger logger, Path path, Class<T> valueType) {
+        return new Builder<T>(logger, path, valueType);
     }
 
-    /** As {@link #open}, with the clock injected so the ceiling can be tested without sleeping. */
-    static <T> MirrorStore<T> open(
-            HeimdallLogger logger,
-            Path path,
-            Type valueType,
-            MirrorPolicy policy,
-            ScheduledExecutorService scheduler,
-            LongSupplier clock) {
-        return new MirrorStore<T>(logger, path, valueType, policy, scheduler, clock);
-    }
-
-    private MirrorStore(
-            HeimdallLogger logger,
-            Path path,
-            Type valueType,
-            MirrorPolicy policy,
-            ScheduledExecutorService scheduler,
-            LongSupplier clock) {
-        if (logger == null || path == null || valueType == null || policy == null || clock == null) {
-            throw new IllegalArgumentException("logger, path, valueType, policy and clock are required");
+    private MirrorStore(Builder<T> builder) {
+        if (builder.logger == null || builder.path == null || builder.valueType == null) {
+            throw new IllegalArgumentException("logger, path and valueType are required");
         }
-        this.logger = logger;
-        this.policy = policy;
-        this.clock = clock;
+        if (builder.policy == null) {
+            throw new IllegalArgumentException("a policy is required — see MirrorPolicy.builder()");
+        }
+        if (builder.policy.saveDebounceMs() > 0 && builder.scheduler == null) {
+            throw new IllegalArgumentException(
+                    "a debounced mirror needs a scheduler; pass one, or set saveDebounceMs(0)");
+        }
+        this.logger = builder.logger;
+        this.policy = builder.policy;
         this.file = new MirrorFile<T>(
-                logger, path, valueType, policy.saveDebounceMs(), scheduler,
+                builder.logger, builder.path, builder.valueType, builder.policy.saveDebounceMs(),
+                builder.scheduler,
                 new Supplier<MirrorSnapshot<T>>() {
                     @Override
                     public MirrorSnapshot<T> get() {
@@ -155,7 +135,7 @@ public final class MirrorStore<T> implements AutoCloseable {
         if (entry == null) {
             return null;
         }
-        if (clock.getAsLong() > effectiveExpiry(entry)) {
+        if (policy.now() > effectiveExpiry(entry)) {
             entries.remove(key, entry);
             file.markDirty();
             return null;
@@ -207,7 +187,7 @@ public final class MirrorStore<T> implements AutoCloseable {
             logger.warn("Refusing to mirror an entry with a blank key or null value");
             return;
         }
-        final long now = clock.getAsLong();
+        final long now = policy.now();
         // compute rather than put, for the same reason reconcile uses it: a verification racing
         // another verification must not be able to move lastVerified backward.
         entries.compute(key, new BiFunction<String, MirrorEntry<T>, MirrorEntry<T>>() {
@@ -238,7 +218,7 @@ public final class MirrorStore<T> implements AutoCloseable {
         if (key == null) {
             return false;
         }
-        final long now = clock.getAsLong();
+        final long now = policy.now();
         final long proposed = now + Math.max(0, windowMs);
         // computeIfPresent, not get-then-mutate: the remapping runs under the bin lock, so a
         // reconcile landing at the same moment either happens entirely before or entirely after,
@@ -313,7 +293,7 @@ public final class MirrorStore<T> implements AutoCloseable {
             throw new IllegalArgumentException(
                     "the authoritative set is required — pass an empty map, not null");
         }
-        final long now = clock.getAsLong();
+        final long now = policy.now();
         Set<String> seen = new HashSet<String>();
         // Counted from inside the remapping function, which runs at most once per key here but is
         // not contractually single-shot, so the counters are atomic rather than plain ints.
@@ -367,7 +347,7 @@ public final class MirrorStore<T> implements AutoCloseable {
      * @return how many were removed
      */
     public int sweepExpired() {
-        long now = clock.getAsLong();
+        long now = policy.now();
         int removed = 0;
         for (Map.Entry<String, MirrorEntry<T>> entry : entries.entrySet()) {
             if (now > effectiveExpiry(entry.getValue())) {
@@ -412,7 +392,7 @@ public final class MirrorStore<T> implements AutoCloseable {
 
     /** A one-line summary for a status command. */
     public String stats() {
-        long now = clock.getAsLong();
+        long now = policy.now();
         int expired = 0;
         for (MirrorEntry<T> entry : entries.values()) {
             if (now > effectiveExpiry(entry)) {
@@ -467,5 +447,50 @@ public final class MirrorStore<T> implements AutoCloseable {
 
     private MirrorSnapshot<T> snapshot() {
         return new MirrorSnapshot<T>(lastEtag, new LinkedHashMap<String, MirrorEntry<T>>(entries));
+    }
+
+    /**
+     * Describes a mirror before opening it.
+     *
+     * <p>{@link #open()} both constructs the store and loads the file, so nothing observes a
+     * half-populated mirror.
+     *
+     * @param <T> the mirrored value type
+     */
+    public static final class Builder<T> {
+
+        private final HeimdallLogger logger;
+        private final Path path;
+        private final Class<T> valueType;
+        private MirrorPolicy policy = MirrorPolicy.builder().build();
+        private ScheduledExecutorService scheduler;
+
+        private Builder(HeimdallLogger logger, Path path, Class<T> valueType) {
+            this.logger = logger;
+            this.path = path;
+            this.valueType = valueType;
+        }
+
+        /** Expiry rules, save debounce and clock. Defaults to {@code MirrorPolicy.builder().build()}. */
+        public Builder<T> policy(MirrorPolicy value) {
+            this.policy = value;
+            return this;
+        }
+
+        /**
+         * Where debounced saves run — typically {@code HeimdallExecutors.scheduler()}.
+         *
+         * <p>Required unless the policy sets {@code saveDebounceMs(0)}. <strong>The store does not
+         * own it</strong> and will not shut it down.
+         */
+        public Builder<T> scheduler(ScheduledExecutorService value) {
+            this.scheduler = value;
+            return this;
+        }
+
+        /** Opens the mirror, loading whatever is already on disk. */
+        public MirrorStore<T> open() {
+            return new MirrorStore<T>(this);
+        }
     }
 }

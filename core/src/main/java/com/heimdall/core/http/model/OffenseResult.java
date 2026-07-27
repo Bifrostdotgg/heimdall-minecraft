@@ -1,5 +1,7 @@
 package com.heimdall.core.http.model;
 
+import java.util.Objects;
+
 /**
  * What the bot decided about a reported offense: the escalation tier it resolved and the command
  * the server should run.
@@ -77,6 +79,32 @@ public final class OffenseResult {
     /** The offense type's display name. */
     public String offenseType() {
         return offenseType;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof OffenseResult)) {
+            return false;
+        }
+        OffenseResult that = (OffenseResult) other;
+        return totalPoints == that.totalPoints
+                && tierApplied == that.tierApplied
+                && infractionId.equals(that.infractionId)
+                && command.equals(that.command)
+                && action.equals(that.action)
+                && Objects.equals(durationMinutes, that.durationMinutes)
+                && tierDescription.equals(that.tierDescription)
+                && offenseType.equals(that.offenseType);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(infractionId, command, action, durationMinutes,
+                Integer.valueOf(totalPoints), Integer.valueOf(tierApplied), tierDescription,
+                offenseType);
     }
 
     @Override

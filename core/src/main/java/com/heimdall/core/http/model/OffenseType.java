@@ -2,6 +2,7 @@ package com.heimdall.core.http.model;
 
 import com.heimdall.core.util.Lists;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * One configured offense category, as served by {@code GET /offense-types}.
@@ -18,13 +19,16 @@ public final class OffenseType {
     private final List<String> offenses;
     private final boolean enabled;
 
-    public OffenseType(
-            String typeId, String displayName, String description, List<String> offenses, boolean enabled) {
-        this.typeId = typeId;
-        this.displayName = displayName;
-        this.description = description == null ? "" : description;
-        this.offenses = Lists.copyOf(offenses);
-        this.enabled = enabled;
+    private OffenseType(Builder builder) {
+        this.typeId = builder.typeId;
+        this.displayName = builder.displayName;
+        this.description = builder.description == null ? "" : builder.description;
+        this.offenses = Lists.copyOf(builder.offenses);
+        this.enabled = builder.enabled;
+    }
+
+    public static Builder builder() {
+        return new Builder();
     }
 
     /** Stable identifier, e.g. {@code cheating}. */
@@ -53,7 +57,70 @@ public final class OffenseType {
     }
 
     @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof OffenseType)) {
+            return false;
+        }
+        OffenseType that = (OffenseType) other;
+        return enabled == that.enabled
+                && Objects.equals(typeId, that.typeId)
+                && Objects.equals(displayName, that.displayName)
+                && description.equals(that.description)
+                && offenses.equals(that.offenses);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(typeId, displayName, description, offenses, Boolean.valueOf(enabled));
+    }
+
+    @Override
     public String toString() {
         return displayName + " (" + typeId + ") — offenses: " + String.join(", ", offenses);
+    }
+
+    /** Mutable writer. */
+    public static final class Builder {
+
+        private String typeId;
+        private String displayName;
+        private String description;
+        private List<String> offenses;
+        private boolean enabled;
+
+        private Builder() {
+        }
+
+        public Builder typeId(String value) {
+            this.typeId = value;
+            return this;
+        }
+
+        public Builder displayName(String value) {
+            this.displayName = value;
+            return this;
+        }
+
+        public Builder description(String value) {
+            this.description = value;
+            return this;
+        }
+
+        public Builder offenses(List<String> value) {
+            this.offenses = value;
+            return this;
+        }
+
+        public Builder enabled(boolean value) {
+            this.enabled = value;
+            return this;
+        }
+
+        public OffenseType build() {
+            return new OffenseType(this);
+        }
     }
 }

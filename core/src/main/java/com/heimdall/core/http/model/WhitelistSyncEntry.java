@@ -1,5 +1,7 @@
 package com.heimdall.core.http.model;
 
+import java.util.Objects;
+
 /**
  * One whitelisted player in the full-whitelist dump.
  *
@@ -23,6 +25,23 @@ public final class WhitelistSyncEntry {
     /** The player's name, or {@code null} if the bot does not know it. */
     public String username() {
         return username;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof WhitelistSyncEntry)) {
+            return false;
+        }
+        WhitelistSyncEntry that = (WhitelistSyncEntry) other;
+        return Objects.equals(uuid, that.uuid) && Objects.equals(username, that.username);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(uuid, username);
     }
 
     @Override

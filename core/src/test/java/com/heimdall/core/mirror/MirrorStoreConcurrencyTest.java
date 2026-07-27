@@ -55,8 +55,10 @@ class MirrorStoreConcurrencyTest {
                 // the clock would remove the interleaving the test exists to provoke.
                 .saveDebounceMs(50)
                 .build();
-        MirrorStore<String> store =
-                MirrorStore.open(logger, dir.resolve("mirror.json"), String.class, policy, scheduler);
+        MirrorStore<String> store = MirrorStore.builder(logger, dir.resolve("mirror.json"), String.class)
+                .policy(policy)
+                .scheduler(scheduler)
+                .open();
 
         Map<String, String> authoritative = new LinkedHashMap<String, String>();
         for (int i = 0; i < KEYS; i++) {

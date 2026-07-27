@@ -1,5 +1,7 @@
 package com.heimdall.core.http.model;
 
+import java.util.Objects;
+
 /**
  * The bot's verdict on a connection attempt.
  *
@@ -80,6 +82,30 @@ public final class ConnectionAttemptResult {
     /** What to do about permission groups. Never {@code null}; see {@link RoleSyncDirective}. */
     public RoleSyncDirective roleSync() {
         return roleSync;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof ConnectionAttemptResult)) {
+            return false;
+        }
+        ConnectionAttemptResult that = (ConnectionAttemptResult) other;
+        return whitelisted == that.whitelisted
+                && revoked == that.revoked
+                && action == that.action
+                && Objects.equals(message, that.message)
+                && Objects.equals(authCode, that.authCode)
+                && Objects.equals(queuePosition, that.queuePosition)
+                && roleSync.equals(that.roleSync);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(Boolean.valueOf(whitelisted), action, message, authCode, queuePosition,
+                Boolean.valueOf(revoked), roleSync);
     }
 
     @Override

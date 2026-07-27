@@ -1,5 +1,7 @@
 package com.heimdall.core.http.model;
 
+import java.util.Objects;
+
 import com.heimdall.core.util.Strings;
 import java.util.Locale;
 
@@ -71,6 +73,29 @@ public final class OffenseReport {
     /** Free-text notes, or {@code null}. */
     public String notes() {
         return notes;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof OffenseReport)) {
+            return false;
+        }
+        OffenseReport that = (OffenseReport) other;
+        return targetUuid.equals(that.targetUuid)
+                && targetUsername.equals(that.targetUsername)
+                && offenseSlug.equals(that.offenseSlug)
+                && Objects.equals(issuedByUuid, that.issuedByUuid)
+                && Objects.equals(issuedByUsername, that.issuedByUsername)
+                && Objects.equals(notes, that.notes);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(targetUuid, targetUsername, offenseSlug, issuedByUuid, issuedByUsername,
+                notes);
     }
 
     @Override

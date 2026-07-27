@@ -3,6 +3,7 @@ package com.heimdall.core.http.model;
 import com.heimdall.core.util.Lists;
 import com.heimdall.core.util.Strings;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * What the plugin tells the bot about a player trying to connect.
@@ -75,6 +76,29 @@ public final class ConnectionAttempt {
     /** The permission groups the player currently holds, for role-sync diffing. */
     public List<String> currentGroups() {
         return currentGroups;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof ConnectionAttempt)) {
+            return false;
+        }
+        ConnectionAttempt that = (ConnectionAttempt) other;
+        return currentlyWhitelisted == that.currentlyWhitelisted
+                && username.equals(that.username)
+                && uuid.equals(that.uuid)
+                && ip.equals(that.ip)
+                && serverIp.equals(that.serverIp)
+                && currentGroups.equals(that.currentGroups);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(username, uuid, ip, serverIp, Boolean.valueOf(currentlyWhitelisted),
+                currentGroups);
     }
 
     @Override

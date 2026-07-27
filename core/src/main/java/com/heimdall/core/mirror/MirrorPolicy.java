@@ -1,6 +1,7 @@
 package com.heimdall.core.mirror;
 
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /**
  * How long a mirrored value may be trusted, and how often the mirror is allowed to hit the disk.
@@ -13,17 +14,32 @@ import java.util.concurrent.TimeUnit;
  *       verification</em> activity may push that, whatever the window says. Set it to 0 to disable
  *       the bound entirely, which restores v2's pre-#771 unbounded behaviour.
  * </ul>
+ *
+ * <p>The clock lives here too. Every question this class answers is "has enough time passed?", so
+ * what "now" means is part of the policy rather than a separate constructor argument on the store —
+ * which is what it was, and it was the reason {@code MirrorStore} needed two overlapping factory
+ * methods.
  */
 public final class MirrorPolicy {
+
+    /** The system clock, used unless a caller supplies its own. */
+    private static final LongSupplier SYSTEM_CLOCK = new LongSupplier() {
+        @Override
+        public long getAsLong() {
+            return System.currentTimeMillis();
+        }
+    };
 
     private final long windowMs;
     private final long maxExtensionMs;
     private final long saveDebounceMs;
+    private final LongSupplier clock;
 
     private MirrorPolicy(Builder builder) {
         this.windowMs = Math.max(0, builder.windowMs);
         this.maxExtensionMs = Math.max(0, builder.maxExtensionMs);
         this.saveDebounceMs = Math.max(0, builder.saveDebounceMs);
+        this.clock = builder.clock == null ? SYSTEM_CLOCK : builder.clock;
     }
 
     public static Builder builder() {
@@ -53,6 +69,11 @@ public final class MirrorPolicy {
      */
     public long saveDebounceMs() {
         return saveDebounceMs;
+    }
+
+    /** The current time in epoch millis, as this policy reckons it. */
+    public long now() {
+        return clock.getAsLong();
     }
 
     /**
@@ -97,6 +118,7 @@ public final class MirrorPolicy {
         private long windowMs = TimeUnit.MINUTES.toMillis(60);
         private long maxExtensionMs = TimeUnit.HOURS.toMillis(24);
         private long saveDebounceMs = TimeUnit.SECONDS.toMillis(5);
+        private LongSupplier clock;
 
         private Builder() {
         }
@@ -124,6 +146,17 @@ public final class MirrorPolicy {
         /** 0 makes every mutation write synchronously — for tests, not for a login path. */
         public Builder saveDebounceMs(long value) {
             this.saveDebounceMs = value;
+            return this;
+        }
+
+        /**
+         * Replaces the system clock.
+         *
+         * <p>For tests, which need to move time by hours without waiting for them. Nothing in
+         * production should call this.
+         */
+        public Builder clock(LongSupplier value) {
+            this.clock = value;
             return this;
         }
 

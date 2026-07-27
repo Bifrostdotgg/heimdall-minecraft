@@ -103,11 +103,12 @@ final class ApiResponses {
     static LinkCodeResult linkCode(RawResponse response) {
         JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
         if (bool(data, "alreadyLinked")) {
-            return LinkCodeResult.alreadyLinked(
-                    string(data, "message"),
-                    string(data, "discordId"),
-                    string(data, "discordUsername"),
-                    string(data, "discordDisplayName"));
+            return LinkCodeResult.linkedTo()
+                    .message(string(data, "message"))
+                    .discordId(string(data, "discordId"))
+                    .discordUsername(string(data, "discordUsername"))
+                    .discordDisplayName(string(data, "discordDisplayName"))
+                    .build();
         }
         return LinkCodeResult.code(string(data, "code"));
     }
@@ -120,12 +121,13 @@ final class ApiResponses {
                 continue;
             }
             JsonObject type = types.get(i).getAsJsonObject();
-            result.add(new OffenseType(
-                    string(type, "typeId"),
-                    string(type, "displayName"),
-                    string(type, "description"),
-                    strings(type, "offenses"),
-                    bool(type, "enabled")));
+            result.add(OffenseType.builder()
+                    .typeId(string(type, "typeId"))
+                    .displayName(string(type, "displayName"))
+                    .description(string(type, "description"))
+                    .offenses(strings(type, "offenses"))
+                    .enabled(bool(type, "enabled"))
+                    .build());
         }
         return result;
     }
@@ -153,12 +155,13 @@ final class ApiResponses {
 
     static PluginRelease pluginRelease(RawResponse response) {
         JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
-        return new PluginRelease(
-                string(data, "version"),
-                string(data, "downloadUrl"),
-                string(data, "releaseNotes"),
-                string(data, "htmlUrl"),
-                string(data, "publishedAt"));
+        return PluginRelease.builder()
+                .version(string(data, "version"))
+                .downloadUrl(string(data, "downloadUrl"))
+                .releaseNotes(string(data, "releaseNotes"))
+                .htmlUrl(string(data, "htmlUrl"))
+                .publishedAt(string(data, "publishedAt"))
+                .build();
     }
 
     static WhitelistSyncResult whitelistSync(RawResponse response) {
@@ -184,12 +187,13 @@ final class ApiResponses {
                 players.add(new WhitelistSyncEntry(uuid, string(player, "username")));
             }
         }
-        return WhitelistSyncResult.modified(
-                response.etag(),
-                string(data, "hash"),
-                intOr(data, "count", players.size()),
-                string(data, "generatedAt"),
-                players);
+        return WhitelistSyncResult.modified()
+                .etag(response.etag())
+                .hash(string(data, "hash"))
+                .count(intOr(data, "count", players.size()))
+                .generatedAt(string(data, "generatedAt"))
+                .players(players)
+                .build();
     }
 
     // ── JSON readers ─────────────────────────────────────────────────────────

@@ -1,6 +1,5 @@
 package com.heimdall.core.http;
 
-import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.util.Strings;
 
 /**
@@ -10,6 +9,10 @@ import com.heimdall.core.util.Strings;
  * reconfiguration, so a reload can never be observed half-applied — v2 had seven separate volatile
  * fields written one at a time, which meant an in-flight worker could sign with the new secret
  * against the old base URL.
+ *
+ * <p>Building one of these from {@code bootstrap.yml} is
+ * {@code com.heimdall.core.wiring.ApiSettingsFactory}'s job, not this class's — {@code http} has no
+ * business knowing the on-disk config format, and 1b adds a second source for the same settings.
  */
 public final class ApiSettings {
 
@@ -67,20 +70,6 @@ public final class ApiSettings {
 
     public static Builder builder() {
         return new Builder();
-    }
-
-    /**
-     * Settings derived from {@code bootstrap.yml}, with the timing defaults.
-     *
-     * <p>The guild id is separate because the plugin can be configured with a token alone and
-     * resolve its guild from the bot; only once that has happened is there a guild id to put here.
-     */
-    public static Builder from(BootstrapConfig bootstrap, String guildId) {
-        return builder()
-                .baseUrl(bootstrap.endpoint())
-                .apiKey(bootstrap.token())
-                .serverId(bootstrap.serverId())
-                .guildId(guildId);
     }
 
     /** The bot's base URL, without a trailing slash. */

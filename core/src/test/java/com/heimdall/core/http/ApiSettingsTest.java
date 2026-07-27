@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.log.RecordingLogger;
 import java.util.concurrent.Executor;
 import org.junit.jupiter.api.DisplayName;
@@ -133,24 +132,6 @@ class ApiSettingsTest {
         assertFalse(ApiSettings.builder().guildId("1").apiKey("k").build().isUsable());
         assertFalse(ApiSettings.builder().baseUrl("http://x").apiKey("k").build().isUsable());
         assertFalse(ApiSettings.builder().baseUrl("http://x").guildId("1").build().isUsable());
-    }
-
-    @Test
-    void derivedFromBootstrapCarriesEndpointKeyAndServerId() {
-        BootstrapConfig bootstrap = BootstrapConfig.builder()
-                .endpoint("https://api.bifrost.gg/")
-                .tokenId("tok")
-                .token("s3cr3t")
-                .serverId("survival")
-                .build();
-
-        ApiSettings derived = ApiSettings.from(bootstrap, "123456789012345678").build();
-
-        assertEquals("https://api.bifrost.gg", derived.baseUrl());
-        assertEquals("s3cr3t", derived.apiKey());
-        assertEquals("survival", derived.serverId());
-        assertEquals("123456789012345678", derived.guildId());
-        assertTrue(derived.isUsable());
     }
 
     @Test

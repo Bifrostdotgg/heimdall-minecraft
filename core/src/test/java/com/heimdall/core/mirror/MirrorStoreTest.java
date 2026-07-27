@@ -63,8 +63,12 @@ class MirrorStoreTest {
                 .windowMinutes(60)
                 .maxExtensionHours(maxExtensionHours)
                 .saveDebounceMs(debounceMs)
+                .clock(clock)
                 .build();
-        return MirrorStore.open(logger, file(dir), String.class, policy, scheduler, clock);
+        return MirrorStore.builder(logger, file(dir), String.class)
+                .policy(policy)
+                .scheduler(scheduler)
+                .open();
     }
 
     private static Path file(Path dir) {
