@@ -106,6 +106,18 @@ val verifyShadowJar by tasks.registering(VerifyShadowJar::class) {
         ),
     )
 
+    // Shaded libraries must be self-contained. The Java-WebSocket incident had
+    // exactly this shape: an unconditional org.slf4j.LoggerFactory call in three
+    // constructors, against a facade legacy Spigot does not have. Excluding the
+    // slf4j artifact satisfied the relocation allowlist perfectly — the failure
+    // was a dangling reference, not a bundled package, so only a constant-pool
+    // scan can see it. platform/velocity is outside libs/ and keeps its injected
+    // org.slf4j.Logger, which Velocity itself provides.
+    shadedLibraryPrefix.set("com/heimdall/libs/")
+    bannedLibraryReferences.set(
+        listOf("org/slf4j", "org/apache/logging", "org/apache/commons/logging"),
+    )
+
     expectedVersion.set(project.version.toString())
     expectedVelocityPluginId.set("heimdall")
 

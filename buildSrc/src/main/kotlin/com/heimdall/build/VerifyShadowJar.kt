@@ -9,6 +9,8 @@ import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 
 /**
@@ -32,8 +34,14 @@ import org.gradle.api.tasks.TaskAction
  */
 abstract class VerifyShadowJar : DefaultTask() {
 
-    /** The shaded jar to inspect. */
+    /**
+     * The shaded jar to inspect.
+     *
+     * Path sensitivity is NONE because only the bytes matter — the jar's location on disk has no
+     * bearing on whether it passes, so a build-directory move must not invalidate the result.
+     */
     @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
     abstract val jarFile: RegularFileProperty
 
     /** Highest classfile major version allowed for ordinary classes (52 = Java 8). */
@@ -70,6 +78,22 @@ abstract class VerifyShadowJar : DefaultTask() {
     @get:Input
     abstract val requiredRelocations: ListProperty<String>
 
+    /** Prefix holding the shaded third-party libraries, scanned by [bannedLibraryReferences]. */
+    @get:Input
+    abstract val shadedLibraryPrefix: Property<String>
+
+    /**
+     * Internal names of logging facades that shaded libraries may not reference.
+     *
+     * This closes the hole the Java-WebSocket incident came through. That library called
+     * `org.slf4j.LoggerFactory` unconditionally from three constructors, and legacy Spigot ships no
+     * slf4j — a guaranteed NoClassDefFoundError. Nothing in the build could see it: excluding the
+     * slf4j artifact from the jar satisfies the relocation allowlist perfectly, because the problem
+     * is a *dangling reference*, not a bundled package. Only reading the constant pool finds it.
+     */
+    @get:Input
+    abstract val bannedLibraryReferences: ListProperty<String>
+
     /** The version both platform descriptors must carry. */
     @get:Input
     abstract val expectedVersion: Property<String>
@@ -97,6 +121,7 @@ abstract class VerifyShadowJar : DefaultTask() {
                 .forEach { problems += "no classes found under relocated prefix: $it" }
 
             checkEverythingIsRelocated(classes, problems)
+            checkShadedLibrariesAreSelfContained(zip, classes, problems)
             checkBytecodeLevels(zip, classes, problems)
             checkExemptModuleStillDiffers(zip, problems)
             checkPluginYml(zip, problems)
@@ -125,6 +150,38 @@ abstract class VerifyShadowJar : DefaultTask() {
             problems += "${foreign.size} class(es) outside $owned — every bundled class must be " +
                 "relocated under it, e.g. ${foreign.take(3).joinToString(", ")}"
         }
+    }
+
+    /**
+     * Fails if a shaded library references a logging facade we do not ship.
+     *
+     * Scans the raw classfile bytes rather than parsing the constant pool: the banned names appear
+     * there as plain UTF-8 entries, so a substring search over the file is both sufficient and
+     * immune to classfile format changes. ISO-8859-1 is used deliberately — it maps bytes to chars
+     * one-to-one, so no byte sequence can be mangled by decoding.
+     */
+    private fun checkShadedLibrariesAreSelfContained(
+        zip: ZipFile,
+        classes: List<ZipEntry>,
+        problems: MutableList<String>,
+    ) {
+        val libraryPrefix = shadedLibraryPrefix.get()
+        val banned = bannedLibraryReferences.get()
+        if (banned.isEmpty()) {
+            return
+        }
+        classes
+            .filter { it.name.startsWith(libraryPrefix) }
+            .forEach { entry ->
+                val body = zip.getInputStream(entry).use {
+                    it.readBytes().toString(Charsets.ISO_8859_1)
+                }
+                banned.filter { body.contains(it) }.forEach { reference ->
+                    problems += "${entry.name} references $reference, which is not shipped — a " +
+                        "server without that facade on its classpath (legacy Spigot has none) " +
+                        "would throw NoClassDefFoundError the moment this class initialises"
+                }
+            }
     }
 
     private fun checkBytecodeLevels(
@@ -167,7 +224,11 @@ abstract class VerifyShadowJar : DefaultTask() {
     }
 
     private fun checkPluginYml(zip: ZipFile, problems: MutableList<String>) {
-        val pluginYml = textOf(zip, "plugin.yml") ?: return
+        val pluginYml = textOf(zip, "plugin.yml")
+        if (pluginYml == null) {
+            problems += "plugin.yml is missing, so its contents could not be checked"
+            return
+        }
         if (!pluginYml.contains("version: ${expectedVersion.get()}")) {
             problems += "plugin.yml did not get the Gradle version substituted into it"
         }
@@ -183,7 +244,11 @@ abstract class VerifyShadowJar : DefaultTask() {
     }
 
     private fun checkVelocityPluginJson(zip: ZipFile, problems: MutableList<String>) {
-        val json = textOf(zip, "velocity-plugin.json") ?: return
+        val json = textOf(zip, "velocity-plugin.json")
+        if (json == null) {
+            problems += "velocity-plugin.json is missing, so its contents could not be checked"
+            return
+        }
         if (!json.contains("\"id\":\"${expectedVelocityPluginId.get()}\"")) {
             problems += "velocity-plugin.json does not declare the id " +
                 "'${expectedVelocityPluginId.get()}'"
