@@ -1,6 +1,6 @@
 name: Heimdall
 main: com.heimdall.platform.bukkit.HeimdallBukkitPlugin
-version: ${version}
+version: @version@
 author: Bifrost
 website: https://bifrost.gg
 description: Discord-to-Minecraft whitelist, role sync, punishments and console relay

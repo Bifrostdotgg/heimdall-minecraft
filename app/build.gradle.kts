@@ -1,5 +1,5 @@
 import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
-import java.util.zip.ZipFile
+import com.heimdall.build.VerifyShadowJar
 
 plugins {
     // The assembler has no sources of its own — it owns plugin.yml and the shadow
@@ -31,7 +31,13 @@ tasks.processResources {
     // Windows/Latin-1 build box would otherwise silently mangle it.
     filteringCharset = "UTF-8"
     filesMatching("plugin.yml") {
-        expand("version" to pluginVersion)
+        // ReplaceTokens, not `expand()`: expand() runs the file through Groovy's
+        // SimpleTemplateEngine, so the first `$` anyone writes in plugin.yml — in a
+        // description, a permission message, anything — fails the build with a
+        // template error. `@version@` substitution has no such trap.
+        filter<org.apache.tools.ant.filters.ReplaceTokens>(
+            "tokens" to mapOf("version" to pluginVersion),
+        )
     }
 }
 
@@ -63,161 +69,48 @@ tasks.named<ShadowJar>("shadowJar") {
     mergeServiceFiles()
 }
 
-/**
- * Verifies the shipping artifact rather than the build's intentions.
- *
- * This exists because `--release 8` is weaker than it looks: it constrains which
- * JDK APIs our own sources may call and the bytecode we emit, but javac happily
- * reads a Java 17 classfile off the compile classpath at release 8 — verified
- * directly, it does not error. So compiling `CoreSanity` against Gson, SnakeYAML
- * and nv-websocket-client proves those artifacts resolve and their APIs are reachable
- * from Java 8 source; it proves nothing about the bytecode that actually ships.
- *
- * The only thing that catches a dependency quietly moving to Java 11+ classfiles
- * is reading the merged jar, which is what this does. A Java 8 server would
- * otherwise fail with UnsupportedClassVersionError at runtime, on a customer's
- * box, with no build signal at all.
- */
-val verifyShadowJar by tasks.registering {
+// Reads the built jar and fails on anything that would only surface at runtime on
+// a customer's server: too-new bytecode, an unrelocated dependency, or a
+// descriptor that disagrees with the Gradle version. See VerifyShadowJar's kdoc
+// for why compiling at `--release 8` does not cover any of this.
+val verifyShadowJar by tasks.registering(VerifyShadowJar::class) {
     description = "Asserts the shaded jar's bytecode levels, relocations and descriptors."
     group = "verification"
 
-    val shadowJarTask = tasks.named<ShadowJar>("shadowJar")
-    val jarFile = shadowJarTask.flatMap { it.archiveFile }
-    // Captured at configuration time: reaching for `project` inside doLast is
-    // deprecated and breaks the configuration cache.
-    val expectedVersion = project.version.toString()
-    inputs.file(jarFile)
-    inputs.property("expectedVersion", expectedVersion)
-    outputs.upToDateWhen { false }
+    jarFile.set(tasks.named<ShadowJar>("shadowJar").flatMap { it.archiveFile })
 
-    doLast {
-        val javaEight = 52
-        val javaSeventeen = 61
+    bytecodeCeiling.set(52)
+    exemptPrefix.set("com/heimdall/platform/velocity/")
+    exemptBytecodeLevel.set(61)
 
-        // The only package allowed to exceed Java 8: Velocity 3.4 is a Java 17+
-        // proxy, and a Bukkit server never loads these classes.
-        val seventeenOnlyPrefix = "com/heimdall/platform/velocity/"
+    // Allowlist, not blacklist: every class in the jar must be ours or relocated
+    // under our namespace. Nothing is currently exempt, and adding an entry here
+    // should require justifying why a foreign package is safe to ship unrelocated.
+    ownedClassPrefix.set("com/heimdall/")
+    allowedForeignClassPrefixes.set(emptyList<String>())
 
-        val requiredEntries = listOf(
+    requiredEntries.set(
+        listOf(
             "plugin.yml",
             "velocity-plugin.json",
             "com/heimdall/platform/bukkit/HeimdallBukkitPlugin.class",
             "com/heimdall/platform/velocity/HeimdallVelocityPlugin.class",
-        )
-        val requiredRelocations = listOf(
+        ),
+    )
+    requiredRelocations.set(
+        listOf(
             "com/heimdall/libs/gson/",
             "com/heimdall/libs/nvws/",
             "com/heimdall/libs/snakeyaml/",
             "com/heimdall/libs/kyori/",
-        )
-        val forbiddenPrefixes = listOf(
-            "com/google/gson/",
-            "com/neovisionaries/",
-            "org/yaml/snakeyaml/",
-            "net/kyori/",
-            "org/slf4j/",
-        )
+        ),
+    )
 
-        val problems = mutableListOf<String>()
-        val jar = jarFile.get().asFile
+    expectedVersion.set(project.version.toString())
+    expectedVelocityPluginId.set("heimdall")
 
-        ZipFile(jar).use { zip ->
-            val entries = zip.entries().toList().filterNot { it.isDirectory }
-            val names = entries.map { it.name }.toSet()
-
-            requiredEntries.filterNot { it in names }
-                .forEach { problems += "missing required entry: $it" }
-
-            requiredRelocations
-                .filterNot { prefix -> names.any { it.startsWith(prefix) } }
-                .forEach { problems += "no classes found under relocated prefix: $it" }
-
-            forbiddenPrefixes.forEach { prefix ->
-                val leaked = names.filter { it.startsWith(prefix) }
-                if (leaked.isNotEmpty()) {
-                    problems += "unrelocated third-party classes under $prefix " +
-                        "(${leaked.size}, e.g. ${leaked.first()})"
-                }
-            }
-
-            entries.filter { it.name.endsWith(".class") }.forEach { entry ->
-                val header = zip.getInputStream(entry).use { stream ->
-                    val buffer = ByteArray(8)
-                    var read = 0
-                    while (read < 8) {
-                        val n = stream.read(buffer, read, 8 - read)
-                        if (n < 0) break
-                        read += n
-                    }
-                    if (read < 8) null else buffer
-                }
-                if (header == null) {
-                    problems += "truncated class entry: ${entry.name}"
-                    return@forEach
-                }
-                val major = ((header[6].toInt() and 0xFF) shl 8) or (header[7].toInt() and 0xFF)
-                val expected = if (entry.name.startsWith(seventeenOnlyPrefix)) {
-                    javaSeventeen
-                } else {
-                    javaEight
-                }
-                if (major > expected) {
-                    problems += "${entry.name} is classfile major $major, expected at most " +
-                        "$expected — it would not load on the oldest supported JVM"
-                }
-            }
-
-            val versionOf = { name: String ->
-                zip.getEntry(name)?.let { entry ->
-                    zip.getInputStream(entry).use { stream ->
-                        val buffer = ByteArray(8)
-                        stream.read(buffer)
-                        ((buffer[6].toInt() and 0xFF) shl 8) or (buffer[7].toInt() and 0xFF)
-                    }
-                }
-            }
-            // Positive assertion, not just an upper bound: if the Velocity module
-            // ever silently dropped to Java 8 the mixed-bytecode merge would have
-            // stopped being exercised and nobody would notice.
-            val velocityMajor = versionOf("com/heimdall/platform/velocity/HeimdallVelocityPlugin.class")
-            if (velocityMajor != javaSeventeen) {
-                problems += "the Velocity entry point is classfile major $velocityMajor, " +
-                    "expected $javaSeventeen — the mixed-bytecode merge is no longer proven"
-            }
-
-            val pluginYml = zip.getEntry("plugin.yml")?.let {
-                zip.getInputStream(it).use { stream -> stream.readBytes().toString(Charsets.UTF_8) }
-            } ?: ""
-            if (!pluginYml.contains("version: ${expectedVersion}")) {
-                problems += "plugin.yml did not get the Gradle version expanded into it"
-            }
-            if (pluginYml.contains(Regex("(?m)^\\s*api-version:"))) {
-                problems += "plugin.yml declares api-version, which stops 1.8.8 loading the plugin"
-            }
-
-            val velocityJson = zip.getEntry("velocity-plugin.json")?.let {
-                zip.getInputStream(it).use { stream -> stream.readBytes().toString(Charsets.UTF_8) }
-            } ?: ""
-            if (!velocityJson.contains("\"id\":\"heimdall\"")) {
-                problems += "velocity-plugin.json does not declare the id 'heimdall'"
-            }
-            if (!velocityJson.contains("\"version\":\"${expectedVersion}\"")) {
-                problems += "velocity-plugin.json version does not match the Gradle version"
-            }
-
-            logger.lifecycle(
-                "verifyShadowJar: ${entries.size} entries, " +
-                    "${entries.count { it.name.endsWith(".class") }} classes in ${jar.name}",
-            )
-        }
-
-        if (problems.isNotEmpty()) {
-            throw GradleException(
-                "shaded jar failed verification:\n  - " + problems.joinToString("\n  - "),
-            )
-        }
-    }
+    // Cheap enough to always run, and a stale pass here is worse than useless.
+    outputs.upToDateWhen { false }
 }
 
 tasks.check {
