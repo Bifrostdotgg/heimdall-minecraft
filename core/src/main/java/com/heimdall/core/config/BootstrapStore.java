@@ -8,8 +8,12 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import org.yaml.snakeyaml.DumperOptions;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
@@ -50,11 +54,12 @@ public final class BootstrapStore {
     private static final String KEY_ROLE = "role";
     private static final String KEY_DEBUG = "debug";
 
+    /** Every key this version knows how to interpret. Anything else is passed through untouched. */
+    private static final Set<String> KNOWN_KEYS = new HashSet<String>(Arrays.asList(
+            KEY_ENDPOINT, KEY_TOKEN_ID, KEY_TOKEN, KEY_SERVER_ID, KEY_ROLE, KEY_DEBUG));
+
     private final HeimdallLogger logger;
     private final Path file;
-
-    /** Keys read from disk that this version does not know about, kept for the next save. */
-    private final Map<String, Object> passthrough = new LinkedHashMap<String, Object>();
 
     public BootstrapStore(HeimdallLogger logger, Path file) {
         if (logger == null || file == null) {
@@ -80,8 +85,7 @@ public final class BootstrapStore {
      * <p>Never throws. A missing, empty, unreadable or malformed file yields {@link
      * BootstrapConfig#defaults()}; the latter two are logged.
      */
-    public BootstrapConfig load() {
-        passthrough.clear();
+    public synchronized BootstrapConfig load() {
         if (!exists()) {
             return BootstrapConfig.defaults();
         }
@@ -113,24 +117,27 @@ public final class BootstrapStore {
                 builder.role(parseRole(asString(value)));
             } else if (KEY_DEBUG.equals(key)) {
                 builder.debug(asBoolean(value));
-            } else {
-                passthrough.put(key, value);
             }
-        }
-
-        if (!passthrough.isEmpty()) {
-            logger.debug("bootstrap.yml carries " + passthrough.size()
-                    + " key(s) this version does not use; they will be preserved on save");
         }
         return builder.build();
     }
 
     /**
-     * Writes the config, preserving any unknown keys seen by the most recent {@link #load()}.
+     * Writes the config, preserving any keys in the file this version does not understand.
      *
-     * @throws IOException if the file could not be written
+     * <p>The unknown keys are re-read from disk <strong>here</strong>, not remembered from an
+     * earlier {@link #load()}. That is the difference between a store you have to use in the right
+     * order and one you cannot get wrong: a caller that saves without having loaded first — a
+     * setup flow writing a fresh config, a second {@code BootstrapStore} over the same path — would
+     * otherwise silently delete a newer version's settings, and the tell would be a config file
+     * that quietly lost a field on downgrade.
+     *
+     * <p>Synchronized with {@link #load()}, so two threads cannot interleave a read-modify-write of
+     * the same file.
+     *
+     * @throws IOException if the file could not be read back or written
      */
-    public void save(BootstrapConfig config) throws IOException {
+    public synchronized void save(BootstrapConfig config) throws IOException {
         if (config == null) {
             throw new IllegalArgumentException("config is required");
         }
@@ -141,10 +148,47 @@ public final class BootstrapStore {
         document.put(KEY_SERVER_ID, config.serverId());
         document.put(KEY_ROLE, config.role().wireName());
         document.put(KEY_DEBUG, Boolean.valueOf(config.debug()));
-        document.putAll(passthrough);
+        document.putAll(unknownKeys());
 
         AtomicFiles.writeUtf8(file, dumper().dump(document));
         logger.debug(() -> "Wrote " + file + " (" + config + ")");
+    }
+
+    /**
+     * The keys currently in the file that this version does not interpret.
+     *
+     * <p>Read fresh on every save. A file that cannot be read or parsed yields none — the same
+     * tolerance {@link #load()} applies, since refusing to save because the <em>old</em> file was
+     * corrupt would leave the server unable to complete setup.
+     */
+    private Map<String, Object> unknownKeys() {
+        if (!exists()) {
+            return Collections.emptyMap();
+        }
+        Map<String, Object> raw;
+        try {
+            raw = readYaml();
+        } catch (IOException e) {
+            logger.warn("Could not re-read " + file + " before saving; any unknown keys in it will "
+                    + "be lost: " + e.getMessage());
+            return Collections.emptyMap();
+        } catch (RuntimeException e) {
+            logger.warn("Could not parse " + file + " before saving; any unknown keys in it will "
+                    + "be lost: " + e.getMessage());
+            return Collections.emptyMap();
+        }
+
+        Map<String, Object> unknown = new LinkedHashMap<String, Object>();
+        for (Map.Entry<String, Object> entry : raw.entrySet()) {
+            if (!KNOWN_KEYS.contains(entry.getKey())) {
+                unknown.put(entry.getKey(), entry.getValue());
+            }
+        }
+        if (!unknown.isEmpty()) {
+            logger.debug("Preserving " + unknown.size() + " key(s) in " + file
+                    + " that this version does not use");
+        }
+        return unknown;
     }
 
     @SuppressWarnings("unchecked")

@@ -104,6 +104,59 @@ class BootstrapStoreTest {
     }
 
     @Test
+    @DisplayName("unknown keys survive a save that was never preceded by a load")
+    void unknownKeysSurviveASaveWithoutALoad(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: https://bot.example\n"
+                + "tokenId: tok_abc\n"
+                + "token: shhh\n"
+                + "futureFeature: enabled\n");
+
+        // A setup flow writing a fresh config, or a second store over the same path. Remembering
+        // the unknown keys from an earlier load() would silently delete them here.
+        storeIn(dir).save(BootstrapConfig.builder()
+                .endpoint("https://bot.example")
+                .tokenId("tok_abc")
+                .token("shhh")
+                .serverId("survival")
+                .build());
+
+        assertTrue(read(dir).contains("futureFeature"),
+                "the store must not need load-before-save to be non-destructive:\n" + read(dir));
+    }
+
+    @Test
+    @DisplayName("a key removed from the file between load and save is not resurrected")
+    void unknownKeysTrackTheFileNotTheLastLoad(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: https://bot.example\nfutureFeature: enabled\n");
+        BootstrapStore store = storeIn(dir);
+        BootstrapConfig config = store.load();
+
+        // Something else rewrites the file — another plugin version, an operator with an editor.
+        write(dir, "endpoint: https://bot.example\ndifferentFeature: on\n");
+        store.save(config);
+
+        String written = read(dir);
+        assertTrue(written.contains("differentFeature"), written);
+        assertFalse(written.contains("futureFeature"),
+                "the file is the source of truth, not a snapshot taken at load time");
+    }
+
+    @Test
+    @DisplayName("a corrupt existing file does not stop the setup flow writing a good one")
+    void saveOverACorruptFileStillWrites(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: [unclosed\n");
+
+        storeIn(dir).save(BootstrapConfig.builder()
+                .endpoint("https://bot.example")
+                .tokenId("tok")
+                .token("shhh")
+                .build());
+
+        assertEquals("https://bot.example", storeIn(dir).load().endpoint());
+        assertTrue(logger.logged(LogLevel.WARN, "Could not parse"));
+    }
+
+    @Test
     @DisplayName("a malformed file is reported and treated as absent")
     void malformedFileDoesNotThrow(@TempDir Path dir) throws IOException {
         write(dir, "endpoint: [unclosed\n");
