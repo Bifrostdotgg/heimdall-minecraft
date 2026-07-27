@@ -504,6 +504,19 @@ claimed it first — which is always the proxy, because it intercepts before for
 had a command whose meaning depended on where the player was standing. Two verbs mean "am I asking
 the gatekeeper or this backend?" is answered by what you typed.
 
+**Each has a spelled-out alias, and the pair is chosen for the same reason.** `/hd` also answers to
+`/heimdall`, and `/hdp` to `/heimdallproxy`. The abbreviations are what anyone will actually type
+once they know which is which; the long forms exist for the moment before that, and they cannot
+collide with each other any more than the short ones can. There is deliberately **no bare
+`/heimdall` on the proxy** — it is the one name an operator would expect to work on both, and a
+name that resolves to whichever component claimed it first is precisely the v2 problem this
+departure exists to close.
+
+The module commands added in 1d follow the same rule from the other direction: `/linkdiscord`,
+`/link` and `/offend` are registered **identically on both platforms**, because unlike the admin
+command they mean the same thing wherever they are typed. A player linking their account does not
+care whether the proxy or the backend answered.
+
 ---
 
 ## Structure
