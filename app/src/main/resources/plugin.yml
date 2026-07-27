@@ -9,15 +9,52 @@ description: Discord-to-Minecraft whitelist, role sync, punishments and console 
 # plugin on 1.8.8, which is a supported target. Modern Paper logs a "legacy
 # plugin" warning as a result — accepted, and cheaper than dropping the floor.
 
+# Every command a module can claim has to be declared here.
+#
+# Bukkit fixes a command's existence and its aliases at load time. The command map
+# can be reached reflectively; v2 did not do it and neither does this — the map's
+# shape has changed across the decade of servers this jar supports, the reflective
+# path is invisible to the conformance rules, and the failure is a verb that
+# silently does not exist on one server generation. So the names live here, and
+# BukkitCommandRegistrar binds a module's handler to whichever of them it asks for.
+#
+# A name declared here that no enabled module has claimed answers with its usage
+# line, which is the right behaviour for a feature that is switched off.
 commands:
   hd:
     description: Heimdall administration
     usage: /<command>
     aliases: [heimdall]
+  linkdiscord:
+    description: Get a code to link this Minecraft account to Discord
+    usage: /<command>
+    # /link is the alias players actually type. Declared here because Bukkit will
+    # not accept one at runtime; the proxy registers the same pair dynamically.
+    aliases: [link]
+  offend:
+    description: Record an offence against a player and apply the escalation tier
+    usage: /<command> <player> <offense> [notes]
 
 permissions:
   heimdall.admin:
     description: Use Heimdall's administrative commands
     # Operators only. Every subcommand this gates is a server-wide change, and a
     # server that wants finer control has a permissions plugin for exactly that.
+    default: op
+  heimdall.linkdiscord:
+    description: Request a Discord link code for your own account
+    # Everyone, on purpose: linking is how a player gets themselves whitelisted,
+    # so gating it to operators would lock out the people it exists for. The
+    # command only ever acts on the sender's own account.
+    default: true
+  heimdall.offend:
+    description: Record offences against players
+    default: op
+  heimdall.bypass:
+    # Note that this does NOT bypass the whitelist itself. Permissions are not
+    # attached during AsyncPlayerPreLoginEvent — the player object does not exist
+    # yet — which is why the login bypass is a UUID list in the dashboard instead
+    # (issue #796 / MC-2). What this node bypasses is the /linkdiscord cooldown,
+    # which is checked when the player is very much online.
+    description: Skip Heimdall's per-player command cooldowns
     default: op

@@ -13,11 +13,14 @@ import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.ConfigDocument;
 import com.heimdall.core.remoteconfig.RemoteConfig;
+import com.heimdall.core.session.PlayerSessionEvents;
 import com.heimdall.core.tunnel.HealthSnapshotSource;
 import com.heimdall.core.tunnel.IdentitySource;
 import com.heimdall.core.tunnel.TunnelClient;
 import com.heimdall.core.tunnel.TunnelSettings;
 import com.heimdall.core.util.Registration;
+import com.heimdall.core.util.Strings;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -66,13 +69,22 @@ public final class HeimdallRuntime implements AutoCloseable {
     private final PlatformFacade platform;
     private final BootstrapStore bootstrapStore;
     private final BootstrapConfig bootstrap;
-    private final String guildId;
+
+    /**
+     * The guild in force. Volatile because guild discovery writes it from {@code heimdall-io} while
+     * whatever asked is on a server thread.
+     */
+    private volatile String guildId;
 
     private final HeimdallExecutors executors;
     private final RemoteConfig remoteConfig;
     private final LoginPipeline loginPipeline;
     private final ChatPipeline chatPipeline;
+    private final PlayerSessionEvents playerSessions;
     private final ModuleManager modules;
+
+    /** {@code null} once the guild is known, or on a server that was never set up. */
+    private final GuildDiscovery guildDiscovery;
 
     /** {@code null} when this server has not been set up yet. */
     private final ApiClient api;
@@ -91,7 +103,11 @@ public final class HeimdallRuntime implements AutoCloseable {
         this.platform = builder.platform;
         this.bootstrapStore = builder.bootstrapStore;
         this.bootstrap = bootstrapStore.load();
-        this.guildId = builder.guildId == null ? "" : builder.guildId.trim();
+        // Explicit beats cached beats nothing. The cached value is what a restart during a bot
+        // outage runs on — see BootstrapConfig#guildId — and is overwritten by whatever `identify`
+        // next answers.
+        String supplied = builder.guildId == null ? "" : builder.guildId.trim();
+        this.guildId = supplied.isEmpty() ? bootstrap.guildId() : supplied;
 
         logger.setDebugEnabled(bootstrap.debug());
 
@@ -105,7 +121,13 @@ public final class HeimdallRuntime implements AutoCloseable {
         this.remoteConfig = new RemoteConfig(logger, cachePath, ConfigDocument.empty());
 
         this.api = bootstrap.isConfigured() ? buildApiClient(builder) : null;
+        // Built even with no guild yet: TunnelClient carries `reconnect(guildId)` for exactly this,
+        // so discovery fills the gap in place rather than the runtime having to construct a client
+        // later and re-point everything that already holds a reference to the old one.
         this.tunnel = bootstrap.isConfigured() ? buildTunnel(builder) : null;
+        this.guildDiscovery = needsGuildDiscovery() ? buildGuildDiscovery() : null;
+
+        this.playerSessions = new PlayerSessionEvents(logger, executors.io());
 
         this.modules = new ModuleManager(ModuleEnvironment.builder()
                 .logger(logger)
@@ -115,6 +137,7 @@ public final class HeimdallRuntime implements AutoCloseable {
                 .loginPipeline(loginPipeline)
                 .chatPipeline(chatPipeline)
                 .platform(platform)
+                .playerSessions(playerSessions)
                 .build());
 
         if (tunnel != null) {
@@ -138,6 +161,19 @@ public final class HeimdallRuntime implements AutoCloseable {
             client.setBedrockIdentityProvider(builder.bedrockIdentityProvider);
         }
         return client;
+    }
+
+    private boolean needsGuildDiscovery() {
+        return api != null && Strings.isBlank(guildId);
+    }
+
+    private GuildDiscovery buildGuildDiscovery() {
+        return new GuildDiscovery(logger, api, executors.scheduler(), new java.util.function.Consumer<String>() {
+            @Override
+            public void accept(String resolved) {
+                adoptGuild(resolved);
+            }
+        });
     }
 
     private TunnelClient buildTunnel(Builder builder) {
@@ -185,15 +221,54 @@ public final class HeimdallRuntime implements AutoCloseable {
                     + "(see " + bootstrapStore.file() + ")");
             return;
         }
+        if (guildDiscovery != null) {
+            // The discovering state. Everything above is already running — commands answer, modules
+            // are enabled, the HTTP client has credentials — and the one thing missing is the guild
+            // the tunnel URL is keyed by. Said once, here, rather than on every retry.
+            logger.info("discovering which guild this server's token belongs to; the tunnel stays "
+                    + "idle until it answers");
+            guildDiscovery.start();
+            return;
+        }
         if (!tunnel.settings().isConfigured()) {
-            // Configured enough to sign HTTP requests, but the tunnel URL is keyed by guild and
-            // nothing has resolved one yet. Deliberately not a warning: it is the state every
-            // server is in until the setup flow (phase 1e) fills it in, and the HTTP client works
-            // regardless.
-            logger.info("tunnel idle: this server has credentials but no guild id yet");
+            // A guild we have, but something else the tunnel needs is missing. Not the discovering
+            // state, and not something retrying would fix.
+            logger.info("tunnel idle: this server has a guild but incomplete tunnel settings");
             return;
         }
         tunnel.connect();
+    }
+
+    /**
+     * Adopts a freshly discovered guild: HTTP client, disk cache, then the tunnel.
+     *
+     * <p>Runs on {@code heimdall-io}, from {@link GuildDiscovery}'s completion.
+     *
+     * <p>The order is deliberate. The API client is re-pointed first because a login arriving
+     * during this must use the new guild or none; the bootstrap file is written next so a restart
+     * in the following second does not have to ask again; and the tunnel is dialled last, because
+     * it is the only step whose failure is retried by something other than this method.
+     *
+     * <p>Persisting is best-effort. A read-only data directory costs one {@code identify} per boot,
+     * which is a great deal better than refusing to connect.
+     */
+    private void adoptGuild(String resolved) {
+        guildId = resolved;
+        if (api != null) {
+            api.reconfigure(ApiSettingsFactory.fromBootstrap(bootstrap, resolved).build());
+        }
+        try {
+            bootstrapStore.save(bootstrap.toBuilder().guildId(resolved).build());
+        } catch (IOException | RuntimeException notPersisted) {
+            logger.warn("could not cache the resolved guild in " + bootstrapStore.file()
+                    + "; this server will ask again on its next boot: " + notPersisted);
+        }
+        if (closed) {
+            return;
+        }
+        // reconnect() rather than connect(): it accepts the guild, cancels anything the backoff has
+        // armed, and works whether or not a socket exists. See TunnelClient#reconnect.
+        tunnel.reconnect(resolved);
     }
 
     /**
@@ -208,6 +283,15 @@ public final class HeimdallRuntime implements AutoCloseable {
             return;
         }
         closed = true;
+
+        if (guildDiscovery != null) {
+            guarded("stopping guild discovery", new Runnable() {
+                @Override
+                public void run() {
+                    guildDiscovery.close();
+                }
+            });
+        }
 
         guarded("stopping modules", new Runnable() {
             @Override
@@ -285,6 +369,31 @@ public final class HeimdallRuntime implements AutoCloseable {
 
     public ChatPipeline chatPipeline() {
         return chatPipeline;
+    }
+
+    /**
+     * Where the platform adapters push join and quit, and where modules subscribe.
+     *
+     * <p>Live from construction, like {@link #modules()}: a platform registers its listeners before
+     * {@link #start()}, and a module can be enabled by the first reconcile inside it.
+     */
+    public PlayerSessionEvents playerSessions() {
+        return playerSessions;
+    }
+
+    /**
+     * The guild this server belongs to, or {@code ""} while discovery is still asking.
+     *
+     * <p>A status command reads this to tell "not set up" apart from "set up, still discovering",
+     * which are the two states an operator confuses.
+     */
+    public String guildId() {
+        return guildId;
+    }
+
+    /** Whether the guild is still being resolved — the state in which the tunnel stays idle. */
+    public boolean isDiscoveringGuild() {
+        return guildDiscovery != null && !guildDiscovery.isResolved();
     }
 
     /** Live from construction, so a platform can register its modules before {@link #start()}. */

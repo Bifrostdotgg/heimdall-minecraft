@@ -124,6 +124,36 @@ public final class ApiClient {
 
     // ── Endpoints ────────────────────────────────────────────────────────────
 
+    /**
+     * Resolves this server's guild from its API key.
+     *
+     * <p>The one endpoint that is <strong>not</strong> guild-scoped, because a plugin calling it does
+     * not yet know its guild — which is the entire point. The bot authenticates it inline, ahead of
+     * the middleware that would otherwise want a guild in the path.
+     *
+     * <p>{@code bootstrap.yml} deliberately has no {@code guildId} to configure: an operator pasting
+     * a token should not also have to find a snowflake, and a guild id typed in by hand that
+     * disagrees with the token produces a server that signs perfectly and reads somebody else's
+     * configuration. The token knows which guild it belongs to, so the token is asked.
+     *
+     * <p>{@code X-Token-Id} rides along when the bootstrap carries one. It is optional: the
+     * signature is what authenticates, and a token issued before that field existed still has to be
+     * able to resolve.
+     *
+     * @return the guild id, never blank — a blank answer raises {@link ApiError} rather than
+     *     resolving to an empty guild that every later path would sign requests for
+     */
+    public CompletableFuture<String> identify() {
+        return async(() -> {
+            ApiSettings current = settings;
+            HttpCall call = HttpCall.post("/api/minecraft/identify", "{}", current.timeoutMs());
+            if (Strings.isNotBlank(current.tokenId())) {
+                call = call.withHeader("X-Token-Id", current.tokenId());
+            }
+            return ApiResponses.identify(requests.execute(current, call));
+        });
+    }
+
     /** {@code POST connection-attempt} — should this player be let in, and what should they be told? */
     public CompletableFuture<ConnectionAttemptResult> connectionAttempt(ConnectionAttempt attempt) {
         if (attempt == null) {

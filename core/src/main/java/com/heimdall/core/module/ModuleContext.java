@@ -1,5 +1,6 @@
 package com.heimdall.core.module;
 
+import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
@@ -12,6 +13,7 @@ import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
+import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.util.Registration;
 
@@ -89,6 +91,39 @@ public interface ModuleContext {
      * never stored.
      */
     Registration observeChat(ChatObserver observer);
+
+    // ── Sessions ─────────────────────────────────────────────────────────────
+
+    /**
+     * Called when a player joins, on {@code heimdall-io} rather than on the server's event thread.
+     *
+     * <p>Not a pipeline: there is no decision left to arbitrate once somebody is on the server. See
+     * {@link com.heimdall.core.session.PlayerSessionEvents} for what moving off the event thread
+     * costs — join and quit are no longer ordered relative to each other.
+     */
+    Registration onPlayerJoin(PlayerSessionListener listener);
+
+    /**
+     * Called when a player leaves, on {@code heimdall-io}.
+     *
+     * <p>The handle names somebody who has already gone; every {@code PlayerHandle} method tolerates
+     * that by doing nothing.
+     */
+    Registration onPlayerQuit(PlayerSessionListener listener);
+
+    // ── Commands ─────────────────────────────────────────────────────────────
+
+    /**
+     * Registers a command, unregistered when this module is disabled.
+     *
+     * <p>That last part is why this is here rather than being a direct call on the platform facade:
+     * v2 had no way to take a command back, so a switched-off feature still answered.
+     *
+     * <p>On the Bukkit family the name must also appear in {@code plugin.yml} — the platform cannot
+     * invent one at runtime — and a name it does not know produces a warning and
+     * {@link Registration#NONE}, not a failed enable.
+     */
+    Registration registerCommand(CommandSpec spec);
 
     // ── Scheduling ───────────────────────────────────────────────────────────
 

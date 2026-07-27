@@ -39,7 +39,7 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
         if (uuid == null) {
             return Optional.empty();
         }
-        return wrap(Bukkit.getPlayer(uuid));
+        return lookedUp(Bukkit.getPlayer(uuid));
     }
 
     @Override
@@ -50,7 +50,7 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
         // getPlayerExact is case-insensitive but does not do Bukkit's prefix matching, which would
         // resolve "ste" to Steve — a command that kicked the wrong player because two usernames
         // share a prefix is not a bug anybody wants to explain.
-        return wrap(Bukkit.getPlayerExact(username));
+        return lookedUp(Bukkit.getPlayerExact(username));
     }
 
     @Override
@@ -71,7 +71,20 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
         return Collections.unmodifiableList(handles);
     }
 
-    private Optional<PlayerHandle> wrap(Player player) {
+    /**
+     * Wraps a player the caller already holds, without a lookup.
+     *
+     * <p>For the event listeners, which are handed a {@code Player} by the server. Looking the same
+     * player up again by UUID would be a second read that can legitimately answer "not online": a
+     * {@code PlayerQuitEvent} fires while they are still in the online list on some versions and
+     * after they have left it on others, and a quit notification that silently stopped firing on
+     * one server generation is exactly the kind of difference nobody finds.
+     */
+    PlayerHandle wrap(Player player) {
+        return new BukkitPlayerHandle(player, mainThread, messenger);
+    }
+
+    private Optional<PlayerHandle> lookedUp(Player player) {
         return player == null || !player.isOnline()
                 ? Optional.<PlayerHandle>empty()
                 : Optional.<PlayerHandle>of(new BukkitPlayerHandle(player, mainThread, messenger));

@@ -6,6 +6,7 @@ import com.heimdall.core.pipeline.ChatPipeline;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.RemoteConfig;
+import com.heimdall.core.session.PlayerSessionEvents;
 import com.heimdall.core.tunnel.TunnelBus;
 
 /**
@@ -27,6 +28,7 @@ public final class ModuleEnvironment {
     private final LoginPipeline loginPipeline;
     private final ChatPipeline chatPipeline;
     private final PlatformFacade platform;
+    private final PlayerSessionEvents playerSessions;
 
     private ModuleEnvironment(Builder builder) {
         if (builder.logger == null || builder.executors == null || builder.platform == null) {
@@ -45,6 +47,12 @@ public final class ModuleEnvironment {
         this.loginPipeline = builder.loginPipeline;
         this.chatPipeline = builder.chatPipeline;
         this.platform = builder.platform;
+        // Defaulted rather than required. Every caller that has one passes it; a test assembling a
+        // partial environment should not have to build a dispatcher it will never push an event
+        // into, and a null here would put a null check in every module that subscribes.
+        this.playerSessions = builder.playerSessions == null
+                ? new PlayerSessionEvents(builder.logger, builder.executors.io())
+                : builder.playerSessions;
     }
 
     public static Builder builder() {
@@ -86,6 +94,16 @@ public final class ModuleEnvironment {
         return platform;
     }
 
+    /**
+     * Join and quit notifications, as the platform pushes them in.
+     *
+     * <p>Never {@code null}: an unset one is built from the logger and the IO pool, so a module can
+     * always subscribe even in an environment nothing will ever push an event into.
+     */
+    public PlayerSessionEvents playerSessions() {
+        return playerSessions;
+    }
+
     /** The mutable writer. */
     public static final class Builder {
 
@@ -96,6 +114,7 @@ public final class ModuleEnvironment {
         private LoginPipeline loginPipeline;
         private ChatPipeline chatPipeline;
         private PlatformFacade platform;
+        private PlayerSessionEvents playerSessions;
 
         private Builder() {
         }
@@ -132,6 +151,12 @@ public final class ModuleEnvironment {
 
         public Builder platform(PlatformFacade value) {
             this.platform = value;
+            return this;
+        }
+
+        /** The dispatcher the platform adapters push into. Left unset, one is built. */
+        public Builder playerSessions(PlayerSessionEvents value) {
+            this.playerSessions = value;
             return this;
         }
 

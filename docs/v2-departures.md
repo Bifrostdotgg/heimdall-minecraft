@@ -630,6 +630,81 @@ server's bundled SnakeYAML, whose API changed incompatibly at 2.0, so the answer
 which version the server happens to carry. Reading it ourselves also makes the whole thing testable
 against a fixture directory — which is how the role matrix is tested at all.
 
+### D52 — session handlers run off the event thread, and carry their own timestamp
+
+**New in 1d**, and the two parts of S1 that were left to the implementation.
+
+`PlayerSessionEvents.join(handle, timestampMs)` hands off to `heimdall-io` and returns. On Bukkit,
+`PlayerJoinEvent` is on the main server thread, so a listener that wrote a mirror entry — let alone
+one that made a network call — would put that on the tick loop for every join. What actually runs
+there is building a handle and queueing a task.
+
+Two consequences, both deliberate:
+
+- **join and quit are no longer ordered relative to each other.** A quit for somebody who
+  reconnected immediately can in principle be delivered after the second join. This is the same
+  trade departure D27 made for tunnel handlers, for the same reason, and it is why the timestamp is
+  stamped on the event thread and carried rather than read by the listener — "now" at delivery is an
+  unknown distance after the thing that happened.
+- **A rejected hand-off is dropped with a debug line.** That only happens while the pools are
+  shutting down, which is the one moment a missed cache extension costs nothing, and throwing would
+  put a plugin fault in the server log for something the plugin was already stopping for.
+
+Bukkit uses `PlayerJoinEvent` / `PlayerQuitEvent` at `MONITOR`. Velocity uses `PostLoginEvent`
+rather than `LoginEvent` (the latter can still refuse the connection, so a join reported from it is
+sometimes a join that never happened) and `DisconnectEvent` rather than `ServerDisconnectEvent` (a
+player moving between backends has not left the network, and treating a `/server` as a quit would
+slide a cache window on every one).
+
+### D53 — a command is a registration, not a branch in the entry point
+
+**v2:** every command was an `if (commandName.equalsIgnoreCase(...))` inside a 1,086-line
+`JavaPlugin`, and there was no way to unregister one. A feature that was "off" still answered.
+**v3:** `CommandRegistrar` is the fifth focused interface behind `PlatformFacade`; a module builds a
+`CommandSpec` and hands it to `ModuleContext.registerCommand`, and the handle is unwound with
+everything else when the module is disabled (departure D30 applied to commands).
+
+The platforms differ in one visible way, and it is worth stating rather than smoothing over.
+**Velocity really unregisters**; Bukkit cannot. A Bukkit command's existence and its aliases are
+fixed at load time by `plugin.yml`, so disabling a module puts its executor back to the plugin's own
+— the verb still exists and prints its usage line, but it no longer reaches the module. The command
+map can be reached reflectively; v2 did not, and neither does v3. That map's shape has changed
+across the decade of servers this jar supports, the reflective path is invisible to the conformance
+rules, and the failure mode is a verb that silently does not exist on one server generation.
+
+The same asymmetry is why `CommandSpec.aliases()` is documented as *advertised* rather than
+guaranteed, and why `BukkitCommandRegistrar` warns when a spec names an alias the descriptor does
+not. A silent difference between the two platforms is exactly how "it works on my proxy" is born.
+
+### D54 — the guild is discovered from the token, never configured
+
+**v2:** `api.guildId` in `config.yml`, filled in by hand.
+**v3:** no guild field to configure at all. On start with credentials, `HeimdallRuntime` calls
+`POST /api/minecraft/identify` (HMAC-signed, with an optional `X-Token-Id` header) and uses what the
+bot answers.
+
+v2's field was the single most common support problem, and its failure mode is the worst available:
+a snowflake copied from the wrong server, or out of a message link, signs perfectly and is refused —
+or, worse, succeeds against a guild the operator does not own. The token already encodes the answer,
+so the token is asked.
+
+Three details follow from it:
+
+- **"Discovering" is a first-class state, beside "not set up".** While `GuildDiscovery` is retrying,
+  commands answer and modules run; the one thing missing is the tunnel, whose URL is keyed by guild.
+  The state is logged once at start, and the retry backs off from 5 s to 5 minutes and never gives
+  up — a bot that is down for an hour must not leave a server unable to connect without a restart.
+  The first failure is a warning and every one after it is debug, so an hour of downtime does not
+  bury the rest of the log.
+- **`bootstrap.yml` gains a `guildId` key, and it is a cache.** It is written by the plugin, never
+  asked for by the setup flow, and overwritten by whatever `identify` next answers. It exists so a
+  restart *during* a bot outage can still dial the tunnel it dialled yesterday instead of sitting in
+  the discovering state until the bot returns. Persisting is best-effort: a read-only data directory
+  costs one `identify` per boot, which is much better than refusing to connect.
+- **A blank `guildId` in the response is an error, not an empty string.** Everything downstream
+  builds a path out of it, so an empty guild yields `/api/guilds//minecraft/…` — a 404 on every
+  endpoint, from a client that believes it is fully configured.
+
 ---
 
 ## Deliberate non-departures
@@ -740,6 +815,11 @@ Shapes that phase 1c decided and phase 1d implements. They are recorded here so 
 thing rather than improvising one, and so a reviewer can object *now* rather than to the code.
 
 ### S1 — join and quit arrive as notifications, not as a third pipeline
+
+**BUILT in 1d**, exactly as specified below. `com.heimdall.core.session.PlayerSessionEvents` is the
+dispatcher; `BukkitSessionListener` and `VelocitySessionListener` push into it; `ModuleContext`
+exposes `onPlayerJoin` / `onPlayerQuit` with the usual tracked registrations. The two details 1d
+settled beyond the shape are in D52.
 
 Platform adapters push join and quit into core through a `PlayerSessionEvents` dispatcher: the
 adapter supplies a `PlayerHandle` and a timestamp, modules subscribe through `ModuleContext` with

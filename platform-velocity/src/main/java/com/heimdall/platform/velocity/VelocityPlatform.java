@@ -1,5 +1,6 @@
 package com.heimdall.platform.velocity;
 
+import com.heimdall.core.command.CommandRegistrar;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.HeimdallLogger;
@@ -32,6 +33,7 @@ final class VelocityPlatform implements PlatformFacade, AutoCloseable {
     private final VelocityPlayerDirectory players;
     private final Log4jConsoleTap consoleTap;
     private final VelocityConsoleBridge console;
+    private final VelocityCommandRegistrar commands;
     private final VelocityIntegrations integrations;
 
     VelocityPlatform(
@@ -48,6 +50,7 @@ final class VelocityPlatform implements PlatformFacade, AutoCloseable {
         this.players = new VelocityPlayerDirectory(proxy, text);
         this.consoleTap = new Log4jConsoleTap(logger, executors.io());
         this.console = new VelocityConsoleBridge(proxy, consoleTap);
+        this.commands = new VelocityCommandRegistrar(proxy.getCommandManager(), logger, text);
         this.integrations = new VelocityIntegrations(logger, executors.io());
     }
 
@@ -91,6 +94,11 @@ final class VelocityPlatform implements PlatformFacade, AutoCloseable {
     @Override
     public ConsoleBridge console() {
         return console;
+    }
+
+    @Override
+    public CommandRegistrar commands() {
+        return commands;
     }
 
     @Override

@@ -1,5 +1,6 @@
 package com.heimdall.core.module;
 
+import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
@@ -13,6 +14,7 @@ import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
+import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.tunnel.ProtocolMode;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
@@ -109,6 +111,24 @@ final class ModuleContextImpl implements ModuleContext {
     @Override
     public Registration observeChat(ChatObserver observer) {
         return registrations.track(environment.chatPipeline().observe(observer));
+    }
+
+    @Override
+    public Registration onPlayerJoin(PlayerSessionListener listener) {
+        return registrations.track(environment.playerSessions().onJoin(listener));
+    }
+
+    @Override
+    public Registration onPlayerQuit(PlayerSessionListener listener) {
+        return registrations.track(environment.playerSessions().onQuit(listener));
+    }
+
+    @Override
+    public Registration registerCommand(CommandSpec spec) {
+        if (spec == null) {
+            throw new IllegalArgumentException("a command spec is required");
+        }
+        return registrations.track(environment.platform().commands().register(spec));
     }
 
     @Override

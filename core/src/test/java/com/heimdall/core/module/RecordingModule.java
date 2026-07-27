@@ -96,6 +96,15 @@ final class RecordingModule implements HeimdallModule {
             context.onConfigChanged((moduleId, previous, current) -> {
             });
             context.scheduleRepeating(tickCount::incrementAndGet, 1_000_000L, 1_000_000L);
+            context.onPlayerJoin((player, timestampMs) -> {
+            });
+            context.onPlayerQuit((player, timestampMs) -> {
+            });
+            context.registerCommand(com.heimdall.core.command.CommandSpec.named(id)
+                    .permission("heimdall.test")
+                    .handler((source, args) -> {
+                    })
+                    .build());
         }
         if (failOnEnable) {
             // Thrown AFTER registering, which is the case worth covering: a module that fails

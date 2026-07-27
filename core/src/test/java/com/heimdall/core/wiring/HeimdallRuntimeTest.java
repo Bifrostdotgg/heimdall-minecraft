@@ -143,8 +143,8 @@ class HeimdallRuntimeTest {
         }
 
         @Test
-        @DisplayName("builds the tunnel and the api client, but stays idle")
-        void idleTunnel(@TempDir Path dataDir) throws IOException {
+        @DisplayName("builds the tunnel and the api client, and goes discovering rather than idle")
+        void discoversTheGuild(@TempDir Path dataDir) throws IOException {
             HeimdallRuntime runtime = runtime(dataDir, configured(dataDir)).build();
 
             assertTrue(runtime.isConfigured());
@@ -153,12 +153,38 @@ class HeimdallRuntimeTest {
             assertFalse(
                     runtime.tunnel().settings().isConfigured(),
                     "the tunnel URL is keyed by guild, and there is no guild yet");
+            assertEquals("", runtime.guildId());
 
             runtime.start();
             assertFalse(runtime.tunnel().isConnected());
+            assertTrue(runtime.isDiscoveringGuild(),
+                    "a token with no cached guild is the discovering state, not a dead end");
             assertTrue(
-                    logger.logged(LogLevel.INFO, "no guild id"),
-                    "the idle reason must be stated: " + logger.records());
+                    logger.logged(LogLevel.INFO, "discovering which guild"),
+                    "the state must be stated once: " + logger.records());
+            runtime.close();
+            assertFalse(runtime.isDiscoveringGuild(), "close must stop discovery retrying");
+        }
+
+        @Test
+        @DisplayName("a cached guild is used without asking, so a restart mid-outage still dials")
+        void cachedGuildSkipsDiscovery(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            store.save(BootstrapConfig.builder()
+                    .endpoint("https://api.example.invalid")
+                    .tokenId("token-id")
+                    .token("secret")
+                    .serverId("survival")
+                    .guildId("123456789012345678")
+                    .build());
+
+            HeimdallRuntime runtime = runtime(dataDir, store).build();
+            assertEquals("123456789012345678", runtime.guildId());
+            assertTrue(runtime.tunnel().settings().isConfigured());
+
+            runtime.start();
+            assertFalse(runtime.isDiscoveringGuild(),
+                    "the cached guild is the answer; there is nothing to discover");
             runtime.close();
         }
 

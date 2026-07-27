@@ -53,6 +53,7 @@ public final class ApiSettings {
     private final String baseUrl;
     private final String guildId;
     private final String apiKey;
+    private final String tokenId;
     private final String serverId;
     private final int timeoutMs;
     private final int retries;
@@ -62,6 +63,7 @@ public final class ApiSettings {
         this.baseUrl = stripTrailingSlash(Strings.trimToEmpty(builder.baseUrl));
         this.guildId = Strings.trimToEmpty(builder.guildId);
         this.apiKey = Strings.trimToEmpty(builder.apiKey);
+        this.tokenId = Strings.trimToEmpty(builder.tokenId);
         this.serverId = Strings.trimToEmpty(builder.serverId);
         this.timeoutMs = Math.max(MIN_TIMEOUT_MS, builder.timeoutMs);
         this.retries = Math.max(1, builder.retries);
@@ -85,6 +87,18 @@ public final class ApiSettings {
     /** The HMAC secret. Never log this. */
     public String apiKey() {
         return apiKey;
+    }
+
+    /**
+     * Which of the guild's Minecraft tokens this one is, or {@code ""} when there is no id for it.
+     *
+     * <p>Sent as {@code X-Token-Id} on {@code POST /api/minecraft/identify} and on nothing else: a
+     * guild-scoped route already names the guild, so the header would be redundant there. It is
+     * optional by design — a token issued before the field existed still has to be able to resolve
+     * its guild, and the signature alone is what actually authenticates the call.
+     */
+    public String tokenId() {
+        return tokenId;
     }
 
     /** This server's identifier within the guild, sent so events can be attributed to it. */
@@ -187,6 +201,7 @@ public final class ApiSettings {
                 .baseUrl(baseUrl)
                 .guildId(guildId)
                 .apiKey(apiKey)
+                .tokenId(tokenId)
                 .serverId(serverId)
                 .timeoutMs(timeoutMs)
                 .retries(retries)
@@ -217,6 +232,7 @@ public final class ApiSettings {
         private String baseUrl = "";
         private String guildId = "";
         private String apiKey = "";
+        private String tokenId = "";
         private String serverId = "";
         private int timeoutMs = DEFAULT_TIMEOUT_MS;
         private int retries = DEFAULT_RETRIES;
@@ -237,6 +253,11 @@ public final class ApiSettings {
 
         public Builder apiKey(String value) {
             this.apiKey = value;
+            return this;
+        }
+
+        public Builder tokenId(String value) {
+            this.tokenId = value;
             return this;
         }
 

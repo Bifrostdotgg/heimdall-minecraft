@@ -140,6 +140,11 @@ final class VelocityBootstrap {
                 plugin,
                 new VelocityLoginListener(
                         logger, runtime.loginPipeline(), platform.integrations().floodgate(), text));
+        // Join and quit, as core's session notifications. PostLoginEvent rather than LoginEvent and
+        // DisconnectEvent rather than ServerDisconnectEvent — see VelocitySessionListener for why
+        // each of the obvious alternatives is wrong.
+        proxy.getEventManager().register(
+                plugin, new VelocitySessionListener(logger, runtime.playerSessions(), text));
         // No chat listener, deliberately: a proxy cannot cancel signed chat, so interception belongs
         // to the backend servers. See VelocityLoginListener for the whole reasoning.
     }

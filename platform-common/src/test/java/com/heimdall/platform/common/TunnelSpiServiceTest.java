@@ -249,6 +249,13 @@ class TunnelSpiServiceTest {
         }
 
         @Override
+        public com.heimdall.core.command.CommandRegistrar commands() {
+            // NONE rather than a throw: the runtime this stub is handed to enables modules, and a
+            // module registering a command must not blow up a test about the SPI.
+            return com.heimdall.core.command.CommandRegistrar.NONE;
+        }
+
+        @Override
         public com.heimdall.core.platform.Integrations integrations() {
             throw new UnsupportedOperationException("not needed by these tests");
         }

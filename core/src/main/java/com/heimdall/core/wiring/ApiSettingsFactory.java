@@ -34,6 +34,9 @@ public final class ApiSettingsFactory {
         return ApiSettings.builder()
                 .baseUrl(bootstrap.endpoint())
                 .apiKey(bootstrap.token())
+                // Carried through only so `identify` can send X-Token-Id. Every other endpoint is
+                // guild-scoped and already names the guild in its path.
+                .tokenId(bootstrap.tokenId())
                 .serverId(bootstrap.serverId())
                 .guildId(guildId);
     }

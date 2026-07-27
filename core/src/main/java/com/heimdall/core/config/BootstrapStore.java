@@ -54,9 +54,20 @@ public final class BootstrapStore {
     private static final String KEY_ROLE = "role";
     private static final String KEY_DEBUG = "debug";
 
+    /**
+     * A <strong>cache</strong>, written by the plugin, not a setting an operator fills in.
+     *
+     * <p>It is in this file rather than in a separate one because it belongs to the same identity
+     * the token does — copy {@code bootstrap.yml} to another box and the guild it names is still the
+     * right one. The setup flow never asks for it; {@code identify} answers it, and whatever that
+     * answers next overwrites this.
+     */
+    private static final String KEY_GUILD_ID = "guildId";
+
     /** Every key this version knows how to interpret. Anything else is passed through untouched. */
     private static final Set<String> KNOWN_KEYS = new HashSet<String>(Arrays.asList(
-            KEY_ENDPOINT, KEY_TOKEN_ID, KEY_TOKEN, KEY_SERVER_ID, KEY_ROLE, KEY_DEBUG));
+            KEY_ENDPOINT, KEY_TOKEN_ID, KEY_TOKEN, KEY_SERVER_ID, KEY_ROLE, KEY_DEBUG,
+            KEY_GUILD_ID));
 
     private final HeimdallLogger logger;
     private final Path file;
@@ -117,6 +128,8 @@ public final class BootstrapStore {
                 builder.role(parseRole(asString(value)));
             } else if (KEY_DEBUG.equals(key)) {
                 builder.debug(asBoolean(value));
+            } else if (KEY_GUILD_ID.equals(key)) {
+                builder.guildId(asString(value));
             }
         }
         return builder.build();
@@ -148,6 +161,9 @@ public final class BootstrapStore {
         document.put(KEY_SERVER_ID, config.serverId());
         document.put(KEY_ROLE, config.role().wireName());
         document.put(KEY_DEBUG, Boolean.valueOf(config.debug()));
+        // Written last of the known keys so it reads as what it is: an appendix the plugin
+        // maintains, below the four fields the operator was actually asked for.
+        document.put(KEY_GUILD_ID, config.guildId());
         document.putAll(unknownKeys());
 
         AtomicFiles.writeUtf8(file, dumper().dump(document));

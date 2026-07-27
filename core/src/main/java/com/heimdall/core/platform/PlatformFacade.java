@@ -1,5 +1,6 @@
 package com.heimdall.core.platform;
 
+import com.heimdall.core.command.CommandRegistrar;
 import com.heimdall.core.config.ServerRole;
 import java.nio.file.Path;
 import java.util.concurrent.Executor;
@@ -67,6 +68,19 @@ public interface PlatformFacade {
 
     /** Running commands as the console, and watching what it prints. */
     ConsoleBridge console();
+
+    /**
+     * Registering commands players can type, and unregistering them again.
+     *
+     * <p>Added in phase 1d, as a focused interface for the same reason the four above are: three
+     * modules need to own a verb ({@code /offend}, {@code /linkdiscord}, {@code /link}), and a
+     * module that registers one must be able to have it taken away when it is switched off — which
+     * is the whole of departure D30 applied to commands.
+     *
+     * <p>A platform that cannot register commands returns {@link CommandRegistrar#NONE}. That is a
+     * plugin with fewer verbs, not a plugin that failed to load.
+     */
+    CommandRegistrar commands();
 
     /** The optional plugins Heimdall talks to — LuckPerms, Floodgate, Trace. */
     Integrations integrations();

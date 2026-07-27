@@ -173,6 +173,12 @@ final class BukkitBootstrap {
         Bukkit.getPluginManager().registerEvents(
                 new BukkitChatListener(logger, runtime.chatPipeline(), platform.messenger()),
                 plugin);
+        // Phase 1c deliberately shipped no join/quit listeners rather than dead ones; the whitelist
+        // mirror's extension windows are the first real consumer and arrive in 1d. See seam S1.
+        Bukkit.getPluginManager().registerEvents(
+                new BukkitSessionListener(
+                        logger, runtime.playerSessions(), platform.playerDirectory()),
+                plugin);
     }
 
     private void registerCommand(ServerRole role) {

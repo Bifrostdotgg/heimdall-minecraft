@@ -42,6 +42,8 @@ class ModuleManagerTest {
     private LoginPipeline loginPipeline;
     private ChatPipeline chatPipeline;
     private RemoteConfig remoteConfig;
+    private FakePlatform platform;
+    private com.heimdall.core.session.PlayerSessionEvents sessions;
 
     @BeforeEach
     void setUp() {
@@ -58,13 +60,18 @@ class ModuleManagerTest {
     }
 
     private ModuleManager manager(ServerRole role) {
+        platform = new FakePlatform(role, dataDir);
+        // Same-thread, so a test can push a join and assert about it without a latch — the dispatch
+        // itself is pinned in PlayerSessionEventsTest.
+        sessions = new com.heimdall.core.session.PlayerSessionEvents(logger, Runnable::run);
         return new ModuleManager(ModuleEnvironment.builder()
                 .logger(logger)
                 .executors(executors)
                 .remoteConfig(remoteConfig)
                 .loginPipeline(loginPipeline)
                 .chatPipeline(chatPipeline)
-                .platform(new FakePlatform(role, dataDir))
+                .platform(platform)
+                .playerSessions(sessions)
                 .build());
     }
 
@@ -148,6 +155,27 @@ class ModuleManagerTest {
     }
 
     @Test
+    @DisplayName("session listeners and commands are unwound too, not just the pipelines")
+    void disableUnwindsSessionsAndCommands() {
+        ModuleManager manager = manager(ServerRole.STANDALONE);
+        manager.register(new RecordingModule("whitelist").registerEverything());
+
+        manager.reconcile(desire("whitelist"));
+        assertEquals(1, sessions.joinListenerCount());
+        assertEquals(1, sessions.quitListenerCount());
+        assertTrue(platform.commandRegistry().has("whitelist"));
+
+        manager.reconcile(Collections.<String>emptySet());
+
+        assertEquals(0, sessions.joinListenerCount(),
+                "a disabled module still extending cache windows is the same bug as one still "
+                        + "gating logins");
+        assertEquals(0, sessions.quitListenerCount());
+        assertFalse(platform.commandRegistry().has("whitelist"),
+                "v2 had no way to take a command back; that is what departure D30 is about");
+    }
+
+    @Test
     @DisplayName("re-enabling registers once, not twice")
     void reEnablingDoesNotDoubleRegister() {
         ModuleManager manager = manager(ServerRole.STANDALONE);
@@ -160,6 +188,8 @@ class ModuleManagerTest {
         assertEquals(1, loginPipeline.size(),
                 "a hot toggle that leaves a stale interceptor behind would run the login check twice");
         assertEquals(1, chatPipeline.observerCount());
+        assertEquals(1, sessions.joinListenerCount());
+        assertEquals(1, platform.commandRegistry().labels().size());
     }
 
     @Test

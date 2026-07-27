@@ -29,6 +29,24 @@ final class ApiResponses {
     }
 
     /**
+     * Reads {@code POST /api/minecraft/identify}.
+     *
+     * <p>A missing or blank {@code guildId} raises rather than resolving to an empty string.
+     * Everything downstream builds a path out of this value, so an empty guild would produce
+     * {@code /api/guilds//minecraft/…} — a 404 on every endpoint, from a client that believes it is
+     * fully configured, which is the hardest shape of this failure to diagnose.
+     */
+    static String identify(RawResponse response) {
+        JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
+        String guildId = string(data, "guildId");
+        if (guildId == null || guildId.trim().isEmpty()) {
+            throw new ApiError(response.status(), "NO_GUILD",
+                    "the bot accepted this token but named no guild for it");
+        }
+        return guildId.trim();
+    }
+
+    /**
      * The connection-attempt verdict, including the derivation of {@link ConnectionAction} from the
      * booleans the bot actually sends.
      *

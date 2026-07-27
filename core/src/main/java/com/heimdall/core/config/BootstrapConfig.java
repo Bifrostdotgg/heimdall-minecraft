@@ -29,6 +29,18 @@ public final class BootstrapConfig {
     private final ServerRole role;
     private final boolean debug;
 
+    /**
+     * The guild this token resolved to, remembered from the last successful {@code identify}.
+     *
+     * <p><strong>A cache, not a setting.</strong> There is deliberately no guild id for an operator
+     * to configure: the token already knows which guild it belongs to, and a hand-typed snowflake
+     * that disagrees with it produces a server which signs perfectly and reads somebody else's
+     * configuration. This field exists so a restart while the bot is unreachable can still dial the
+     * tunnel it dialled yesterday, rather than sitting in the discovering state until the bot comes
+     * back. It is overwritten by whatever {@code identify} next answers.
+     */
+    private final String guildId;
+
     private BootstrapConfig(Builder builder) {
         this.endpoint = stripTrailingSlash(Strings.trimToEmpty(builder.endpoint));
         this.tokenId = Strings.trimToEmpty(builder.tokenId);
@@ -36,6 +48,7 @@ public final class BootstrapConfig {
         this.serverId = Strings.trimToEmpty(builder.serverId);
         this.role = builder.role == null ? ServerRole.AUTO : builder.role;
         this.debug = builder.debug;
+        this.guildId = Strings.trimToEmpty(builder.guildId);
     }
 
     /** An empty, not-configured bootstrap: what a server with no {@code bootstrap.yml} has. */
@@ -56,7 +69,8 @@ public final class BootstrapConfig {
                 .token(token)
                 .serverId(serverId)
                 .role(role)
-                .debug(debug);
+                .debug(debug)
+                .guildId(guildId);
     }
 
     /**
@@ -96,6 +110,17 @@ public final class BootstrapConfig {
     }
 
     /**
+     * The last guild this server's token resolved to, or {@code ""} if it never has.
+     *
+     * <p>A cache of the answer to {@code POST /api/minecraft/identify} — see the field comment. Not
+     * something an operator sets, and not part of {@link #isConfigured()}: a server with a token and
+     * no cached guild is perfectly well configured, it just has one round trip to make first.
+     */
+    public String guildId() {
+        return guildId;
+    }
+
+    /**
      * Whether this config carries enough to talk to the bot at all.
      *
      * <p>{@code false} means the setup flow has not run: no endpoint, or no credentials. It is not
@@ -119,7 +144,8 @@ public final class BootstrapConfig {
                 && endpoint.equals(that.endpoint)
                 && tokenId.equals(that.tokenId)
                 && token.equals(that.token)
-                && serverId.equals(that.serverId);
+                && serverId.equals(that.serverId)
+                && guildId.equals(that.guildId);
     }
 
     @Override
@@ -130,6 +156,7 @@ public final class BootstrapConfig {
         result = 31 * result + serverId.hashCode();
         result = 31 * result + role.hashCode();
         result = 31 * result + (debug ? 1 : 0);
+        result = 31 * result + guildId.hashCode();
         return result;
     }
 
@@ -141,7 +168,8 @@ public final class BootstrapConfig {
                 + "', token=" + (token.isEmpty() ? "<unset>" : "<redacted>")
                 + ", serverId='" + serverId
                 + "', role=" + role.wireName()
-                + ", debug=" + debug
+                + ", guildId='" + guildId
+                + "', debug=" + debug
                 + "}";
     }
 
@@ -162,6 +190,7 @@ public final class BootstrapConfig {
         private String serverId = "";
         private ServerRole role = ServerRole.AUTO;
         private boolean debug;
+        private String guildId = "";
 
         private Builder() {
         }
@@ -194,6 +223,12 @@ public final class BootstrapConfig {
 
         public Builder debug(boolean value) {
             this.debug = value;
+            return this;
+        }
+
+        /** The resolved guild, cached from {@code identify}. Not an operator-facing setting. */
+        public Builder guildId(String value) {
+            this.guildId = value;
             return this;
         }
 

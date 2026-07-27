@@ -1,5 +1,6 @@
 package com.heimdall.platform.bukkit;
 
+import com.heimdall.core.command.CommandRegistrar;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.HeimdallLogger;
@@ -33,6 +34,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     private final BukkitPlayerDirectory players;
     private final Log4jConsoleTap consoleTap;
     private final BukkitConsoleBridge console;
+    private final BukkitCommandRegistrar commands;
     private final BukkitIntegrations integrations;
 
     BukkitPlatform(
@@ -44,6 +46,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
         this.players = new BukkitPlayerDirectory(mainThread, messenger);
         this.consoleTap = new Log4jConsoleTap(logger, executors.io());
         this.console = new BukkitConsoleBridge(logger, mainThread, consoleTap);
+        this.commands = new BukkitCommandRegistrar(plugin, logger, messenger);
         this.integrations = new BukkitIntegrations(logger, executors.io());
     }
 
@@ -68,6 +71,11 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     /** The messenger, so the command handler can answer a sender in components. */
     BukkitMessenger messenger() {
         return messenger;
+    }
+
+    /** The online-player list, so the session listener can wrap a player it was handed. */
+    BukkitPlayerDirectory playerDirectory() {
+        return players;
     }
 
     @Override
@@ -98,6 +106,11 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     @Override
     public ConsoleBridge console() {
         return console;
+    }
+
+    @Override
+    public CommandRegistrar commands() {
+        return commands;
     }
 
     @Override
