@@ -159,7 +159,9 @@ public final class ApiClient {
         return async(() -> {
             ApiSettings current = settings;
             JsonObject body = new JsonObject();
-            body.addProperty("username", username.trim().toLowerCase(java.util.Locale.ROOT));
+            // Verbatim, not lower-cased. link.ts writes minecraftUsername straight from this body,
+            // so v2's normalisation rewrote every linked player's name in the bot's database.
+            body.addProperty("username", username.trim());
             body.addProperty("uuid", uuid.trim());
             addBedrockIdentity(body, uuid.trim());
 

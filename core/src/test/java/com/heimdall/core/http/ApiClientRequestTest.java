@@ -113,8 +113,8 @@ class ApiClientRequestTest {
             assertEquals("/api/guilds/" + GUILD + "/minecraft/connection-attempt", request.path);
 
             JsonObject body = bodyOf(request);
-            assertEquals("allowedsteve", body.get("username").getAsString(),
-                    "the bot matches case-insensitively, so the client normalises once");
+            assertEquals("AllowedSteve", body.get("username").getAsString(),
+                    "verbatim, not lower-cased");
             assertEquals(UUID, body.get("uuid").getAsString());
             assertEquals("203.0.113.7", body.get("ip").getAsString());
             assertEquals("play.example.com", body.get("serverIp").getAsString());
@@ -122,6 +122,18 @@ class ApiClientRequestTest {
                     "the serverId comes from settings, not from the caller");
             assertTrue(body.get("currentlyWhitelisted").getAsBoolean());
             assertEquals(2, body.getAsJsonArray("currentGroups").size());
+        }
+
+        @Test
+        @DisplayName("the link-code body is verbatim too — this is the one that reached the database")
+        void linkCodeUsernameIsVerbatim() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"alreadyLinked\":false,\"code\":\"135790\"}}");
+
+            await(client.requestLinkCode("  Steve  ", UUID));
+
+            assertEquals("Steve", bodyOf(server.lastRequest()).get("username").getAsString(),
+                    "link.ts writes minecraftUsername straight from this body; v2's lower-casing "
+                            + "silently rewrote every linked player's name");
         }
 
         @Test
@@ -227,7 +239,8 @@ class ApiClientRequestTest {
             assertEquals("BedrockBob", body.get("bedrockGamertag").getAsString(),
                     "the gamertag is prefix-free; the username still carries the Floodgate prefix");
             assertEquals("2535467890123456", body.get("bedrockXuid").getAsString());
-            assertEquals(".bedrockbob", body.get("username").getAsString());
+            assertEquals(".BedrockBob", body.get("username").getAsString(),
+                    "the username keeps its Floodgate prefix and its case");
         }
 
         @Test

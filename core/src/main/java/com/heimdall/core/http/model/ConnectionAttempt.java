@@ -3,13 +3,17 @@ package com.heimdall.core.http.model;
 import com.heimdall.core.util.Lists;
 import com.heimdall.core.util.Strings;
 import java.util.List;
-import java.util.Locale;
 
 /**
  * What the plugin tells the bot about a player trying to connect.
  *
- * <p>{@code username} is lower-cased on construction, matching v2 — the bot matches case-insensitively
- * and normalising here means one place decides, rather than each caller remembering.
+ * <p><strong>{@code username} is sent exactly as the platform reported it.</strong> v2 lower-cased
+ * it, and the bot does match case-insensitively, so on this endpoint the difference is invisible —
+ * {@code connection.ts} stores whatever it is handed. But v2 applied the <em>same</em>
+ * normalisation to the link-code request, and {@code link.ts} writes {@code minecraftUsername}
+ * straight from the request body, so every link silently rewrote "Steve" to "steve" in the bot's
+ * database and the dashboard showed it that way from then on. Normalising in one place and not the
+ * other is how that went unnoticed, so neither is normalised now. See {@code docs/v2-departures.md}.
  *
  * <p>Bedrock identity is <em>not</em> a field: it is resolved by the {@code
  * com.heimdall.core.http.BedrockIdentityProvider} the client was given and merged in at send time,
@@ -31,7 +35,7 @@ public final class ConnectionAttempt {
         if (Strings.isBlank(builder.uuid)) {
             throw new IllegalArgumentException("uuid is required");
         }
-        this.username = builder.username.trim().toLowerCase(Locale.ROOT);
+        this.username = builder.username.trim();
         this.uuid = builder.uuid.trim();
         this.ip = Strings.trimToEmpty(builder.ip);
         this.serverIp = Strings.isBlank(builder.serverIp) ? "localhost" : builder.serverIp.trim();
@@ -43,7 +47,7 @@ public final class ConnectionAttempt {
         return new Builder().username(username).uuid(uuid);
     }
 
-    /** The player's name, lower-cased. */
+    /** The player's name, exactly as the platform reported it. */
     public String username() {
         return username;
     }
