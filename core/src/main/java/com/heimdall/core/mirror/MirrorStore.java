@@ -11,6 +11,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -52,7 +54,19 @@ import java.util.function.Supplier;
  * managed to get" entry point, because an empty set is a legitimate "nobody is whitelisted" state
  * and could not be told apart from a partial failure after the fact.
  *
- * <p>Thread-safe.
+ * <h2>Thread safety</h2>
+ *
+ * <p>Safe for concurrent use, and specifically so rather than by assertion. {@link MirrorEntry} is
+ * immutable, and every mutation goes through {@code ConcurrentHashMap.compute} /
+ * {@code computeIfPresent} so the read-modify-write on an expiry happens under the bin lock. The
+ * login thread extending an entry and the scheduler reconciling it therefore serialise, instead of
+ * interleaving into an expiry neither of them chose — and a reader never observes a half-updated
+ * entry, which on the 32-bit JVMs the oldest supported servers run could otherwise mean a torn
+ * {@code long}.
+ *
+ * <p><strong>This store does not own the scheduler it is handed.</strong> {@link #close()} flushes
+ * and stops debouncing; it does not shut the scheduler down, because the caller shares it with
+ * everything else Heimdall runs on a timer.
  *
  * @param <T> the mirrored value type; must be serialisable by Gson
  */
@@ -188,13 +202,23 @@ public final class MirrorStore<T> implements AutoCloseable {
      * <p>This is a real verification: {@code lastVerified} moves to now, so the ceiling is measured
      * from now and the entry gets a full fresh window.
      */
-    public void record(String key, T value) {
+    public void record(String key, final T value) {
         if (Strings.isBlank(key) || value == null) {
             logger.warn("Refusing to mirror an entry with a blank key or null value");
             return;
         }
-        long now = clock.getAsLong();
-        entries.put(key, new MirrorEntry<T>(value, now, now + policy.windowMs(), now));
+        final long now = clock.getAsLong();
+        // compute rather than put, for the same reason reconcile uses it: a verification racing
+        // another verification must not be able to move lastVerified backward.
+        entries.compute(key, new BiFunction<String, MirrorEntry<T>, MirrorEntry<T>>() {
+            @Override
+            public MirrorEntry<T> apply(String unused, MirrorEntry<T> existing) {
+                if (existing == null) {
+                    return new MirrorEntry<T>(value, now, now + policy.windowMs(), now);
+                }
+                return verify(existing, value, now, now + policy.windowMs());
+            }
+        });
         file.markDirty();
     }
 
@@ -214,13 +238,60 @@ public final class MirrorStore<T> implements AutoCloseable {
         if (key == null) {
             return false;
         }
-        MirrorEntry<T> entry = entries.get(key);
-        if (entry == null) {
+        final long now = clock.getAsLong();
+        final long proposed = now + Math.max(0, windowMs);
+        // computeIfPresent, not get-then-mutate: the remapping runs under the bin lock, so a
+        // reconcile landing at the same moment either happens entirely before or entirely after,
+        // rather than interleaving into an expiry neither of them chose.
+        MirrorEntry<T> updated = entries.computeIfPresent(key,
+                new BiFunction<String, MirrorEntry<T>, MirrorEntry<T>>() {
+                    @Override
+                    public MirrorEntry<T> apply(String unused, MirrorEntry<T> entry) {
+                        return entry.withActivity(now, cap(entry, proposed));
+                    }
+                });
+        if (updated == null) {
             return false;
         }
-        long now = clock.getAsLong();
-        entry.lastConnection(now);
-        entry.cacheExpiry(cap(entry, now + Math.max(0, windowMs)));
+        file.markDirty();
+        return true;
+    }
+
+    /**
+     * Replaces an entry's value without touching any of its timestamps.
+     *
+     * <p>For a detail nobody had to ask the bot about — v2 refreshed a player's username this way
+     * on a cache hit. The distinction matters: {@link #record} is the only other way to change a
+     * value, and it advances {@code lastVerified}, which would hand a revoked player a fresh
+     * ceiling every time they changed their name. That would defeat the whole #771 bound.
+     *
+     * <p>Does nothing for a key the mirror does not hold.
+     *
+     * @return whether an entry was found and updated
+     */
+    public boolean touchValue(String key, final T value) {
+        if (key == null || value == null) {
+            return false;
+        }
+        MirrorEntry<T> existing = entries.get(key);
+        if (existing == null) {
+            return false;
+        }
+        if (value.equals(existing.value())) {
+            // Nothing to write. Worth checking: this is called on every join, and marking the
+            // mirror dirty for an unchanged username would defeat the debounce it sits behind.
+            return true;
+        }
+        MirrorEntry<T> updated = entries.computeIfPresent(key,
+                new BiFunction<String, MirrorEntry<T>, MirrorEntry<T>>() {
+                    @Override
+                    public MirrorEntry<T> apply(String unused, MirrorEntry<T> entry) {
+                        return entry.withValue(value);
+                    }
+                });
+        if (updated == null) {
+            return false;
+        }
         file.markDirty();
         return true;
     }
@@ -242,33 +313,35 @@ public final class MirrorStore<T> implements AutoCloseable {
             throw new IllegalArgumentException(
                     "the authoritative set is required — pass an empty map, not null");
         }
-        long now = clock.getAsLong();
+        final long now = clock.getAsLong();
         Set<String> seen = new HashSet<String>();
-        int added = 0;
-        int updated = 0;
+        // Counted from inside the remapping function, which runs at most once per key here but is
+        // not contractually single-shot, so the counters are atomic rather than plain ints.
+        final AtomicInteger added = new AtomicInteger();
+        final AtomicInteger updated = new AtomicInteger();
 
         for (Map.Entry<String, T> incoming : authoritative.entrySet()) {
             String key = incoming.getKey();
-            T value = incoming.getValue();
+            final T value = incoming.getValue();
             if (Strings.isBlank(key) || value == null) {
                 continue;
             }
             seen.add(key);
 
-            MirrorEntry<T> existing = entries.get(key);
-            if (existing == null) {
-                entries.put(key, new MirrorEntry<T>(value, now, now + policy.windowMs(), now));
-                added++;
-            } else {
-                existing.value(value);
-                existing.lastVerified(now);
-                // Refresh from this verification, but never shrink an entry a recent event already
-                // slid further forward. The cap uses the just-updated lastVerified, so the ceiling
-                // has moved forward too and this cannot exceed it.
-                existing.cacheExpiry(
-                        Math.max(existing.cacheExpiry(), cap(existing, now + policy.windowMs())));
-                updated++;
-            }
+            entries.compute(key, new BiFunction<String, MirrorEntry<T>, MirrorEntry<T>>() {
+                @Override
+                public MirrorEntry<T> apply(String unused, MirrorEntry<T> existing) {
+                    if (existing == null) {
+                        added.incrementAndGet();
+                        return new MirrorEntry<T>(value, now, now + policy.windowMs(), now);
+                    }
+                    updated.incrementAndGet();
+                    // Refresh the window from this verification, but never shrink an entry a recent
+                    // event already slid further forward.
+                    return verify(existing, value, now,
+                            Math.max(existing.cacheExpiry(), policy.cap(now + policy.windowMs(), now)));
+                }
+            });
         }
 
         int pruned = 0;
@@ -279,7 +352,7 @@ public final class MirrorStore<T> implements AutoCloseable {
             }
         }
 
-        ReconcileResult result = new ReconcileResult(added, updated, pruned);
+        ReconcileResult result = new ReconcileResult(added.get(), updated.get(), pruned);
         file.markDirty();
         logger.info("Mirror reconcile (" + file.name() + "): " + result + " (" + entries.size() + " held)");
         return result;
@@ -332,6 +405,11 @@ public final class MirrorStore<T> implements AutoCloseable {
         return file.writeCount();
     }
 
+    /** The raw entry, expiry ignored — so tests can assert on the timestamps the rules produce. */
+    MirrorEntry<T> rawEntry(String key) {
+        return key == null ? null : entries.get(key);
+    }
+
     /** A one-line summary for a status command. */
     public String stats() {
         long now = clock.getAsLong();
@@ -346,6 +424,21 @@ public final class MirrorStore<T> implements AutoCloseable {
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
+
+    /**
+     * Applies a verification to an entry, keeping two things true that a race could otherwise break.
+     *
+     * <p>{@code lastVerified} never moves backward, and the resulting expiry is clamped to the
+     * ceiling that {@code lastVerified} implies. Both are no-ops in the single-threaded case v2 was
+     * written for, where {@code now} only ever increases — but two verifications in flight at once
+     * can arrive out of order, and the older one would then lower the ceiling while the
+     * never-shrink rule kept the newer, larger expiry. The result is an entry trusted past its own
+     * bound, which is the one thing the #771 fix exists to prevent.
+     */
+    private MirrorEntry<T> verify(MirrorEntry<T> existing, T value, long now, long proposedExpiry) {
+        long verifiedAt = Math.max(existing.lastVerified(), now);
+        return existing.verified(value, verifiedAt, policy.cap(proposedExpiry, verifiedAt));
+    }
 
     /** See {@link MirrorPolicy#effectiveExpiry} — the ceiling rule itself lives on the policy. */
     private long effectiveExpiry(MirrorEntry<T> entry) {
