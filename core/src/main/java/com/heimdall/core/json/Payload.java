@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -35,14 +36,54 @@ import java.util.Set;
  *
  * <p>Two accessors deliberately break that pattern by returning {@code null}: {@link #optInt} and
  * {@link #optBool}. Absent and zero are different answers — the {@code queuePosition} case
- * (departure D1) is exactly this, and a fallback-shaped API cannot express it.
+ * (departure D1) is exactly this, and a fallback-shaped API cannot express it. Both are strict
+ * about type for the same reason: an accessor that answered {@code false} for a number, or
+ * truncated an out-of-range value into a plausible-looking int, would be giving a confident wrong
+ * answer where the whole point is to distinguish "no answer" from one.
  *
- * <p><strong>Immutable and thread-safe.</strong> The backing object is never handed out and never
- * mutated after construction; {@link #toBuilder()} copies.
+ * <p>{@link #string} and {@link #doubleValue} are deliberately <em>coercive</em> in the other
+ * direction — {@code string} renders a number or a boolean as text — because a bot that sends
+ * {@code {"code": 135790}} where a string was expected should still produce a usable code rather
+ * than a fallback.
+ *
+ * <h2>Numbers</h2>
+ *
+ * <p>Numeric values are compared and hashed through one canonical form ({@link #canonicalNumber}),
+ * not through Gson's. Gson's own {@code JsonPrimitive.equals} is <strong>not transitive</strong>
+ * across the parser and the builder: it only compares two numbers as integers when both are a
+ * {@code Long}/{@code Integer}/{@code Short}/{@code Byte}/{@code BigInteger}, and the parser
+ * produces neither of those — it produces a {@code LazilyParsedNumber}, which falls to the
+ * {@code double} branch. So a parsed {@code 1234567890123456789} equals a built
+ * {@code 1234567890123456789} and also equals a built {@code 1234567890123456788}, while those two
+ * built values are not equal to each other. Anything holding a 64-bit id as a JSON number — a
+ * Discord snowflake, most obviously — lands squarely in that gap, and near 1.2e18 a {@code double}
+ * cannot tell apart ids minted seconds apart.
+ *
+ * <p>That matters here rather than being a curiosity, because {@code RemoteConfig} decides whether
+ * to fire a module's change listeners by comparing settings for equality. A setting carrying a
+ * snowflake would silently stop producing change notifications.
+ *
+ * <p>So both {@link #equals} and {@link #hashCode} go through the same normalisation, and neither
+ * defers to Gson: values are compared as {@link BigDecimal}, which keeps 64-bit ids exact, treats
+ * {@code 1} and {@code 1.0} as the same number, and folds {@code -0.0} into {@code 0.0} on both
+ * sides. Two payloads that are {@code equals} therefore always hash alike, whatever built them.
+ *
+ * <p><strong>Immutable and thread-safe.</strong> The exact invariant, since two of the mechanisms
+ * are worth naming: the backing object graph is never reachable from outside this package, and it
+ * is never mutated after construction. Everything entering — {@link #parse}, {@link #wrap},
+ * {@link Builder#build()} — copies or takes exclusive ownership at that boundary, so no caller
+ * retains a handle on it. {@link #child} and {@link #children} alias a subtree rather than copying,
+ * which is safe precisely because nothing outside can reach the tree they alias. A payload is
+ * therefore safe to hand from the socket's reading thread to any number of handler executors.
  */
 public final class Payload {
 
     private static final Payload EMPTY = new Payload(new JsonObject());
+
+    private static final BigDecimal INT_MAX = BigDecimal.valueOf(Integer.MAX_VALUE);
+    private static final BigDecimal INT_MIN = BigDecimal.valueOf(Integer.MIN_VALUE);
+    private static final BigDecimal LONG_MAX = BigDecimal.valueOf(Long.MAX_VALUE);
+    private static final BigDecimal LONG_MIN = BigDecimal.valueOf(Long.MIN_VALUE);
 
     private final JsonObject json;
 
@@ -109,29 +150,41 @@ public final class Payload {
         return Collections.unmodifiableSet(new LinkedHashSet<String>(json.keySet()));
     }
 
-    /** A string field, or {@code fallback} when it is absent, null, or not a primitive. */
+    /**
+     * A string field, or {@code fallback} when it is absent, null, or not a primitive.
+     *
+     * <p><strong>Coercive:</strong> a number or a boolean is rendered as its text. That is
+     * deliberate — a bot sending {@code {"code": 135790}} where a string was expected should still
+     * produce a usable code — but it means this never distinguishes {@code "1"} from {@code 1}.
+     */
     public String string(String key, String fallback) {
         JsonElement value = primitive(key);
         return value == null ? fallback : value.getAsString();
     }
 
-    /** An int field, or {@code fallback} when it is absent, null, or not numeric. */
+    /**
+     * An int field, or {@code fallback} when it is absent, null, not numeric, or out of range.
+     *
+     * <p>Out-of-range falls back rather than truncating — see {@link #optInt}.
+     */
     public int intValue(String key, int fallback) {
         Integer value = optInt(key);
         return value == null ? fallback : value.intValue();
     }
 
-    /** A long field, or {@code fallback} when it is absent, null, or not numeric. */
+    /**
+     * A long field, or {@code fallback} when it is absent, null, not numeric, or outside the range
+     * of a long.
+     *
+     * <p>Range-checked for the same reason as {@link #optInt}: a silent narrowing produces a number
+     * that looks entirely reasonable. A fractional value is truncated toward zero.
+     */
     public long longValue(String key, long fallback) {
-        JsonElement value = primitive(key);
-        if (value == null) {
+        BigDecimal number = number(key);
+        if (number == null || number.compareTo(LONG_MAX) > 0 || number.compareTo(LONG_MIN) < 0) {
             return fallback;
         }
-        try {
-            return value.getAsLong();
-        } catch (NumberFormatException e) {
-            return fallback;
-        }
+        return number.longValue();
     }
 
     /** A double field, or {@code fallback} when it is absent, null, or not numeric. */
@@ -147,34 +200,51 @@ public final class Payload {
         }
     }
 
-    /** A boolean field, or {@code fallback} when it is absent, null, or not a primitive. */
+    /**
+     * A boolean field, or {@code fallback} when it is absent, null, or <strong>not actually a
+     * boolean</strong>.
+     *
+     * <p>Strict rather than coercive. Gson would happily answer {@code false} for the string
+     * {@code "yes"} and for the number {@code 5}, which is a confident wrong answer about whether a
+     * module is enabled — and "enabled" is the single most consequential boolean on this wire.
+     */
     public boolean bool(String key, boolean fallback) {
         Boolean value = optBool(key);
         return value == null ? fallback : value.booleanValue();
     }
 
     /**
-     * An int field, or {@code null} when it is absent, null, or not numeric.
+     * An int field, or {@code null} when it is absent, null, not numeric, or <strong>outside the
+     * range of an int</strong>.
      *
      * <p>The nullable form exists because absent and zero are different answers on this wire — see
-     * the class javadoc.
+     * the class javadoc. Which is exactly why the range check matters: {@code getAsInt()} on a
+     * parsed number is a narrowing cast that never complains, so {@code 5000000000} came back as
+     * {@code 705032704} — a wrong answer indistinguishable from a right one. Departure D1's
+     * nullable {@code queuePosition} rests on this method being trustworthy.
+     *
+     * <p>A value with a fractional part is truncated toward zero, as it always was.
      */
     public Integer optInt(String key) {
-        JsonElement value = primitive(key);
-        if (value == null) {
+        BigDecimal number = number(key);
+        if (number == null || number.compareTo(INT_MAX) > 0 || number.compareTo(INT_MIN) < 0) {
             return null;
         }
-        try {
-            return Integer.valueOf(value.getAsInt());
-        } catch (NumberFormatException e) {
-            return null;
-        }
+        return Integer.valueOf(number.intValue());
     }
 
-    /** A boolean field, or {@code null} when it is absent, null, or not a primitive. */
+    /**
+     * A boolean field, or {@code null} when it is absent, null, or not a JSON boolean.
+     *
+     * <p>Type-strict: see {@link #bool}. Coercing anything non-boolean into {@code FALSE} would
+     * defeat this method's only purpose, which is telling an absent value from a present one.
+     */
     public Boolean optBool(String key) {
         JsonElement value = primitive(key);
-        return value == null ? null : Boolean.valueOf(value.getAsBoolean());
+        if (value == null || !value.getAsJsonPrimitive().isBoolean()) {
+            return null;
+        }
+        return Boolean.valueOf(value.getAsBoolean());
     }
 
     /**
@@ -272,29 +342,82 @@ public final class Payload {
         if (!(other instanceof Payload)) {
             return false;
         }
-        return json.equals(((Payload) other).json);
+        return equal(json, ((Payload) other).json);
     }
 
     /**
-     * A hash that actually agrees with {@link #equals(Object)}.
+     * A hash that agrees with {@link #equals(Object)} — because both call the same normalisation.
      *
-     * <p><strong>Gson's own does not, and the disagreement is invisible until it bites.</strong>
-     * {@code JsonPrimitive.equals} compares numbers by value — a parsed {@code 1} equals a built
-     * {@code 1} — but {@code JsonPrimitive.hashCode} branches on the concrete {@code Number}
-     * subclass: an {@code Integer} hashes as a long, while the {@code LazilyParsedNumber} the parser
-     * produces falls through to the double-bits branch. So {@code Payload.parse("{\"x\":1}")} and
-     * {@code Payload.builder().put("x", 1).build()} are equal and hash differently, which is exactly
-     * the contract violation that makes a {@code HashMap} lose entries.
-     *
-     * <p>It matters here because payloads are compared for change detection (departure D22): a
-     * remote-config section that arrived over the wire is compared against one built locally, and
-     * either could end up as a map key. So numbers are normalised to their double bits — the same
-     * normalisation {@code equals} performs — and object members are summed so the hash stays
-     * independent of key order, as {@code Map.equals} is.
+     * <p>Object members are summed rather than combined in order, so the hash is independent of key
+     * order exactly as {@code Map.equals} is. Numbers go through {@link #canonicalNumber}, the same
+     * function {@link #equal} uses, which is what makes the agreement structural rather than a
+     * property two separate implementations happen to share today.
      */
     @Override
     public int hashCode() {
         return hash(json);
+    }
+
+    /**
+     * Structural equality, with numbers compared by value.
+     *
+     * <p>Kinds are compared before contents, so the string {@code "1"} is never equal to the number
+     * {@code 1}.
+     */
+    private static boolean equal(JsonElement left, JsonElement right) {
+        if (left == null || left.isJsonNull() || right == null || right.isJsonNull()) {
+            return (left == null || left.isJsonNull()) && (right == null || right.isJsonNull());
+        }
+        if (left.isJsonObject() && right.isJsonObject()) {
+            JsonObject a = left.getAsJsonObject();
+            JsonObject b = right.getAsJsonObject();
+            if (a.size() != b.size()) {
+                return false;
+            }
+            for (String key : a.keySet()) {
+                if (!b.has(key) || !equal(a.get(key), b.get(key))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (left.isJsonArray() && right.isJsonArray()) {
+            JsonArray a = left.getAsJsonArray();
+            JsonArray b = right.getAsJsonArray();
+            if (a.size() != b.size()) {
+                return false;
+            }
+            for (int i = 0; i < a.size(); i++) {
+                if (!equal(a.get(i), b.get(i))) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (left.isJsonPrimitive() && right.isJsonPrimitive()) {
+            return equalPrimitives(left.getAsJsonPrimitive(), right.getAsJsonPrimitive());
+        }
+        return false;
+    }
+
+    private static boolean equalPrimitives(JsonPrimitive left, JsonPrimitive right) {
+        if (left.isNumber() != right.isNumber() || left.isBoolean() != right.isBoolean()) {
+            return false;
+        }
+        if (left.isNumber()) {
+            BigDecimal a = canonicalNumber(left);
+            BigDecimal b = canonicalNumber(right);
+            if (a == null || b == null) {
+                // Not representable as a decimal — NaN or an infinity, which only Gson's lenient
+                // mode can produce. Comparing the text is the only meaningful thing left.
+                return left.getAsString().equals(right.getAsString());
+            }
+            return a.compareTo(b) == 0;
+        }
+        if (left.isBoolean()) {
+            return left.getAsBoolean() == right.getAsBoolean();
+        }
+        return left.getAsString().equals(right.getAsString());
     }
 
     private static int hash(JsonElement element) {
@@ -318,8 +441,8 @@ public final class Payload {
         }
         JsonPrimitive primitive = element.getAsJsonPrimitive();
         if (primitive.isNumber()) {
-            long bits = Double.doubleToLongBits(primitive.getAsDouble());
-            return (int) (bits ^ (bits >>> 32));
+            BigDecimal canonical = canonicalNumber(primitive);
+            return canonical == null ? primitive.getAsString().hashCode() : canonical.hashCode();
         }
         if (primitive.isBoolean()) {
             return Boolean.valueOf(primitive.getAsBoolean()).hashCode();
@@ -327,10 +450,42 @@ public final class Payload {
         return primitive.getAsString().hashCode();
     }
 
-    /** The JSON text. Convenient in log lines and assertion failures alike. */
-    @Override
-    public String toString() {
-        return toJson();
+    /**
+     * <strong>The single normalisation.</strong> Both {@link #equal} and {@link #hash} call this,
+     * and nothing else decides what a number means.
+     *
+     * <p>Two rules, each fixing a concrete bug:
+     *
+     * <ul>
+     *   <li><strong>Trailing zeros are stripped</strong>, so {@code 1} and {@code 1.0} are one
+     *       number and hash alike. Without it, values that compare equal would hash differently.
+     *   <li><strong>Zero is canonicalised</strong>, so {@code 0} and {@code -0.0} are one number.
+     *       Hashing the raw double bits made those two equal-but-differently-hashed, which is the
+     *       exact contract violation that loses entries from a {@code HashMap}.
+     * </ul>
+     *
+     * <p>Built from {@link JsonPrimitive#getAsString()} rather than from a {@code double}, because
+     * going through a {@code double} is what discards the low bits of a 64-bit id.
+     *
+     * @return the canonical value, or {@code null} for a number no decimal can represent (NaN, an
+     *     infinity) — only reachable through Gson's lenient mode
+     */
+    private static BigDecimal canonicalNumber(JsonPrimitive primitive) {
+        try {
+            BigDecimal value = new BigDecimal(primitive.getAsString());
+            return value.signum() == 0 ? BigDecimal.ZERO : value.stripTrailingZeros();
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** The canonical form of a numeric field, or {@code null} if it is not a usable number. */
+    private BigDecimal number(String key) {
+        JsonElement value = primitive(key);
+        if (value == null || !value.getAsJsonPrimitive().isNumber()) {
+            return null;
+        }
+        return canonicalNumber(value.getAsJsonPrimitive());
     }
 
     // ── Package-private bridge ───────────────────────────────────────────────
@@ -349,9 +504,17 @@ public final class Payload {
         return json;
     }
 
-    /** Wraps an object as a payload without copying. The caller must not retain or mutate it. */
+    /**
+     * Adopts an object as a payload, copying it at the boundary.
+     *
+     * <p>The copy is what makes the immutability guarantee unconditional rather than a contract the
+     * caller has to keep. This is the entry point every inbound frame takes, and the payload it
+     * produces is then handed to handler executors on other threads; sharing a subtree with
+     * whatever parsed it would make that safe only for as long as nobody touched the parse result
+     * afterwards.
+     */
     static Payload wrap(JsonObject json) {
-        return json == null ? EMPTY : new Payload(json);
+        return json == null ? EMPTY : new Payload(json.deepCopy());
     }
 
     private JsonElement primitive(String key) {
@@ -381,6 +544,14 @@ public final class Payload {
             return this;
         }
 
+        /**
+         * Writes a 64-bit integer.
+         *
+         * <p><strong>Use this, not {@link #put(String, double)}, for ids and timestamps.</strong>
+         * The {@code double} overload emits {@code 1.7E12} for an epoch-millis value — valid JSON,
+         * read back as a different number — and silently loses precision above 2^53, which covers
+         * every Discord snowflake.
+         */
         public Builder put(String key, long value) {
             json.addProperty(key, Long.valueOf(value));
             return this;

@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 
 /**
@@ -80,6 +81,15 @@ final class SubscriptionRegistry {
                 subscription.executor.execute(new Runnable() {
                     @Override
                     public void run() {
+                        // Re-checked here, not only when the snapshot was taken. Dispatch reads a
+                        // copy-on-write snapshot and then hands the work to an executor, so there is
+                        // a window — however small — in which a registration is closed while its
+                        // task is already queued. Without this a module that has been disabled can
+                        // still have a handler run, which is exactly the "disabled module still
+                        // reacting to events" failure the registration design exists to prevent.
+                        if (!subscription.active.get()) {
+                            return;
+                        }
                         try {
                             subscription.handler.onMessage(envelope);
                         } catch (RuntimeException e) {
@@ -109,6 +119,11 @@ final class SubscriptionRegistry {
 
     /** Drops every subscription. Used only on shutdown. */
     void clear() {
+        for (CopyOnWriteArrayList<Subscription> handlers : byType.values()) {
+            for (Subscription subscription : handlers) {
+                subscription.active.set(false);
+            }
+        }
         byType.clear();
     }
 
@@ -149,17 +164,30 @@ final class SubscriptionRegistry {
             @Override
             public CopyOnWriteArrayList<Subscription> apply(
                     String key, CopyOnWriteArrayList<Subscription> handlers) {
+                // Deactivate first, then unlist. A task already queued on an executor checks this
+                // flag before running, so the order means a handler can never run after its
+                // registration was closed — only that it may be dropped slightly before.
+                subscription.active.set(false);
                 handlers.remove(subscription);
                 return handlers.isEmpty() ? null : handlers;
             }
         });
     }
 
-    /** One handler and the executor it was registered with. Identity-compared. */
+    /**
+     * One handler, the executor it was registered with, and whether it is still live.
+     *
+     * <p>Identity-compared, so two modules registering the same lambda stay independent.
+     *
+     * <p>The {@code active} flag is what closes the gap between "removed from the list" and "not
+     * going to run": removal only affects future dispatches, and a task handed to an executor a
+     * microsecond earlier is already beyond the list's reach.
+     */
     private static final class Subscription {
 
         private final TunnelMessageHandler handler;
         private final Executor executor;
+        private final AtomicBoolean active = new AtomicBoolean(true);
 
         Subscription(TunnelMessageHandler handler, Executor executor) {
             this.handler = handler;

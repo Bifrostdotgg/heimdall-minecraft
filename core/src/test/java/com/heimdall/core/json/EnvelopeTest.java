@@ -68,13 +68,20 @@ class EnvelopeTest {
     }
 
     @Test
-    @DisplayName("fresh ids are distinct — correlation depends on it")
-    void freshIdsAreDistinct() {
+    @DisplayName("fresh ids are eight hex characters, and distinct across a handful")
+    void freshIdsHaveTheRightShapeAndVary() {
+        // Asserting distinctness over a thousand ids would be asserting that 32 bits of entropy
+        // beat the birthday bound, which it does not: the collision probability there is about one
+        // in 8,600, so the test would fail roughly once every few thousand CI runs and be blamed on
+        // something else. Eight hex characters is the actual contract — the id only has to be
+        // distinguishable among the handful of requests outstanding on one socket at one moment.
         Set<String> ids = new HashSet<String>();
-        for (int i = 0; i < 1000; i++) {
-            ids.add(Envelope.newId());
+        for (int i = 0; i < 32; i++) {
+            String id = Envelope.newId();
+            assertTrue(id.matches("[0-9a-f]{8}"), "unexpected id shape: " + id);
+            ids.add(id);
         }
-        assertEquals(1000, ids.size(), "a repeated id would complete the wrong caller's future");
+        assertTrue(ids.size() >= 30, "ids should vary; got " + ids.size() + " distinct out of 32");
     }
 
     @Test

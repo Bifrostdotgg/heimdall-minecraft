@@ -118,7 +118,9 @@ public final class Envelope {
         JsonObject object = new JsonObject();
         object.addProperty("id", id);
         object.addProperty("type", type);
-        object.add("payload", payload.json());
+        // Copied, not lent. Payload.empty() is a shared singleton, and handing its backing
+        // object to a container someone else owns is the one way it could ever be mutated.
+        object.add("payload", payload.json().deepCopy());
         return object.toString();
     }
 

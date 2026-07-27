@@ -4,9 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.gson.JsonObject;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -159,6 +161,152 @@ class PayloadTest {
 
         assertEquals(built, parsed);
         assertEquals(built.hashCode(), parsed.hashCode());
+    }
+
+    @Test
+    @DisplayName("equals is TRANSITIVE across the parser and the builder, for 64-bit ids")
+    void equalsIsTransitiveForLargeIntegers() {
+        // Gson's own JsonPrimitive.equals is not. It compares two numbers as integers only when
+        // BOTH are Long/Integer/Short/Byte/BigInteger, and the parser produces a LazilyParsedNumber
+        // — so a parsed value falls to the double branch, where near 1.2e18 the gap between
+        // representable doubles is 256 and two snowflakes minted seconds apart collapse onto one.
+        long id = 1234567890123456789L;
+        long neighbour = 1234567890123456788L;
+
+        Payload parsed = Payload.parse("{\"x\":" + id + "}");
+        Payload built = Payload.builder().put("x", id).build();
+        Payload builtNeighbour = Payload.builder().put("x", neighbour).build();
+
+        assertEquals(parsed, built);
+        assertNotEquals(parsed, builtNeighbour,
+                "if this passes while the line above does too, equals is intransitive — and "
+                        + "RemoteConfig decides whether to fire a module's listeners with it, so a "
+                        + "setting carrying a snowflake silently stops reporting changes");
+        assertNotEquals(built, builtNeighbour);
+        assertEquals(parsed.hashCode(), built.hashCode());
+    }
+
+    @Test
+    @DisplayName("0 and -0.0 are equal AND hash alike")
+    void negativeZeroIsCanonicalised() {
+        Payload positive = Payload.parse("{\"x\":0}");
+        Payload negative = Payload.parse("{\"x\":-0.0}");
+
+        assertEquals(positive, negative);
+        assertEquals(positive.hashCode(), negative.hashCode(),
+                "equal-but-differently-hashed is the exact contract violation that loses entries "
+                        + "from a HashMap; hashing raw double bits sets the sign bit for -0.0");
+    }
+
+    @Test
+    @DisplayName("1 and 1.0 are one number, however they were produced")
+    void integerAndDecimalFormsAgree() {
+        Payload asInt = Payload.parse("{\"x\":1}");
+        Payload asDecimal = Payload.parse("{\"x\":1.0}");
+        Payload built = Payload.builder().put("x", 1).build();
+
+        assertEquals(asInt, asDecimal);
+        assertEquals(asInt.hashCode(), asDecimal.hashCode());
+        assertEquals(asInt, built);
+        assertEquals(asInt.hashCode(), built.hashCode());
+    }
+
+    @Test
+    @DisplayName("a string is never equal to the number that renders the same")
+    void kindsAreComparedBeforeContents() {
+        assertNotEquals(Payload.parse("{\"x\":\"1\"}"), Payload.parse("{\"x\":1}"));
+        assertNotEquals(Payload.parse("{\"x\":true}"), Payload.parse("{\"x\":\"true\"}"));
+    }
+
+    // ── Numbers on the wire ──────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("a long round-trips exactly, and reaches the wire without E-notation")
+    void longsSurviveTheWire() {
+        long timestamp = 1_700_000_000_000L;
+        Payload built = Payload.builder().put("ts", timestamp).build();
+
+        assertTrue(built.toJson().contains("\"ts\":1700000000000"),
+                "E-notation is valid JSON that the bot would read back as a different number: "
+                        + built.toJson());
+        assertEquals(timestamp, Payload.parse(built.toJson()).longValue("ts", -1L));
+    }
+
+    @Test
+    @DisplayName("snowflake precision survives a round trip")
+    void snowflakesSurviveARoundTrip() {
+        long snowflake = 1234567890123456789L;
+        Payload parsed = Payload.parse(Payload.builder().put("id", snowflake).build().toJson());
+
+        assertEquals(snowflake, parsed.longValue("id", -1L));
+        assertEquals(String.valueOf(snowflake), parsed.string("id", null));
+    }
+
+    @Test
+    @DisplayName("an out-of-range int is ABSENT, not truncated into a plausible wrong answer")
+    void outOfRangeIntegersAreNotTruncated() {
+        Payload payload = Payload.parse("{\"v\":5000000000}");
+
+        assertNull(payload.optInt("v"),
+                "getAsInt() on a parsed number is a narrowing cast that never complains — this used "
+                        + "to come back as 705032704, a wrong answer indistinguishable from a right "
+                        + "one, and departure D1's nullable queuePosition rests on optInt being "
+                        + "trustworthy");
+        assertEquals(-1, payload.intValue("v", -1));
+        assertEquals(5_000_000_000L, payload.longValue("v", -1L), "but it fits a long perfectly");
+    }
+
+    @Test
+    @DisplayName("an out-of-range long falls back rather than wrapping")
+    void outOfRangeLongsFallBack() {
+        Payload payload = Payload.parse("{\"v\":99999999999999999999999}");
+        assertEquals(-1L, payload.longValue("v", -1L));
+    }
+
+    @Test
+    @DisplayName("optBool and bool are type-strict — a number is not FALSE")
+    void booleanAccessorsAreStrict() {
+        assertNull(Payload.parse("{\"num\":5}").optBool("num"),
+                "answering FALSE for a number defeats the entire absent-versus-value purpose");
+        assertNull(Payload.parse("{\"s\":\"yes\"}").optBool("s"));
+        assertTrue(Payload.parse("{\"s\":\"yes\"}").bool("s", true),
+                "and the fallback is used rather than a confident wrong answer about, say, whether "
+                        + "a module is enabled");
+        assertTrue(Payload.parse("{\"b\":true}").bool("b", false));
+        assertEquals(Boolean.FALSE, Payload.parse("{\"b\":false}").optBool("b"));
+    }
+
+    @Test
+    @DisplayName("string() is deliberately coercive, so a numeric code is still usable")
+    void stringIsCoercive() {
+        assertEquals("135790", Payload.parse("{\"code\":135790}").string("code", null));
+    }
+
+    // ── Immutability across threads ──────────────────────────────────────────
+
+    @Test
+    @DisplayName("mutating the object a payload was built from cannot alter the payload")
+    void adoptedObjectsAreCopiedAtTheBoundary() {
+        JsonObject source = new JsonObject();
+        source.addProperty("mode", "websocket");
+        Payload adopted = Payload.wrap(source);
+
+        source.addProperty("mode", "rcon");
+        source.addProperty("injected", true);
+
+        assertEquals("websocket", adopted.string("mode", null),
+                "every inbound frame takes this path, and the payload it produces is handed to "
+                        + "handler executors on other threads");
+        assertFalse(adopted.has("injected"));
+    }
+
+    @Test
+    @DisplayName("serialising a frame cannot corrupt the shared empty payload")
+    void theEmptySingletonIsNeverLent() {
+        Envelope.of("a", "ping", Payload.empty()).toJson();
+        Envelope.of("b", "pong", Payload.empty()).toJson();
+
+        assertTrue(Payload.empty().isEmpty());
     }
 
     @Test

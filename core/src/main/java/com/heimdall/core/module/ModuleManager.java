@@ -156,7 +156,7 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
                 }
             }
             for (String id : toStop) {
-                stop(modules.get(id));
+                stopQuietly(modules.get(id));
             }
             for (Map.Entry<String, Managed> entry : modules.entrySet()) {
                 if (wanted.contains(entry.getKey())) {
@@ -192,7 +192,7 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
             List<Managed> reversed = new ArrayList<Managed>(modules.values());
             Collections.reverse(reversed);
             for (Managed managed : reversed) {
-                stop(managed);
+                stopQuietly(managed);
             }
             recomputeCapabilities();
         }
@@ -222,6 +222,25 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
                     + "disabled; the rest of the plugin is unaffected", e);
             unwind(managed);
             managed.state = ModuleState.FAILED;
+        }
+    }
+
+    /**
+     * Stops one module without letting its failure reach the modules after it.
+     *
+     * <p>{@link #stop} already contains a module that throws from {@code disable()}, and
+     * {@link TrackedRegistrations#closeAll()} guards each handle individually. This is the outer
+     * belt: anything else that could escape — a handle whose {@code close()} throws something the
+     * inner guard does not catch, a logger that fails — would otherwise abort the loop and leave
+     * every module after this one running while the plugin believes it has shut down.
+     */
+    private void stopQuietly(Managed managed) {
+        try {
+            stop(managed);
+        } catch (RuntimeException e) {
+            logger.error("stopping module '" + managed.module.id() + "' failed; continuing with "
+                    + "the rest", e);
+            managed.state = ModuleState.STOPPED;
         }
     }
 

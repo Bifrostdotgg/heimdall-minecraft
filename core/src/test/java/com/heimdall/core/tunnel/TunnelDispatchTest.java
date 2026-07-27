@@ -14,6 +14,7 @@ import com.heimdall.core.testing.Await;
 import com.heimdall.core.testing.MutableClock;
 import com.heimdall.core.util.Registration;
 import java.util.concurrent.CompletableFuture;
+import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
@@ -157,6 +158,43 @@ class TunnelDispatchTest {
 
         Await.until("the surviving handler to run", () -> hits.contains("second"));
         assertFalse(hits.contains("first"));
+    }
+
+    @Test
+    @DisplayName("(S3) a handler already queued when its registration closed does NOT run")
+    void aClosedRegistrationCancelsWorkAlreadyQueued() {
+        // Dispatch takes a copy-on-write snapshot and then hands each handler to an executor, so
+        // there is a window in which a registration is closed while its task is already in flight.
+        // Holding the task here reproduces that window exactly, rather than hoping to hit it.
+        final List<Runnable> queued = new CopyOnWriteArrayList<Runnable>();
+        final AtomicReference<String> ran = new AtomicReference<String>();
+
+        Registration registration = client.subscribe(
+                "role_sync", envelope -> ran.set("handler ran"), (Executor) queued::add);
+
+        socket.deliver(Envelope.fresh("role_sync", Payload.empty()));
+        assertEquals(1, queued.size(), "the task should be waiting on the executor");
+
+        registration.close();
+        queued.get(0).run();
+
+        assertNull(ran.get(),
+                "a disabled module still reacting to events is exactly what the registration design "
+                        + "exists to prevent, and removal from the list only affects future "
+                        + "dispatches");
+    }
+
+    @Test
+    @DisplayName("a still-open registration's queued handler runs normally")
+    void anOpenRegistrationStillRuns() {
+        final List<Runnable> queued = new CopyOnWriteArrayList<Runnable>();
+        final AtomicReference<String> ran = new AtomicReference<String>();
+        client.subscribe("role_sync", envelope -> ran.set("handler ran"), (Executor) queued::add);
+
+        socket.deliver(Envelope.fresh("role_sync", Payload.empty()));
+        queued.get(0).run();
+
+        assertEquals("handler ran", ran.get());
     }
 
     @Test

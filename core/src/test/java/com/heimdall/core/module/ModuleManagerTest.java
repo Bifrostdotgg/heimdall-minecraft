@@ -232,6 +232,70 @@ class ModuleManagerTest {
         assertTrue(logger.logged(LogLevel.SEVERE, "threw while stopping"));
     }
 
+    @Test
+    @DisplayName("(S8) one registration whose close() throws does not leak the ones behind it")
+    void aThrowingCloseDoesNotStopTheUnwind() {
+        ModuleManager manager = manager(ServerRole.STANDALONE);
+        manager.register(new HeimdallModule() {
+            @Override
+            public String id() {
+                return "messy";
+            }
+
+            @Override
+            public Set<String> capabilities() {
+                return Collections.emptySet();
+            }
+
+            @Override
+            public Set<ServerRole> roles() {
+                return Collections.emptySet();
+            }
+
+            @Override
+            public void enable(ModuleContext context) {
+                // Registered first, so it is unwound LAST — the handle behind the exploding one.
+                context.interceptLogin(attempt -> null, 10);
+                context.observeChat(message -> {
+                });
+            }
+
+            @Override
+            public void disable() {
+            }
+        });
+        manager.reconcile(desire("messy"));
+        assertEquals(1, loginPipeline.size());
+
+        manager.shutdown();
+
+        assertEquals(0, loginPipeline.size());
+        assertEquals(0, chatPipeline.observerCount(),
+                "handles are unwound newest-first, so anything registered early is exactly what a "
+                        + "failure partway through would strand");
+    }
+
+    @Test
+    @DisplayName("(S8) a module that explodes on shutdown does not strand the modules after it")
+    void oneBadModuleDoesNotStrandTheRest() {
+        ModuleManager manager = manager(ServerRole.STANDALONE);
+        RecordingModule first = new RecordingModule("first").registerEverything().failOnDisable();
+        RecordingModule second = new RecordingModule("second").registerEverything();
+        manager.register(first);
+        manager.register(second);
+        manager.reconcile(desire("first", "second"));
+        assertEquals(2, loginPipeline.size());
+
+        manager.shutdown();
+
+        assertEquals(ModuleState.STOPPED, manager.state("first"));
+        assertEquals(ModuleState.STOPPED, manager.state("second"));
+        assertEquals(0, loginPipeline.size(),
+                "shutdown stops in reverse registration order, so a throw from the LAST one to be "
+                        + "stopped must not leave the plugin believing it has shut down while a "
+                        + "module is still gating logins");
+    }
+
     // ── Role eligibility ─────────────────────────────────────────────────────
 
     @Test
