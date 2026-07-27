@@ -29,6 +29,10 @@ under Git Bash on Windows.
 
 ## The matrix
 
+> **`smoke/run.sh --list` is the source of truth.** The `ROWS` array in that script is what CI
+> reads to build its job matrix; the table below is informational and can fall behind. If the two
+> ever disagree, the script wins.
+
 | Row | Image | Server | Java | Why this row |
 | --- | --- | --- | --- | --- |
 | `paper-1.8.8` | `itzg/minecraft-server:2026.7.2-java8` | Paper 1.8.8 | 8 | The floor. Catches anything accidentally compiled or shaded above release 8. |
@@ -83,8 +87,16 @@ problem, and Velocity does write in there (bStats).
 5. Bukkit rows log the disable banner. Velocity has no disable banner in phase 0 (the scaffold
    registers no shutdown listener), so those rows assert the proxy's own `Shutting down the proxy`
    line instead — "no errors" alone would be far too weak, since a proxy killed outright also logs
-   no errors.
+   no errors. **The Velocity rows are therefore boot-only:** they prove the jar loads and the proxy
+   stops cleanly, not that the plugin unloads. Once `:platform-velocity` gains a
+   `ProxyShutdownEvent` listener, those rows assert the disable banner like the rest (there is a
+   `TODO(phase 1)` on the branch in `run.sh`).
 6. No error in the shutdown log is attributable to the plugin.
+
+Before any of the shutdown assertions run, the harness waits for the `docker logs -f` follower to
+drain. Reading the file while the stream is still catching up produces a "missing disable banner"
+that is indistinguishable from `onDisable` genuinely never running — a fixed sleep only makes that
+unlikely, not impossible.
 
 On failure the row prints the tail of the server log and the whole run exits non-zero.
 

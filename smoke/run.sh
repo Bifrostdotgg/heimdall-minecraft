@@ -367,11 +367,17 @@ row_body() {
         dump_log "${log_file}"
         return 1
     fi
-    # Let the log stream flush the final lines before asserting on them.
-    sleep 2
+    # Wait for the log follower to finish draining, rather than sleeping a fixed two seconds and
+    # hoping. Every assertion below greps for lines the server writes on its way out, and reading
+    # the file while the stream is still catching up produces a "missing disable banner" that is
+    # indistinguishable from onDisable genuinely never running.
+    wait_for_log_flush "${ROW_TAIL_PID}" 30
+    ROW_TAIL_PID=""
 
     if [ "${platform}" = "bukkit" ]; then
-        if ! grep -Eq "${DISABLE_PATTERN}" "${log_file}"; then
+        # Polled with a short budget rather than a single grep: on a slow daemon the follower can
+        # exit before the last buffered lines have landed in the file.
+        if ! wait_for_pattern "${log_file}" "${DISABLE_PATTERN}" 30 "the plugin's disable banner"; then
             fail "no disable banner — onDisable did not run, or threw before logging"
             dump_log "${log_file}"
             return 1
@@ -382,8 +388,13 @@ row_body() {
         # own to assert on. "No errors" alone would be far too weak here — a proxy killed outright
         # also logs no errors. Asserting the proxy's OWN shutdown line is what distinguishes a
         # graceful stop, with plugin unloading, from a SIGKILL.
-        if ! grep -Eq "${VELOCITY_SHUTDOWN_PATTERN}" "${log_file}"; then
-            fail "the proxy never logged its shutdown — it was killed rather than stopped, so "
+        #
+        # TODO(phase 1): the Velocity rows are boot-only. Once :platform-velocity registers a
+        # ProxyShutdownEvent listener and logs its own banner, assert DISABLE_PATTERN here exactly
+        # as the Bukkit rows do, and drop this branch to a shared code path.
+        if ! wait_for_pattern "${log_file}" "${VELOCITY_SHUTDOWN_PATTERN}" 30 \
+                "the proxy's own shutdown line"; then
+            fail "the proxy never logged its shutdown — it was killed rather than stopped, so"
             fail "nothing was proven about unloading the plugin"
             dump_log "${log_file}"
             return 1

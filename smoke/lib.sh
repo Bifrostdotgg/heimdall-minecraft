@@ -82,6 +82,22 @@ assert_no_heimdall_errors() {
     pass "no plugin errors during ${phase}"
 }
 
+# Waits for the `docker logs -f` follower to exit, so the captured log is complete.
+#
+# The follower ends by itself once the container stops. Waiting for it is what makes the shutdown
+# assertions safe: grepping while it is still draining can miss the last few lines and report a
+# missing disable banner that was in fact about to arrive. A fixed sleep only makes that unlikely
+# rather than impossible, and the failure it produces is indistinguishable from a real bug.
+wait_for_log_flush() {
+    local pid="$1" timeout="${2:-30}"
+    [ -n "${pid}" ] || return 0
+    local deadline=$(( $(date +%s) + timeout ))
+    while kill -0 "${pid}" 2>/dev/null && [ "$(date +%s)" -lt "${deadline}" ]; do
+        sleep 1
+    done
+    wait "${pid}" 2>/dev/null || true
+}
+
 # Prints the tail of a log with a header, for a failure report.
 dump_log() {
     local file="$1" lines="${2:-120}"
