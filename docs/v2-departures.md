@@ -190,6 +190,122 @@ Dozens of config reads per login, on the login thread.
 caller that saves without loading first cannot silently delete a newer version's settings. The tell
 would otherwise be a config file that quietly lost a field on downgrade.
 
+### D24 — socket callbacks carry a generation, and stale ones are inert
+
+**New in v3.**
+
+Every connection attempt gets a monotonic id; a socket's listener captures it and ignores any
+callback that arrives once it no longer matches.
+
+v2 had two bugs this closes. A late `onClose` from a socket aborted minutes earlier would schedule a
+reconnect that killed the *healthy* socket which had replaced it. And `disconnect()` — a deliberate,
+graceful close — fires `onClose` too, which looked exactly like an unexpected drop, so the client
+immediately reconnected itself; v2 papered over that by destroying its scheduler, which is why its
+reconnect path had "no live scheduler" branches to rebuild one.
+
+### D25 — any inbound frame refreshes liveness, not just pings and pongs
+
+**v2:** `lastPong` moved only for a `ping` or a `pong`.
+**v3:** every parseable inbound frame moves it.
+
+A link that is delivering role syncs is demonstrably alive. Under v2's narrower rule a busy
+connection could still be aborted by its own heartbeat because the bot happened to be too busy to
+run its ping sweep — the client tearing down a connection that was working, on the evidence of a
+timer rather than of the link.
+
+### D26 — the tunnel has its own scheduler, and does not own it
+
+**v2:** created and destroyed a private `heimdall-ws` scheduler inside the WebSocket client, on
+every connect and every disconnect.
+**v3:** `HeimdallExecutors` owns a `heimdall-ws` single-thread scheduler alongside `heimdall-io` and
+`heimdall-sched`; the tunnel borrows it and never shuts it down.
+
+Two separate points. *Owning* it was what forced v2's teardown paths to reconstruct one, and what
+made "disconnect" and "shut down" hard to tell apart. *Separating* it from `heimdall-sched` is the
+new part: both are single-threaded, so sharing would queue the heartbeat behind whatever periodic
+work was running — and a whitelist poll that blocks for its full retry budget is tens of seconds. A
+heartbeat tick that late is indistinguishable, to its own timeout check and to the bot's sweep, from
+a dead link, so the tunnel would abort a healthy socket because a poll was slow.
+
+### D27 — message handlers never run on the socket's reading thread
+
+**v2:** a single `BiConsumer` message handler, invoked inline from the read callback.
+**v3:** a subscription registry; every handler runs on `heimdall-io` or on an executor it named.
+
+v2's role-sync handler made an HTTP call from that callback, so the socket stopped reading for the
+length of a round trip — and the heartbeat check, seeing no traffic, aborted a connection that was
+working perfectly. The consequence to know when writing one: handlers no longer run in wire order
+relative to each other.
+
+### D28 — the reconnect delay is atomic
+
+**v2:** a plain `long`, written by whichever thread noticed the failure and read by another.
+**v3:** an `AtomicLong` inside `ReconnectPolicy`.
+
+The oldest supported hosts run 32-bit JVMs, where a non-volatile `long` read may tear. A torn
+backoff delay is a reconnect scheduled for a duration nobody chose.
+
+### D29 — remote-config version monotonicity is scoped to a connection
+
+**New in v3.**
+
+A `config.push` older than the one in force is ignored (and still acknowledged, so the bot does not
+re-send it forever). But the floor **resets** when a connection negotiates v3, so the first push of
+a session is always applied.
+
+An absolute floor wedges. The disk cache outlives the bot's own counter: a guild document recreated
+bot-side starts counting from 1 again, and a plugin holding a cached version 7 would then reject
+every push it ever received and run on stale config permanently — fixable only by deleting a file on
+the server. The bot is the source of truth and has just stated its version in `identify_ack`, so the
+ordering guarantee is applied where the ordering hazard actually is: within one connection, where
+fire-and-forget frames really can arrive replayed or out of order.
+
+### D30 — modules do not have to clean up after themselves
+
+**v2:** no disable path at all. A feature was "off" because its own code checked a boolean on every
+call; its listeners stayed registered for the life of the server.
+**v3:** every registry a module can reach is reached through its `ModuleContext`, which records what
+it registered, so `ModuleManager.disable(id)` unwinds all of it without knowing what any of it was.
+
+Trusting each module's `disable()` fails the first time somebody adds a listener and forgets, and
+the symptom — a disabled module still gating logins — is one nobody attributes to the module that
+was turned off weeks ago. A module that throws on the way *out* still has its registrations unwound,
+which is the case that justifies the whole mechanism.
+
+### D31 — a module that fails to start is contained, and not retried
+
+**New in v3** (v2 had nothing to fail).
+
+`enable()` throwing unwinds the module's partial registrations, marks it `FAILED`, and leaves the
+rest of the plugin running. It is not retried while it stays in the desired set: it will fail again
+for the same reason, and retrying on every config push turns one severe line into a flood that
+buries the cause. Toggling it off and on in the dashboard clears the state — which is what an
+operator does after fixing the problem anyway.
+
+### D32 — abstain is a third answer, not a synonym for allow
+
+**New in v3** (v2 had no pipeline; each check was a hardcoded step in one method).
+
+A login or chat interceptor returns allow, deny, or abstain. Collapsing abstain into allow means the
+first indifferent check — a module that is switched off, a bypassed player, a check that does not
+apply on this platform — silently vetoes every stricter check behind it, with nothing in any log to
+say so. An interceptor that throws is treated as having abstained: a broken check must neither lock
+a server's whole player base out nor wave them all through.
+
+### D33 — remote-config module entries are accepted flat *and* nested
+
+**New in v3.**
+
+The v3 design specifies `{"enabled": true, "settings": {...}}`. `stub-bot` — the executable copy of
+the bot's wire contract — sends settings flat alongside `enabled`:
+`{"enabled": true, "mode": "websocket"}`. Both are read.
+
+A parser that only understood the nested form would read every flat entry as having no settings, and
+a module would silently run on its defaults while the dashboard showed the operator a value it had
+definitely saved. Declaring one shape correct and letting the other fail silently is the worst
+available outcome, so neither is.
+
+
 ---
 
 ## Structure
@@ -220,6 +336,56 @@ The `BootstrapConfig` → `ApiSettings` adapter lives in `com.heimdall.core.wiri
 second source for the same settings (remote config over the tunnel), which an adapter bolted onto
 `ApiSettings` would have had no room for.
 
+### D34 — core owns a JSON value type, so Gson stays private
+
+**New in v3.**
+
+Gson is `implementation` in core, so it is not on a feature module's compile classpath. Phase 1b is
+the first time core has to hand a module something JSON-shaped — tunnel payloads, and a module's own
+remote-config settings — so `com.heimdall.core.json.Payload` is the one type both speak, and
+`Envelope` lives beside it purely so it can reach `Payload`'s package-private Gson bridge and build
+a frame without serialising and re-parsing a payload that was just constructed.
+
+`Payload.hashCode` is computed rather than delegated: Gson's `JsonPrimitive.equals` compares numbers
+by value while its `hashCode` branches on the concrete `Number` subclass, so a parsed `1` and a built
+`1` are equal and hash differently. Payloads are compared for change detection (D22) and could end
+up as map keys, which is exactly where that inconsistency loses entries.
+
+### D35 — Adventure is core's one `api` dependency
+
+**v2:** section-coded `String`s passed all the way down, re-interpreted per platform at each call
+site.
+**v3:** everything user-visible is a `Component`, rendered once at the edge by
+`com.heimdall.core.text.Msg`.
+
+`Component` is genuinely in core's public signatures — `Msg` returns one, a pipeline `Verdict.deny`
+carries one — so `adventure-api` is declared `api` and core applies `java-library` for it. The legacy
+serializer stays `implementation`: it is how `Msg.legacy` is built, not part of what it promises.
+Every other module keeps a build file where `implementation` is the only option, which is the right
+default. MiniMessage is deliberately absent until the dashboard templates that would produce it
+exist.
+
+### D36 — one `Registration` handle instead of paired add/remove methods
+
+**New in v3.**
+
+Every registry returns an idempotent `AutoCloseable` rather than exposing `removeX(handler)`.
+Unregistering by identity does not work for lambdas — v2's answer was to keep handlers in fields
+purely so they could be removed, or more often to never remove them — and a handle is what makes
+ownership trackable, which is what D30 is built on.
+
+### D37 — the WebSocket library sits behind a core-owned seam
+
+**v2:** `WebSocketClient` was written directly against `java.net.http.WebSocket`.
+**v3:** `TunnelSocket` / `TunnelSocketFactory` / `TunnelSocketListener`, with one small adapter class
+naming nv-websocket-client.
+
+The library was chosen for a constraint that has nothing to do with its API — it is the only mature
+client with no logging facade, and legacy Spigot ships no slf4j — and that constraint could change.
+The seam is also what makes the invariants testable: a real server cannot be made to black-hole a
+connection, error and close simultaneously, or refuse the next four attempts and then accept.
+
+
 ---
 
 ## Deliberate non-departures
@@ -245,3 +411,38 @@ over.
 SnakeYAML discards them at parse time. Saves come from the setup flow, which writes a file that
 either did not exist or that it wrote itself, so this trades a rare cosmetic loss against carrying a
 comment-preserving YAML editor.
+
+### N4 — the client still sends a ping the bot ignores
+
+The bot special-cases exactly `identify`, `pong`, `health` and `console_line`. There is no `ping`
+case, so a **client-initiated** ping gets no reply and does not refresh liveness — it lands where
+`trace.report` does. Client liveness derives entirely from answering the *bot's* pings, or from
+sending `health`, which the sweep does count.
+
+The heartbeat sends one anyway. It is harmless, and it is what the deployed v2 fleet does, so
+removing it would be a wire change made in passing rather than a decision anyone took. Making a
+client ping meaningful is a bot-side capability decision for a later phase; inventing it here would
+produce a plugin that looks healthy in testing and gets reaped in production.
+
+### N5 — a capability id and a module id are not the same string, and the bot cannot currently tell
+
+**Open contract question, deliberately not settled here.**
+
+The client declares versioned capabilities (`whitelist@1`); the bot files module config under an
+unversioned module id (`whitelist`); and the bot narrows its `config.push` to "the modules the client
+declared a capability for" using exact string equality. So nothing matches, and the client receives
+config for no modules at all — silently, because an empty push is a perfectly valid push.
+
+Either the bot matches on the capability's base name or the two identifiers are the same string with
+the version carried elsewhere. That is a bot-side protocol decision for phase 1f. Until then
+`Capabilities.moduleId()` / `Capabilities.version()` name the relationship, and
+`TunnelStubIntegrationTest` pins the current behaviour both ways so the decision is made against an
+executable fact rather than an assumption.
+
+### N6 — a hot module toggle changes the declared capabilities without reconnecting
+
+The capability set the tunnel declares is the union over *enabled* modules, so toggling one changes
+it — but the tunnel deliberately does not reconnect to re-advertise. Dropping a working connection to
+update metadata would make every module toggle a brief outage. The bot learns the new set on the next
+reconnect, and in the meantime it is pushing config for a superset of what is running, which is
+harmless.
