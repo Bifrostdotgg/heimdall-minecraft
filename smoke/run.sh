@@ -338,23 +338,35 @@ row_body() {
         # `stop` over RCON is the server's own shutdown path, so onDisable actually runs. A
         # `docker stop` would work too, but only because itzg traps the signal — asserting the
         # disable line through a code path the plugin will never see in production proves less.
-        # Retried rather than one-shot: the RCON listener can still be a moment behind the ready
-        # line, and a single refused connection would drop us onto the SIGTERM fallback — which,
-        # against a server that is not listening yet, ends in the container being killed a minute
-        # later with no disable banner and no useful diagnosis.
-        log "stopping via rcon-cli"
-        local attempt=0 stopped=0
-        while [ "${attempt}" -lt 5 ]; do
-            if docker exec "${container}" rcon-cli stop >/dev/null 2>&1; then
-                stopped=1
+        #
+        # Readiness and the action are separate commands, and that separation is the point.
+        # Retrying `stop` conflates two outcomes it cannot tell apart: "the RCON listener is not up
+        # yet" and "the stop was accepted, and the connection then dropped because the server is
+        # shutting down". The second is the NORMAL case — the server closes the socket while it
+        # answers, so rcon-cli's exit status after a successful `stop` is not reliable — and a
+        # retry loop around `stop` therefore reports five failures, falls through to SIGTERM
+        # against a server already on its way down, and fails the row. That is what the three red
+        # runs on this branch were.
+        #
+        # So: poll `list`, which is idempotent and answers only once RCON is genuinely serving.
+        # Then issue `stop` exactly once and let wait_for_exit be the assertion.
+        log "waiting for rcon to answer"
+        local attempt=0 ready=0
+        while [ "${attempt}" -lt 10 ]; do
+            if docker exec "${container}" rcon-cli list >/dev/null 2>&1; then
+                ready=1
                 break
             fi
             attempt=$(( attempt + 1 ))
-            warn "rcon-cli stop attempt ${attempt}/5 failed; retrying"
             sleep 3
         done
-        if [ "${stopped}" -ne 1 ]; then
-            warn "rcon-cli never succeeded, falling back to SIGTERM"
+
+        if [ "${ready}" -eq 1 ]; then
+            log "stopping via rcon-cli"
+            # Exit status deliberately ignored: see above. wait_for_exit decides whether it worked.
+            docker exec "${container}" rcon-cli stop >/dev/null 2>&1 || true
+        else
+            warn "rcon never answered, falling back to SIGTERM"
             docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
         fi
     else
