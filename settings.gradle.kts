@@ -10,5 +10,6 @@ include(
     "module-rolesync",
     "module-offenses",
     "module-console",
+    "conformance",
     "app",
 )
