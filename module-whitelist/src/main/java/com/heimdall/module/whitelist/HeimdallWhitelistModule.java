@@ -217,6 +217,20 @@ public final class HeimdallWhitelistModule implements HeimdallModule {
         return live == null ? "whitelist module is not enabled" : live.stats();
     }
 
+    /**
+     * Records a player in the mirror directly.
+     *
+     * <p>Package-private and for tests only: the states worth exercising include "warm mirror, no
+     * bot", which by definition cannot be reached by asking a bot. Production writes to the mirror
+     * only through the login path, where the bot has just vouched for the player.
+     */
+    void recordForTest(java.util.UUID uuid, String username) {
+        WhitelistMirrorService live = mirror;
+        if (live != null) {
+            live.record(uuid, username);
+        }
+    }
+
     /** Runs the pre-warm poll now. What {@code /hd whitelist sync} calls in 1e. Blocking. */
     public void syncNow() {
         WhitelistMirrorService live = mirror;

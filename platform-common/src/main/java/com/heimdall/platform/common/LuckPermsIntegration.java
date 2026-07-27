@@ -220,6 +220,21 @@ final class LuckPermsIntegration implements LuckPermsBridge {
         return cached != null ? cached : api.getUserManager().loadUser(playerUuid).join();
     }
 
+    /**
+     * The groups a user holds, <em>including</em> ones inherited through another group.
+     *
+     * <p>{@code getInheritedGroups} rather than the directly-held nodes. That is v2's behaviour and
+     * is kept deliberately: non-departure <strong>N7</strong> in {@code docs/v2-departures.md} is
+     * about this exact line, and it records the two consequences. An inherited managed group is
+     * never *added* — correct, since granting it would change nothing. The same group, when the
+     * dashboard drops it from the target set, <em>is</em> listed for removal, and removing the
+     * direct node does nothing because the player still inherits it, so the sync logs a removal that
+     * did not take effect.
+     *
+     * <p>N7 also says not to "fix" this without the bot side in the room: diffing against
+     * directly-held nodes changes which groups get written on every sync for every server that uses
+     * group inheritance, which is most of them.
+     */
     private static List<String> groupsOf(User user) {
         List<String> names = new ArrayList<String>();
         for (Group group : user.getInheritedGroups(user.getQueryOptions())) {

@@ -61,6 +61,21 @@ final class BukkitLoginListener implements Listener {
     // deliberate "skip logins another plugin already refused", which is not what it does.
     @EventHandler(priority = EventPriority.LOW)
     public void onPreLogin(AsyncPlayerPreLoginEvent event) {
+        if (event.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED) {
+            // Somebody else has already refused this connection — a ban plugin, an IP-reputation
+            // plugin, an anti-bot. v2 bailed here and v3 must too, and `ignoreCancelled` cannot do
+            // it: AsyncPlayerPreLoginEvent is not Cancellable, so Bukkit never reads that flag for
+            // this event (see the annotation below).
+            //
+            // Running anyway does not change WHETHER they are refused, which is why this is easy to
+            // miss. What it changes is the message: disallow() overwrites the reason unconditionally,
+            // so a banned player would be told they are not whitelisted, with the ban's expiry and
+            // appeal text replaced by ours. The staff member who then gets asked about it has no
+            // idea LiteBans was ever involved.
+            logger.debug(() -> "skipping the whitelist check for " + event.getName()
+                    + ": already refused by something else (" + event.getLoginResult() + ")");
+            return;
+        }
         try {
             Verdict verdict = pipeline.dispatch(attemptFrom(event));
             if (verdict.isDeny()) {

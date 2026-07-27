@@ -304,6 +304,52 @@ class WhitelistLoginOutcomesTest {
     }
 
     @Nested
+    @DisplayName("failure containment")
+    class Containment {
+
+        @Test
+        @DisplayName("an Error still runs apiFallbackMode — it must not fail OPEN on a deny server")
+        void anErrorDoesNotBypassTheFallback(@TempDir Path dir) {
+            try (WhitelistHarness h = WhitelistHarness.standalone(dir)) {
+                h.enableWith(Payload.builder()
+                        .put("prewarmEnabled", false)
+                        .put("apiFallbackMode", "deny")
+                        .build());
+                // A LuckPerms bridge that throws an Error is the realistic shape: an API that moved
+                // between server versions, reached through the group read on the login path.
+                h.platform.withLuckPerms(new com.heimdall.core.platform.LuckPermsBridge() {
+                    @Override
+                    public boolean isAvailable() {
+                        return true;
+                    }
+
+                    @Override
+                    public java.util.concurrent.CompletableFuture<java.util.List<String>>
+                            getPlayerGroups(java.util.UUID playerUuid) {
+                        throw new NoSuchMethodError("net.luckperms.api.Something.gone()");
+                    }
+
+                    @Override
+                    public java.util.concurrent.CompletableFuture<Boolean> setPlayerGroups(
+                            java.util.UUID playerUuid, java.util.List<String> targetGroups,
+                            java.util.List<String> managedGroups) {
+                        return java.util.concurrent.CompletableFuture.completedFuture(Boolean.FALSE);
+                    }
+                });
+
+                Verdict verdict = h.login(WhitelistHarness.ALLOWED, "Steve");
+
+                // Catching only RuntimeException lets the Error out of the interceptor entirely,
+                // and Pipeline treats a thrown interceptor as having abstained — so the login is
+                // ALLOWED. On a deny-configured server that is the operator's policy inverted,
+                // silently, on every login.
+                assertTrue(verdict.isDeny(),
+                        "apiFallbackMode: deny must hold even when the failure is an Error");
+            }
+        }
+    }
+
+    @Nested
     @DisplayName("when the bot cannot be reached")
     class FallbackModes {
 
@@ -367,6 +413,30 @@ class WhitelistLoginOutcomesTest {
                 assertEquals(Verdict.Decision.ALLOW,
                         h.login(WhitelistHarness.ALLOWED, "Steve").decision(),
                         "nor silently lock the server");
+            }
+        }
+
+        @Test
+        @DisplayName("a mirror hit does NOT fire a report while the guild is unresolved")
+        void discoveringGuildDoesNotReportOnMirrorHits(@TempDir Path dir) {
+            try (WhitelistHarness h = WhitelistHarness.unconfigured(dir)) {
+                h.enableWith(settings());
+                // A warm mirror with no guild is not a contrived state: it is every server that
+                // restarts while the bot is down. Seeded through the store directly, because the
+                // usual route to a populated mirror is a bot this harness deliberately does not
+                // have.
+                h.seedMirror(WhitelistHarness.ALLOWED, "Steve");
+
+                assertEquals(Verdict.Decision.ALLOW,
+                        h.login(WhitelistHarness.ALLOWED, "Steve").decision(),
+                        "the mirror is exactly what should carry them through");
+
+                // Without the guard the client builds /api/guilds//minecraft/connection-attempt —
+                // signed, sent, and 404'd — once per returning player.
+                assertTrue(h.logger.logged(com.heimdall.core.log.LogLevel.DEBUG,
+                        "has not resolved its guild yet"), h.logger.records().toString());
+                assertFalse(h.logger.logged(com.heimdall.core.log.LogLevel.WARN, "/api/guilds//"),
+                        "no malformed path may be attempted: " + h.logger.records());
             }
         }
 

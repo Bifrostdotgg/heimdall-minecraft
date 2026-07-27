@@ -56,17 +56,6 @@ import java.util.function.Supplier;
  */
 final class ConnectionAttemptReporter {
 
-    /**
-     * How long the LuckPerms group read may take before the attempt is sent without it.
-     *
-     * <p>v2 blocked on this with no bound at all, on the login thread. A bound is strictly better,
-     * but it is not free: sending an empty group list when the player <em>does</em> have groups is
-     * issue #796 / MC-11 — the bot diffs against nothing and concludes every managed group needs
-     * adding. So the bound is generous enough that only a genuinely stuck storage backend hits it,
-     * and hitting it is a warning rather than a silent empty list.
-     */
-    private static final long GROUP_READ_TIMEOUT_MS = 5000L;
-
     private final HeimdallLogger logger;
     private final ApiClient api;
     private final PlatformFacade platform;
@@ -160,23 +149,33 @@ final class ConnectionAttemptReporter {
         return inFlight.submit(key, new Supplier<CompletableFuture<ConnectionAttemptResult>>() {
             @Override
             public CompletableFuture<ConnectionAttemptResult> get() {
-                // Built inside the supplier so a collapsed caller does not pay for the LuckPerms
-                // read the winner is already doing.
-                ConnectionAttempt attempt = ConnectionAttempt
-                        .builder(login.username(), login.uuid().toString())
-                        .ip(login.ipAddress())
-                        .currentlyWhitelisted(currentlyWhitelisted)
-                        .currentGroups(currentGroups(login))
-                        .build();
-                return api.connectionAttempt(attempt).whenComplete(
-                        new BiConsumer<ConnectionAttemptResult, Throwable>() {
-                            @Override
-                            public void accept(ConnectionAttemptResult result, Throwable failure) {
-                                if (failure == null && result != null) {
-                                    applyRoleSync(login, result);
-                                }
-                            }
-                        });
+                // COMPOSED, not blocked on. An earlier version read the groups with a five-second
+                // get() right here, inside the supplier — which runs on the caller's thread, so the
+                // real worst case was five seconds PLUS the retry budget while awaitCheck's own
+                // bound only covered the second half. The javadoc claimed joinTimeoutMs bounded the
+                // wait and it did not.
+                //
+                // thenCompose keeps the whole thing inside one future, so awaitCheck's timeout is
+                // the true ceiling on everything a joining player waits for. Non-async on purpose:
+                // the continuation builds a request and hands it to ApiClient, which does its own
+                // hop onto heimdall-io, and the conformance rules ban the executor-less *Async
+                // overloads rather than the synchronous stages.
+                return currentGroups(login).thenCompose(groups -> {
+                    ConnectionAttempt attempt = ConnectionAttempt
+                            .builder(login.username(), login.uuid().toString())
+                            .ip(login.ipAddress())
+                            .currentlyWhitelisted(currentlyWhitelisted)
+                            .currentGroups(groups)
+                            .build();
+                    return api.connectionAttempt(attempt);
+                }).whenComplete(new BiConsumer<ConnectionAttemptResult, Throwable>() {
+                    @Override
+                    public void accept(ConnectionAttemptResult result, Throwable failure) {
+                        if (failure == null && result != null) {
+                            applyRoleSync(login, result);
+                        }
+                    }
+                });
             }
         });
     }
@@ -210,23 +209,27 @@ final class ConnectionAttemptReporter {
      * diff and makes no group decisions. Empty on a timeout is the answer that is <em>not</em>
      * honest, so that case is logged.
      */
-    private List<String> currentGroups(LoginAttempt login) {
+    private CompletableFuture<List<String>> currentGroups(LoginAttempt login) {
         LuckPermsBridge bridge = platform.integrations().luckPerms().orElse(null);
         if (bridge == null || !bridge.isAvailable()) {
-            return Collections.emptyList();
+            return CompletableFuture.completedFuture(Collections.<String>emptyList());
         }
         try {
-            return bridge.getPlayerGroups(login.uuid())
-                    .get(GROUP_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            return Collections.emptyList();
-        } catch (Exception slowOrBroken) {
-            logger.warn("could not read " + login.username() + "'s LuckPerms groups within "
-                    + GROUP_READ_TIMEOUT_MS + "ms; sending an empty set, so the bot will diff "
-                    + "against nothing for this login (issue #796 / MC-11): "
-                    + Strings.trimToEmpty(slowOrBroken.getMessage()));
-            return Collections.emptyList();
+            return bridge.getPlayerGroups(login.uuid()).exceptionally(broken -> {
+                // Empty here is not an honest answer, it is a fallback — the bot then diffs against
+                // nothing and concludes every managed group needs adding, which is issue #796 /
+                // MC-11. So it is said out loud rather than passed off as "no groups".
+                logger.warn("could not read " + login.username() + "'s LuckPerms groups; sending an "
+                        + "empty set, so the bot will diff against nothing for this login "
+                        + "(issue #796 / MC-11): " + Strings.trimToEmpty(broken.getMessage()));
+                return Collections.<String>emptyList();
+            });
+        } catch (RuntimeException bridgeRefused) {
+            // The bridge throwing synchronously rather than failing its future. Not a shape
+            // LuckPermsIntegration produces, but a fake or a future implementation might.
+            logger.warn("the LuckPerms bridge refused a group read for " + login.username() + ": "
+                    + Strings.trimToEmpty(bridgeRefused.getMessage()));
+            return CompletableFuture.completedFuture(Collections.<String>emptyList());
         }
     }
 }

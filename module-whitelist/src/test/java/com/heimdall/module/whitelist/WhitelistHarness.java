@@ -184,6 +184,17 @@ final class WhitelistHarness implements AutoCloseable {
         return stats;
     }
 
+    /**
+     * Puts an entry in the mirror without going through the bot.
+     *
+     * <p>For the states a bot cannot produce because there is not one — a server that restarted
+     * during an outage still holding a warm mirror, which is the case the whole pre-warm design
+     * exists for and the one an unconfigured harness cannot otherwise reach.
+     */
+    void seedMirror(String uuid, String username) {
+        module.recordForTest(UUID.fromString(uuid), username);
+    }
+
     /** Runs a login through the pipeline, exactly as a platform listener would. */
     Verdict login(String uuid, String username) {
         return loginPipeline.dispatch(LoginAttempt.builder(UUID.fromString(uuid))

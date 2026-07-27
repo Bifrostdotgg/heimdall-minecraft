@@ -597,6 +597,36 @@ Three details follow from it:
   builds a path out of it, so an empty guild yields `/api/guilds//minecraft/…` — a 404 on every
   endpoint, from a client that believes it is fully configured.
 
+### D60 — an unresolved guild runs the fallback mode; it is not an automatic refusal
+
+**v2:** the login listener checked its guild id and, if it was empty, disallowed with the
+`apiUnavailable` message — unconditionally, whatever `advanced.apiFallbackMode` said.
+**v3:** the same state runs the configured fallback, exactly as an unreachable bot does.
+
+Security-relevant in both directions, so the reasoning matters more than the change.
+
+v2 could afford to refuse, because its guild id came out of a config file: an empty one meant a
+misconfigured server, which is a permanent state an operator has to fix, and refusing everybody is a
+reasonable way to make them fix it. In v3 the guild is *discovered* (D54), so "unresolved" is a
+transient state every server passes through on the way up — and one a restart during a bot outage
+can leave a perfectly healthy server sitting in for minutes. Refusing there would mean a bot
+redeploy locks out a server whose mirror holds the entire whitelist, which is exactly the outage the
+pre-warm design exists to prevent, reintroduced at a different door.
+
+So the state is treated as what it is: the bot cannot be consulted. `apiFallbackMode` decides, and
+its default (`whitelist-only`) serves the mirror. The security properties are then the ones the
+operator chose rather than ones this branch imposed:
+
+- a genuinely fresh server has an empty mirror, so `whitelist-only` refuses everybody anyway — v2's
+  outcome, reached by policy rather than by special case;
+- an operator who wants v2's behaviour exactly sets `deny`, and gets it;
+- `allow` admits everybody, which is what `allow` means and what that operator asked for.
+
+The one thing this must not do is *report* while unresolved. A mirror hit fires a background
+connection-attempt, and with no guild that builds `/api/guilds//minecraft/connection-attempt` — a
+malformed, signed, 404'd request per returning player. The check sits before the report rather than
+after it, and is tested.
+
 ### D55 — the declared capability set is what the build CAN run, not what is running
 
 **New in 1d**, and a correction to v3's own first attempt.
@@ -642,6 +672,17 @@ when there is no client and when the guild is still being discovered, and that d
 made alongside the setup flow in 1e than in passing here. **Prerequisite for 1e:** decide between
 `ModuleContext.api()` returning an `Optional`, and a core-owned gateway that queues or fails calls
 made before the guild resolves. Do not add a fourth nullable constructor argument first.
+
+**There is a live consequence, not only an aesthetic one.** Each module captures the reference it was
+constructed with, once, at registration — before `start()`, and therefore before anything could have
+resolved a guild. On a server that was never set up that reference is `null` forever, so when
+`/hd setup` lands in 1e and configures a server *without a restart*, `/offend` and `/linkdiscord`
+will still refuse: the modules are holding a null client and nothing re-hands them a live one.
+
+Guild discovery does not have this problem, because it reconfigures the single `ApiClient` instance
+in place rather than replacing it — which is the shape the gateway needs. Whatever 1e builds must
+make a module's view of the API survive the server being configured underneath it, and the setup
+flow is not testable end to end until it does.
 
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 

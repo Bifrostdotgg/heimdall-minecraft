@@ -110,7 +110,17 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
             // which is how role sync, the connection history and the join feed all stopped
             // happening for everybody who was already cached. See ConnectionAttemptReporter.
             mirror.refreshUsername(attempt.uuid(), attempt.username());
-            reporter.reportAsync(attempt);
+            if (reporter.isUsable()) {
+                reporter.reportAsync(attempt);
+            } else {
+                // Checked BEFORE firing, not after. Without a guild the client builds
+                // /api/guilds//minecraft/connection-attempt — a malformed path, signed and sent, and
+                // 404'd — once per mirror hit. A server restarting mid-outage with a warm mirror is
+                // exactly the case: every returning player produces one, and none of them can
+                // possibly succeed.
+                logger.debug(() -> "not reporting " + attempt.username() + "'s mirror hit: this "
+                        + "server has not resolved its guild yet");
+            }
             logger.debug(() -> "mirror hit for " + attempt.username());
             return Verdict.allow();
         }
@@ -127,7 +137,16 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
 
         try {
             return decide(current, attempt, reporter.awaitCheck(attempt, false));
-        } catch (RuntimeException failed) {
+        } catch (Throwable failed) {
+            // Throwable, not RuntimeException, and on this path the difference is a security one.
+            // An Error escaping here does not reach some other handler that applies the policy — it
+            // leaves the interceptor entirely, and Pipeline treats an interceptor that threw as
+            // having abstained, so the login is ALLOWED. On a server configured apiFallbackMode:
+            // deny that is precisely inverted: the operator asked to fail closed and a
+            // NoClassDefFoundError fails open instead, silently, on every login.
+            //
+            // The same lesson the login and chat listeners already learned (D43/D44/D45), arriving
+            // where it actually decides something.
             logger.warn("whitelist check failed for " + attempt.username() + ": "
                     + Strings.trimToEmpty(failed.getMessage()));
             return fallback(current, attempt, failed.getMessage());

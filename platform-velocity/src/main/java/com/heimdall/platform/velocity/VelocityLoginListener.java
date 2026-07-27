@@ -62,6 +62,15 @@ final class VelocityLoginListener {
         if (player == null) {
             return;
         }
+        if (!event.getResult().isAllowed()) {
+            // The proxy-side twin of the Bukkit guard: something already refused this connection, and
+            // overwriting its result would replace a ban's reason with ours. PostOrder.FIRST means
+            // this usually runs before anything else, so the case is rarer here than on a backend —
+            // but "rarer" is exactly the kind of path that is never noticed when it is wrong.
+            logger.debug(() -> "skipping the whitelist check for " + player.getUsername()
+                    + ": another plugin has already refused this connection");
+            return;
+        }
         try {
             Verdict verdict = pipeline.dispatch(attemptFrom(player));
             if (!verdict.isDeny()) {

@@ -56,10 +56,18 @@ final class ApiResponses {
      * <ol>
      *   <li>{@code whitelisted && !existingPlayerLink} → allow, and the message is <em>dropped</em>
      *       — it is a welcome-back line, not a kick reason, and v2 nulled it here for that reason.
-     *   <li>{@code existingPlayerLink} → they are let in <em>and</em> shown a code. Note this comes
-     *       before the plain {@code pendingAuth} branch and carries {@code whitelisted: true},
-     *       which is the combination that looks contradictory until you know it means "on the
-     *       server whitelist, not yet linked to Discord".
+     *   <li>{@code existingPlayerLink} → {@code SHOW_AUTH_CODE}, and this branch comes <em>before</em>
+     *       the plain {@code pendingAuth} one. It carries {@code whitelisted: true}, which is the
+     *       combination that looks contradictory until you know it means "on the server whitelist,
+     *       not yet linked to Discord".
+     *       <p><strong>It is a refusal, not an admission.</strong> An earlier version of this
+     *       comment said the player is let in and shown a code; that is wrong, and v2's
+     *       {@code PaperLoginListener} is the authority — it disallows with the code in the kick
+     *       message for every {@code show_auth_code} action, this branch included. Which is the only
+     *       thing that works: a code shown in chat to somebody who is joining is a code they cannot
+     *       read, and admitting them would also mean caching them (see MC-4). The interceptor has
+     *       always done the right thing; this sentence did not, which is departure D51's failure
+     *       shape — a comment asserting a behaviour nobody checked.
      *   <li>{@code pendingAuth} → show the code, do not let them in.
      *   <li>{@code pendingApproval} → linked, waiting.
      *   <li>otherwise → deny.

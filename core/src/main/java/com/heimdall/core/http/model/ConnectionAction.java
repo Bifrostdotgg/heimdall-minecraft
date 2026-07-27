@@ -15,7 +15,19 @@ public enum ConnectionAction {
     /** Let them in, say nothing. */
     ALLOW,
 
-    /** Show them a six-digit code. May be a denial (pending auth) or an allow with an offer to link. */
+    /**
+     * Refuse them, and put a six-digit link code in the kick message.
+     *
+     * <p>Both shapes that reach this — {@code pendingAuth} and {@code existingPlayerLink} — are
+     * refusals, even though the second carries {@code whitelisted: true}. An earlier version of this
+     * comment called that one "an allow with an offer to link"; it is not, and v2 is the authority:
+     * its login listener disallows on {@code show_auth_code} without distinguishing the two.
+     *
+     * <p>It could not sensibly work the other way. The code is delivered in the kick screen because
+     * a player who is admitted has no reason to read chat, and admitting them would additionally
+     * mean caching them — which is the lockout in issue #796 / MC-4, where the next attempt is a
+     * mirror hit and the code is never shown again.
+     */
     SHOW_AUTH_CODE,
 
     /** Linked, waiting on staff approval or a scheduled auto-whitelist. */
