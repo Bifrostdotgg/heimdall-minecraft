@@ -165,7 +165,26 @@ public final class Log4jConsoleTap implements AutoCloseable {
         });
     }
 
-    /** Detaches the appender and drops anything buffered. Idempotent. */
+    /**
+     * Detaches the appender and drops anything buffered. Idempotent.
+     *
+     * <h2>The appender is removed but deliberately never stopped</h2>
+     *
+     * <p>That looks like a leak and is the opposite. On a server with async loggers — Paper 1.16.5
+     * and every version since — log events are queued and delivered on a background thread, so an
+     * event that entered the ring buffer <em>before</em> the appender was removed can be delivered
+     * after. Log4j's {@code AppenderControl} then finds a stopped appender and its status logger
+     * prints {@code ERROR Attempted to append to non-started appender HeimdallConsoleTap-N} — an
+     * ERROR line, in the server's log, naming Heimdall, during shutdown, caused by nothing being
+     * wrong. It failed the smoke matrix's own error check, which is exactly the outcome the check
+     * exists to produce for a real fault.
+     *
+     * <p>Removing without stopping closes that window: {@code LoggerConfig.removeAppender} does not
+     * stop the appender, so anything still in flight arrives at a started appender that discards it
+     * (the taps are cleared above) and nothing is logged. An {@link AbstractAppender} that is never
+     * stopped holds no resources — no thread, no handle, no buffer beyond the queue this method has
+     * just emptied — so there is nothing left to release.
+     */
     @Override
     public synchronized void close() {
         AbstractAppender attached = this.appender;
@@ -175,14 +194,11 @@ public final class Log4jConsoleTap implements AutoCloseable {
         taps.clear();
         queue.clear();
         queued.set(0);
-        if (attached == null) {
+        if (attached == null || root == null) {
             return;
         }
         try {
-            if (root != null) {
-                root.removeAppender(appenderName);
-            }
-            attached.stop();
+            root.removeAppender(appenderName);
         } catch (Throwable ignored) {
             // Detaching is best-effort. An appender left attached with no taps discards every line
             // immediately, which is inert — a thrown exception during plugin disable is not.
