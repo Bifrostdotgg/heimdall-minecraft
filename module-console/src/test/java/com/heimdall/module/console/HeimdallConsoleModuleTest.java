@@ -15,6 +15,7 @@ import com.heimdall.core.platform.LogLine;
 import com.heimdall.core.remoteconfig.ConfigDocument;
 import com.heimdall.core.remoteconfig.RemoteConfig;
 import com.heimdall.core.testing.FakePlatform;
+import com.heimdall.core.testing.RecordingTunnelBus;
 import com.heimdall.core.tunnel.Capabilities;
 import java.nio.file.Path;
 import java.util.Collections;
@@ -111,9 +112,9 @@ class HeimdallConsoleModuleTest {
 
         List<RecordingTunnelBus.Sent> sent = tunnel.sent();
         assertEquals(1, sent.size());
-        assertEquals("console_line", sent.get(0).type);
+        assertEquals("console_line", sent.get(0).type());
 
-        List<Payload> lines = sent.get(0).payload.children("lines");
+        List<Payload> lines = sent.get(0).payload().children("lines");
         assertEquals(2, lines.size());
         assertEquals(1000L, lines.get(0).longValue("ts", -1));
         assertEquals("INFO", lines.get(0).string("level", ""));
@@ -136,13 +137,13 @@ class HeimdallConsoleModuleTest {
         module.flush();
         List<RecordingTunnelBus.Sent> afterFirst = tunnel.sent();
         assertEquals(1, afterFirst.size());
-        assertEquals(200, afterFirst.get(0).payload.children("lines").size(),
+        assertEquals(200, afterFirst.get(0).payload().children("lines").size(),
                 "v2 parity: MAX_BATCH_SIZE is 200");
 
         module.flush();
         List<RecordingTunnelBus.Sent> afterSecond = tunnel.sent();
         assertEquals(2, afterSecond.size());
-        assertEquals(50, afterSecond.get(1).payload.children("lines").size(),
+        assertEquals(50, afterSecond.get(1).payload().children("lines").size(),
                 "the 50 lines left over from the first flush must not be dropped");
     }
 
@@ -195,7 +196,7 @@ class HeimdallConsoleModuleTest {
 
         List<RecordingTunnelBus.Sent> sent = tunnel.sent();
         assertEquals(1, sent.size());
-        List<Payload> lines = sent.get(0).payload.children("lines");
+        List<Payload> lines = sent.get(0).payload().children("lines");
         assertEquals(1, lines.size(), "the disconnected line must not be replayed alongside this one");
         assertEquals("survives", lines.get(0).string("msg", ""));
     }
@@ -230,7 +231,7 @@ class HeimdallConsoleModuleTest {
 
         List<RecordingTunnelBus.Sent> sent = tunnel.sent();
         assertEquals(1, sent.size());
-        assertEquals(1, sent.get(0).payload.children("lines").size(),
+        assertEquals(1, sent.get(0).payload().children("lines").size(),
                 "a doubled subscription would have delivered this one line to two live consumers");
     }
 

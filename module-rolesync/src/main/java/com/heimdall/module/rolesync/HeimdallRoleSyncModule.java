@@ -4,6 +4,7 @@ import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.http.model.RoleSyncDirective;
 import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
+import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.tunnel.Capabilities;
 import java.util.Collections;
 import java.util.Set;
@@ -89,7 +90,7 @@ import java.util.UUID;
  * cancels deferred join syncs, which live in the <em>server's</em> scheduler and are therefore the
  * one thing the tracked registrations do not cover.
  */
-public final class HeimdallRoleSyncModule implements HeimdallModule {
+public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSink {
 
     /** The module's stable identifier, used for config keys and logging. */
     public static final String ID = "rolesync";
@@ -158,6 +159,7 @@ public final class HeimdallRoleSyncModule implements HeimdallModule {
      * @param username their name, used for log lines
      * @param directive the {@code roleSync} block, never pre-collapsed to a boolean
      */
+    @Override
     public void applyOnJoin(UUID uuid, String username, RoleSyncDirective directive) {
         RoleSyncApplier running = this.applier;
         if (running == null) {

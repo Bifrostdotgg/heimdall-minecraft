@@ -13,6 +13,7 @@ import com.heimdall.core.wiring.HeimdallRuntime;
 import com.heimdall.platform.bukkit.adapter.BukkitAdapters;
 import com.heimdall.platform.bukkit.adapter.TickSource;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
+import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.TunnelSpiService;
 import java.io.File;
 import org.bukkit.Bukkit;
@@ -114,6 +115,10 @@ final class BukkitBootstrap {
                 .healthSource(new BukkitHealthSource(ticks))
                 .bedrockIdentityProvider(FloodgateIdentityProvider.create())
                 .build();
+
+        // Between build() and start(), which is the gap the runtime leaves open for exactly this:
+        // modules must be registered before the first reconcile, and start() is what runs it.
+        HeimdallModules.registerAll(runtime);
 
         registerListeners();
         registerCommand(role);

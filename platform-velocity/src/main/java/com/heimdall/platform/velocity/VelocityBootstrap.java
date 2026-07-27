@@ -8,6 +8,7 @@ import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.wiring.HeimdallRuntime;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
+import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.TunnelSpiService;
 import com.velocitypowered.api.command.CommandMeta;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -95,6 +96,11 @@ final class VelocityBootstrap {
                 .healthSource(new VelocityHealthSource(proxy))
                 .bedrockIdentityProvider(FloodgateIdentityProvider.create())
                 .build();
+
+        // Between build() and start(), like the Bukkit side and for the same reason: the first
+        // reconcile happens inside start(), and a module registered after it sits STOPPED until the
+        // next config push.
+        HeimdallModules.registerAll(runtime);
 
         registerListeners();
         registerCommand(role);

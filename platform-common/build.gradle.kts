@@ -8,6 +8,17 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":api"))
 
+    // The shipped feature modules, so HeimdallModules can name them.
+    //
+    // This is the only place in the build where the module set is written down, and it is here
+    // because :platform-common is the one project both entry points already depend on. :app is the
+    // assembler and depends on the platform modules, so it cannot be the answer; core must not
+    // depend on features at all.
+    implementation(project(":module-whitelist"))
+    implementation(project(":module-rolesync"))
+    implementation(project(":module-offenses"))
+    implementation(project(":module-console"))
+
     // Both optional at runtime, both reached only after a guarded probe, neither shipped.
     //
     // net.luckperms:api is genuinely platform-neutral — it is the same artifact on Bukkit and on

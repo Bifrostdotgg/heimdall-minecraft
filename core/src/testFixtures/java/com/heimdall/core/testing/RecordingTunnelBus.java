@@ -112,16 +112,20 @@ public final class RecordingTunnelBus implements TunnelBus {
         return delivered;
     }
 
-    /** Says the link is down, which is what the console module's drain-and-discard turns on. */
-    public RecordingTunnelBus disconnected() {
-        this.connected = false;
+    /** Sets whether the link is up. What the console module's drain-and-discard branches on. */
+    public RecordingTunnelBus connected(boolean value) {
+        this.connected = value;
         return this;
+    }
+
+    /** Says the link is down. */
+    public RecordingTunnelBus disconnected() {
+        return connected(false);
     }
 
     /** Says the link is up again. */
     public RecordingTunnelBus reconnected() {
-        this.connected = true;
-        return this;
+        return connected(true);
     }
 
     public RecordingTunnelBus mode(ProtocolMode value) {
