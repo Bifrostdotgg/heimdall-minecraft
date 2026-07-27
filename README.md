@@ -346,18 +346,33 @@ See the main Heimdall documentation for bot setup instructions.
 
 ### Building from Source
 
+**Prerequisite: a JDK 21.** Gradle 8.14 does not run on JDK 25+, and the build
+targets Java 8 bytecode via toolchains, so 21 is what you need installed — not
+whatever your `JAVA_HOME` happens to point at. `gradle/gradle-daemon-jvm.properties`
+pins the daemon to 21, so Gradle will find a detected JDK 21 on its own and tell
+you clearly if there is not one.
+
 ```bash
 git clone https://github.com/Bifrostdotgg/heimdall-minecraft.git
 cd heimdall-minecraft
-mvn clean package
+./gradlew build
 ```
 
-The compiled JAR will be in `target/heimdall-whitelist-X.X.X.jar`.
+The shipping JAR is `app/build/libs/heimdall-whitelist-X.X.X.jar`. It is a single
+shadow jar that runs on Velocity, Paper and Spigot 1.8.8+.
 
-The plugin version has a single source of truth: the `<version>` in `pom.xml`.
-The `templating-maven-plugin` generates `BuildConstants.VERSION` from it, and
-`plugin.yml` reads it via resource filtering — so bumping the POM (or releasing a
-`vX.Y.Z` tag, which sets the POM) updates every version reference at once.
+`./gradlew build` is the full gate, not just a compile: it builds every module at
+its own bytecode level, runs the unit tests, runs the ArchUnit conformance rules
+in `:conformance`, and then inspects the produced jar (`:app:verifyShadowJar`) for
+too-new bytecode, unrelocated dependencies and mismatched plugin descriptors.
+
+The plugin version has a single source of truth: `version` in `gradle.properties`.
+The build generates `BuildConstants.VERSION` from it, substitutes it into
+`plugin.yml`, and the Velocity annotation processor writes it into
+`velocity-plugin.json`. Release builds override it on the command line
+(`./gradlew build -Pversion=3.0.0`), which is what the tag-triggered release
+workflow does — so the tag, the jar name and every in-jar version reference cannot
+drift apart.
 
 ### API Endpoints Used
 

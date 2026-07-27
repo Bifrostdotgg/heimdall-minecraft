@@ -1,3 +1,4 @@
+import com.heimdall.build.ConformanceScanArgs
 import org.gradle.api.attributes.LibraryElements
 import org.gradle.api.attributes.Usage
 
@@ -61,18 +62,15 @@ dependencies {
     testImplementation(libs.adventure.platform.bukkit)
 }
 
+// A `Configuration` cannot be carried into task execution under the
+// configuration cache; a FileCollection can, so the resolution is wrapped once
+// here and only the collection is captured below.
+val scannedClassDirs: FileCollection = files(scannedClasses)
+val scannedModuleNames: String = scannedProjects.joinToString(",") { it.name }
+
 tasks.test {
-    inputs.files(scannedClasses).withPropertyName("scannedClasses")
-    val classDirs = scannedClasses
-    val moduleNames = scannedProjects.map { it.name }
-    doFirst {
-        // Passed as directories rather than letting ArchUnit scan the classpath:
-        // the import is then exactly the set of modules derived from the project
-        // graph, and the presence guard in the test can hold it to that.
-        systemProperty(
-            "heimdall.conformance.classDirs",
-            classDirs.files.joinToString(File.pathSeparator),
-        )
-        systemProperty("heimdall.conformance.moduleNames", moduleNames.joinToString(","))
-    }
+    // Passed as directories rather than letting ArchUnit scan the classpath: the
+    // import is then exactly the set of modules derived from the project graph,
+    // and the presence guard in the test can hold it to that.
+    jvmArgumentProviders.add(ConformanceScanArgs(scannedClassDirs, scannedModuleNames))
 }
