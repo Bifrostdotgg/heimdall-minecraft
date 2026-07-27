@@ -33,6 +33,31 @@ STOP_TIMEOUT="${SMOKE_STOP_TIMEOUT:-120}"
 RCON_TIMEOUT="${SMOKE_RCON_TIMEOUT:-120}"
 WORK_ROOT="${SCRIPT_DIR}/.work"
 
+# Containers must not outlive an interrupted run.
+#
+# run_row removes the container it started, but only on the path where row_body returns. Ctrl-C, or
+# CI cancelling a job, kills the shell somewhere else entirely — and what is left behind is a
+# Minecraft server holding a port and a couple of gigabytes, which the next run then collides with
+# and misreports as a failure to start. The trap names the container the current row created; it is
+# set once here and the variable is what changes per row.
+CURRENT_CONTAINER=""
+cleanup_on_signal() {
+    local signal="$1"
+    if [ -n "${CURRENT_CONTAINER}" ]; then
+        warn "interrupted (${signal}) — removing ${CURRENT_CONTAINER}"
+        docker rm -f "${CURRENT_CONTAINER}" >/dev/null 2>&1 || true
+    fi
+    if [ -n "${ROW_TAIL_PID:-}" ]; then
+        kill "${ROW_TAIL_PID}" 2>/dev/null || true
+    fi
+    # Conventional exit status for a signal, so a CI runner reports "cancelled" rather than a
+    # smoke failure that never happened.
+    trap - INT TERM
+    kill -s "${signal}" "$$"
+}
+trap 'cleanup_on_signal INT' INT
+trap 'cleanup_on_signal TERM' TERM
+
 # The plugin's own banners. Change the text in the plugin and here, in one place.
 ENABLE_PATTERN='Heimdall v[0-9][^ ]* enabled'
 DISABLE_PATTERN='Heimdall v[0-9][^ ]* shutting down'
@@ -239,6 +264,13 @@ selftest() {
         "[13:49:18 INFO]: Thread RCON Client /0:0:0:0:0:0:0:1 shutting down" \
         no "runner kill vs the RCON thread's own shutdown line" || failures=$((failures + 1))
 
+    # The console-stop fallback path, which no green run ever executes: it only runs when RCON never
+    # answers, and on a healthy row RCON always does. So its two failure shapes are pinned here
+    # instead — the runner-kill signature it exists to avoid producing, and the disable banner that
+    # a successful console stop still yields.
+    expect_match "${RUNNER_KILL_PATTERN}"         "[13:49:18 ERROR]: mc-server-runner  Failed to stop using rcon-cli"         yes "console fallback: what the harness must NOT cause" || failures=$((failures + 1))
+    expect_match "${DISABLE_PATTERN}"         "[13:50:13 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down"         yes "console fallback: a console stop still runs the shutdown handler"         || failures=$((failures + 1))
+
     # The rows themselves have to be well-formed, since a typo in a 6-field record would otherwise
     # surface as a confusing docker error many minutes into a run.
     local row name image type version platform memory
@@ -305,6 +337,8 @@ run_row() {
     ROW_WORK="${WORK_ROOT}/${ROW_NAME}"
     ROW_LOG="${ROW_WORK}/server.log"
     ROW_TAIL_PID=""
+    # What the signal trap removes if this run is interrupted.
+    CURRENT_CONTAINER="${ROW_CONTAINER}"
 
     local rc=0
     row_body || rc=$?
@@ -318,6 +352,7 @@ run_row() {
     else
         log "SMOKE_KEEP=1 — container ${ROW_CONTAINER} and ${ROW_WORK} left in place"
     fi
+    CURRENT_CONTAINER=""
     return "${rc}"
 }
 
@@ -330,8 +365,14 @@ row_body() {
 
     docker rm -f "${container}" >/dev/null 2>&1 || true
     rm -rf "${work}"
-    mkdir -p "${work}/plugins"
-    cp "${jar}" "${work}/plugins/"
+    # Checked explicitly. `set -e` does not apply inside a function whose result is tested — and
+    # row_body's is, by `row_body || rc=$?` — so a failed cp here would otherwise sail on and
+    # surface as "the plugin's enable banner never appeared", which is a plugin-shaped verdict for
+    # a harness-shaped problem.
+    if ! mkdir -p "${work}/plugins" || ! cp "${jar}" "${work}/plugins/"; then
+        fail "HARNESS: could not stage the jar into ${work}/plugins"
+        return 1
+    fi
 
     # Deliberately no `--rm`: it removes the container the instant it exits, taking the logs with
     # it — which is exactly when a shutdown assertion needs them. Cleanup is explicit instead.
@@ -385,7 +426,37 @@ row_body() {
         )
     fi
 
-    docker "${docker_args[@]}" "${image}" >/dev/null
+    if ! docker "${docker_args[@]}" "${image}" >/dev/null; then
+        fail "HARNESS: docker run failed for ${name}"
+        return 1
+    fi
+
+    # Prove the bind mount is actually visible inside the container before the server looks for it.
+    #
+    # This is not paranoia. Under a VM-backed daemon — Podman on Windows or macOS, Docker Desktop —
+    # the host directory reaches the container through a filesystem share, and a file written on the
+    # host moments earlier can be absent on the first read inside the VM. What that produces is not
+    # a missing plugin: the server starts loading a jar whose entries are not all there yet and dies
+    # with ClassNotFoundException, which reads exactly like a broken shaded jar. It vanishes on
+    # retry, which is the worst possible property for a failure to have.
+    local mount_path="/plugins"
+    [ "${platform}" = "velocity" ] && mount_path="/server/plugins"
+    local jar_name
+    jar_name="$(basename "${jar}")"
+    local visible=0 mount_deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "${mount_deadline}" ]; do
+        if timeout 15 docker exec "${container}" test -s "${mount_path}/${jar_name}" 2>/dev/null; then
+            visible=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "${visible}" -ne 1 ]; then
+        fail "HARNESS: ${jar_name} never became visible at ${mount_path} inside the container —"
+        fail "the bind mount did not propagate, so nothing has been proven about the plugin"
+        dump_log "${log_file}"
+        return 1
+    fi
 
     # Stream to a file from the start. `docker logs` after the fact would do for a container we
     # keep, but streaming means the log survives even if the container is lost, and it lets the
@@ -444,9 +515,10 @@ row_body() {
         # which is the exact failure mode the self-test was written to prevent, one level up.
         local hd_before hd_after hd_deadline
         hd_before="$(grep -Ec "${COMMAND_PATTERN}" "${log_file}" || true)"
-        # -u 1000: the pipe is owned by the server's user, and mc-send-to-console refuses outright
-        # for anybody else. `docker exec` defaults to root under rootless Podman.
-        if ! docker exec -u 1000 "${container}" mc-send-to-console hd >/dev/null 2>&1; then
+        # docker_exec runs as the server's own uid (derived, not assumed) and imposes a wall-clock
+        # bound: the pipe is owned by that user and mc-send-to-console refuses outright for anybody
+        # else, while `docker exec` defaults to root under rootless Podman.
+        if ! docker_exec "${container}" 20 mc-send-to-console hd >/dev/null 2>&1; then
             fail "could not type on the server console — CREATE_CONSOLE_IN_PIPE or the exec user"
             dump_log "${log_file}"
             return 1
@@ -466,6 +538,16 @@ row_body() {
             return 1
         fi
     fi
+
+    # Velocity registers its command with the proxy's own command manager, which lists it in the
+    # reply to `help`. There is no console pipe on the proxy image, so this reads the boot log
+    # instead: Velocity logs nothing about plugin commands, so the assertion is the enable banner
+    # having appeared at all — the registration happens on the same path, immediately before it, and
+    # a throw there would have been caught and logged as an enable failure.
+    #
+    # Deliberately weaker than the Bukkit check, and said out loud rather than dressed up. Proving
+    # /hdp answers needs a client connection, which is the same missing capability as the chat test
+    # in D43 — TODO(1d): assert both from one headless-client row.
 
     # ── Graceful stop ────────────────────────────────────────────────────────────────────────
     if [ "${platform}" = "bukkit" ]; then
@@ -493,7 +575,7 @@ row_body() {
         log "waiting for rcon to answer (budget ${RCON_TIMEOUT}s)"
         local rcon_deadline=$(( $(date +%s) + RCON_TIMEOUT )) ready=0
         while [ "$(date +%s)" -lt "${rcon_deadline}" ]; do
-            if docker exec "${container}" rcon-cli list >/dev/null 2>&1; then
+            if timeout 20 docker exec "${container}" rcon-cli list >/dev/null 2>&1; then
                 ready=1
                 break
             fi
@@ -503,7 +585,7 @@ row_body() {
         if [ "${ready}" -eq 1 ]; then
             log "stopping via rcon-cli"
             # Exit status deliberately ignored: see above. wait_for_exit decides whether it worked.
-            docker exec "${container}" rcon-cli stop >/dev/null 2>&1 || true
+            timeout 30 docker exec "${container}" rcon-cli stop >/dev/null 2>&1 || true
         else
             # The console pipe is the next-best graceful path. The itzg images run the server
             # behind a named pipe wired to its stdin, and mc-send-to-console types into it — so
@@ -512,7 +594,7 @@ row_body() {
             # just spent the whole budget failing), give up, and SIGKILL the server — destroying
             # exactly the shutdown this row exists to observe.
             warn "rcon never answered within ${RCON_TIMEOUT}s; sending 'stop' on the server console"
-            if ! docker exec -u 1000 "${container}" mc-send-to-console stop >/dev/null 2>&1; then
+            if ! docker_exec "${container}" 20 mc-send-to-console stop >/dev/null 2>&1; then
                 warn "console send failed too, falling back to SIGTERM"
                 docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
             fi
@@ -534,6 +616,13 @@ row_body() {
     wait_for_log_flush "${ROW_TAIL_PID}" 30
     ROW_TAIL_PID=""
 
+    # Both shutdown assertions below are greps over the whole captured log, not a scan from wherever
+    # the previous one matched, so they do not care which line the server wrote first. That matters
+    # on the proxy: Velocity's own "Shutting down the proxy" and Heimdall's disable banner are
+    # emitted by different components during the same teardown, and their order is not a contract.
+    # A harness that required one before the other would fail a perfectly good shutdown for a
+    # reason nobody could act on.
+    #
     # Velocity only, and still worth checking now that the plugin has a banner of its own: the
     # proxy's line is what distinguishes a graceful stop from a proxy killed part-way through
     # teardown. "No errors" would be weaker still — a SIGKILL logs nothing at all.

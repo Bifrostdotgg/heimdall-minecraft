@@ -39,6 +39,42 @@ wait_for_pattern() {
     return 1
 }
 
+# Every `docker exec` in this harness, with a wall-clock bound.
+#
+# An exec that hangs hangs the whole row until CI's job timeout kills it, and the report is then a
+# job that "timed out" with no indication of which command never came back. The docker CLI has no
+# per-exec timeout of its own, so it is imposed here. `timeout` is in coreutils and in Git Bash.
+#
+# The uid is derived rather than assumed: mc-send-to-console refuses to run as anybody but the
+# server's user, and hard-coding 1000 would break silently on an image that changes it.
+docker_exec() {
+    local container="$1" seconds="$2"
+    shift 2
+    timeout "${seconds}" docker exec -u "$(container_uid "${container}")" "${container}" "$@"
+}
+
+# The uid the server process runs as, cached per container. Falls back to 1000, which is what every
+# itzg image uses today — a wrong guess produces the same refusal as no guess at all.
+container_uid() {
+    local container="$1"
+    local cached_var="SMOKE_UID_${container//[^A-Za-z0-9]/_}"
+    local cached="${!cached_var:-}"
+    if [ -n "${cached}" ]; then
+        printf '%s' "${cached}"
+        return 0
+    fi
+    local uid
+    uid="$(docker inspect -f '{{.Config.User}}' "${container}" 2>/dev/null || true)"
+    # Config.User can be empty (image runs as root and drops privileges itself, which is what the
+    # itzg images do), a name, or uid:gid. Only a bare numeric uid is usable directly.
+    case "${uid}" in
+        ''|*[!0-9]*) uid=1000 ;;
+    esac
+    printf -v "${cached_var}" '%s' "${uid}"
+    export "${cached_var}"
+    printf '%s' "${uid}"
+}
+
 # Waits for a container to stop running. Returns 1 on timeout.
 wait_for_exit() {
     local container="$1" timeout="$2"
