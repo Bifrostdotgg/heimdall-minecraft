@@ -60,7 +60,7 @@ public final class FakePlatform implements PlatformFacade {
     private final CopyOnWriteArrayList<Consumer<LogLine>> consoleTaps =
             new CopyOnWriteArrayList<Consumer<LogLine>>();
     private final RecordingCommands commands = new RecordingCommands();
-    private final List<Runnable> deferred = Collections.synchronizedList(new ArrayList<Runnable>());
+    private final List<Deferred> deferred = Collections.synchronizedList(new ArrayList<Deferred>());
 
     private volatile LuckPermsBridge luckPerms;
     private volatile BedrockIdentityProvider floodgate = BedrockIdentityProvider.NONE;
@@ -124,13 +124,13 @@ public final class FakePlatform implements PlatformFacade {
 
     /** Runs everything {@link #deferringLaterTasks()} queued, oldest first. */
     public int runDeferred() {
-        List<Runnable> due;
+        List<Deferred> due;
         synchronized (deferred) {
-            due = new ArrayList<Runnable>(deferred);
+            due = new ArrayList<Deferred>(deferred);
             deferred.clear();
         }
-        for (Runnable task : due) {
-            task.run();
+        for (Deferred task : due) {
+            task.task.run();
         }
         return due.size();
     }
@@ -138,6 +138,35 @@ public final class FakePlatform implements PlatformFacade {
     /** How many {@code runLater} tasks are waiting. */
     public int deferredCount() {
         return deferred.size();
+    }
+
+    /**
+     * The delays the waiting tasks were scheduled with, oldest first.
+     *
+     * <p>Recorded because a module's choice of delay is otherwise structurally untestable: without
+     * it, a two-second defer and a fifty-millisecond one are the same observation, so a test can
+     * prove that something was deferred but never that it was deferred for the right reason.
+     */
+    public List<Long> deferredDelays() {
+        List<Long> delays = new ArrayList<Long>();
+        synchronized (deferred) {
+            for (Deferred task : deferred) {
+                delays.add(Long.valueOf(task.delayMs));
+            }
+        }
+        return Collections.unmodifiableList(delays);
+    }
+
+    /** One task {@code runLater} was asked to defer, and how long for. */
+    private static final class Deferred {
+
+        private final Runnable task;
+        private final long delayMs;
+
+        Deferred(Runnable task, long delayMs) {
+            this.task = task;
+            this.delayMs = delayMs;
+        }
     }
 
     /** Feeds a line to every attached console tap, as the server's logging backend would. */
@@ -248,11 +277,12 @@ public final class FakePlatform implements PlatformFacade {
                     task.run();
                     return Registration.NONE;
                 }
-                deferred.add(task);
+                final Deferred pending = new Deferred(task, delayMs);
+                deferred.add(pending);
                 return Registration.once(new Runnable() {
                     @Override
                     public void run() {
-                        deferred.remove(task);
+                        deferred.remove(pending);
                     }
                 });
             }
