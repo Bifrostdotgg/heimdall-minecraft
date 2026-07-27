@@ -92,11 +92,20 @@ problem, and Velocity does write in there (bStats).
    reaches a server not yet reading stdin, and the row dies a minute later on "Took too long, so
    killing server process". That is a flake, not a finding, and it cost one CI run to learn.
 3. No error in the boot log is attributable to the plugin.
-3a. Bukkit rows: `/hd` over RCON answers with the version line. A `commands:` block in `plugin.yml`
-   that the entry point never claims yields "Unknown command" with nothing in any log to say why,
-   and the plugin loads perfectly either way. Retried a few times, unlike `stop`, because it is
-   read-only and idempotent and legacy RCON drops the odd connection — the 1.8.8 row answered
-   `list` and then had the very next call reset by peer.
+3a. Bukkit rows: `/hd`, typed on the server console, answers with the version line. A `commands:`
+   block in `plugin.yml` that the entry point never claims yields "Unknown command" with nothing in
+   any log to say why, and the plugin loads perfectly either way.
+
+   Two details that cost a red CI run each. It goes through `mc-send-to-console`, not RCON:
+   legacy 1.8.8 RCON is single-session and fragile, and a third `rcon-cli` call before `stop` was
+   enough to hang that row on CI while passing locally. And the assertion counts matches rather than
+   grepping for one, because Bukkit's own loader logs `Loading server plugin Heimdall v3.0.0-…`
+   during boot — any pattern loose enough to survive the console's ANSI colouring matches that too,
+   so a plain grep would have passed whether or not the command existed.
+
+   `CREATE_CONSOLE_IN_PIPE=true` and `docker exec -u 1000` are both required for
+   `mc-send-to-console` to work at all. Without either it fails immediately, which also silently
+   disarmed the console `stop` fallback added for the flaky-RCON case.
 4. The server stops **gracefully** — over RCON (`rcon-cli stop`, retried a few times) for the Bukkit
    family, so the server's own shutdown path runs and `onDisable` is actually called. `docker stop`
    would also work, but only because the image traps the signal, and asserting through a path the

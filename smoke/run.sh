@@ -44,14 +44,13 @@ VELOCITY_SHUTDOWN_PATTERN='Shutting down the proxy'
 # thing the plugin does — the API that works on Minecraft 1.8.8's log4j 2.0-beta9 is not the one v2
 # used — and asserting it here is what turns "it compiled" into "it attached on all six servers".
 CONSOLE_TAP_PATTERN='console tap on'
-# What /hd prints. Proves the command is actually registered: a commands: block in plugin.yml that
-# the entry point never claims yields "Unknown command" with nothing in any log to say why, and the
-# plugin loads perfectly either way.
+# What /hd prints, as it lands in the server log.
 #
-# `.*` between the name and the version is not laziness. The plugin answers in §-coded text and
-# rcon-cli rewrites those into ANSI escapes, so what actually comes back is
+# `.*` between the name and the version is not laziness. The plugin answers in §-coded text and the
+# console renders those as ANSI escapes, so what actually appears is
 # `<esc>[33mHeimdall <esc>[37mv3.0.0-SNAPSHOT` — a literal 'Heimdall v3' never matches. The
-# self-test carries that exact shape.
+# self-test carries that exact shape, because the first version of this pattern passed the self-test
+# and failed every real row.
 COMMAND_PATTERN='Heimdall.*v[0-9]+\.[0-9]'
 # The server's own "I have finished starting" line. Both families print it.
 #
@@ -122,6 +121,11 @@ readonly SELFTEST_ERRORS=(
     "	at com.heimdall.platform.bukkit.HeimdallBukkitPlugin.onEnable(HeimdallBukkitPlugin.java:20)"
     "[13:48:25 ERROR]: Could not load 'plugins/heimdall-whitelist-3.0.0-SNAPSHOT.jar' in folder 'plugins'"
     "[13:48:25 WARN]: Heimdall threw a java.lang.NullPointerException"
+    # Log4j's own status logger, from the async-logger race the console tap used to lose on
+    # shutdown: an event queued before the appender was removed, delivered after it was stopped.
+    # Nothing was actually wrong, and it still produced an ERROR naming Heimdall during shutdown —
+    # which is exactly what this detector is for. Pinned so the fix cannot quietly regress.
+    "2026-07-27 19:42:36,772 Log4j2-TF-1-AsyncLogger[AsyncContext@5552768b]-1 ERROR Attempted to append to non-started appender HeimdallConsoleTap-1"
 )
 
 # Real lines from the captured logs of a PASSING run. Flagging any of these makes the check useless.
@@ -335,6 +339,11 @@ row_body() {
             -e VIEW_DISTANCE=4
             -e SPAWN_PROTECTION=0
             -e ENABLE_RCON=true
+            # Wires the server's stdin to a named pipe so `mc-send-to-console` can type into it.
+            # Off by default in the image, and without it that command is an immediate error — which
+            # silently disarmed both things that use it here: the /hd registration check below, and
+            # the console `stop` that is the graceful fallback when RCON never answers.
+            -e CREATE_CONSOLE_IN_PIPE=true
             -e RCON_PASSWORD=smoke
             # Mounted READ-ONLY at the image's staging path, not straight onto /data/plugins.
             #
@@ -401,6 +410,47 @@ row_body() {
         return 1
     fi
 
+    # ── The command is really registered ─────────────────────────────────────────────────────
+    #
+    # A `commands:` block in plugin.yml that the entry point never claims yields "Unknown command",
+    # with nothing in any log to say why, and the plugin loads perfectly either way.
+    #
+    # Typed on the server console rather than sent over RCON, deliberately. RCON would be the
+    # obvious route and it costs an extra connection on the row where connections are scarcest:
+    # legacy 1.8.8 RCON is single-session and fragile, and adding a third `rcon-cli` call before
+    # `stop` was enough to make that row hang on CI while passing locally. mc-send-to-console types
+    # into the server's stdin pipe, the console sender's reply lands in the log like everything
+    # else, and the assertion becomes one more grep over the file the harness already has.
+    if [ "${platform}" = "bukkit" ]; then
+        # Counted rather than matched. Bukkit's own loader logs "Loading server plugin Heimdall
+        # v3.0.0-SNAPSHOT" during boot, which any pattern loose enough to survive the console's ANSI
+        # colouring also matches — so a plain grep would pass whether or not the command exists,
+        # which is the exact failure mode the self-test was written to prevent, one level up.
+        local hd_before hd_after hd_deadline
+        hd_before="$(grep -Ec "${COMMAND_PATTERN}" "${log_file}" || true)"
+        # -u 1000: the pipe is owned by the server's user, and mc-send-to-console refuses outright
+        # for anybody else. `docker exec` defaults to root under rootless Podman.
+        if ! docker exec -u 1000 "${container}" mc-send-to-console hd >/dev/null 2>&1; then
+            fail "could not type on the server console — CREATE_CONSOLE_IN_PIPE or the exec user"
+            dump_log "${log_file}"
+            return 1
+        fi
+        hd_deadline=$(( $(date +%s) + 20 ))
+        hd_after="${hd_before}"
+        while [ "$(date +%s)" -lt "${hd_deadline}" ]; do
+            hd_after="$(grep -Ec "${COMMAND_PATTERN}" "${log_file}" || true)"
+            [ "${hd_after}" -gt "${hd_before}" ] && break
+            sleep 1
+        done
+        if [ "${hd_after}" -gt "${hd_before}" ]; then
+            pass "/hd is registered: $(grep -Eo "${COMMAND_PATTERN}.*" "${log_file}" | tail -n 1)"
+        else
+            fail "/hd did not answer — the command is declared in plugin.yml but not claimed"
+            dump_log "${log_file}"
+            return 1
+        fi
+    fi
+
     # ── Graceful stop ────────────────────────────────────────────────────────────────────────
     if [ "${platform}" = "bukkit" ]; then
         # `stop` over RCON is the server's own shutdown path, so onDisable actually runs. A
@@ -435,33 +485,6 @@ row_body() {
         done
 
         if [ "${ready}" -eq 1 ]; then
-            # Prove the command is registered before stopping. Console is op-equivalent, so /hd
-            # answers without a permission dance. Failure here is a real finding: plugin.yml and the
-            # entry point can disagree silently, and the plugin loads either way.
-            #
-            # Retried, unlike `stop`. Every rcon-cli invocation opens its own connection, and
-            # legacy RCON drops one now and then — the 1.8.8 row answered `list` and then had `hd`
-            # reset by peer on the very next call. Retrying is safe here precisely because /hd is
-            # read-only and idempotent, which is exactly what `stop` is not (see below).
-            local hd_output="" hd_attempt=0 hd_ok=0
-            while [ "${hd_attempt}" -lt 5 ]; do
-                hd_output="$(docker exec "${container}" rcon-cli hd 2>&1 || true)"
-                if printf '%s\n' "${hd_output}" | grep -Eq "${COMMAND_PATTERN}"; then
-                    hd_ok=1
-                    break
-                fi
-                hd_attempt=$(( hd_attempt + 1 ))
-                sleep 3
-            done
-            if [ "${hd_ok}" -eq 1 ]; then
-                pass "/hd is registered: $(printf '%s' "${hd_output}" | head -n 1)"
-            else
-                fail "/hd did not answer — the command is declared in plugin.yml but not claimed"
-                printf '       rcon said: %s\n' "${hd_output}" >&2
-                dump_log "${log_file}"
-                return 1
-            fi
-
             log "stopping via rcon-cli"
             # Exit status deliberately ignored: see above. wait_for_exit decides whether it worked.
             docker exec "${container}" rcon-cli stop >/dev/null 2>&1 || true
@@ -473,7 +496,7 @@ row_body() {
             # just spent the whole budget failing), give up, and SIGKILL the server — destroying
             # exactly the shutdown this row exists to observe.
             warn "rcon never answered within ${RCON_TIMEOUT}s; sending 'stop' on the server console"
-            if ! docker exec "${container}" mc-send-to-console stop >/dev/null 2>&1; then
+            if ! docker exec -u 1000 "${container}" mc-send-to-console stop >/dev/null 2>&1; then
                 warn "console send failed too, falling back to SIGTERM"
                 docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
             fi
