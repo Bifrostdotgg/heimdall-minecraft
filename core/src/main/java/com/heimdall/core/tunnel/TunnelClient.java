@@ -113,26 +113,26 @@ public final class TunnelClient implements TunnelBus {
         }
     };
 
-    private TunnelClient(Builder builder) {
-        this.logger = builder.logger;
-        this.executors = builder.executors;
-        this.wsScheduler = builder.executors.ws();
-        this.socketFactory = builder.socketFactory;
-        this.clock = builder.clock;
-        this.settings = builder.settings;
-        this.healthSource = builder.healthSource;
-        this.capabilitySource = builder.capabilitySource;
-        this.lastInboundMs = builder.clock.getAsLong();
+    TunnelClient(TunnelClientBuilder builder) {
+        this.logger = builder.logger();
+        this.executors = builder.executors();
+        this.wsScheduler = builder.wsScheduler();
+        this.socketFactory = builder.socketFactory();
+        this.clock = builder.clock();
+        this.settings = builder.settings();
+        this.healthSource = builder.healthSource();
+        this.capabilitySource = builder.capabilitySource();
+        this.lastInboundMs = builder.clock().getAsLong();
 
-        this.subscriptions = new SubscriptionRegistry(builder.logger);
-        this.pending = new PendingRequests(builder.executors.ws());
+        this.subscriptions = new SubscriptionRegistry(builder.logger());
+        this.pending = new PendingRequests(builder.wsScheduler());
         this.reconnectPolicy = new ReconnectPolicy(
-                builder.settings.reconnectDelayMs(), builder.settings.maxReconnectDelayMs());
+                builder.settings().reconnectDelayMs(), builder.settings().maxReconnectDelayMs());
         this.negotiator = new HandshakeNegotiator(
-                builder.logger,
-                builder.executors.ws(),
+                builder.logger(),
+                builder.wsScheduler(),
                 frames,
-                builder.identitySource,
+                builder.identitySource(),
                 new CapabilitySource() {
                     @Override
                     public java.util.Set<String> capabilities() {
@@ -140,14 +140,15 @@ public final class TunnelClient implements TunnelBus {
                         return source == null ? java.util.Collections.<String>emptySet() : source.capabilities();
                     }
                 },
-                builder.configPushHandler);
-        this.heartbeat = new TunnelHeartbeat(builder.logger, builder.executors.ws(), this);
+                builder.configPushHandler());
+        this.heartbeat = new TunnelHeartbeat(builder.logger(), builder.wsScheduler(), this);
         this.dispatcher = new TunnelDispatcher(
-                builder.logger, this, negotiator, pending, subscriptions);
+                builder.logger(), this, negotiator, pending, subscriptions);
     }
 
-    public static Builder builder(HeimdallLogger logger, HeimdallExecutors executors) {
-        return new Builder(logger, executors);
+    /** Starts describing a client. See {@link TunnelClientBuilder}. */
+    public static TunnelClientBuilder builder(HeimdallLogger logger, HeimdallExecutors executors) {
+        return new TunnelClientBuilder(logger, executors);
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -425,11 +426,6 @@ public final class TunnelClient implements TunnelBus {
         return heartbeat;
     }
 
-    /** The backoff and single-flight state, so a test can assert on both directly. */
-    ReconnectPolicy reconnectPolicy() {
-        return reconnectPolicy;
-    }
-
     /** The correlation map, so a test can assert nothing was left outstanding. */
     PendingRequests pendingRequests() {
         return pending;
@@ -701,96 +697,6 @@ public final class TunnelClient implements TunnelBus {
 
         private boolean isStale() {
             return attempt != generation.get();
-        }
-    }
-
-    /** The mutable writer. Logger, executors, socket factory and settings are all required. */
-    public static final class Builder {
-
-        private final HeimdallLogger logger;
-        private final HeimdallExecutors executors;
-        private TunnelSocketFactory socketFactory;
-        private TunnelSettings settings = TunnelSettings.builder().build();
-        private IdentitySource identitySource;
-        private CapabilitySource capabilitySource;
-        private ConfigPushHandler configPushHandler = new ConfigPushHandler() {
-            @Override
-            public void onConfigPush(Payload document) {
-                // No-op default so the client is usable before RemoteConfig is wired in. The push
-                // is still acknowledged by the negotiator, which is what keeps the bot from
-                // re-sending it forever.
-            }
-        };
-        private HealthSnapshotSource healthSource;
-        private LongSupplier clock = new LongSupplier() {
-            @Override
-            public long getAsLong() {
-                return System.currentTimeMillis();
-            }
-        };
-
-        private Builder(HeimdallLogger logger, HeimdallExecutors executors) {
-            if (logger == null || executors == null) {
-                throw new IllegalArgumentException("logger and executors are required");
-            }
-            this.logger = logger;
-            this.executors = executors;
-        }
-
-        public Builder settings(TunnelSettings value) {
-            this.settings = value;
-            return this;
-        }
-
-        /** The socket implementation. Defaults to {@link NvTunnelSocketFactory} when left unset. */
-        public Builder socketFactory(TunnelSocketFactory value) {
-            this.socketFactory = value;
-            return this;
-        }
-
-        public Builder identitySource(IdentitySource value) {
-            this.identitySource = value;
-            return this;
-        }
-
-        public Builder capabilitySource(CapabilitySource value) {
-            this.capabilitySource = value;
-            return this;
-        }
-
-        public Builder configPushHandler(ConfigPushHandler value) {
-            if (value != null) {
-                this.configPushHandler = value;
-            }
-            return this;
-        }
-
-        public Builder healthSource(HealthSnapshotSource value) {
-            this.healthSource = value;
-            return this;
-        }
-
-        /**
-         * Replaces the system clock used for the heartbeat's silence measurement.
-         *
-         * <p>For tests, which need to make thirty seconds pass without waiting for them. Nothing in
-         * production should call this.
-         */
-        public Builder clock(LongSupplier value) {
-            if (value != null) {
-                this.clock = value;
-            }
-            return this;
-        }
-
-        public TunnelClient build() {
-            if (settings == null) {
-                throw new IllegalArgumentException("settings are required");
-            }
-            if (socketFactory == null) {
-                socketFactory = new NvTunnelSocketFactory(settings.connectTimeoutMs());
-            }
-            return new TunnelClient(this);
         }
     }
 }

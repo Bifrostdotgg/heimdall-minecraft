@@ -15,6 +15,7 @@ import com.heimdall.core.testing.Await;
 import com.heimdall.core.testing.MutableClock;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -37,6 +38,8 @@ class TunnelClientInvariantsTest {
     private final RecordingLogger logger = new RecordingLogger(true);
     private final MutableClock clock = new MutableClock();
     private final FakeTunnelSocketFactory sockets = new FakeTunnelSocketFactory();
+
+    private final CapturingScheduler ws = new CapturingScheduler();
 
     private HeimdallExecutors executors;
     private TunnelClient client;
@@ -74,9 +77,28 @@ class TunnelClientInvariantsTest {
                 .settings(settings(reconnectDelayMs))
                 .socketFactory(sockets)
                 .clock(clock)
+                .wsScheduler(ws)
                 .build();
         client.connect();
         Await.until("the first socket to open", () -> client.isConnected());
+        return client;
+    }
+
+    /**
+     * A client whose heartbeat, backoff and negotiation deadline the test drives by hand.
+     *
+     * <p>Nothing fires until {@link CapturingScheduler#runPending()} is called, so every assertion
+     * below is about what the client <em>decided</em> rather than about what happened to have
+     * elapsed. The fake socket opens synchronously inside {@code connect()}, so there is nothing to
+     * wait for either.
+     */
+    private TunnelClient manualClient() {
+        client = TunnelClient.builder(logger, executors)
+                .settings(settings(100L))
+                .socketFactory(sockets)
+                .clock(clock)
+                .wsScheduler(ws)
+                .build();
         return client;
     }
 
@@ -117,51 +139,56 @@ class TunnelClientInvariantsTest {
     // ── (b) one CAS, one reconnect ───────────────────────────────────────────
 
     @Test
-    @DisplayName("(b) close + error + heartbeat timeout on one dead link schedule exactly ONE reconnect")
+    @DisplayName("(b) all four reconnect triggers on one dead link produce exactly ONE new connection")
     void allReconnectTriggersCollapseIntoOneSchedule() {
-        // Long enough that the scheduled reconnect cannot fire during the test — what is being
-        // asserted is how many were SCHEDULED, not how many completed.
-        TunnelClient tunnel = connectedClient(60_000L);
+        // Asserted by counting CONNECTION ATTEMPTS, driving the scheduler by hand. The earlier
+        // version inferred the count from the backoff delay, which quietly depended on the ratio
+        // between the base delay and the ceiling — make it *2 instead of *8 and the assertion
+        // becomes unfalsifiable — and would have died the first time anyone added jitter. Attempts
+        // are what the v2 outage was actually about: several live sockets to the same bot, so
+        // every command ran twice.
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
         FakeTunnelSocket dead = sockets.first();
         assertEquals(1, sockets.createdCount());
+        assertTrue(tunnel.isConnected());
 
-        // All three in-band triggers, for the same dead connection, as they really do arrive.
-        dead.fireError(new IllegalStateException("connection reset"));
-        dead.fireClose(1006, "abnormal closure");
+        // The heartbeat timeout goes FIRST, while the link is still up. It reaches the gate through
+        // forceReconnect, which is a genuinely different path from the callbacks — and once any of
+        // the others has run, the socket is already detached and tick() returns early, so a
+        // heartbeat trigger placed after them is inert and tests nothing.
         clock.advance(45_000L);
         tunnel.heartbeat().tick(tunnel.settings());
+        assertTrue(dead.wasAborted(), "the heartbeat trigger must actually have fired");
+
+        dead.fireError(new IllegalStateException("connection reset"));
+        dead.fireClose(1006, "abnormal closure");
         dead.fireClose(1006, "abnormal closure again");
 
-        assertTrue(tunnel.reconnectPolicy().isClaimed(),
-                "the single-flight gate should be held by whichever trigger won");
-        assertEquals(1, sockets.createdCount(),
-                "four triggers must not each start their own doConnect chain — that is how a server "
-                        + "ends up with several live sockets to the same bot, and commands run twice");
+        ws.runPending();
 
-        // The sharp assertion, and the reason it is not just the socket count: with a long backoff
-        // the extra reconnects would not have FIRED yet either way, so counting sockets alone
-        // cannot tell one schedule from four. The backoff advances exactly once per schedule, so
-        // the delay is a direct count of them — one doubling, not four.
-        assertEquals(120_000L, tunnel.reconnectPolicy().peekDelayMs(),
-                "exactly one reconnect was scheduled, so the backoff doubled exactly once; four "
-                        + "would leave it at the 480s ceiling");
+        assertEquals(2, sockets.createdCount(),
+                "one replacement, not one per trigger — four doConnect chains is how a server ends "
+                        + "up with several live sockets to the same bot");
+        assertTrue(tunnel.isConnected());
     }
 
     @Test
     @DisplayName("(b) the fourth trigger — a socket that cannot be created — also goes through the gate")
     void aFailureToCreateASocketAlsoSchedulesExactlyOneReconnect() {
         client = TunnelClient.builder(logger, executors)
-                .settings(settings(60_000L))
+                .settings(settings(100L))
                 .socketFactory(sockets.throwOnCreate(true))
                 .clock(clock)
+                .wsScheduler(ws)
                 .build();
 
         client.connect();
 
         assertEquals(0, sockets.createdCount());
-        assertTrue(client.reconnectPolicy().isClaimed(),
+        assertEquals(1, ws.delaysMs().size(),
                 "a create failure reaches scheduleReconnect by a different path from the callbacks, "
-                        + "and must still be single-flighted");
+                        + "and must still schedule exactly one retry");
     }
 
     // ── (c) exponential backoff ──────────────────────────────────────────────
@@ -184,36 +211,57 @@ class TunnelClientInvariantsTest {
     @Test
     @DisplayName("(c) a real reconnect cycle doubles the delay, and a successful open resets it")
     void backoffIsDrivenByTheClientItself() {
-        TunnelClient tunnel = connectedClient(20L);
-        assertEquals(20L, tunnel.reconnectPolicy().peekDelayMs());
-
+        // The delays are read off the scheduler the client actually handed them to, so this asserts
+        // what was scheduled rather than what an accessor reported.
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
         sockets.failNextConnects(2);
-        sockets.first().fireClose(1006, "dropped");
 
-        // Two failed attempts, then one that opens.
-        Await.until("three sockets to have been attempted", () -> sockets.createdCount() >= 3);
-        Await.until("the tunnel to be back up", () -> tunnel.isConnected());
-        assertEquals(20L, tunnel.reconnectPolicy().peekDelayMs(),
+        ws.clearCaptured();
+        sockets.first().fireClose(1006, "dropped");
+        assertEquals(Collections.singletonList(Long.valueOf(100L)), ws.delaysMs(),
+                "the first retry waits the base delay, not twice it");
+
+        ws.runPending();
+        assertEquals(2, sockets.createdCount());
+        assertEquals(Collections.singletonList(Long.valueOf(200L)), ws.delaysMs(),
+                "the attempt failed, so the next one waits twice as long");
+
+        ws.runPending();
+        assertEquals(3, sockets.createdCount());
+        assertEquals(Collections.singletonList(Long.valueOf(400L)), ws.delaysMs());
+
+        ws.runPending();
+        assertTrue(tunnel.isConnected(), "the fourth attempt opens");
+
+        ws.clearCaptured();
+        sockets.latest().fireClose(1006, "dropped again");
+        assertEquals(Collections.singletonList(Long.valueOf(100L)), ws.delaysMs(),
                 "a successful open must clear the backoff, or a flaky link degrades permanently");
     }
 
     // ── (d) the factory is reused ────────────────────────────────────────────
 
     @Test
-    @DisplayName("(d) reconnects reuse the one socket factory and leak nothing per attempt")
-    void theSocketFactoryIsReusedAcrossReconnects() {
-        TunnelClient tunnel = connectedClient(20L);
+    @DisplayName("(d) each reconnect creates exactly one socket, and abandons the previous one")
+    void eachReconnectCreatesExactlyOneSocket() {
+        // Factory reuse itself is true by construction — the client holds one final reference — so
+        // asserting it proves nothing. What can regress, and what the v2 leak actually looked like
+        // from outside, is the count: one socket per attempt, with the previous one closed rather
+        // than left holding its threads.
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
 
         for (int cycle = 0; cycle < 5; cycle++) {
-            final int expected = cycle + 2;
-            sockets.latest().fireClose(1006, "dropped");
-            Await.until("reconnect " + expected, () -> sockets.createdCount() >= expected);
+            FakeTunnelSocket previous = sockets.latest();
+            previous.fireClose(1006, "dropped");
+            ws.runPending();
+            assertEquals(cycle + 2, sockets.createdCount(),
+                    "cycle " + cycle + " should have produced exactly one new socket");
+            assertFalse(previous.isOpen(), "and the one it replaced must not still be open");
         }
 
         assertTrue(tunnel.isConnected());
-        assertEquals(6, sockets.createdCount(),
-                "exactly one socket per attempt — v2 built a whole new HTTP client each time, and "
-                        + "each one carried a selector thread that never went away");
         assertNotSame(sockets.first(), sockets.latest());
     }
 
@@ -222,7 +270,8 @@ class TunnelClientInvariantsTest {
     @Test
     @DisplayName("(e) disconnect() closes gracefully, does NOT reconnect, and leaves the client reusable")
     void disconnectIsReusableAndDoesNotReconnect() {
-        TunnelClient tunnel = connectedClient(20L);
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
         FakeTunnelSocket first = sockets.first();
 
         tunnel.disconnect();
@@ -232,28 +281,36 @@ class TunnelClientInvariantsTest {
         assertFalse(tunnel.isConnected());
 
         // The graceful close fires onClose exactly like an unexpected drop would. Without the
-        // generation guard the client would treat it as one and immediately reconnect.
+        // generation guard the client would treat it as one and reconnect. Draining the scheduler
+        // is what makes this conclusive: any reconnect that HAD been scheduled runs here, rather
+        // than the assertion merely arriving before it could.
         first.fireClose(1000, "Heimdall tunnel disabled");
+        ws.runPending();
         assertEquals(1, sockets.createdCount(),
                 "a deliberate disconnect must not reconnect itself");
 
         tunnel.connect();
-        Await.until("the client to come back up after disconnect()", () -> tunnel.isConnected());
+        assertTrue(tunnel.isConnected(), "and the client is still usable afterwards");
         assertEquals(2, sockets.createdCount());
     }
 
     @Test
     @DisplayName("(e) reconnect() rebuilds in place, resetting the backoff")
     void reconnectRebuildsInPlace() {
-        TunnelClient tunnel = connectedClient(20L);
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
         FakeTunnelSocket first = sockets.first();
+        ws.clearCaptured();
 
         tunnel.reconnect("987654321098765432");
 
         assertTrue(first.wasAborted(), "the old socket goes the same way a dead one does");
-        Await.until("a replacement socket", () -> sockets.createdCount() >= 2);
-        Await.until("the tunnel to be back up", () -> tunnel.isConnected());
-        assertEquals(20L, tunnel.reconnectPolicy().peekDelayMs());
+        assertEquals(Collections.singletonList(Long.valueOf(100L)), ws.delaysMs(),
+                "an operator who just fixed the endpoint should not wait out a backoff that grew "
+                        + "while it was wrong");
+
+        ws.runPending();
+        assertTrue(tunnel.isConnected());
         assertTrue(sockets.latest().url().contains("987654321098765432"),
                 "the new guild id has to reach the URL, or the reload did nothing");
     }
@@ -261,7 +318,8 @@ class TunnelClientInvariantsTest {
     @Test
     @DisplayName("(e) shutdown() latches, is idempotent, and never reconnects again")
     void shutdownLatches() {
-        TunnelClient tunnel = connectedClient(20L);
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
 
         tunnel.shutdown();
         tunnel.shutdown();
@@ -271,6 +329,7 @@ class TunnelClientInvariantsTest {
 
         tunnel.connect();
         sockets.first().fireClose(1006, "late");
+        ws.runPending();
         assertEquals(1, sockets.createdCount(), "nothing brings a shut-down client back");
     }
 
@@ -345,8 +404,9 @@ class TunnelClientInvariantsTest {
                         + "holds a reference to close it");
         assertFalse(live.isOpen());
         assertFalse(tunnel.isConnected());
-        assertEquals(120_000L, tunnel.reconnectPolicy().peekDelayMs(),
-                "and exactly one replacement is scheduled, not one per error");
+        ws.runPending();
+        assertEquals(2, sockets.createdCount(),
+                "and exactly one replacement is made, not one per error");
     }
 
     @Test
@@ -359,9 +419,9 @@ class TunnelClientInvariantsTest {
         // nv follows the abort with onDisconnected for the same socket.
         live.fireClose(1001, "Heimdall aborting a dead connection");
 
-        assertEquals(120_000L, tunnel.reconnectPolicy().peekDelayMs(),
+        ws.runPending();
+        assertEquals(2, sockets.createdCount(),
                 "the error and the close it caused are one failure, not two");
-        assertEquals(1, sockets.createdCount());
     }
 
     // ── (S1) a manual connect must disarm the backoff ──────────────────────
@@ -369,7 +429,8 @@ class TunnelClientInvariantsTest {
     @Test
     @DisplayName("(S1) connect() during a backoff cancels the armed reconnect instead of racing it")
     void connectDisarmsAPendingReconnect() {
-        TunnelClient tunnel = connectedClient(60_000L);
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
         sockets.first().fireClose(1006, "dropped");
         assertTrue(tunnel.hasArmedReconnect(), "a reconnect should be armed and waiting");
 
@@ -385,12 +446,14 @@ class TunnelClientInvariantsTest {
     @Test
     @DisplayName("(S1) reconnect() during a backoff does the same - the likeliest moment for a reload")
     void reconnectDisarmsAPendingReconnect() {
-        TunnelClient tunnel = connectedClient(60_000L);
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
         sockets.first().fireClose(1006, "dropped");
         assertTrue(tunnel.hasArmedReconnect());
 
         tunnel.reconnect(null);
 
+        ws.runPending();
         assertEquals(2, sockets.createdCount(),
                 "one replacement, from the reload - not one from the reload and one from the "
                         + "backoff that was already ticking");
@@ -402,9 +465,10 @@ class TunnelClientInvariantsTest {
     @DisplayName("(S2) a socket whose connect() throws is aborted, not silently overwritten")
     void aSocketThatFailsToStartIsAborted() {
         client = TunnelClient.builder(logger, executors)
-                .settings(settings(60_000L))
+                .settings(settings(100L))
                 .socketFactory(sockets.throwOnConnect(true))
                 .clock(clock)
+                .wsScheduler(ws)
                 .build();
 
         client.connect();
@@ -416,7 +480,7 @@ class TunnelClientInvariantsTest {
                         + "the field is set - but it means a throw leaves a half-started socket "
                         + "installed that the next attempt would just overwrite");
         assertFalse(client.isConnected());
-        assertTrue(client.reconnectPolicy().isClaimed());
+        assertEquals(1, ws.delaysMs().size(), "and a retry is scheduled");
     }
 
     // ── Stale callbacks ──────────────────────────────────────────────────────
@@ -424,12 +488,13 @@ class TunnelClientInvariantsTest {
     @Test
     @DisplayName("a late callback from a superseded socket cannot kill the connection that replaced it")
     void staleCallbacksAreIgnored() {
-        TunnelClient tunnel = connectedClient(20L);
+        TunnelClient tunnel = manualClient();
+        tunnel.connect();
         FakeTunnelSocket first = sockets.first();
 
         first.fireClose(1006, "dropped");
-        Await.until("a replacement socket", () -> sockets.createdCount() >= 2);
-        Await.until("the tunnel to be back up", () -> tunnel.isConnected());
+        ws.runPending();
+        assertTrue(tunnel.isConnected());
         FakeTunnelSocket second = sockets.latest();
         assertNotSame(first, second);
 

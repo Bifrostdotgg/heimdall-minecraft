@@ -33,9 +33,60 @@ final class CapturingScheduler extends ScheduledThreadPoolExecutor {
 
     @Override
     public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
-        CapturedTask task = new CapturedTask(command);
+        CapturedTask task = new CapturedTask(command, unit.toMillis(delay));
         captured.add(task);
         return task;
+    }
+
+    /**
+     * Captured too, and never run.
+     *
+     * <p>A {@link ScheduledThreadPoolExecutor} with a zero core pool still starts a worker for a
+     * periodic task, so without this override the heartbeat would tick in the background of tests
+     * that are trying to drive it by hand.
+     */
+    @Override
+    public ScheduledFuture<?> scheduleAtFixedRate(
+            Runnable command, long initialDelay, long period, TimeUnit unit) {
+        CapturedTask task = new CapturedTask(command, unit.toMillis(initialDelay));
+        captured.add(task);
+        return task;
+    }
+
+    /**
+     * Runs every task captured <em>so far</em>, cancelled ones excluded, in scheduling order.
+     *
+     * <p>Snapshots first: a reconnect task opens a socket, which schedules a fresh heartbeat and
+     * deadline, and running those in the same call would make it impossible to tell "one reconnect
+     * happened" from "one reconnect happened and then everything it set up ran too".
+     */
+    void runPending() {
+        CapturedTask[] due;
+        synchronized (captured) {
+            due = captured.toArray(new CapturedTask[0]);
+            captured.clear();
+        }
+        for (CapturedTask task : due) {
+            if (!task.isCancelled()) {
+                task.command.run();
+            }
+        }
+    }
+
+    /** The delays, in milliseconds, of every task captured so far — cancelled ones included. */
+    java.util.List<Long> delaysMs() {
+        synchronized (captured) {
+            java.util.List<Long> delays = new ArrayList<Long>();
+            for (CapturedTask task : captured) {
+                delays.add(Long.valueOf(task.delayMs));
+            }
+            return delays;
+        }
+    }
+
+    /** Forgets everything captured so far, so a test can measure one phase at a time. */
+    void clearCaptured() {
+        captured.clear();
     }
 
     /** How many tasks have been scheduled, cancelled or not. */
@@ -72,10 +123,12 @@ final class CapturingScheduler extends ScheduledThreadPoolExecutor {
     private static final class CapturedTask implements ScheduledFuture<Object> {
 
         private final Runnable command;
+        private final long delayMs;
         private final AtomicBoolean cancelled = new AtomicBoolean();
 
-        CapturedTask(Runnable command) {
+        CapturedTask(Runnable command, long delayMs) {
             this.command = command;
+            this.delayMs = delayMs;
         }
 
         @Override

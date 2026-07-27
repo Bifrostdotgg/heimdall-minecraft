@@ -79,7 +79,7 @@ class TunnelStubIntegrationTest {
                 .negotiationTimeoutMs(2_000L);
     }
 
-    private TunnelClient.Builder clientBuilder(TunnelSettings settings, Set<String> capabilities) {
+    private TunnelClientBuilder clientBuilder(TunnelSettings settings, Set<String> capabilities) {
         executors = new HeimdallExecutors(logger, 2);
         return TunnelClient.builder(logger, executors)
                 .settings(settings)
@@ -335,16 +335,21 @@ class TunnelStubIntegrationTest {
                     .negotiationTimeoutMs(60_000L)
                     .build(), caps(Capabilities.WHITELIST)).build();
 
-            int baselineThreads = settledThreadCount();
-
             client.connect();
             Await.until("the client to get through the refusals", () -> client.isConnected());
             assertTrue(flaky.totalConnections() >= 5,
                     "four refusals then an accept: " + flaky.totalConnections());
-            assertEquals(10L, client.reconnectPolicy().peekDelayMs(),
-                    "a successful open must clear the backoff, or a flaky link degrades permanently");
 
-            // Twenty full cycles: the server accepts, the client is dropped, it reconnects.
+            // Baselined AFTER the first successful connection, so the threads a healthy connection
+            // legitimately owns are part of the baseline rather than half the allowance. (That the
+            // backoff resets on a successful open is asserted precisely, and deterministically, in
+            // TunnelClientInvariantsTest — inferring it here from wall-clock timing would be
+            // guessing.)
+            Await.until("the first connection's threads to settle",
+                    () -> connectionThreadCount() == connectionThreadCount());
+            int baseline = connectionThreadCount();
+
+            // Twenty full cycles: the client aborts, reconnects, and the server accepts again.
             for (int cycle = 0; cycle < 20; cycle++) {
                 final int expected = flaky.acceptedConnections() + 1;
                 client.forceReconnect("test cycle " + cycle);
@@ -353,10 +358,12 @@ class TunnelStubIntegrationTest {
             }
 
             assertTrue(client.isConnected());
-            int afterThreads = settledThreadCount();
-            assertTrue(afterThreads - baselineThreads <= 8,
-                    "twenty connect cycles should not accumulate threads — v2 leaked a selector "
-                            + "thread per attempt. baseline=" + baselineThreads + " after=" + afterThreads);
+            Await.until("the abandoned connections' threads to be reaped",
+                    () -> connectionThreadCount() <= baseline + 2);
+            assertTrue(connectionThreadCount() <= baseline + 2,
+                    "twenty connect cycles must not accumulate threads — v2 leaked a selector "
+                            + "thread per attempt. baseline=" + baseline
+                            + " after=" + connectionThreadCount());
         }
     }
 
@@ -413,27 +420,26 @@ class TunnelStubIntegrationTest {
     }
 
     /**
-     * The JVM's thread count, once it has stopped moving.
+     * How many threads belonging to <em>this plugin's connections</em> are alive.
      *
-     * <p>Connection threads are torn down asynchronously, so sampling immediately after a reconnect
-     * measures the teardown rather than the leak. Waiting for two consecutive equal readings is
-     * enough to tell one from the other without a fixed sleep guessing at how long teardown takes.
+     * <p>Counted by name rather than with {@link Thread#activeCount()}, which sweeps in JUnit's own
+     * threads, the JIT's, the GC's and the stub bot's — so a tolerance wide enough to absorb that
+     * noise is also wide enough to absorb the leak being tested for. These four names are the whole
+     * population that a connect cycle creates: Heimdall's own pools, and nv-websocket-client's
+     * reading, writing and connect threads (their names are the library's, verified against the
+     * 2.14 bytecode).
      */
-    private static int settledThreadCount() {
-        int previous = -1;
-        for (int attempt = 0; attempt < 100; attempt++) {
-            int current = Thread.activeCount();
-            if (current == previous) {
-                return current;
-            }
-            previous = current;
-            try {
-                Thread.sleep(20L);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return current;
+    private static int connectionThreadCount() {
+        int count = 0;
+        for (Thread thread : Thread.getAllStackTraces().keySet()) {
+            String name = thread.getName();
+            if (name.startsWith("heimdall-")
+                    || "ReadingThread".equals(name)
+                    || "WritingThread".equals(name)
+                    || "ConnectThread".equals(name)) {
+                count++;
             }
         }
-        return previous;
+        return count;
     }
 }
