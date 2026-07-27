@@ -16,7 +16,6 @@ import com.heimdall.core.remoteconfig.RemoteConfig;
 import com.heimdall.core.tunnel.HealthSnapshotSource;
 import com.heimdall.core.tunnel.IdentitySource;
 import com.heimdall.core.tunnel.TunnelClient;
-import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.tunnel.TunnelSettings;
 import com.heimdall.core.util.Registration;
 import java.nio.file.Path;
@@ -146,16 +145,12 @@ public final class HeimdallRuntime implements AutoCloseable {
                 .serverId(bootstrap.serverId())
                 .apiKey(bootstrap.token())
                 .build();
-        TunnelClient client = TunnelClient.builder(logger, executors)
+        return TunnelClient.builder(logger, executors)
                 .settings(settings)
                 .identitySource(builder.identitySource)
                 .healthSource(builder.healthSource)
                 .configPushHandler(remoteConfig)
                 .build();
-        if (builder.unhandledHandler != null) {
-            client.setUnhandledHandler(builder.unhandledHandler);
-        }
-        return client;
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -316,7 +311,6 @@ public final class HeimdallRuntime implements AutoCloseable {
         private IdentitySource identitySource;
         private HealthSnapshotSource healthSource;
         private BedrockIdentityProvider bedrockIdentityProvider;
-        private TunnelMessageHandler unhandledHandler;
 
         private Builder(HeimdallLogger logger, PlatformFacade platform) {
             if (logger == null || platform == null) {
@@ -356,12 +350,6 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         public Builder bedrockIdentityProvider(BedrockIdentityProvider value) {
             this.bedrockIdentityProvider = value;
-            return this;
-        }
-
-        /** Where frames nothing subscribed to go — the public {@code HeimdallTunnel} SPI. */
-        public Builder unhandledHandler(TunnelMessageHandler value) {
-            this.unhandledHandler = value;
             return this;
         }
 

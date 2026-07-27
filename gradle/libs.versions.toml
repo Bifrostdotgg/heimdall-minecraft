@@ -30,6 +30,19 @@ paper-api = "1.16.5-R0.1-SNAPSHOT"
 # transitively, which upstream has never released — also compileOnly.)
 velocity-api = "3.4.0"
 
+# Optional integrations. compileOnly everywhere, like the platform APIs: LuckPerms is a plugin the
+# server may or may not have, and log4j-core is the server's OWN logging backend (bundled with
+# Minecraft since 1.7 and used directly by Velocity), so neither is ever shaded in.
+#
+# net.luckperms:api is platform-neutral — the same artifact on Bukkit and on Velocity — which is
+# what lets the group-diff logic be written once in :platform-common rather than twice.
+#
+# The log4j version here is a COMPILE target, not what will be present. Minecraft 1.8.8 ships
+# 2.0-beta9, so :platform-common is restricted to the API surface that exists in both; see
+# Log4jConsoleTap.
+luckperms-api = "5.4"
+log4j = "2.19.0"
+
 # Test and verification tooling.
 junit = "5.10.2"
 mockito = "4.11.0"
@@ -62,6 +75,9 @@ adventure-text-serializer-legacy = { module = "net.kyori:adventure-text-serializ
 spigot-api = { module = "org.spigotmc:spigot-api", version.ref = "spigot-api" }
 paper-api = { module = "com.destroystokyo.paper:paper-api", version.ref = "paper-api" }
 velocity-api = { module = "com.velocitypowered:velocity-api", version.ref = "velocity-api" }
+
+luckperms-api = { module = "net.luckperms:api", version.ref = "luckperms-api" }
+log4j-core = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }
 
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }

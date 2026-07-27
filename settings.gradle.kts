@@ -3,6 +3,7 @@ rootProject.name = "heimdall-plugin"
 include(
     "core",
     "api",
+    "platform-common",
     "platform-bukkit",
     "platform-bukkit-paper",
     "platform-velocity",

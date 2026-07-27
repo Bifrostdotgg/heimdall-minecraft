@@ -8,6 +8,11 @@ plugins {
     // right default: an accidental `api` is how a shaded library ends up on a consumer's compile
     // classpath without anyone deciding it should be.
     `java-library`
+    // RecordingLogger and FakePlatform are needed by the platform modules' tests as well as by
+    // core's own. A test-fixtures source set is how Gradle publishes test helpers across module
+    // boundaries; the alternative — copying them — is how five near-identical no-op loggers end up
+    // in a repo, none of which can answer "did this actually warn?".
+    `java-test-fixtures`
 }
 
 dependencies {

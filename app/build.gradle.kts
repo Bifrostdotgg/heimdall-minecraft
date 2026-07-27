@@ -15,6 +15,7 @@ plugins {
 dependencies {
     implementation(project(":core"))
     implementation(project(":api"))
+    implementation(project(":platform-common"))
     implementation(project(":platform-bukkit"))
     implementation(project(":platform-bukkit-paper"))
     implementation(project(":platform-velocity"))
