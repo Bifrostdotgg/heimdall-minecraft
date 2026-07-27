@@ -90,8 +90,39 @@ final class RoleSyncApplier {
     private final AtomicBoolean absenceLogged = new AtomicBoolean(false);
 
     /** Deferred join syncs that have not fired yet, so disabling the module can cancel them. */
-    private final Set<PendingJoinSync> pending =
-            Collections.newSetFromMap(new ConcurrentHashMap<PendingJoinSync, Boolean>());
+    /**
+     * The deferred join syncs that have not fired yet, at most one per player.
+     *
+     * <p>Keyed by UUID rather than held in a set, so a second join for the same player <em>replaces</em>
+     * the first rather than queueing beside it. Two of these running two seconds apart both call
+     * {@code setPlayerGroups}, which is a load-modify-save against LuckPerms storage — so they
+     * interleave, and the later save can be computed from a user object read before the earlier one
+     * wrote. The result is a sync that silently loses whichever change lost the race.
+     *
+     * <p>A reconnect inside the defer window is the ordinary way to produce that: leaving and
+     * rejoining within two seconds is one click. Last-snapshot-wins is already the stated semantics
+     * everywhere else in this module — the bot's most recent word is the truth — so replacing is
+     * both safer and the behaviour that was already being described.
+     */
+    private final ConcurrentHashMap<UUID, PendingJoinSync> pending =
+            new ConcurrentHashMap<UUID, PendingJoinSync>();
+
+    /**
+     * The last thing the bot said about whether role sync is on, or {@code null} if it never has.
+     *
+     * <p>R1: a {@code role_sync} FRAME carries no enabled flag — only a login response does, as the
+     * tri-state {@code RoleSyncDirective} (departure D2). So a bot that has been switched to driving
+     * LuckPerms over RCON and still broadcasts a stale frame would be obeyed by a plugin that only
+     * checked the directive on the join path, and the two would fight over the same groups. That is
+     * the exact scenario D2 exists to prevent, arriving on the other transport.
+     *
+     * <p>Remembering the last directive is the only signal available: the frame cannot say, and
+     * asking the bot per frame would be an HTTP call inside a tunnel handler. {@code null} means
+     * nothing has ever told us, and pushes are honoured in that state — refusing them would break
+     * every server that has had a push before its first login, which is most of them after a
+     * restart.
+     */
+    private volatile Boolean lastKnownEnabled;
 
     private volatile boolean active = true;
 
@@ -126,6 +157,9 @@ final class RoleSyncApplier {
             logger.debug(() -> "no role-sync snapshot for " + label + " yet; leaving groups alone");
             return;
         }
+        // Recorded before the early return, so a disabled directive is remembered rather than
+        // merely obeyed once. See lastKnownEnabled.
+        lastKnownEnabled = Boolean.valueOf(directive.isEnabled());
         if (!directive.isEnabled()) {
             logger.debug(() -> "role sync is disabled for " + label
                     + "; the bot owns LuckPerms for this guild, leaving groups alone");
@@ -144,7 +178,14 @@ final class RoleSyncApplier {
                 + "ms — target=" + target + " managed=" + managed);
 
         PendingJoinSync task = new PendingJoinSync(uuid, label, target, managed);
-        pending.add(task);
+        PendingJoinSync superseded = pending.put(uuid, task);
+        if (superseded != null) {
+            // A second join inside the two-second window — one reconnect. Cancelled rather than
+            // left to run, so two load-modify-save cycles cannot interleave against LuckPerms
+            // storage and lose whichever change finished second.
+            logger.debug(() -> "replacing an outstanding deferred role sync for " + label);
+            superseded.cancel();
+        }
         Registration handle = context.platform().scheduler().runLater(task, JOIN_DELAY_MS);
         // Attached after the call, because an inline scheduler has already run the task by the time
         // this returns. `attach` closes the handle itself if that happened, and closing twice is a
@@ -172,6 +213,15 @@ final class RoleSyncApplier {
         if (uuid == null) {
             return;
         }
+        if (Boolean.FALSE.equals(lastKnownEnabled)) {
+            // R1. The last directive said the bot drives LuckPerms itself over RCON, and a pushed
+            // frame cannot say otherwise because the wire shape has no flag for it. Obeying it would
+            // mean the plugin and the bot both writing the same groups — which is what departure D2
+            // is about, and the reason the directive is a tri-state rather than a boolean.
+            logger.debug(() -> "ignoring a pushed role sync for " + label
+                    + ": the last directive said the bot owns LuckPerms for this guild");
+            return;
+        }
         if (managedGroups == null || managedGroups.isEmpty()) {
             logger.debug(() -> "pushed role sync for " + label
                     + " named no managed groups; changing nothing");
@@ -190,7 +240,7 @@ final class RoleSyncApplier {
      */
     void shutdown() {
         active = false;
-        for (PendingJoinSync task : pending) {
+        for (PendingJoinSync task : pending.values()) {
             task.cancel();
         }
         pending.clear();
@@ -324,7 +374,9 @@ final class RoleSyncApplier {
             if (!done.compareAndSet(false, true)) {
                 return;
             }
-            pending.remove(this);
+            // Two-argument remove: a task that has already been superseded must not evict the
+            // replacement that took its place in the map.
+            pending.remove(uuid, this);
             Registration registration = handle;
             if (registration != null) {
                 registration.close();
@@ -336,7 +388,7 @@ final class RoleSyncApplier {
             if (!done.compareAndSet(false, true)) {
                 return;
             }
-            pending.remove(this);
+            pending.remove(uuid, this);
             if (!active) {
                 logger.debug(() -> "dropping the deferred role sync for " + label
                         + "; the module was disabled while it was waiting");

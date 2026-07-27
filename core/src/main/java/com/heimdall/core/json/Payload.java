@@ -254,6 +254,24 @@ public final class Payload {
      *     elements are skipped rather than failing the whole list: one bad entry in a group list
      *     should cost that entry, not the sync.
      */
+    /**
+     * Whether the key is present <em>and</em> holds an array.
+     *
+     * <p>Exists because {@link #strings(String)} answers an empty list for three different states —
+     * the key is absent, the key holds something that is not an array, and the key holds a genuinely
+     * empty array — and for at least one caller those mean opposite things. A role-sync frame whose
+     * {@code targetGroups} is {@code []} is the bot saying "this player should hold none of the
+     * managed groups", which is a revocation; a frame where the field never arrived is a frame this
+     * build does not understand, and acting on it would revoke groups nobody asked to revoke.
+     *
+     * <p>Deliberately not {@code isArray} alone: absence is the common case and callers want the
+     * two questions answered together.
+     */
+    public boolean hasArray(String key) {
+        JsonElement value = json.get(key);
+        return value != null && value.isJsonArray();
+    }
+
     public List<String> strings(String key) {
         JsonElement value = json.get(key);
         if (value == null || !value.isJsonArray()) {

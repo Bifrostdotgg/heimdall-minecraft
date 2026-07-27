@@ -88,6 +88,29 @@ final class RoleSyncPushHandler implements TunnelMessageHandler {
 
             final UUID resolved = uuid;
             final String label = RoleSyncApplier.label(username, resolved);
+
+            // R3: absent is not empty, and the difference is a revocation.
+            //
+            // Payload.strings answers an empty list for three states — absent, not-an-array, and a
+            // genuinely empty array — and two of those mean opposite things here. `targetGroups: []`
+            // is the bot saying "hold none of the managed groups", which strips them. A frame where
+            // the field never arrived, or arrived as something this build cannot read, is a frame we
+            // do not understand, and treating it as `[]` would revoke groups nobody asked to revoke
+            // on the strength of a parse failure.
+            if (!payload.hasArray("managedGroups")) {
+                logger.warn("role_sync for " + label + " carried no readable managedGroups; "
+                        + "ignoring it rather than guessing. An empty list would mean 'change "
+                        + "nothing' and a missing one means the frame is not what this build "
+                        + "expects — those are not the same thing.");
+                return;
+            }
+            if (!payload.hasArray("targetGroups")) {
+                logger.warn("role_sync for " + label + " carried no readable targetGroups; "
+                        + "ignoring it rather than treating it as an empty set, which would strip "
+                        + "every managed group this player holds.");
+                return;
+            }
+
             List<String> target = payload.strings("targetGroups");
             List<String> managed = payload.strings("managedGroups");
             logger.debug(() -> "role_sync for " + label
