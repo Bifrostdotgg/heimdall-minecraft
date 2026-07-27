@@ -4,6 +4,7 @@ import com.heimdall.core.log.HeimdallLogger;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -24,6 +25,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * speculatively here: an idle named pool is still a thread an operator has to account for.
  *
  * <p>Both are daemon-threaded and named — see {@link NamedThreadFactory}.
+ *
+ * <p><strong>Thread-safe.</strong> {@link #io()} and {@link #scheduler()} may be called from any
+ * thread and always return the same two executors; {@link #shutdown()} is idempotent and safe to
+ * race. <strong>This class owns both pools</strong> — it is the only thing that should shut them
+ * down, and everything handed one (the API client, the mirrors) borrows it and must not.
  */
 public final class HeimdallExecutors implements AutoCloseable {
 
@@ -51,8 +57,23 @@ public final class HeimdallExecutors implements AutoCloseable {
             throw new IllegalArgumentException("logger is required");
         }
         this.logger = logger;
-        this.io = Executors.newFixedThreadPool(Math.max(1, ioThreads), NamedThreadFactory.numbered("heimdall-io"));
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(NamedThreadFactory.single("heimdall-sched"));
+        this.io = Executors.newFixedThreadPool(
+                Math.max(1, ioThreads), NamedThreadFactory.numbered("heimdall-io"));
+
+        // Constructed directly rather than via Executors.newSingleThreadScheduledExecutor, whose
+        // return value is wrapped in an unconfigurable delegate — these two policies need the real
+        // type. Without the first, a debounced mirror save scheduled seconds ago still runs after
+        // shutdown() and burns the whole grace period waiting for it, for a write that close()
+        // already performed synchronously. Without the second, a periodic poll keeps firing during
+        // shutdown and feeds work to an IO pool that is trying to drain.
+        ScheduledThreadPoolExecutor scheduled =
+                new ScheduledThreadPoolExecutor(1, NamedThreadFactory.single("heimdall-sched"));
+        scheduled.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        scheduled.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+        // Cancelled tasks are removed from the queue immediately rather than lingering until their
+        // delay elapses, so a long-interval task that gets cancelled is not retained for hours.
+        scheduled.setRemoveOnCancelPolicy(true);
+        this.scheduler = scheduled;
     }
 
     /**

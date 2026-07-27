@@ -17,8 +17,24 @@ import java.util.function.Supplier;
  * its result, and a caller arriving one millisecond after it finishes makes a fresh request. There
  * is no window in which a stale answer can be served, because there is no stored answer.
  *
- * <p>Typical use is a login path where a client reconnects three times in two seconds, or a
- * whitelist poll that overlaps the previous one.
+ * <p><strong>Nothing wires this yet.</strong> It lands in phase 1a with the rest of the plumbing;
+ * the whitelist module adopts it in 1d, where the shape is a login path seeing the same UUID three
+ * times in two seconds (a client retrying a connect) and a whitelist poll overlapping the previous
+ * one. It is here now so that the replacement for v2's response cache exists and is tested before
+ * anything is tempted to reintroduce a cache instead.
+ *
+ * <h2>The completion obligation</h2>
+ *
+ * <p><strong>The operation's future must always complete.</strong> A future that never does leaves
+ * its key occupied forever: every later caller joins a result that will not arrive, and the only
+ * cure is a restart. That is not hypothetical — it is what a task silently dropped by a shut-down
+ * or saturated executor looks like from here.
+ *
+ * <p>So the {@code start} supplier must return a future from something that completes on every
+ * path, including rejection. {@code CompletableFuture.supplyAsync(work, executor)} does:
+ * a {@code RejectedExecutionException} completes the returned future exceptionally rather than
+ * vanishing. A hand-rolled {@code executor.execute(() -> future.complete(...))} does not, because
+ * the rejection is thrown at the caller and the future is left pending.
  *
  * <p>Thread-safe. The returned future completes on whatever thread completed the underlying
  * operation.

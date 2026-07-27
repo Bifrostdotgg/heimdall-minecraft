@@ -67,7 +67,8 @@ class HeimdallExecutorsTest {
             }, 1, TimeUnit.MILLISECONDS);
 
             assertTrue(done.await(5, TimeUnit.SECONDS));
-            assertEquals("heimdall-sched", name.get());
+            assertTrue(name.get().startsWith("heimdall-sched"),
+                    "the prefix is the contract; a pool suffix is not: " + name.get());
         }
     }
 

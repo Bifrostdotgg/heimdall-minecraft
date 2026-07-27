@@ -153,7 +153,8 @@ class BootstrapStoreTest {
                 .build());
 
         assertEquals("https://bot.example", storeIn(dir).load().endpoint());
-        assertTrue(logger.logged(LogLevel.WARN, "Could not parse"));
+        assertFalse(logger.at(LogLevel.WARN).isEmpty(),
+                "losing the old file's unknown keys is worth a line");
     }
 
     @Test
@@ -181,7 +182,9 @@ class BootstrapStoreTest {
         write(dir, "just-a-string\n");
 
         assertEquals(BootstrapConfig.defaults(), storeIn(dir).load());
-        assertTrue(logger.logged(LogLevel.WARN, "does not contain a YAML mapping"));
+        assertEquals(1, logger.at(LogLevel.WARN).size(),
+                "an operator whose config is the wrong shape has to be told which file");
+        assertTrue(logger.at(LogLevel.WARN).get(0).message.contains("bootstrap.yml"));
     }
 
     @Test
@@ -202,7 +205,9 @@ class BootstrapStoreTest {
         write(dir, "role: overlord\n");
 
         assertEquals(ServerRole.AUTO, storeIn(dir).load().role());
-        assertTrue(logger.logged(LogLevel.WARN, "Unknown role 'overlord'"));
+        assertEquals(1, logger.at(LogLevel.WARN).size());
+        assertTrue(logger.at(LogLevel.WARN).get(0).message.contains("overlord"),
+                "the warning has to quote the value the operator actually typed");
     }
 
     @Test

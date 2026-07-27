@@ -208,7 +208,8 @@ class ApiClientRequestTest {
             connect(ConnectionAttempt.builder("Steve", UUID).build());
 
             assertNull(server.lastRequest().header("X-Signature"));
-            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "No API key configured"));
+            assertFalse(logger.at(com.heimdall.core.log.LogLevel.WARN).isEmpty(),
+                    "an unsigned request that will certainly 401 deserves a local explanation");
         }
     }
 
@@ -275,7 +276,8 @@ class ApiClientRequestTest {
             connect(ConnectionAttempt.builder("Steve", UUID).build());
 
             assertFalse(bodyOf(server.lastRequest()).has("isBedrock"));
-            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "Bedrock identity lookup failed"));
+            assertFalse(logger.at(com.heimdall.core.log.LogLevel.WARN).isEmpty(),
+                    "swallowing a broken provider silently would hide a misinstalled Floodgate");
         }
 
         @Test

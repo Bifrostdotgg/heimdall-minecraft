@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -46,7 +47,7 @@ class MirrorStoreTest {
 
     private final RecordingLogger logger = new RecordingLogger(true);
     private final MutableClock clock = new MutableClock();
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ManualScheduler scheduler = new ManualScheduler();
 
     @AfterEach
     void tearDown() {
@@ -442,20 +443,20 @@ class MirrorStoreTest {
 
         @Test
         @DisplayName("a burst of mutations is coalesced instead of rewriting the file each time")
-        void savesAreDebounced(@TempDir Path dir) throws Exception {
+        void savesAreDebounced(@TempDir Path dir) {
             MirrorStore<String> store = open(dir, 24, 150);
 
             for (int i = 0; i < 25; i++) {
                 store.record(UUID + i, USER);
             }
+
             assertEquals(0L, store.writeCount(),
                     "v2 rewrote the whole file 25 times here, several of them on the login thread");
+            assertEquals(1, scheduler.pendingCount(), "twenty-five mutations, one scheduled write");
 
-            long deadline = System.currentTimeMillis() + 5000;
-            while (store.writeCount() == 0 && System.currentTimeMillis() < deadline) {
-                Thread.sleep(20);
-            }
-            assertEquals(1L, store.writeCount(), "twenty-five mutations, one write");
+            scheduler.runPending();
+
+            assertEquals(1L, store.writeCount());
             assertTrue(Files.isRegularFile(file(dir)));
         }
 
@@ -488,21 +489,32 @@ class MirrorStoreTest {
         }
 
         @Test
-        @DisplayName("a leftover temp file from a crashed save is not the store, and is ignored")
-        void partialTempFileDoesNotCorruptTheStore(@TempDir Path dir) throws IOException {
+        @DisplayName("a crash mid-save leaves the previous store readable, not a truncated one")
+        void aCrashMidSaveLeavesThePreviousStoreIntact(@TempDir Path dir) throws IOException {
             MirrorStore<String> store = open(dir, 24);
             store.record(UUID, USER);
             store.close();
+            String beforeTheCrash = readRaw(dir);
 
-            // What a crash mid-write leaves: the real file intact, a truncated sibling next to it.
-            Files.write(dir.resolve("whitelist-mirror.json8675309.tmp"),
-                    "{\"entries\":{\"broke".getBytes(StandardCharsets.UTF_8));
+            // What AtomicFiles guarantees: the bytes of the NEXT save go to a sibling and only
+            // replace the store on a rename. So a process killed part-way through writing them
+            // leaves the store byte-for-byte as it was.
+            Path temp = Files.createTempFile(dir, "whitelist-mirror.json", ".tmp");
+            Files.write(temp, "{\"entries\":{\"broke".getBytes(StandardCharsets.UTF_8));
 
+            assertEquals(beforeTheCrash, readRaw(dir),
+                    "the half-written bytes must not have touched the store file");
             MirrorStore<String> reopened = open(dir, 24);
+            assertEquals(USER, reopened.get(UUID));
+            assertEquals(1, reopened.size(), "and nothing from the truncated file leaked in");
 
-            assertEquals(USER, reopened.get(UUID),
-                    "the store is replaced by a rename, so a half-written temp file is never read");
-            assertTrue(readRaw(dir).contains(UUID));
+            // The next successful save cleans up after itself.
+            reopened.record(UUID2, "Alex");
+            reopened.close();
+            Files.deleteIfExists(temp);
+            try (Stream<Path> files = Files.list(dir)) {
+                assertEquals(1, files.count());
+            }
         }
 
         @Test
@@ -605,7 +617,7 @@ class MirrorStoreTest {
             assertNull(store.lastEtag(),
                     "and the ETag goes with it — otherwise the bot answers 304 to a mirror that is "
                             + "permanently missing a row, and the row never comes back");
-            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "Dropped 1 unusable"));
+            assertTrue(logger.logged(LogLevel.WARN, "Dropped 1 unusable"));
         }
 
         @Test
@@ -639,7 +651,8 @@ class MirrorStoreTest {
             store.record(UUID, null);
 
             assertEquals(0, store.size());
-            assertNotNull(logger.records());
+            assertEquals(2, logger.at(LogLevel.WARN).size(),
+                    "silently refusing to mirror something is how a whitelist ends up short");
         }
     }
 }

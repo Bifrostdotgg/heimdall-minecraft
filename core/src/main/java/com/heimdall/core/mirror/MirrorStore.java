@@ -5,7 +5,6 @@ import com.heimdall.core.util.Strings;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -474,7 +473,8 @@ public final class MirrorStore<T> implements AutoCloseable {
     }
 
     private MirrorSnapshot<T> snapshot() {
-        return new MirrorSnapshot<T>(lastEtag, new LinkedHashMap<String, MirrorEntry<T>>(entries));
+        // MirrorSnapshot copies the map itself, so this is already a point-in-time view.
+        return new MirrorSnapshot<T>(lastEtag, entries);
     }
 
     /**

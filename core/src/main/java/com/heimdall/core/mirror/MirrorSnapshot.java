@@ -17,15 +17,28 @@ import java.util.Map;
  */
 final class MirrorSnapshot<T> {
 
-    String etag;
-    Map<String, MirrorEntry<T>> entries;
+    final String etag;
+
+    /**
+     * The mirrored entries.
+     *
+     * <p>Copied on the way in, so the map the store handed over cannot keep changing while the
+     * serializer walks it. The entries themselves are already immutable, so this copy is the last
+     * piece that makes a save a genuine point-in-time snapshot.
+     *
+     * <p>Nullable only because Gson leaves it so when the key is absent from the file; {@link
+     * MirrorFile#load()} treats that as an empty snapshot.
+     */
+    final Map<String, MirrorEntry<T>> entries;
 
     MirrorSnapshot() {
-        this(null, new LinkedHashMap<String, MirrorEntry<T>>());
+        this(null, null);
     }
 
     MirrorSnapshot(String etag, Map<String, MirrorEntry<T>> entries) {
         this.etag = etag;
-        this.entries = entries;
+        this.entries = entries == null
+                ? new LinkedHashMap<String, MirrorEntry<T>>()
+                : new LinkedHashMap<String, MirrorEntry<T>>(entries);
     }
 }

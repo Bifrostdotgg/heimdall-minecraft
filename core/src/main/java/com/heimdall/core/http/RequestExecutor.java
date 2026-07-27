@@ -45,7 +45,11 @@ final class RequestExecutor {
      * @throws UncheckedIOException if every attempt failed at the transport level
      */
     RawResponse execute(ApiSettings settings, HttpCall call) {
-        int attempts = settings.retries();
+        // ApiSettings already clamps this to at least 1, but the loop's correctness should not
+        // depend on a caller's invariant: with attempts <= 0 the loop body never runs and the
+        // method falls through to `throw failure` with failure still null, so a misconfiguration
+        // would surface as a NullPointerException from inside the transport.
+        int attempts = Math.max(1, settings.retries());
         RuntimeException failure = null;
 
         for (int attempt = 1; attempt <= attempts; attempt++) {

@@ -10,7 +10,7 @@ package com.heimdall.core.http;
  *
  * <p>The bot's error envelope is {@code {success: false, error: {code, message}}} — except on the
  * HMAC middleware's rejection path, which answers a bare {@code {"error": "Unauthorized"}} with no
- * envelope at all. Both shapes land here; see {@code ApiErrors}.
+ * envelope at all. Both shapes land here; see {@code Envelopes.errorFor}.
  */
 public final class ApiError extends RuntimeException {
 
