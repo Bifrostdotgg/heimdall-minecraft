@@ -168,6 +168,11 @@ public final class TunnelClient implements TunnelBus {
             logger.warn("tunnel not started: no endpoint, guild or credentials configured yet");
             return;
         }
+        // Disarm anything the backoff already has in flight. Without this a connect() during a
+        // pending reconnect leaves the armed task to fire later and open a SECOND socket alongside
+        // the one this call is about to make — and because the gate is released when the armed
+        // attempt starts rather than when it finishes, nothing downstream collapses them.
+        cancelReconnect();
         reconnectPolicy.updateBounds(current.reconnectDelayMs(), current.maxReconnectDelayMs());
         reconnectPolicy.reset();
         doConnect();
@@ -201,6 +206,9 @@ public final class TunnelClient implements TunnelBus {
             settings = settings.toBuilder().guildId(guildId).build();
         }
         TunnelSettings current = settings;
+        // Same reason as connect(): `/hd reload` during a backoff would otherwise race the armed
+        // reconnect, which is the likeliest moment for an operator to run it.
+        cancelReconnect();
         reconnectPolicy.updateBounds(current.reconnectDelayMs(), current.maxReconnectDelayMs());
         // A manual retry is a fresh start: an operator who just fixed the endpoint should not wait
         // out a backoff that grew to thirty seconds while it was wrong.
@@ -428,12 +436,50 @@ public final class TunnelClient implements TunnelBus {
     }
 
     /**
+     * Whether a backoff reconnect is currently armed and uncancelled.
+     *
+     * <p>Package-private for the tests. Asserting on the socket count cannot distinguish "the armed
+     * task was cancelled" from "it has not fired yet", and the difference is the whole of S1.
+     */
+    boolean hasArmedReconnect() {
+        ScheduledFuture<?> armed = reconnectTask;
+        return armed != null && !armed.isCancelled();
+    }
+
+    /**
      * Aborts a connection believed to be dead and schedules a replacement.
      *
      * <p>Invariant (a): {@link TunnelSocket#abort()}, never a graceful close. Invariant (f): every
      * pending future is failed here, not left to its deadline.
      */
     void forceReconnect(String reason) {
+        logger.warn("tunnel: " + reason + " — aborting and reconnecting");
+        abandonConnection(reason);
+    }
+
+    /**
+     * Drops the current connection, aborting its socket, and schedules a replacement.
+     *
+     * <p><strong>The abort is not optional, even on the paths where the socket looks closed
+     * already.</strong> This is shared by {@link #forceReconnect} — where the socket is presumed
+     * wedged — and by the listener's error and close callbacks, and one of those callbacks is not
+     * terminal.
+     *
+     * <p>nv-websocket-client's {@code onError} is a <em>catch-all</em>: it fires immediately before
+     * every specific error callback, including recoverable ones like {@code onSendError}. (Verified
+     * against the 2.14 bytecode: {@code WritingThread} calls {@code callOnError} and then
+     * {@code callOnSendError}, and {@code ReadingThread} does the same for its seven error paths.)
+     * The terminal callback is {@code onDisconnected}. So a failed frame write reaches us as an
+     * error on a socket that is still perfectly open, with its reading and writing threads alive.
+     * Detaching without aborting would orphan exactly that — a live socket nothing holds a reference
+     * to any more, two leaked threads, and a second connection opened alongside it.
+     *
+     * <p>Aborting makes the distinction not matter: a recoverable error is turned into a clean
+     * recycle rather than a leak, and on a socket that really was already closed the abort is a
+     * no-op. Choosing to treat any error as connection-abandoning is a deliberate trade — one
+     * reconnect is cheap, and a half-dead socket that keeps failing sends is not.
+     */
+    private void abandonConnection(String reason) {
         TunnelSocket dead = detachSocket();
         heartbeat.stop();
         negotiator.onClosed();
@@ -445,7 +491,6 @@ public final class TunnelClient implements TunnelBus {
                 logger.debug("aborting a dead socket threw, which changes nothing: " + e);
             }
         }
-        logger.warn("tunnel: " + reason + " — aborting and reconnecting");
         scheduleReconnect();
     }
 
@@ -468,14 +513,30 @@ public final class TunnelClient implements TunnelBus {
         }
 
         logger.info("tunnel connecting to " + TunnelUrls.sanitize(url));
+        TunnelSocket created = null;
         try {
             AtomicReference<TunnelSocket> self = new AtomicReference<TunnelSocket>();
-            TunnelSocket created = socketFactory.create(url, new SocketCallbacks(attempt, self));
+            created = socketFactory.create(url, new SocketCallbacks(attempt, self));
             self.set(created);
             socket = created;
             created.connect();
         } catch (RuntimeException e) {
             logger.warn("tunnel connection failed: " + e);
+            // The socket was published to the field before connect() was called — that ordering is
+            // deliberate, so onOpen cannot fire before the field it needs is set. The cost is that a
+            // throw from connect() leaves a half-started socket installed, which the next attempt
+            // would simply overwrite: never aborted, never closed, and holding whatever the library
+            // managed to open before it failed.
+            if (created != null) {
+                if (socket == created) {
+                    detachSocket();
+                }
+                try {
+                    created.abort();
+                } catch (RuntimeException ignored) {
+                    // A socket that failed to start failing to stop changes nothing.
+                }
+            }
             scheduleReconnect();
         }
     }
@@ -594,8 +655,12 @@ public final class TunnelClient implements TunnelBus {
                 }
                 return;
             }
-            connected = true;
+            // markAlive() BEFORE connected: the heartbeat checks isConnected() first and the
+            // silence clock second, so publishing them the other way round lets a tick that lands
+            // in between measure a brand-new socket against the previous connection's last-seen
+            // time — and force-reconnect a link that is one millisecond old.
             markAlive();
+            connected = true;
             reconnectPolicy.reset();
             logger.info("tunnel connected");
 
@@ -618,7 +683,7 @@ public final class TunnelClient implements TunnelBus {
                 return;
             }
             logger.warn("tunnel error: " + error);
-            connectionLost();
+            connectionLost("tunnel error: " + error);
         }
 
         @Override
@@ -627,15 +692,11 @@ public final class TunnelClient implements TunnelBus {
                 return;
             }
             logger.info("tunnel disconnected: code=" + code + " reason=" + reason);
-            connectionLost();
+            connectionLost("tunnel disconnected");
         }
 
-        private void connectionLost() {
-            detachSocket();
-            heartbeat.stop();
-            negotiator.onClosed();
-            pending.failAll("tunnel disconnected");
-            scheduleReconnect();
+        private void connectionLost(String reason) {
+            abandonConnection(reason);
         }
 
         private boolean isStale() {

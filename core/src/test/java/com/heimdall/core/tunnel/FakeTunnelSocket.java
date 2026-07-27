@@ -32,6 +32,7 @@ final class FakeTunnelSocket implements TunnelSocket {
     private volatile int closeCode;
     private volatile String closeReason = "";
     private volatile boolean connectFails;
+    private volatile boolean connectThrows;
 
     FakeTunnelSocket(String url, TunnelSocketListener listener) {
         this.url = url;
@@ -44,8 +45,23 @@ final class FakeTunnelSocket implements TunnelSocket {
         return this;
     }
 
+    /**
+     * Makes {@link #connect()} throw rather than report an error.
+     *
+     * <p>A different path from {@link #failToConnect()}: the exception unwinds through
+     * {@code doConnect}'s own catch instead of arriving as a listener callback, and the socket has
+     * already been published to the client's field by the time it happens.
+     */
+    FakeTunnelSocket throwOnConnect() {
+        this.connectThrows = true;
+        return this;
+    }
+
     @Override
     public void connect() {
+        if (connectThrows) {
+            throw new IllegalStateException("connect() blew up (fake)");
+        }
         if (connectFails) {
             listener.onError(new IllegalStateException("connection refused (fake)"));
             return;

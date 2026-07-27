@@ -21,6 +21,7 @@ final class FakeTunnelSocketFactory implements TunnelSocketFactory {
             Collections.synchronizedList(new ArrayList<FakeTunnelSocket>());
     private final AtomicInteger failuresRemaining = new AtomicInteger();
     private volatile boolean throwOnCreate;
+    private volatile boolean throwOnConnect;
 
     /** The next {@code count} attempts report a connect error instead of opening. */
     FakeTunnelSocketFactory failNextConnects(int count) {
@@ -40,12 +41,21 @@ final class FakeTunnelSocketFactory implements TunnelSocketFactory {
         return this;
     }
 
+    /** Every socket handed out throws from {@code connect()} rather than opening. */
+    FakeTunnelSocketFactory throwOnConnect(boolean value) {
+        this.throwOnConnect = value;
+        return this;
+    }
+
     @Override
     public TunnelSocket create(String url, TunnelSocketListener listener) {
         if (throwOnCreate) {
             throw new IllegalStateException("cannot create a socket (fake)");
         }
         FakeTunnelSocket socket = new FakeTunnelSocket(url, listener);
+        if (throwOnConnect) {
+            socket.throwOnConnect();
+        }
         if (failuresRemaining.getAndUpdate(current -> current > 0 ? current - 1 : 0) > 0) {
             socket.failToConnect();
         }

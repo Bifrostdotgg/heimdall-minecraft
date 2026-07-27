@@ -324,6 +324,101 @@ class TunnelClientInvariantsTest {
         assertEquals(0, client.pendingRequests().size());
     }
 
+    // ── (B2) a non-terminal error must not orphan a live socket ──────────────
+
+    @Test
+    @DisplayName("an error on a socket that is STILL OPEN aborts it rather than orphaning it")
+    void aNonTerminalErrorAbortsTheLiveSocket() {
+        // nv-websocket-client's onError is a catch-all that fires before every specific error
+        // callback, including recoverable ones like onSendError - the terminal callback is
+        // onDisconnected. So this is a real shape: an error arrives while the socket is open, with
+        // its reading and writing threads alive. Detaching without aborting leaks exactly that,
+        // and opens a second connection beside it.
+        TunnelClient tunnel = connectedClient(60_000L);
+        FakeTunnelSocket live = sockets.first();
+        assertTrue(live.isOpen(), "the fixture must model a socket that is still up");
+
+        live.fireError(new IllegalStateException("frame could not be sent"));
+
+        assertTrue(live.wasAborted(),
+                "an orphaned live socket keeps its reader and writer threads forever, and nothing "
+                        + "holds a reference to close it");
+        assertFalse(live.isOpen());
+        assertFalse(tunnel.isConnected());
+        assertEquals(120_000L, tunnel.reconnectPolicy().peekDelayMs(),
+                "and exactly one replacement is scheduled, not one per error");
+    }
+
+    @Test
+    @DisplayName("the terminal close that follows an abort does not schedule a second reconnect")
+    void anAbortsOwnCloseCallbackIsCollapsed() {
+        TunnelClient tunnel = connectedClient(60_000L);
+        FakeTunnelSocket live = sockets.first();
+
+        live.fireError(new IllegalStateException("frame could not be sent"));
+        // nv follows the abort with onDisconnected for the same socket.
+        live.fireClose(1001, "Heimdall aborting a dead connection");
+
+        assertEquals(120_000L, tunnel.reconnectPolicy().peekDelayMs(),
+                "the error and the close it caused are one failure, not two");
+        assertEquals(1, sockets.createdCount());
+    }
+
+    // ── (S1) a manual connect must disarm the backoff ──────────────────────
+
+    @Test
+    @DisplayName("(S1) connect() during a backoff cancels the armed reconnect instead of racing it")
+    void connectDisarmsAPendingReconnect() {
+        TunnelClient tunnel = connectedClient(60_000L);
+        sockets.first().fireClose(1006, "dropped");
+        assertTrue(tunnel.hasArmedReconnect(), "a reconnect should be armed and waiting");
+
+        tunnel.connect();
+
+        assertFalse(tunnel.hasArmedReconnect(),
+                "leaving it armed means it fires later and opens a SECOND socket beside the one "
+                        + "connect() just made - and the gate is already released, so nothing "
+                        + "downstream collapses them");
+        assertEquals(2, sockets.createdCount());
+    }
+
+    @Test
+    @DisplayName("(S1) reconnect() during a backoff does the same - the likeliest moment for a reload")
+    void reconnectDisarmsAPendingReconnect() {
+        TunnelClient tunnel = connectedClient(60_000L);
+        sockets.first().fireClose(1006, "dropped");
+        assertTrue(tunnel.hasArmedReconnect());
+
+        tunnel.reconnect(null);
+
+        assertEquals(2, sockets.createdCount(),
+                "one replacement, from the reload - not one from the reload and one from the "
+                        + "backoff that was already ticking");
+    }
+
+    // ── (S2) a socket that fails mid-start is not left installed ─────────────
+
+    @Test
+    @DisplayName("(S2) a socket whose connect() throws is aborted, not silently overwritten")
+    void aSocketThatFailsToStartIsAborted() {
+        client = TunnelClient.builder(logger, executors)
+                .settings(settings(60_000L))
+                .socketFactory(sockets.throwOnConnect(true))
+                .clock(clock)
+                .build();
+
+        client.connect();
+
+        FakeTunnelSocket halfStarted = sockets.first();
+        assertNotNull(halfStarted, "the socket was created before connect() threw");
+        assertTrue(halfStarted.wasAborted(),
+                "publishing the socket before connect() is deliberate - onOpen must not fire before "
+                        + "the field is set - but it means a throw leaves a half-started socket "
+                        + "installed that the next attempt would just overwrite");
+        assertFalse(client.isConnected());
+        assertTrue(client.reconnectPolicy().isClaimed());
+    }
+
     // ── Stale callbacks ──────────────────────────────────────────────────────
 
     @Test

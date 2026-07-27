@@ -10,11 +10,42 @@ import java.util.Map;
 /**
  * Adapts one nv-websocket-client socket to {@link TunnelSocket}.
  *
- * <p>Deliberately thin. The only judgement it makes is collapsing the library's several failure
- * callbacks onto one {@code onError}, and mapping "abort" onto the disconnect overload that does
- * not wait for the peer.
+ * <p>Deliberately thin. The only judgement it makes is which of the library's callbacks mean what,
+ * and that judgement is worth stating because getting it wrong leaks live sockets.
  *
- * <p>Threading: callbacks arrive on the library's reading thread and are passed straight through.
+ * <h2>Which nv callback maps to what, and why</h2>
+ *
+ * <p><strong>{@code onDisconnected} is the authoritative connection-lost signal.</strong> It is the
+ * terminal callback: nv calls it once, when the socket is really finished.
+ *
+ * <p><strong>{@code onError} is a catch-all, not a terminal signal.</strong> nv fires it immediately
+ * before <em>every</em> specific error callback, including recoverable ones. Verified against the
+ * 2.14 bytecode rather than assumed: {@code WritingThread} calls {@code callOnError} and then
+ * {@code callOnSendError} for a failed frame write, and {@code ReadingThread} does the same across
+ * its several error paths. So a socket that is wide open, with its reading and writing threads
+ * alive, can and does deliver {@code onError}.
+ *
+ * <p>Three of nv's callbacks are routed to {@link TunnelSocketListener#onError}:
+ *
+ * <ul>
+ *   <li>{@code onConnectError} — the attempt never established a connection;
+ *   <li>{@code onError} — the catch-all above, fatal or not;
+ *   <li>{@code onUnexpectedError} — a protocol violation, or an exception escaping a listener.
+ * </ul>
+ *
+ * <p>The specific error callbacks ({@code onSendError}, {@code onTextMessageError},
+ * {@code onMessageDecompressionError}) are deliberately <em>not</em> overridden, because nv raises
+ * {@code onError} alongside each of them and handling both would report one failure twice.
+ *
+ * <p><strong>Why treating a possibly-recoverable error as connection-lost is nonetheless safe:</strong>
+ * {@link TunnelClient} aborts the socket on every lost-connection path, not only the ones where it
+ * believes the socket is already dead. A recoverable error therefore becomes a clean recycle — one
+ * reconnect — rather than an orphaned live socket with two leaked threads and a duplicate connection
+ * opened beside it. That property is load-bearing for this mapping; see
+ * {@code TunnelClient.abandonConnection}.
+ *
+ * <p>Threading: callbacks arrive on the library's reading or writing thread and are passed straight
+ * through.
  */
 final class NvTunnelSocket implements TunnelSocket {
 
