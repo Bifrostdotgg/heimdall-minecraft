@@ -1,0 +1,253 @@
+package com.heimdall.core.http;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.heimdall.core.http.model.ConnectionAttempt;
+import com.heimdall.core.http.model.ConnectionAttemptResult;
+import com.heimdall.core.http.model.LinkCodeResult;
+import com.heimdall.core.http.model.OffenseReport;
+import com.heimdall.core.http.model.OffenseResult;
+import com.heimdall.core.http.model.OffenseType;
+import com.heimdall.core.http.model.PluginRelease;
+import com.heimdall.core.http.model.WhitelistSyncResult;
+import com.heimdall.core.log.HeimdallLogger;
+import com.heimdall.core.util.Strings;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.function.Supplier;
+
+/**
+ * The bot's Minecraft API, as six methods.
+ *
+ * <h2>Threading contract</h2>
+ *
+ * <p>Every method returns immediately with a {@link CompletableFuture} and does its blocking work —
+ * DNS, connect, read, and the retry sleeps — on the {@link Executor} handed to the constructor.
+ * <strong>Nothing here ever touches the common {@code ForkJoinPool}</strong>: the executor-less
+ * {@code *Async} overloads are banned by the conformance rules for exactly that reason, since the
+ * common pool is shared with the server's own parallel work and is sized by core count, so on a
+ * two-core VPS a handful of concurrent logins would starve it.
+ *
+ * <p>Callers that must block on a returned future have to bound the wait on {@link
+ * ApiSettings#overallTimeoutMs()} rather than on a single timeout, or they abandon a request the
+ * retry loop is still legitimately working on.
+ *
+ * <h2>Failures</h2>
+ *
+ * <p>Futures complete exceptionally with {@link ApiError} when the bot answered and refused, and
+ * with {@link java.io.UncheckedIOException} when it could not be reached at all. The two are worth
+ * distinguishing: only the second is a reason to consider failing open.
+ *
+ * <h2>Reconfiguration</h2>
+ *
+ * <p>{@link #reconfigure(ApiSettings)} swaps a whole immutable settings object, so an in-flight
+ * request either signs entirely with the old configuration or entirely with the new one. v2 wrote
+ * seven separate volatile fields one at a time.
+ */
+public final class ApiClient {
+
+    private final HeimdallLogger logger;
+    private final Executor executor;
+    private final RequestExecutor requests;
+
+    private volatile ApiSettings settings;
+    private volatile BedrockIdentityProvider bedrockIdentity = BedrockIdentityProvider.NONE;
+
+    /**
+     * @param logger where transport diagnostics go
+     * @param settings the initial configuration; swap it later with {@link #reconfigure}
+     * @param executor the pool every request runs on — typically {@code HeimdallExecutors.io()}
+     */
+    public ApiClient(HeimdallLogger logger, ApiSettings settings, Executor executor) {
+        if (logger == null || settings == null || executor == null) {
+            throw new IllegalArgumentException("logger, settings and executor are all required");
+        }
+        this.logger = logger;
+        this.settings = settings;
+        this.executor = executor;
+        this.requests = new RequestExecutor(logger);
+    }
+
+    /** The current settings. */
+    public ApiSettings settings() {
+        return settings;
+    }
+
+    /** Replaces the settings wholesale. Visible to in-flight workers immediately. */
+    public void reconfigure(ApiSettings replacement) {
+        if (replacement == null) {
+            throw new IllegalArgumentException("settings are required");
+        }
+        this.settings = replacement;
+        logger.debug(() -> "ApiClient reconfigured: " + replacement);
+    }
+
+    /**
+     * Worst-case wall clock for one logical request including retries — see {@link
+     * ApiSettings#overallTimeoutMs()}. Reflects the most recent {@link #reconfigure}.
+     */
+    public long getOverallTimeoutMs() {
+        return settings.overallTimeoutMs();
+    }
+
+    /**
+     * Installs the resolver used to enrich player-identifying requests with Bedrock identity.
+     *
+     * <p>Defaults to {@link BedrockIdentityProvider#NONE}. Platform modules install the reflective
+     * Floodgate implementation when Floodgate is present.
+     */
+    public void setBedrockIdentityProvider(BedrockIdentityProvider provider) {
+        this.bedrockIdentity = provider == null ? BedrockIdentityProvider.NONE : provider;
+    }
+
+    // ── Endpoints ────────────────────────────────────────────────────────────
+
+    /** {@code POST connection-attempt} — should this player be let in, and what should they be told? */
+    public CompletableFuture<ConnectionAttemptResult> connectionAttempt(ConnectionAttempt attempt) {
+        if (attempt == null) {
+            throw new IllegalArgumentException("attempt is required");
+        }
+        return async(() -> {
+            ApiSettings current = settings;
+            JsonObject body = new JsonObject();
+            body.addProperty("username", attempt.username());
+            body.addProperty("uuid", attempt.uuid());
+            body.addProperty("ip", attempt.ip());
+            body.addProperty("serverIp", attempt.serverIp());
+            body.addProperty("serverId", current.serverId());
+            body.addProperty("currentlyWhitelisted", attempt.currentlyWhitelisted());
+            JsonArray groups = new JsonArray();
+            for (String group : attempt.currentGroups()) {
+                groups.add(group);
+            }
+            body.add("currentGroups", groups);
+            addBedrockIdentity(body, attempt.uuid());
+
+            return ApiResponses.connectionAttempt(requests.execute(current,
+                    HttpCall.post(guildPath(current, "connection-attempt"), body.toString(),
+                            current.timeoutMs())));
+        });
+    }
+
+    /** {@code POST request-link-code} — mint a linking code, or report an existing link. */
+    public CompletableFuture<LinkCodeResult> requestLinkCode(String username, String uuid) {
+        if (Strings.isBlank(username) || Strings.isBlank(uuid)) {
+            throw new IllegalArgumentException("username and uuid are required");
+        }
+        return async(() -> {
+            ApiSettings current = settings;
+            JsonObject body = new JsonObject();
+            body.addProperty("username", username.trim().toLowerCase(java.util.Locale.ROOT));
+            body.addProperty("uuid", uuid.trim());
+            addBedrockIdentity(body, uuid.trim());
+
+            return ApiResponses.linkCode(requests.execute(current,
+                    HttpCall.post(guildPath(current, "request-link-code"), body.toString(),
+                            current.timeoutMs())));
+        });
+    }
+
+    /** {@code GET offense-types} — the configured offense categories, for tab completion and display. */
+    public CompletableFuture<List<OffenseType>> offenseTypes() {
+        return async(() -> {
+            ApiSettings current = settings;
+            return ApiResponses.offenseTypes(requests.execute(current,
+                    HttpCall.get(guildPath(current, "offense-types"), current.timeoutMs())));
+        });
+    }
+
+    /** {@code POST offend} — record an offense and receive the escalated punishment to apply. */
+    public CompletableFuture<OffenseResult> offend(OffenseReport report) {
+        if (report == null) {
+            throw new IllegalArgumentException("report is required");
+        }
+        return async(() -> {
+            ApiSettings current = settings;
+            JsonObject body = new JsonObject();
+            body.addProperty("targetUuid", report.targetUuid());
+            body.addProperty("targetUsername", report.targetUsername());
+            body.addProperty("offenseSlug", report.offenseSlug());
+            addIfPresent(body, "issuedByUuid", report.issuedByUuid());
+            addIfPresent(body, "issuedByUsername", report.issuedByUsername());
+            addIfPresent(body, "notes", report.notes());
+
+            return ApiResponses.offense(requests.execute(current,
+                    HttpCall.post(guildPath(current, "offend"), body.toString(), current.timeoutMs())));
+        });
+    }
+
+    /**
+     * {@code GET whitelist/sync} — the full whitelist, or a 304 saying it has not changed.
+     *
+     * @param etag the ETag from the previous successful fetch, or {@code null} to force a full dump.
+     *     Pass {@link WhitelistSyncResult#etag()} straight back; quoting is handled by the bot,
+     *     which compares after stripping quotes.
+     */
+    public CompletableFuture<WhitelistSyncResult> whitelistSync(String etag) {
+        return async(() -> {
+            ApiSettings current = settings;
+            HttpCall call = HttpCall.get(
+                    guildPath(current, "whitelist/sync"), current.whitelistSyncTimeoutMs());
+            if (Strings.isNotBlank(etag)) {
+                call = call.withHeader("If-None-Match", etag);
+            }
+            return ApiResponses.whitelistSync(requests.execute(current, call));
+        });
+    }
+
+    /** {@code GET plugin/latest} — the newest published release, for the update check. */
+    public CompletableFuture<PluginRelease> latestRelease() {
+        return async(() -> {
+            ApiSettings current = settings;
+            return ApiResponses.pluginRelease(requests.execute(current,
+                    HttpCall.get(guildPath(current, "plugin/latest"), current.updateCheckTimeoutMs())));
+        });
+    }
+
+    // ── Internals ────────────────────────────────────────────────────────────
+
+    /**
+     * The one place a task is handed to the executor.
+     *
+     * <p>{@code supplyAsync(Supplier, Executor)} — the two-argument overload — every time. The
+     * one-argument one silently uses the common pool, and the conformance suite fails the build if
+     * it appears anywhere under {@code com.heimdall}.
+     */
+    private <T> CompletableFuture<T> async(Supplier<T> work) {
+        return CompletableFuture.supplyAsync(work, executor);
+    }
+
+    private static String guildPath(ApiSettings settings, String suffix) {
+        return "/api/guilds/" + settings.guildId() + "/minecraft/" + suffix;
+    }
+
+    /**
+     * Merges Bedrock identity into a request body, if the joining player has one.
+     *
+     * <p>A no-op for Java players and for servers without Floodgate, in which case the bot falls
+     * back to inferring Bedrock from the synthetic UUID and stripping its configured prefix.
+     */
+    private void addBedrockIdentity(JsonObject body, String uuid) {
+        BedrockIdentity identity;
+        try {
+            identity = bedrockIdentity.resolve(uuid);
+        } catch (RuntimeException e) {
+            // A misbehaving identity provider must not cost a player their login.
+            logger.warn("Bedrock identity lookup failed for " + uuid + ": " + e);
+            return;
+        }
+        if (identity == null || Strings.isBlank(identity.gamertag())) {
+            return;
+        }
+        body.addProperty("isBedrock", Boolean.TRUE);
+        body.addProperty("bedrockGamertag", identity.gamertag());
+        addIfPresent(body, "bedrockXuid", identity.xuid());
+    }
+
+    private static void addIfPresent(JsonObject body, String key, String value) {
+        if (Strings.isNotBlank(value)) {
+            body.addProperty(key, value);
+        }
+    }
+}
