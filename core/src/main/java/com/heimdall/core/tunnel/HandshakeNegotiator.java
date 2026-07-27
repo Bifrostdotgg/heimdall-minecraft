@@ -167,11 +167,21 @@ final class HandshakeNegotiator {
             // The deadline is cancelled AFTER this check, never before. Disarming on a stale ack
             // would leave a live handshake with no deadline at all, so a bot that then went silent
             // would wedge the connection at UNKNOWN forever.
+            //
+            // This branch is also what makes a repeat ack inert: the id is cleared the moment the
+            // first one is accepted, so a second on the same socket lands here.
             logger.debug("ignoring identify_ack that arrived outside a handshake");
             return;
         }
 
         cancelDeadline();
+        // Cleared here, with the deadline, because the handshake is now settled whichever branch
+        // below runs. Without it the guard above never fires again on a live socket, so a SECOND
+        // identify_ack — a bot re-sending one, a replayed frame — is fully reprocessed: it resets
+        // acceptedCapabilities and configVersion, re-logs the negotiation, and an `accepted: false`
+        // in it would demote a working V3 link to V2_COMPAT for the rest of the connection. The
+        // guard's own comment already claimed this was handled; now it is.
+        identifyId = null;
 
         Payload payload = envelope.payload();
 

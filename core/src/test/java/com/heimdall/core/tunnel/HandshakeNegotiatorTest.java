@@ -10,8 +10,11 @@ import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.AbstractHeimdallLogger;
 import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.DisplayName;
@@ -39,18 +42,32 @@ class HandshakeNegotiatorTest {
             .build();
 
     private HandshakeNegotiator negotiator(com.heimdall.core.log.HeimdallLogger logger) {
+        return negotiator(logger, Collections.singleton(Capabilities.WHITELIST));
+    }
+
+    private HandshakeNegotiator negotiator(
+            com.heimdall.core.log.HeimdallLogger logger, Set<String> declared) {
         return new HandshakeNegotiator(
                 logger,
                 scheduler,
                 sent::add,
                 () -> ServerIdentity.builder().serverName("Survival").platform("bukkit").build(),
-                () -> Collections.singleton(Capabilities.WHITELIST),
+                () -> declared,
                 document -> {
                 });
     }
 
     private static Payload accepted() {
         return Payload.builder().put("accepted", true).put("configVersion", 7).build();
+    }
+
+    /** What the real bot sends: `accepted` is the LIST of capabilities it will honour. */
+    private static Payload acceptedList(int configVersion, String... capabilities) {
+        return Payload.builder()
+                .put("protocolVersion", 3)
+                .putStrings("accepted", Arrays.asList(capabilities))
+                .put("configVersion", configVersion)
+                .build();
     }
 
     private Envelope identifyFrame() {
@@ -167,6 +184,124 @@ class HandshakeNegotiatorTest {
         negotiator.handle(Envelope.of(identifyFrame().id(), "identify_ack", accepted()));
 
         assertFalse(scheduler.latestIsArmed());
+    }
+
+    // -- `accepted` is a list (departure D51) --------------------------------
+
+    @Test
+    @DisplayName("the accepted list is read, in the client's own spelling")
+    void acceptedIsReadAsAList() {
+        RecordingLogger logger = new RecordingLogger(true);
+        HandshakeNegotiator negotiator = negotiator(logger);
+        negotiator.onOpen(SETTINGS);
+
+        negotiator.handle(Envelope.of("fresh", "identify_ack",
+                acceptedList(11, Capabilities.WHITELIST, Capabilities.CONSOLE)));
+
+        assertEquals(ProtocolMode.V3, negotiator.mode());
+        assertEquals(
+                Arrays.asList(Capabilities.WHITELIST, Capabilities.CONSOLE),
+                negotiator.acceptedCapabilities(),
+                "returning an empty list here passed every other assertion in this file, which is "
+                        + "how the list handling went uncovered");
+        assertEquals(11, negotiator.configVersion());
+    }
+
+    @Test
+    @DisplayName("a declared capability missing from the list is named, once")
+    void unacceptedCapabilitiesAreReported() {
+        RecordingLogger logger = new RecordingLogger(true);
+        HandshakeNegotiator negotiator = negotiator(logger,
+                new LinkedHashSet<String>(
+                        Arrays.asList(Capabilities.WHITELIST, Capabilities.ROLE_SYNC)));
+        negotiator.onOpen(SETTINGS);
+
+        negotiator.handle(Envelope.of("fresh", "identify_ack",
+                acceptedList(1, Capabilities.WHITELIST)));
+
+        assertTrue(logger.logged(LogLevel.WARN, Capabilities.ROLE_SYNC),
+                "a module that is enabled and will never be driven is otherwise perfectly silent: "
+                        + logger.records());
+    }
+
+    @Test
+    @DisplayName("an empty accepted list is a successful handshake, and names nothing")
+    void anEmptyAcceptedListIsStillV3() {
+        RecordingLogger logger = new RecordingLogger(true);
+        HandshakeNegotiator negotiator = negotiator(logger);
+        negotiator.onOpen(SETTINGS);
+
+        negotiator.handle(Envelope.of("fresh", "identify_ack", acceptedList(3)));
+
+        assertEquals(ProtocolMode.V3, negotiator.mode(),
+                "there is no refusal frame in this protocol; an empty list means the bot "
+                        + "recognised none of what this build declared");
+        assertTrue(negotiator.acceptedCapabilities().isEmpty());
+        // Deliberate: a bot that acked with the older boolean shape also lands on an empty list,
+        // and inventing a warning out of its silence would name every capability this build has.
+        assertFalse(logger.logged(LogLevel.WARN, Capabilities.WHITELIST));
+    }
+
+    @Test
+    @DisplayName("an explicit accepted:false still demotes, for a bot answering the older shape")
+    void anExplicitBooleanRefusalDemotes() {
+        RecordingLogger logger = new RecordingLogger(true);
+        HandshakeNegotiator negotiator = negotiator(logger);
+        negotiator.onOpen(SETTINGS);
+
+        negotiator.handle(Envelope.of("fresh", "identify_ack", Payload.builder()
+                .put("accepted", false)
+                .put("reason", "unsupported plugin version")
+                .build()));
+
+        assertEquals(ProtocolMode.V2_COMPAT, negotiator.mode());
+        assertTrue(logger.logged(LogLevel.SEVERE, "unsupported plugin version"));
+    }
+
+    // -- A second ack on a live socket (departure D51) -----------------------
+
+    @Test
+    @DisplayName("a second identify_ack on the same socket is ignored, not reprocessed")
+    void aRepeatAckIsInert() {
+        RecordingLogger logger = new RecordingLogger(true);
+        HandshakeNegotiator negotiator = negotiator(logger);
+        negotiator.onOpen(SETTINGS);
+
+        negotiator.handle(Envelope.of("first", "identify_ack",
+                acceptedList(9, Capabilities.WHITELIST)));
+        assertEquals(ProtocolMode.V3, negotiator.mode());
+
+        // A re-sent or replayed ack. Reprocessing it would reset the accepted set and the config
+        // version, and an `accepted: false` in it would demote a link that is demonstrably working.
+        negotiator.handle(Envelope.of("second", "identify_ack", Payload.builder()
+                .put("accepted", false)
+                .put("reason", "should never be applied")
+                .build()));
+
+        assertEquals(ProtocolMode.V3, negotiator.mode(),
+                "the handshake is decided once per connection");
+        assertEquals(9, negotiator.configVersion());
+        assertEquals(Collections.singletonList(Capabilities.WHITELIST),
+                negotiator.acceptedCapabilities());
+        assertFalse(logger.logged(LogLevel.SEVERE, "should never be applied"));
+    }
+
+    @Test
+    @DisplayName("a fresh connection negotiates again after a close")
+    void reopeningRenegotiates() {
+        RecordingLogger logger = new RecordingLogger(true);
+        HandshakeNegotiator negotiator = negotiator(logger);
+        negotiator.onOpen(SETTINGS);
+        negotiator.handle(Envelope.of("first", "identify_ack", acceptedList(9)));
+        negotiator.onClosed();
+
+        negotiator.onOpen(SETTINGS);
+        negotiator.handle(Envelope.of("second", "identify_ack",
+                acceptedList(12, Capabilities.WHITELIST)));
+
+        assertEquals(ProtocolMode.V3, negotiator.mode());
+        assertEquals(12, negotiator.configVersion(),
+                "clearing the identify id on success must not stop the NEXT connection acking");
     }
 
     @Test
