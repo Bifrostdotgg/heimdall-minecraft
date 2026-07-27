@@ -156,5 +156,29 @@ class HmacTest {
             assertFalse(Hmac.verify(SECRET, "GET", "/x", "", "abc", TIMESTAMP, NOW), "odd hex length");
             assertFalse(Hmac.verify(SECRET, "GET", "/x", "", "ab", TIMESTAMP, NOW), "right hex, wrong length");
         }
+
+        @Test
+        @DisplayName("the timestamp parse is plain decimal only — deliberately stricter")
+        void timestampParsingIsStrictDecimal() {
+            // Every one of these would be accepted by a looser parse, and none is a timestamp any
+            // real client sends. Java's Double.parseDouble takes "5d" and hex float literals;
+            // JavaScript's Number() takes hex, a leading +, exponents and surrounding whitespace.
+            // The divergence is one-directional and fail-closed: the stub can refuse what the bot
+            // would accept, never accept what the bot would refuse.
+            for (String bad : new String[] {
+                    TIMESTAMP + "d", TIMESTAMP + "f", "0x65a0bc00", "+" + TIMESTAMP,
+                    "1.7e9", " " + TIMESTAMP, TIMESTAMP + " ", "", "Infinity", "NaN"}) {
+                String signature = Hmac.sign(SECRET, bad, "GET", "/x", "");
+                assertFalse(Hmac.verify(SECRET, "GET", "/x", "", signature, bad, NOW),
+                        "should have rejected timestamp '" + bad + "'");
+            }
+
+            // Plain decimal, with or without a fraction, still verifies.
+            assertTrue(Hmac.verify(SECRET, "GET", "/x", "",
+                    Hmac.sign(SECRET, TIMESTAMP, "GET", "/x", ""), TIMESTAMP, NOW));
+            String fractional = TIMESTAMP + ".5";
+            assertTrue(Hmac.verify(SECRET, "GET", "/x", "",
+                    Hmac.sign(SECRET, fractional, "GET", "/x", ""), fractional, NOW));
+        }
     }
 }

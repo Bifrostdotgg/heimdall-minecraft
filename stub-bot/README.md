@@ -70,6 +70,7 @@ Player fixture schema (`STUB_BOT_PLAYERS`):
   { "uuid": "3333…", "outcome": "pending_auth",     "authCode": "135790" },
   { "uuid": "4444…", "outcome": "revoked",          "revocationReason": " for griefing" },
   { "uuid": "5555…", "outcome": "pending_approval", "queuePosition": 3 },
+  { "uuid": "7777…", "outcome": "pending_approval", "schedule": "on Friday at 18:00 UTC" },
   { "uuid": "6666…", "outcome": "existing_link",    "authCode": "246800" },
   { "uuid": "7777…", "outcome": "allow", "roleSyncEnabled": false },
   { "uuid": "8888…", "outcome": "allow", "linkedDiscordId": "999…", "linkedDiscordUsername": "steve" }
@@ -172,11 +173,21 @@ of six shapes. A plugin that only handles the first two mis-handles the rest in 
 | `deny` | `false` | `message` |
 | `pending_auth` | `false` | `message`, `pendingAuth: true`, `authCode` |
 | `revoked` | `false` | `message`, `revoked: true` |
-| `pending_approval` | `false` | `message`, `pendingApproval: true`, `queuePosition` |
+| `pending_approval` | `false` | `message`, `pendingApproval: true`, **`queuePosition` only sometimes** — see below |
 | `existing_link` | **`true`** | `message`, `existingPlayerLink: true`, `authCode` |
 
 `existing_link` is the one most easily got wrong: the player **is admitted** and simultaneously
 offered a link code.
+
+**`pending_approval` has two branches, and `queuePosition` is conditional.**
+
+| Fixture | Response |
+| --- | --- |
+| `queuePosition` set | Staff approval required. `queuePosition` is present, and the message carries `{position}`. |
+| `queuePosition` absent (set `schedule` instead) | Auto-whitelist is on but **scheduled**. The bot computes no position and spreads nothing into the response, so **the key is absent — not null**. The message tells the player when to come back (`{schedule}`). |
+
+A plugin that reads `queuePosition` unconditionally breaks on the second branch and nowhere else,
+which is why `ScheduledSam` is in the default demo set.
 
 `roleSync` itself has three shapes, all of which the plugin must handle:
 
@@ -272,8 +283,7 @@ Bot → plugin:
 
 | Type | Payload | Correlated |
 | --- | --- | --- |
-| `ping` | `{}` | Reply `pong` with the same id. |
-| `pong` | `{}` | Answer to the plugin's own `ping`, id echoed. |
+| `ping` | `{}` | Reply `pong` with the same id. **This is the only keepalive that exists.** |
 | `role_sync` | `{uuid, username, targetGroups, managedGroups, groupsAdded, groupsRemoved}` | No — broadcast to every server in the guild. |
 | `get_players` | `{}` | Yes → `player_list`. |
 | `run_command` | `{command}` | Yes → `command_result`. |
@@ -286,14 +296,21 @@ Plugin → bot:
 
 | Type | Payload | Handling |
 | --- | --- | --- |
-| `identify` | metadata, plus v3 `protocolVersion` + `capabilities` | See below. |
-| `ping` | `{}` | Answered with `pong`, id echoed. Refreshes liveness. |
+| `identify` | metadata, plus v3 `protocolVersion` + `capabilities` | Recorded. **Not a liveness signal** — the bot's handler only stores metadata. See below. |
 | `pong` | `{}` | Refreshes liveness. |
 | `health` | `{tps?, mspt?, onlinePlayers?, maxPlayers?, usedMemMb?, maxMemMb?}` | Stored; **also refreshes liveness**. |
 | `console_line` | `{lines: [{ts, level, msg}]}` | Collected per server (bounded to 2000). |
-| `config.ack` | `{version}` | v3 only; recorded on the connection. |
-| `player_join` / `player_leave` / anything else | — | Forwarded to the `WsMessageListener`. |
+| `config.ack` | `{version}` | v3 only; recorded. Not a liveness signal. |
+| `trace.report` / `trace.annotation` | trace payloads | **Real bot-side sinks**, not test noise: the bot's `onClientMessage` listener persists them to Mongo via `traceIngest.ts`. The stub has no database, so it forwards them to its `WsMessageListener` like any other unsolicited message. |
+| `player_join` / `player_leave` / `ping` / anything else | — | Forwarded to the `WsMessageListener`. |
 | `player_list` / `command_result` / `probe_result` / `update_result` | — | Correlated by id. |
+
+> **There is no `ping` case.** The bot special-cases exactly `identify`, `pong`, `health` and
+> `console_line`, and nothing else; everything else falls through to id-correlation and then to the
+> listener. A **client-initiated ping therefore gets no reply and does not refresh liveness** — it
+> lands in the same place `trace.report` does. A stub that answered it politely would be speaking a
+> protocol the real bot does not, and a plugin built against that would look healthy in testing and
+> be reaped by the real bot's sweep in production.
 
 ### Liveness
 
@@ -301,6 +318,9 @@ The bot pings **immediately on connect** — that is how the plugin learns the l
 own heartbeat tick. Then a sweep every `STUB_BOT_PING_INTERVAL_MS` (30 s) pings every open
 connection and closes any that has been silent for `STUB_BOT_LIVENESS_TIMEOUT_MS` (90 s) with
 `1001 Heartbeat timeout`.
+
+Liveness is refreshed by `pong` and `health` **only** — not by `identify`, not by `config.ack`, and
+not by a client-initiated `ping`.
 
 Both `pong` **and** `health` count as liveness, so a plugin whose heartbeat carries health without an
 explicit pong stays connected.
@@ -381,3 +401,13 @@ Everything here is a conscious simplification, not an oversight.
 | No Bedrock/Floodgate identity resolution | The stub matches on UUID; prefix inference and same-name/different-edition guarding are bot-side matching rules with no wire-visible effect on the plugin. |
 | No `player_join` / `player_leave` / alerting side effects | Those drive Discord and the dashboard, not the plugin. |
 | A rejected upgrade fails the handshake; the real bot destroys the socket | Both look like a failed connection to the client. Java-WebSocket has no socket-destroy hook. |
+| `trace.report` / `trace.annotation` are forwarded, not persisted | They are real bot-side sinks backed by Mongo. The stub has no database; the wire behaviour (accepted, no reply) is identical. |
+| The timestamp parse is **stricter** than the bot's | The bot uses JavaScript `Number()`, which accepts hex, a leading `+`, exponents and whitespace; `Double.parseDouble` also accepts `"5d"`. None of that is a timestamp a client sends. The divergence is one-directional and fail-closed: the stub can refuse a request the bot would accept, never the reverse. |
+
+## Deferred, deliberately
+
+**Client-initiated keepalive does not exist in the current protocol.** The v2 plugin's liveness
+derives entirely from answering the **bot's** pings (or sending `health`); a ping the plugin sends
+is not acknowledged and does not count. Making client pings meaningful would be a bot-side
+capability decision for v3 (phase 1f) — it is not invented here, because a fixture that grants a
+capability the real bot lacks produces plugins that pass their tests and die in production.

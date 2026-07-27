@@ -34,8 +34,16 @@ public final class PlayerFixture {
 
     /** PENDING_AUTH / EXISTING_LINK — the 6-digit code shown in-game. */
     private String authCode;
-    /** PENDING_APPROVAL — position in the staff-approval queue. */
+    /**
+     * PENDING_APPROVAL — position in the staff-approval queue.
+     *
+     * <p>Leaving it out is meaningful rather than lazy: it selects the bot's OTHER pending branch,
+     * where auto-whitelist is on but scheduled, {@code queuePosition} is omitted from the response
+     * entirely, and the player is told when to come back rather than where they are in a queue.
+     */
     private Integer queuePosition;
+    /** PENDING_APPROVAL with no queuePosition — substituted into {@code {schedule}}. */
+    private String schedule;
     /** REVOKED — substituted into {@code {reason}} in the revocation message. */
     private String revocationReason;
     /** Overrides the default message template for this player entirely. */
@@ -75,6 +83,13 @@ public final class PlayerFixture {
 
     public PlayerFixture withQueuePosition(int position) {
         this.queuePosition = position;
+        return this;
+    }
+
+    /** Selects the scheduled-auto-whitelist branch: no queuePosition on the wire. */
+    public PlayerFixture withSchedule(String value) {
+        this.queuePosition = null;
+        this.schedule = value;
         return this;
     }
 
@@ -130,6 +145,10 @@ public final class PlayerFixture {
 
     public Integer queuePosition() {
         return queuePosition;
+    }
+
+    public String schedule() {
+        return schedule;
     }
 
     public String revocationReason() {

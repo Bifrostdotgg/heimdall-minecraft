@@ -291,6 +291,31 @@ class StubWsServerTest {
         }
 
         @Test
+        @DisplayName("an envelope with an empty id or type is rejected, not merely a missing one")
+        void emptyIdOrTypeIsMalformed() throws Exception {
+            boot();
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                assertNotNull(bot.ws().awaitConnection(GUILD, SERVER, 2000));
+
+                java.util.concurrent.BlockingQueue<String> seen =
+                        new java.util.concurrent.LinkedBlockingQueue<>();
+                bot.ws().setMessageListener((guild, server, id, type, payload) -> seen.add(type));
+
+                client.send("", "player_join", new JsonObject());
+                client.send("some-id", "", new JsonObject());
+
+                assertNull(seen.poll(1, TimeUnit.SECONDS),
+                        "the bot's guard is `!msg.type || !msg.id` — a truthiness test, so an empty "
+                                + "string is as malformed as an absent key");
+
+                // ...and a well-formed one still gets through, so the guard is not just rejecting
+                // everything.
+                client.send("real-id", "player_join", new JsonObject());
+                assertEquals("player_join", seen.poll(3, TimeUnit.SECONDS));
+            }
+        }
+
+        @Test
         @DisplayName("a request to a server that is not connected fails immediately")
         void requestToAbsentServer() {
             boot();
@@ -389,16 +414,64 @@ class StubWsServerTest {
         }
 
         @Test
-        @DisplayName("the plugin's own ping gets a pong back with the id echoed")
-        void clientPingIsAnswered() throws Exception {
-            boot();
+        @DisplayName("a client-initiated ping is NOT answered and does NOT refresh liveness")
+        void clientPingIsNotAKeepalive() throws Exception {
+            // Short sweep so the liveness half of this is observable inside a test.
+            boot(StubBotConfig.withDemoFixtures().pingIntervalMs(100).livenessTimeoutMs(400));
             try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
                 assertNotNull(bot.ws().awaitConnection(GUILD, SERVER, 2000));
+
+                java.util.concurrent.BlockingQueue<String> unsolicited =
+                        new java.util.concurrent.LinkedBlockingQueue<>();
+                bot.ws().setMessageListener((guild, server, id, type, payload) -> unsolicited.add(type));
+
                 client.send("ping-id-1", "ping", new JsonObject());
 
-                JsonObject pong = client.await("pong", 3000);
-                assertNotNull(pong);
-                assertEquals("ping-id-1", pong.get("id").getAsString());
+                assertEquals("ping", unsolicited.poll(3, TimeUnit.SECONDS),
+                        "the bot has no ping case at all — a client ping falls through correlation "
+                                + "to the same listener trace.report lands on");
+                assertTrue(client.absent("pong", 500),
+                        "answering would be a protocol the real bot does not speak, and a plugin "
+                                + "built against it would look healthy here and be reaped in prod");
+
+                // Keep pinging and do nothing else. If client pings counted as liveness this
+                // connection would survive indefinitely; under the real bot's rules it must not.
+                long deadline = System.currentTimeMillis() + 8000;
+                while (System.currentTimeMillis() < deadline
+                        && bot.ws().connected(GUILD, SERVER) != null) {
+                    try {
+                        client.send("ping", new JsonObject());
+                    } catch (RuntimeException e) {
+                        break; // the sweep already closed it
+                    }
+                    Thread.sleep(100L);
+                }
+                assertNull(bot.ws().connected(GUILD, SERVER),
+                        "only pong and health refresh liveness, so a client that merely pings is "
+                                + "still a silent server and has to be reaped");
+            }
+        }
+
+        @Test
+        @DisplayName("identify does not refresh liveness either")
+        void identifyIsNotAKeepalive() throws Exception {
+            boot(StubBotConfig.withDemoFixtures().pingIntervalMs(100).livenessTimeoutMs(400));
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                assertNotNull(bot.ws().awaitConnection(GUILD, SERVER, 2000));
+
+                long deadline = System.currentTimeMillis() + 8000;
+                while (System.currentTimeMillis() < deadline
+                        && bot.ws().connected(GUILD, SERVER) != null) {
+                    try {
+                        client.identifyV2(SERVER, "Survival");
+                    } catch (RuntimeException e) {
+                        break;
+                    }
+                    Thread.sleep(100L);
+                }
+                assertNull(bot.ws().connected(GUILD, SERVER),
+                        "the bot's identify handler only records metadata — re-identifying in a "
+                                + "loop must not keep a silent server on the books");
             }
         }
 

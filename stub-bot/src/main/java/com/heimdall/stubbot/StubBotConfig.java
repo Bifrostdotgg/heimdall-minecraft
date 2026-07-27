@@ -63,6 +63,12 @@ public final class StubBotConfig {
                 .withQueuePosition(3));
         config.players.add(PlayerFixture.of("66666666-6666-6666-6666-666666666666", "LegacyLee", Outcome.EXISTING_LINK)
                 .withAuthCode("246800"));
+        // The SECOND pending branch: auto-whitelist on a schedule, so the response carries no
+        // queuePosition at all. In the demo set because a plugin that reads that key
+        // unconditionally breaks here and nowhere else.
+        config.players.add(PlayerFixture.of("77777777-7777-7777-7777-777777777777", "ScheduledSam",
+                        Outcome.PENDING_APPROVAL)
+                .withSchedule("on Friday at 18:00 UTC"));
         return config;
     }
 

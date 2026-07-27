@@ -88,6 +88,23 @@ class StubHttpApiTest {
             assertEquals("NOT_CONFIGURED",
                     SignedClient.envelope(response).getAsJsonObject("error").get("code").getAsString());
         }
+
+        @Test
+        @DisplayName("a malformed body for an unknown guild is a 400, not a 404")
+        void bodyValidationRunsBeforeTheGuildLookup() throws Exception {
+            HttpResponse<String> response =
+                    client.post("/api/guilds/999999999999999999/minecraft/connection-attempt", "{}");
+            assertEquals(400, response.statusCode(),
+                    "connection.ts validates username/uuid BEFORE loading the guild config, so the "
+                            + "caller is told what is actually wrong with their request");
+            assertEquals("MISSING_FIELDS",
+                    SignedClient.envelope(response).getAsJsonObject("error").get("code").getAsString());
+
+            assertEquals(400,
+                    client.post("/api/guilds/999999999999999999/minecraft/request-link-code", "{}")
+                            .statusCode(),
+                    "link.ts orders it the same way");
+        }
     }
 
     // ── connection-attempt ───────────────────────────────────────────────────
@@ -155,6 +172,25 @@ class StubHttpApiTest {
             assertTrue(data.get("pendingApproval").getAsBoolean());
             assertEquals(3, data.get("queuePosition").getAsInt());
             assertTrue(data.get("message").getAsString().contains("#3"));
+        }
+
+        @Test
+        @DisplayName("the scheduled pending branch OMITS queuePosition entirely")
+        void pendingApprovalWithoutQueuePosition() throws Exception {
+            HttpResponse<String> response = client.post(PREFIX + "/connection-attempt",
+                    attempt("77777777-7777-7777-7777-777777777777", "ScheduledSam"));
+            JsonObject data = SignedClient.data(response);
+
+            assertFalse(data.get("whitelisted").getAsBoolean());
+            assertTrue(data.get("pendingApproval").getAsBoolean());
+            assertFalse(data.has("queuePosition"),
+                    "when auto-whitelist is on but scheduled, the bot computes no position and "
+                            + "spreads nothing into the response — the key is absent, not null. A "
+                            + "plugin that reads it unconditionally breaks here and nowhere else.");
+            assertFalse(response.body().contains("queuePosition"),
+                    "and it must be absent on the wire too, not merely null: " + response.body());
+            assertTrue(data.get("message").getAsString().contains("on Friday at 18:00 UTC"),
+                    "the scheduled branch tells the player when to come back instead");
         }
 
         @Test
@@ -329,6 +365,56 @@ class StubHttpApiTest {
             assertEquals("tempban", third.get("action").getAsString());
             assertEquals(1440, third.get("duration").getAsInt());
             assertEquals("tempban (1d)", third.get("tierDescription").getAsString());
+        }
+
+        @Test
+        @DisplayName("a zero duration gets no suffix — the bot tests truthiness, not null")
+        void zeroDurationHasNoSuffix() throws Exception {
+            com.google.gson.JsonObject tier = new com.google.gson.JsonObject();
+            tier.addProperty("points", 1);
+            tier.addProperty("action", "mute");
+            tier.addProperty("duration", 0);
+            tier.addProperty("reason", "zero-duration tier");
+            tier.addProperty("command", "mute {player}");
+            com.google.gson.JsonArray tiers = new com.google.gson.JsonArray();
+            tiers.add(tier);
+            com.google.gson.JsonArray slugs = new com.google.gson.JsonArray();
+            slugs.add("zeroed");
+            com.google.gson.JsonObject type = new com.google.gson.JsonObject();
+            type.addProperty("typeId", "zero");
+            type.addProperty("displayName", "Zero");
+            type.add("escalationTiers", tiers);
+            type.add("offenses", slugs);
+            type.addProperty("enabled", true);
+            // Added to the RUNNING fixture's config, which the handler reads on every request.
+            bot.config().offenseTypes().add(type);
+
+            JsonObject data = SignedClient.data(client.post(PREFIX + "/offend",
+                    "{\"targetUuid\":\"dddddddd-0000-0000-0000-000000000001\","
+                            + "\"targetUsername\":\"Zeroed\",\"offenseSlug\":\"zeroed\"}"));
+            assertEquals("mute", data.get("tierDescription").getAsString(),
+                    "`${action}${duration ? ...}` is falsy at 0, so no suffix — a null check would "
+                            + "emit \"mute ()\", since formatDuration(0) is the empty string");
+        }
+
+        @Test
+        @DisplayName("the escalation counter is keyed by the UUID as received, case included")
+        void escalationKeyIsCaseSensitive() throws Exception {
+            bot.resetInfractions();
+            String lower = "{\"targetUuid\":\"eeeeeeee-0000-0000-0000-00000000000a\","
+                    + "\"targetUsername\":\"Cheater\",\"offenseSlug\":\"xray\"}";
+            String upper = "{\"targetUuid\":\"EEEEEEEE-0000-0000-0000-00000000000A\","
+                    + "\"targetUsername\":\"Cheater\",\"offenseSlug\":\"xray\"}";
+
+            assertEquals(1, SignedClient.data(client.post(PREFIX + "/offend", lower))
+                    .get("totalPoints").getAsInt());
+            assertEquals(1, SignedClient.data(client.post(PREFIX + "/offend", upper))
+                    .get("totalPoints").getAsInt(),
+                    "the bot counts with a Mongo equality match on minecraftUuid, which is "
+                            + "case-sensitive — so these really are two separate running totals. "
+                            + "Folding case here would merge them and hide an escalation bug.");
+            assertEquals(2, SignedClient.data(client.post(PREFIX + "/offend", lower))
+                    .get("totalPoints").getAsInt());
         }
 
         @Test

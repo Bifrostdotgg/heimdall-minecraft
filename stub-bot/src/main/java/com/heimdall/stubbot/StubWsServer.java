@@ -219,33 +219,36 @@ public final class StubWsServer extends WebSocketServer {
             StubLog.warn("unparseable message from " + server.serverId());
             return;
         }
-        if (!envelope.has("id") || !envelope.has("type")) {
+        // `if (!msg.type || !msg.id)` on the bot side — a TRUTHINESS check, so an empty string is
+        // rejected just as firmly as a missing key. Checking only for the key's presence would let
+        // `{"id":"","type":""}` through and register it for correlation against an id no reply can
+        // ever carry meaningfully.
+        String id = truthyString(envelope, "id");
+        String type = truthyString(envelope, "type");
+        if (id == null || type == null) {
             StubLog.warn("malformed message from " + server.serverId() + " (missing id or type)");
             return;
         }
-
-        String id = envelope.get("id").getAsString();
-        String type = envelope.get("type").getAsString();
         JsonObject payload = envelope.has("payload") && envelope.get("payload").isJsonObject()
                 ? envelope.getAsJsonObject("payload")
                 : new JsonObject();
 
         StubLog.debug("ws recv " + type + " id=" + id + " from " + server.serverId());
 
+        // The bot special-cases exactly these four types, and NOTHING else — in particular there is
+        // no `ping` case. A client-initiated ping falls through to correlation (where its id never
+        // matches) and then to the listener. Adding a courteous pong here would have been a
+        // protocol the real bot does not speak, and a plugin built against it would look healthy in
+        // testing and be reaped by the real bot's sweep in production.
         switch (type) {
             case "identify" -> {
-                server.touch(System.currentTimeMillis());
+                // Deliberately does NOT refresh liveness: the bot's identify handler only records
+                // metadata. Only `pong` and `health` are liveness signals.
                 handleIdentify(conn, server, id, payload);
                 return;
             }
             case "pong" -> {
                 server.touch(System.currentTimeMillis());
-                return;
-            }
-            case "ping" -> {
-                // The plugin pings us too; echo the id back so its own correlation works.
-                server.touch(System.currentTimeMillis());
-                send(conn, id, "pong", new JsonObject());
                 return;
             }
             case "health" -> {
@@ -264,7 +267,9 @@ public final class StubWsServer extends WebSocketServer {
                 return;
             }
             case "config.ack" -> {
-                server.touch(System.currentTimeMillis());
+                // Also not a liveness signal, for consistency with identify: the v3 handshake is
+                // about configuration, and letting it double as a heartbeat would mean a client
+                // could stay "alive" without ever answering a ping.
                 if (payload.has("version") && payload.get("version").isJsonPrimitive()) {
                     server.setAcknowledgedConfigVersion(payload.get("version").getAsInt());
                     StubLog.info("config acked by " + server.serverId() + " at version "
@@ -580,6 +585,23 @@ public final class StubWsServer extends WebSocketServer {
 
     private static String newId() {
         return UUID.randomUUID().toString();
+    }
+
+    /**
+     * A field's string value, or null if JavaScript would consider it falsy.
+     *
+     * <p>Covers absent, JSON null, empty string, and the numeric/boolean falsy values, so
+     * {@code {"id":""}} and {@code {"id":0}} are rejected exactly as {@code !msg.id} rejects them.
+     */
+    private static String truthyString(JsonObject object, String key) {
+        if (!object.has(key) || object.get(key).isJsonNull() || !object.get(key).isJsonPrimitive()) {
+            return null;
+        }
+        String value = object.get(key).getAsString();
+        if (value.isEmpty() || "0".equals(value) || "false".equals(value)) {
+            return null;
+        }
+        return value;
     }
 
     private static <T> T await(long timeoutMs, java.util.function.Supplier<T> supplier) {

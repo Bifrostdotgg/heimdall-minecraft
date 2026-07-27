@@ -147,21 +147,33 @@ final class StubHttpApi {
             String guildId = matcher.group(1);
             String route = matcher.group(2);
 
-            if (!config.guildId().equals(guildId)) {
-                // What the real bot answers when the guild has no Minecraft config row.
-                sendError(exchange, 404, "NOT_CONFIGURED", "Minecraft integration not enabled");
-                return;
-            }
-
             StubLog.debug(method + " " + signedPath);
 
+            // The guild check is deliberately NOT hoisted here. On the bot, every route that
+            // validates its body does so BEFORE loading the guild's config, so a request that is
+            // both malformed and for an unknown guild answers 400 MISSING_FIELDS, not 404
+            // NOT_CONFIGURED. Checking the guild in the dispatcher would invert that ordering for
+            // every such route at once, so each handler calls guildIsConfigured() where its real
+            // counterpart looks the config up.
             switch (method + " " + route) {
-                case "POST connection-attempt" -> handleConnectionAttempt(exchange, body);
-                case "GET whitelist/sync" -> handleWhitelistSync(exchange);
-                case "POST request-link-code" -> handleRequestLinkCode(exchange, body);
-                case "GET offense-types" -> sendEnvelope(exchange, 200, config.offenseTypes());
+                case "POST connection-attempt" -> handleConnectionAttempt(exchange, guildId, body);
+                case "GET whitelist/sync" -> {
+                    if (guildIsConfigured(exchange, guildId)) {
+                        handleWhitelistSync(exchange);
+                    }
+                }
+                case "POST request-link-code" -> handleRequestLinkCode(exchange, guildId, body);
+                case "GET offense-types" -> {
+                    if (guildIsConfigured(exchange, guildId)) {
+                        sendEnvelope(exchange, 200, config.offenseTypes());
+                    }
+                }
                 case "POST offend" -> handleOffend(exchange, guildId, body);
-                case "GET plugin/latest" -> sendEnvelope(exchange, 200, config.pluginLatest());
+                case "GET plugin/latest" -> {
+                    if (guildIsConfigured(exchange, guildId)) {
+                        sendEnvelope(exchange, 200, config.pluginLatest());
+                    }
+                }
                 default -> sendError(exchange, 404, "NOT_FOUND", "No route for " + method + " " + route);
             }
         } catch (RuntimeException e) {
@@ -195,13 +207,18 @@ final class StubHttpApi {
         sendEnvelope(exchange, 200, data);
     }
 
-    private void handleConnectionAttempt(HttpExchange exchange, String body) throws IOException {
+    private void handleConnectionAttempt(HttpExchange exchange, String guildId, String body)
+            throws IOException {
         JsonObject request = parseObject(body);
         String username = optString(request, "username");
         String uuid = optString(request, "uuid");
 
+        // Body first, config second — the order connection.ts uses.
         if (isBlank(username) || isBlank(uuid)) {
             sendError(exchange, 400, "MISSING_FIELDS", "username and uuid are required");
+            return;
+        }
+        if (!guildIsConfigured(exchange, guildId)) {
             return;
         }
 
@@ -242,15 +259,34 @@ final class StubHttpApi {
                 data.addProperty("revoked", true);
             }
             case PENDING_APPROVAL -> {
-                int position = fixture == null || fixture.queuePosition() == null ? 1 : fixture.queuePosition();
                 data.addProperty("whitelisted", false);
-                data.addProperty("message", message(fixture,
-                        "§eYour whitelist application is pending staff approval.\n"
-                                + "§7Please wait for a staff member to review your request.\n"
-                                + "§7You are §b#{position}§7 in the queue.",
-                        username, null).replace("{position}", String.valueOf(position)));
                 data.addProperty("pendingApproval", true);
-                data.addProperty("queuePosition", position);
+
+                // Two distinct branches on the bot, and the difference is visible on the wire:
+                //
+                //  - Staff approval required: a queue position is computed and included, and the
+                //    message carries {position}.
+                //  - Auto-whitelist on a SCHEDULE: queuePosition stays null and the key is omitted
+                //    entirely (`...(queuePosition !== null && { queuePosition })`), with a
+                //    different message telling the player when to come back.
+                //
+                // A fixture with no queuePosition selects the scheduled branch, so a plugin that
+                // assumes the key is always present has something to fail against.
+                Integer position = fixture == null ? null : fixture.queuePosition();
+                if (position == null) {
+                    String schedule = fixture == null || fixture.schedule() == null
+                            ? "soon" : fixture.schedule();
+                    data.addProperty("message", message(fixture,
+                            "§eYou will be whitelisted {schedule}.\n§7Please check back later!",
+                            username, null).replace("{schedule}", schedule));
+                } else {
+                    data.addProperty("message", message(fixture,
+                            "§eYour whitelist application is pending staff approval.\n"
+                                    + "§7Please wait for a staff member to review your request.\n"
+                                    + "§7You are §b#{position}§7 in the queue.",
+                            username, null).replace("{position}", String.valueOf(position)));
+                    data.addProperty("queuePosition", position);
+                }
             }
             case EXISTING_LINK -> {
                 String code = authCode(fixture, uuid);
@@ -331,13 +367,17 @@ final class StubHttpApi {
         sendEnvelope(exchange, 200, data);
     }
 
-    private void handleRequestLinkCode(HttpExchange exchange, String body) throws IOException {
+    private void handleRequestLinkCode(HttpExchange exchange, String guildId, String body)
+            throws IOException {
         JsonObject request = parseObject(body);
         String username = optString(request, "username");
         String uuid = optString(request, "uuid");
 
         if (isBlank(username) || isBlank(uuid)) {
             sendError(exchange, 400, "MISSING_FIELDS", "username and uuid are required");
+            return;
+        }
+        if (!guildIsConfigured(exchange, guildId)) {
             return;
         }
 
@@ -387,6 +427,9 @@ final class StubHttpApi {
                     "targetUuid, targetUsername, and offenseSlug are required.");
             return;
         }
+        if (!guildIsConfigured(exchange, guildId)) {
+            return;
+        }
 
         String slug = offenseSlug.toLowerCase(Locale.ROOT);
         JsonObject offenseType = findOffenseType(slug);
@@ -409,7 +452,11 @@ final class StubHttpApi {
         tiers.sort((a, b) -> Integer.compare(a.get("points").getAsInt(), b.get("points").getAsInt()));
 
         String typeId = offenseType.get("typeId").getAsString();
-        String key = guildId + "|" + targetUuid.toLowerCase(Locale.ROOT) + "|" + typeId;
+        // The UUID is keyed AS RECEIVED. The bot counts prior infractions with
+        // `Infraction.countDocuments({ minecraftUuid: targetUuid })`, and a Mongo equality match is
+        // case-sensitive — so two spellings of the same UUID really are two separate running totals
+        // there. Case-folding here would quietly merge them and hide an escalation bug.
+        String key = guildId + "|" + targetUuid + "|" + typeId;
         int newTotal = infractionCounts.computeIfAbsent(key, unused -> new AtomicInteger()).incrementAndGet();
 
         JsonObject tier = tiers.get(tiers.size() - 1);
@@ -467,8 +514,11 @@ final class StubHttpApi {
         }
         data.addProperty("totalPoints", newTotal);
         data.addProperty("tierApplied", tierIndex);
+        // `${tier.action}${tierDuration ? ` (…)` : ""}` — a TRUTHINESS test, so a tier with
+        // `duration: 0` gets no suffix at all. A null check would emit " ()" here, since
+        // formatDuration(0) is the empty string.
         data.addProperty("tierDescription", tier.get("action").getAsString()
-                + (duration != null ? " (" + durationText + ")" : ""));
+                + (duration != null && duration != 0 ? " (" + durationText + ")" : ""));
         data.addProperty("offenseType", offenseType.get("displayName").getAsString());
 
         sendEnvelope(exchange, 200, data);
@@ -555,6 +605,16 @@ final class StubHttpApi {
         } else {
             object.addProperty(key, value);
         }
+    }
+
+    /** Answers 404 NOT_CONFIGURED and returns false when the guild is not the one we serve. */
+    private boolean guildIsConfigured(HttpExchange exchange, String guildId) throws IOException {
+        if (config.guildId().equals(guildId)) {
+            return true;
+        }
+        // What the bot answers when the guild has no enabled Minecraft config row.
+        sendError(exchange, 404, "NOT_CONFIGURED", "Minecraft integration not enabled");
+        return false;
     }
 
     private static boolean isBlank(String value) {

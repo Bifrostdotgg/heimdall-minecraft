@@ -36,6 +36,13 @@ public final class Hmac {
     public static final String EMPTY_BODY_SHA256 =
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+    /**
+     * Plain decimal, optionally negative, with an optional fractional part. No hex, no exponent, no
+     * leading {@code +}, no surrounding whitespace, no trailing type suffix. See {@link #verify}.
+     */
+    private static final java.util.regex.Pattern DECIMAL_TIMESTAMP =
+            java.util.regex.Pattern.compile("-?\\d+(\\.\\d+)?");
+
     private Hmac() {
     }
 
@@ -63,10 +70,19 @@ public final class Hmac {
     /**
      * Verifies a signature, with the clock injected so tests can drive the replay window.
      *
-     * <p>Mirrors the reference implementation's failure modes exactly: a non-numeric timestamp, a
-     * timestamp outside ±5 minutes, a signature that is not valid hex, and a signature of the wrong
-     * length all fail before any comparison. The comparison itself is constant-time over the decoded
-     * bytes, matching {@code crypto.timingSafeEqual}.
+     * <p>A timestamp outside ±5 minutes, a signature that is not valid hex, and a signature of the
+     * wrong length all fail before any comparison. The comparison itself is constant-time over the
+     * decoded bytes, matching {@code crypto.timingSafeEqual}.
+     *
+     * <p><strong>The timestamp parse is deliberately STRICTER than the reference.</strong> The bot
+     * uses JavaScript's {@code Number()}, which also accepts hex ({@code "0x10"} → 16), a leading
+     * {@code +}, exponent notation and surrounding whitespace. Java's {@code Double.parseDouble} is
+     * looser still — it accepts a trailing type suffix, so {@code "5d"} parses as 5.0. None of that
+     * is a timestamp any client sends, and tolerating it would make the fixture quietly forgiving
+     * of garbage that deserves to be caught.
+     *
+     * <p>The divergence is one-directional and fail-closed: this can refuse a request the real bot
+     * would have accepted, never the reverse. Recorded in the README's deviations table.
      */
     public static boolean verify(
             String secret,
@@ -80,13 +96,13 @@ public final class Hmac {
             return false;
         }
 
-        double seconds;
-        try {
-            seconds = Double.parseDouble(timestamp.trim());
-        } catch (NumberFormatException | NullPointerException e) {
+        if (!DECIMAL_TIMESTAMP.matcher(timestamp).matches()) {
             return false;
         }
-        if (Double.isNaN(seconds) || Double.isInfinite(seconds)) {
+        double seconds;
+        try {
+            seconds = Double.parseDouble(timestamp);
+        } catch (NumberFormatException e) {
             return false;
         }
         if (Math.abs(nowMs - seconds * 1000.0) > MAX_AGE_MS) {
