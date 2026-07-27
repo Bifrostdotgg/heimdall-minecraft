@@ -260,17 +260,52 @@ class TunnelNegotiationTest {
     }
 
     @Test
-    @DisplayName("an identify_ack echoing a stale handshake id is ignored")
-    void staleIdentifyAckIsIgnored() {
+    @DisplayName("an identify_ack with the bot's own fresh id still negotiates v3")
+    void identifyAckIdIsNotACorrelation() {
         TunnelClient tunnel = connect(baseSettings().build(), caps(Capabilities.WHITELIST));
         FakeTunnelSocket socket = sockets.first();
 
-        AtomicReference<ProtocolMode> observed = new AtomicReference<ProtocolMode>();
-        socket.deliver(Envelope.of("not-our-identify-id", "identify_ack",
+        // The real bot sends `id: nanoid()` — it does not echo the identify's id. Requiring it to
+        // was a client-side assumption that would have discarded every real ack.
+        socket.deliver(Envelope.of("a-fresh-id-from-the-bot", "identify_ack",
                 Payload.builder().put("accepted", true).put("configVersion", 1).build()));
-        observed.set(tunnel.mode());
 
-        assertEquals(ProtocolMode.UNKNOWN, observed.get(),
-                "an ack for a handshake from a previous socket must not decide this connection's mode");
+        assertEquals(ProtocolMode.V3, tunnel.mode());
+        assertEquals(1, tunnel.configVersion());
+    }
+
+    @Test
+    @DisplayName("`accepted` as a capability list is a successful handshake, not a refusal")
+    void acceptedAsAListNegotiatesV3() {
+        TunnelClient tunnel = connect(baseSettings().build(), caps(Capabilities.WHITELIST));
+        FakeTunnelSocket socket = sockets.first();
+
+        // The production shape. Read as a boolean this is `false`, which is how an earlier client
+        // turned every successful handshake into a loud "the bot refused this plugin".
+        socket.deliver(Envelope.of("bot-id", "identify_ack", Payload.builder()
+                .putStrings("accepted", Arrays.asList("whitelist@1", "modules@1", "config@1"))
+                .put("protocolVersion", 3)
+                .put("configVersion", 4)
+                .build()));
+
+        assertEquals(ProtocolMode.V3, tunnel.mode());
+        assertEquals(4, tunnel.configVersion());
+    }
+
+    @Test
+    @DisplayName("an empty accepted list is still v3 — the bot recognised none of our capabilities")
+    void emptyAcceptedListIsStillV3() {
+        TunnelClient tunnel = connect(baseSettings().build(), caps(Capabilities.WHITELIST));
+        FakeTunnelSocket socket = sockets.first();
+
+        socket.deliver(Envelope.of("bot-id", "identify_ack", Payload.builder()
+                .putStrings("accepted", Collections.<String>emptyList())
+                .put("protocolVersion", 3)
+                .put("configVersion", 0)
+                .build()));
+
+        assertEquals(ProtocolMode.V3, tunnel.mode(),
+                "the handshake succeeded; what failed is that this build declared nothing the bot "
+                        + "knows about, which is a different problem and not a protocol downgrade");
     }
 }

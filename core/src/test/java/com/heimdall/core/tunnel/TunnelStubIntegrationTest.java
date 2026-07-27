@@ -122,9 +122,11 @@ class TunnelStubIntegrationTest {
     void fullV3Handshake() {
         bot = StubBot.start(StubBotConfig.withDemoFixtures()
                 .port(0)
-                .maxProtocolVersion(3)
                 .configVersion(4)
-                .modules(modules(Capabilities.WHITELIST, Capabilities.ROLE_SYNC)));
+                // Filed under the UNVERSIONED module ids, which is what a real config document
+                // uses. The client declares `whitelist@1`; the bot narrows by base name.
+                .modules(modules(Capabilities.moduleId(Capabilities.WHITELIST),
+                        Capabilities.moduleId(Capabilities.ROLE_SYNC))));
 
         RemoteConfig remoteConfig =
                 new RemoteConfig(logger, dataDir.resolve("remote-config.json"), ConfigDocument.empty());
@@ -150,9 +152,10 @@ class TunnelStubIntegrationTest {
         assertEquals(4, client.configVersion());
 
         Await.until("the pushed config to be applied",
-                () -> remoteConfig.moduleEnabled(Capabilities.WHITELIST));
+                () -> remoteConfig.moduleEnabled(Capabilities.moduleId(Capabilities.WHITELIST)));
         assertEquals("websocket",
-                remoteConfig.moduleSettings(Capabilities.ROLE_SYNC).string("mode", null),
+                remoteConfig.moduleSettings(Capabilities.moduleId(Capabilities.ROLE_SYNC))
+                        .string("mode", null),
                 "the stub sends settings flat alongside `enabled`, which is the shape the parser has "
                         + "to tolerate or every setting silently reads as absent");
 
@@ -166,7 +169,6 @@ class TunnelStubIntegrationTest {
     void hotConfigPush() {
         bot = StubBot.start(StubBotConfig.withDemoFixtures()
                 .port(0)
-                .maxProtocolVersion(3)
                 .configVersion(1)
                 .modules(modules(Capabilities.WHITELIST)));
 
@@ -190,17 +192,20 @@ class TunnelStubIntegrationTest {
     // ── (b) v2 compatibility ─────────────────────────────────────────────────
 
     @Test
-    @DisplayName("(b) a bot that refuses our protocol version drops us to V2 compat and keeps the socket")
-    void aBotTooOldForUsFallsBackToV2Compat() {
-        bot = StubBot.start(StubBotConfig.withDemoFixtures().port(0).maxProtocolVersion(1));
+    @DisplayName("(b) a bot that recognises none of our capabilities is still v3, not a refusal")
+    void aBotThatKnowsNoneOfOurCapabilitiesIsStillV3() {
+        // There is no refusal frame in this protocol. A capability the bot does not support is
+        // simply absent from `accepted`, and an all-absent list is a SUCCESSFUL handshake with a bot
+        // that recognised nothing this build declared. Treating that as a downgrade — which an
+        // earlier client did, by reading `accepted` as a boolean — turns every such connection into
+        // a loud false alarm while the bot believes it negotiated v3.
+        bot = StubBot.start(StubBotConfig.withDemoFixtures().port(0));
 
-        client = clientBuilder(settings(bot.baseUrl()).build(), caps(Capabilities.WHITELIST)).build();
+        client = clientBuilder(settings(bot.baseUrl()).build(), caps("teleport@1")).build();
         client.connect();
 
-        Await.until("the client to fall back", () -> client.mode() == ProtocolMode.V2_COMPAT);
-        assertTrue(client.isConnected(),
-                "the bot deliberately keeps the socket open rather than dropping a client it cannot "
-                        + "configure into a reconnect loop it could not diagnose");
+        Await.until("the client to negotiate v3", () -> client.mode() == ProtocolMode.V3);
+        assertTrue(client.isConnected());
         assertNotNull(bot.ws().connected(GUILD, SERVER_ID));
     }
 
@@ -233,7 +238,6 @@ class TunnelStubIntegrationTest {
         // reply and does not count. A client that failed to answer would be reaped here.
         bot = StubBot.start(StubBotConfig.withDemoFixtures()
                 .port(0)
-                .maxProtocolVersion(3)
                 .pingIntervalMs(40L)
                 .livenessTimeoutMs(200L));
 
@@ -260,7 +264,7 @@ class TunnelStubIntegrationTest {
     @Test
     @DisplayName("(d) role_sync reaches a subscribed handler, on heimdall-io rather than the socket thread")
     void roleSyncReachesASubscriber() {
-        bot = StubBot.start(StubBotConfig.withDemoFixtures().port(0).maxProtocolVersion(3));
+        bot = StubBot.start(StubBotConfig.withDemoFixtures().port(0));
 
         client = clientBuilder(settings(bot.baseUrl()).build(), caps(Capabilities.ROLE_SYNC)).build();
         AtomicReference<Envelope> received = new AtomicReference<Envelope>();
@@ -291,7 +295,7 @@ class TunnelStubIntegrationTest {
     @Test
     @DisplayName("(e) the bot asks, we reply with the echoed id, and its future completes")
     void correlatedRequestsRoundTrip() throws Exception {
-        bot = StubBot.start(StubBotConfig.withDemoFixtures().port(0).maxProtocolVersion(3));
+        bot = StubBot.start(StubBotConfig.withDemoFixtures().port(0));
 
         client = clientBuilder(settings(bot.baseUrl()).build(),
                 caps(Capabilities.WHITELIST, Capabilities.CONSOLE)).build();
@@ -372,7 +376,7 @@ class TunnelStubIntegrationTest {
     @Test
     @DisplayName("(h) shutdown closes the socket the bot can see and fails everything outstanding")
     void shutdownIsVisibleToTheBot() {
-        bot = StubBot.start(StubBotConfig.withDemoFixtures().port(0).maxProtocolVersion(3));
+        bot = StubBot.start(StubBotConfig.withDemoFixtures().port(0));
 
         client = clientBuilder(settings(bot.baseUrl()).build(), caps(Capabilities.WHITELIST)).build();
         client.connect();
@@ -386,20 +390,20 @@ class TunnelStubIntegrationTest {
         Await.until("the bot to see the disconnect", () -> bot.ws().connected(GUILD, SERVER_ID) == null);
     }
 
-    // ── The capability/module-id narrowing question ──────────────────────────
+    // ── Capability narrowing: settled ────────────────────────────────────────
 
     @Test
-    @DisplayName("the bot narrows config.push by EXACT capability id — versioned ids match nothing")
-    void configNarrowingIsAnExactMatchOnTheCapabilityId() {
-        // Pinned rather than asserted-as-correct. The bot files module config under an unversioned
-        // module id (`whitelist`) and the client declares a versioned capability (`whitelist@1`);
-        // stub-bot's narrowing is exact string equality, so nothing matches and an empty — but
-        // perfectly valid — config arrives. Either the bot matches on Capabilities.moduleId(), or
-        // the two identifiers are the same string. That is a bot-side decision for phase 1f; this
-        // test exists so it is made against a fact rather than an assumption.
+    @DisplayName("a versioned capability id is narrowed to its unversioned module id")
+    void configNarrowingMatchesOnTheBaseModuleId() {
+        // This used to pin the OPPOSITE, as an open question: the client declares `whitelist@1`, a
+        // config document files settings under `whitelist`, and if the bot compared them with exact
+        // string equality then nothing matched and an empty — but perfectly valid — config arrived,
+        // silently, for every module. Departure N5 recorded it as a bot-side decision for 1f.
+        //
+        // The bot side has since decided: it narrows with `capabilityModuleId()`, the base name. So
+        // the versioned id does match, and this asserts the resolution rather than the hazard.
         bot = StubBot.start(StubBotConfig.withDemoFixtures()
                 .port(0)
-                .maxProtocolVersion(3)
                 .modules(modules("whitelist", "rolesync")));
 
         RemoteConfig remoteConfig =
@@ -412,11 +416,39 @@ class TunnelStubIntegrationTest {
         Await.until("the client to negotiate v3", () -> client.mode() == ProtocolMode.V3);
         Await.until("a push to arrive", () -> remoteConfig.version() >= 0);
 
-        assertFalse(remoteConfig.moduleEnabled("whitelist"),
-                "the versioned capability id does not match the unversioned module id, so no config "
-                        + "for it is pushed at all");
+        Await.until("the whitelist config to be applied",
+                () -> remoteConfig.moduleEnabled("whitelist"));
+        assertFalse(remoteConfig.moduleEnabled("rolesync"),
+                "narrowing still happens — a module this build did not declare a capability for "
+                        + "must not receive settings nothing will read");
         assertEquals("whitelist", Capabilities.moduleId(Capabilities.WHITELIST));
         assertEquals(1, Capabilities.version(Capabilities.WHITELIST));
+    }
+
+    @Test
+    @DisplayName("an unregistered server is acked at version 0 and gets no config at all")
+    void anUnregisteredServerGetsNoConfig() {
+        bot = StubBot.start(StubBotConfig.withDemoFixtures()
+                .port(0)
+                .configVersion(9)
+                .unregisterServer(SERVER_ID)
+                .modules(modules("whitelist")));
+
+        RemoteConfig remoteConfig =
+                new RemoteConfig(logger, dataDir.resolve("remote-config.json"), ConfigDocument.empty());
+        client = clientBuilder(settings(bot.baseUrl()).build(), caps(Capabilities.WHITELIST))
+                .configPushHandler(remoteConfig)
+                .build();
+        client.onModeChange(remoteConfig);
+        client.connect();
+
+        // Still v3 — the ack is what stops it timing out into v2-compat — but carrying nothing.
+        Await.until("the client to negotiate v3", () -> client.mode() == ProtocolMode.V3);
+        assertEquals(0, client.configVersion(),
+                "the bot never reads the config store for a serverId it has no registry row for");
+        assertFalse(remoteConfig.moduleEnabled("whitelist"),
+                "and no push follows, so the client runs on its own defaults — which is exactly "
+                        + "what a v2 client does, and why this is a supported state not an error");
     }
 
     /**

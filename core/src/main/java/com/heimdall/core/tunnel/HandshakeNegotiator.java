@@ -5,7 +5,9 @@ import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.util.Registration;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.RejectedExecutionException;
@@ -57,6 +59,16 @@ final class HandshakeNegotiator {
     private volatile ScheduledFuture<?> deadline;
     private volatile int configVersion = -1;
 
+    /**
+     * What the bot said it will honour, from the last {@code identify_ack}.
+     *
+     * <p>Empty until a v3 ack arrives, and empty for a bot that acked with the older boolean shape —
+     * "it told us nothing" and "it accepted nothing" are the same value here, which is why the
+     * warning about unaccepted capabilities is skipped when it is empty rather than treating the
+     * whole declared set as refused.
+     */
+    private volatile List<String> acceptedCapabilities = Collections.emptyList();
+
     HandshakeNegotiator(
             HeimdallLogger logger,
             ScheduledExecutorService wsScheduler,
@@ -75,6 +87,11 @@ final class HandshakeNegotiator {
     /** The mode this connection negotiated. */
     ProtocolMode mode() {
         return mode;
+    }
+
+    /** The capabilities the bot acknowledged. Empty while disconnected or against a v2 bot. */
+    List<String> acceptedCapabilities() {
+        return acceptedCapabilities;
     }
 
     /** The config version the bot last advertised, or -1 if it never did. */
@@ -100,6 +117,7 @@ final class HandshakeNegotiator {
     void onOpen(TunnelSettings settings) {
         transitionTo(ProtocolMode.UNKNOWN);
         configVersion = -1;
+        acceptedCapabilities = Collections.emptyList();
 
         Envelope identify = Envelope.fresh("identify", buildIdentifyPayload(settings));
         identifyId = identify.id();
@@ -112,6 +130,7 @@ final class HandshakeNegotiator {
         cancelDeadline();
         identifyId = null;
         configVersion = -1;
+        acceptedCapabilities = Collections.emptyList();
         transitionTo(ProtocolMode.UNKNOWN);
     }
 
@@ -133,38 +152,93 @@ final class HandshakeNegotiator {
     }
 
     private void handleIdentifyAck(Envelope envelope) {
-        String expected = identifyId;
-        if (expected != null && !expected.equals(envelope.id())) {
-            // The bot echoes the identify's id. A mismatch means this ack belongs to a handshake
-            // from a previous socket, arriving late — accepting it would let a stale frame decide
-            // the mode of a connection it was never part of.
+        if (identifyId == null) {
+            // No handshake is in flight, so this ack belongs to a connection already torn down.
+            //
+            // The id is deliberately NOT compared against the identify's. An earlier draft required
+            // the ack to echo it, on the assumption that the bot correlates them — it does not, it
+            // sends a fresh id. That guard discarded every ack the real bot sends, so the plugin
+            // timed out into v2-compat against a perfectly good v3 bot, on every connection, while
+            // the bot believed it had negotiated v3. Cross-socket delivery is already impossible
+            // without it: TunnelClient's socket callbacks carry a generation and stale ones are
+            // inert (departure D24), so the id check was a second layer built on a false premise
+            // about the first.
             //
             // The deadline is cancelled AFTER this check, never before. Disarming on a stale ack
-            // would leave the live handshake with no deadline at all, so a bot that then went
-            // silent would wedge this connection at UNKNOWN forever — never negotiating v3 and
-            // never falling back to v2 either.
-            logger.debug("ignoring identify_ack for a stale handshake id " + envelope.id());
+            // would leave a live handshake with no deadline at all, so a bot that then went silent
+            // would wedge the connection at UNKNOWN forever.
+            logger.debug("ignoring identify_ack that arrived outside a handshake");
             return;
         }
 
         cancelDeadline();
 
-        boolean accepted = envelope.payload().bool("accepted", false);
-        if (!accepted) {
-            String reason = envelope.payload().string("reason", "no reason given");
-            // Severe, not warn: the plugin is newer than the bot it is pointed at, every pushed
-            // setting is now inert, and nothing will fix itself. The socket deliberately stays
-            // open — the bot keeps it open too — so the tunnel still carries v2 traffic.
+        Payload payload = envelope.payload();
+
+        // `accepted` is the LIST of capabilities the bot will honour, in the client's own spelling —
+        // not a yes/no. There is no refusal frame in the protocol at all: a capability the bot does
+        // not support is simply absent, and an empty list is a successful handshake with a bot that
+        // recognised none of what this build declared.
+        //
+        // The boolean is still read, first and only to detect an explicit refusal, for a bot that
+        // answers the older shape. Reading it as the primary signal is what an earlier draft did,
+        // and against the real bot `bool("accepted", false)` over a JSON array returns the fallback
+        // — so every connection logged "the bot refused this plugin's protocol version" and dropped
+        // to v2-compat.
+        Boolean legacyFlag = payload.optBool("accepted");
+        if (Boolean.FALSE.equals(legacyFlag)) {
+            String reason = payload.string("reason", "no reason given");
+            // Severe, not warn: every pushed setting is now inert and nothing will fix itself. The
+            // socket deliberately stays open — the bot keeps it open too — so v2 traffic continues.
             logger.severe("the bot refused this plugin's protocol version — running in v2 "
                     + "compatibility mode on cached config. Reason: " + reason);
             transitionTo(ProtocolMode.V2_COMPAT);
             return;
         }
 
-        configVersion = envelope.payload().intValue("configVersion", -1);
+        acceptedCapabilities = Collections.unmodifiableList(payload.strings("accepted"));
+        reportUnacceptedCapabilities();
+
+        configVersion = payload.intValue("configVersion", -1);
+        int botProtocol = payload.intValue("protocolVersion", 0);
         logger.info("tunnel negotiated protocol v" + TunnelSettings.PROTOCOL_VERSION
+                + (botProtocol > 0 ? " with a v" + botProtocol + " bot" : "")
                 + " (bot config version " + configVersion + ")");
         transitionTo(ProtocolMode.V3);
+    }
+
+    /**
+     * Says which declared capabilities the bot will not honour.
+     *
+     * <p>Worth a line because the failure it describes is otherwise perfectly silent: the module is
+     * enabled, it runs, and it simply never receives configuration or traffic for the thing it
+     * claimed. That is the same shape as the capability-id mismatch in departure N5, and this log is
+     * how somebody notices it rather than deduces it.
+     *
+     * <p>Only when the bot answered with a list at all. A bot that acked with a boolean has said
+     * nothing about individual capabilities, and inventing a warning out of its silence would name
+     * every capability this build has.
+     */
+    private void reportUnacceptedCapabilities() {
+        if (capabilitySource == null || acceptedCapabilities.isEmpty()) {
+            return;
+        }
+        Set<String> declared;
+        try {
+            declared = capabilitySource.capabilities();
+        } catch (RuntimeException unavailable) {
+            return;
+        }
+        List<String> unaccepted = new ArrayList<String>();
+        for (String capability : declared) {
+            if (!acceptedCapabilities.contains(capability)) {
+                unaccepted.add(capability);
+            }
+        }
+        if (!unaccepted.isEmpty()) {
+            logger.warn("the bot does not support " + unaccepted + " — those modules will run but "
+                    + "will never be configured or driven by it");
+        }
     }
 
     private void handleConfigPush(Envelope envelope) {

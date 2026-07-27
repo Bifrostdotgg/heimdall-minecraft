@@ -122,26 +122,39 @@ class HandshakeNegotiatorTest {
                 "and it must not claim in the log to have concluded something it did not");
     }
 
-    // ── S4: a stale ack must not disarm the live deadline ────────────────────
+    // ── The ack's id is not a correlation ────────────────────────────────────
 
     @Test
-    @DisplayName("an ack echoing a stale handshake id leaves the live deadline armed")
-    void aStaleAckDoesNotDisarmTheDeadline() {
+    @DisplayName("an ack is accepted whatever id it carries — the bot does not echo ours")
+    void anAckWithAnUnrelatedIdIsStillOurs() {
         RecordingLogger logger = new RecordingLogger(true);
         HandshakeNegotiator negotiator = negotiator(logger);
         negotiator.onOpen(SETTINGS);
-        assertTrue(scheduler.latestIsArmed());
 
-        negotiator.handle(Envelope.of("an-id-from-a-previous-socket", "identify_ack", accepted()));
+        // Exactly what the real bot sends: a fresh id, unrelated to the identify's.
+        negotiator.handle(Envelope.of("a-fresh-id-from-the-bot", "identify_ack", accepted()));
 
-        assertEquals(ProtocolMode.UNKNOWN, negotiator.mode());
-        assertTrue(scheduler.latestIsArmed(),
-                "disarming on a stale ack leaves the live handshake with no deadline at all, so a "
-                        + "bot that then goes silent wedges the connection at UNKNOWN forever — "
-                        + "never v3, and never falling back to v2 either");
+        assertEquals(ProtocolMode.V3, negotiator.mode(),
+                "requiring the ack to echo the identify's id discarded every ack the real bot "
+                        + "sends, so the plugin timed out into v2-compat on every connection while "
+                        + "the bot believed it had negotiated v3");
+        assertEquals(7, negotiator.configVersion());
+        assertFalse(scheduler.latestIsArmed());
+    }
 
-        scheduler.runLatest();
-        assertEquals(ProtocolMode.V2_COMPAT, negotiator.mode(), "the fallback still happens");
+    @Test
+    @DisplayName("an ack arriving outside a handshake is ignored and disarms nothing")
+    void anAckOutsideAHandshakeIsIgnored() {
+        RecordingLogger logger = new RecordingLogger(true);
+        HandshakeNegotiator negotiator = negotiator(logger);
+        negotiator.onOpen(SETTINGS);
+        negotiator.onClosed();
+
+        negotiator.handle(Envelope.of("late", "identify_ack", accepted()));
+
+        assertEquals(ProtocolMode.UNKNOWN, negotiator.mode(),
+                "an ack for a connection that has already been torn down must not decide anything");
+        assertEquals(-1, negotiator.configVersion());
     }
 
     @Test
