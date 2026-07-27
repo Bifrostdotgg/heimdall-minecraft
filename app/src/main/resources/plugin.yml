@@ -7,4 +7,17 @@ description: Discord-to-Minecraft whitelist, role sync, punishments and console 
 
 # No `api-version` on purpose: declaring one makes the server refuse to load the
 # plugin on 1.8.8, which is a supported target. Modern Paper logs a "legacy
-# plugin" warning as a result — accepted for phase 0, revisited in phase 1.
+# plugin" warning as a result — accepted, and cheaper than dropping the floor.
+
+commands:
+  hd:
+    description: Heimdall administration
+    usage: /<command>
+    aliases: [heimdall]
+
+permissions:
+  heimdall.admin:
+    description: Use Heimdall's administrative commands
+    # Operators only. Every subcommand this gates is a server-wide change, and a
+    # server that wants finer control has a permissions plugin for exactly that.
+    default: op
