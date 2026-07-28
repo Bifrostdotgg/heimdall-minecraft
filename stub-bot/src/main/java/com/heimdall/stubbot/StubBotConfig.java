@@ -60,6 +60,21 @@ public final class StubBotConfig {
     /** Server ids whose registry row names a different token. Connecting as one is a 403. */
     private final Set<String> foreignServers = new LinkedHashSet<>();
 
+    /**
+     * Setup codes to mint at startup, as {@code CODE:serverName:serverId} triples.
+     *
+     * <p>Exists for one caller that cannot use {@code bot.http().issueClaimCode(...)}: the smoke
+     * matrix, which starts this stub in a container and drives a real server against it, and has no
+     * way to reach into the JVM. Without it the setup scenario cannot be exercised at all from the
+     * outside, which would leave the one flow phase 1e is about proven only by unit tests.
+     *
+     * <p>The {@code serverId} is optional and is the reason the triple is not a pair. A claim
+     * normally invents a random UUID, which is fine in a test that reads the response and useless in
+     * a shell script that has to assert on a log line naming the server. Given one, the claim uses
+     * it verbatim.
+     */
+    private final Map<String, String[]> claimCodes = new LinkedHashMap<>();
+
     /** When true the registry cannot be read, which is what turns an incumbent clash into a 503. */
     private boolean registryUnreadable;
 
@@ -143,6 +158,19 @@ public final class StubBotConfig {
                         if (!id.trim().isEmpty()) {
                             config.foreignServers.add(id.trim());
                         }
+                    }
+                }
+                case "claim_codes" -> {
+                    config.claimCodes.clear();
+                    for (String entryText : value.split(",")) {
+                        String[] parts = entryText.trim().split(":");
+                        if (parts.length == 0 || parts[0].trim().isEmpty()) {
+                            continue;
+                        }
+                        String code = parts[0].trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "");
+                        String serverName = parts.length > 1 ? parts[1].trim() : "Smoke";
+                        String serverId = parts.length > 2 ? parts[2].trim() : "";
+                        config.claimCodes.put(code, new String[] {serverName, serverId});
                     }
                 }
                 case "unregistered_servers" -> {
@@ -377,6 +405,19 @@ public final class StubBotConfig {
     }
 
     /** The serverIds being treated as unregistered. */
+    /** The codes to mint at startup, as {@code CODE -> [serverName, serverId]}. */
+    public Map<String, String[]> claimCodes() {
+        return Collections.unmodifiableMap(claimCodes);
+    }
+
+    /** Pre-issues a setup code, for a caller that cannot reach {@code StubHttpApi}. */
+    public StubBotConfig claimCode(String code, String serverName, String serverId) {
+        claimCodes.put(
+                code.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", ""),
+                new String[] {serverName, serverId == null ? "" : serverId});
+        return this;
+    }
+
     public Set<String> unregisteredServers() {
         return Collections.unmodifiableSet(unregisteredServers);
     }

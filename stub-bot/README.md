@@ -54,6 +54,7 @@ Precedence: defaults → `STUB_BOT_*` environment variables → `--key=value` ar
 | `STUB_BOT_PING_INTERVAL_MS` | `30000` | WebSocket ping sweep interval. |
 | `STUB_BOT_LIVENESS_TIMEOUT_MS` | `90000` | Silence after which a connection is reaped. |
 | `STUB_BOT_UNREGISTERED_SERVERS` | — | Comma-separated server ids to treat as absent from the registry. |
+| `STUB_BOT_CLAIM_CODES` | — | Setup codes to mint at startup, as `CODE:serverName:serverId` triples, comma-separated. `serverId` is optional. |
 | `STUB_BOT_FOREIGN_SERVERS` | — | Comma-separated server ids registered to a *different* token — their upgrade is refused with 403. |
 | `STUB_BOT_REGISTRY_UNREADABLE` | `false` | Simulates a registry outage; with an incumbent under another token the upgrade is refused with 503. |
 | `STUB_BOT_CONFIG_VERSION` | `1` | Starting config version advertised to v3 clients. |
@@ -280,8 +281,16 @@ the plaintext API key, returned exactly once.
 | 401 | `INVALID_CODE` | Unknown, expired or already used. Codes are single-use. |
 | 429 | `TOO_MANY_ATTEMPTS` | Ten failures from one client. Checked **before** the body is read, so a throttled caller gets 429 whatever it sends. |
 
-Issue a code in a test with `bot.http().issueClaimCode("ABCD2345", "Survival")`. A successful claim
-also **registers** the new serverId, which is what the WebSocket upgrade then looks up.
+Issue a code in a test with `bot.issueClaimCode("ABCD2345", "Survival")`. A successful claim also
+**registers** the new serverId, which is what the WebSocket upgrade then looks up.
+
+**The serverId is normally a fresh UUID, and can be pinned.** `bot.issueClaimCode(code, name,
+serverId)` — and the `STUB_BOT_CLAIM_CODES` environment variable, which takes the same three fields
+— make the claim register an id you chose. The real bot always has one already (the dashboard
+created the registry row when it minted the code), so this is the more faithful shape rather than a
+shortcut; it exists because `smoke/connected.sh` asserts on the stub's own
+`ws connected: guild=… server=…` line and a shell script cannot know a UUID minted inside a
+container.
 
 ### `POST …/servers/{serverId}/config/import`
 
@@ -493,6 +502,10 @@ On `StubBot`:
 
 - `fixtures()` — mutate players and the whitelist while running.
 - `resetInfractions()` — clear the `/offend` escalation counters.
+- `issueClaimCode(code, serverName)` / `issueClaimCode(code, serverName, serverId)` — mint a setup
+  code. On `StubBot` rather than only on the HTTP side because `StubHttpApi` is package-private, so
+  no consumer outside `com.heimdall.stubbot` can name its type.
+- `importedConfig(serverId)` — the write-once document a plugin imported, or `null`.
 - `baseUrl()`, `port()`.
 
 On `StubBot.ws()`:

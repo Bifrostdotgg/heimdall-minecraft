@@ -95,6 +95,11 @@ final class StubHttpApi {
         }
         server.setExecutor(executor);
         server.createContext("/", this::dispatch);
+        // Codes handed in through the environment, for a caller that cannot reach this object at
+        // all - see StubBotConfig#claimCodes. Empty in every other case.
+        for (Map.Entry<String, String[]> preIssued : config.claimCodes().entrySet()) {
+            issueClaimCode(preIssued.getKey(), preIssued.getValue()[0], preIssued.getValue()[1]);
+        }
     }
 
     void start() {
@@ -262,7 +267,7 @@ final class StubHttpApi {
             return;
         }
 
-        String serverId = UUID.randomUUID().toString();
+        String serverId = claim.serverId.isEmpty() ? UUID.randomUUID().toString() : claim.serverId;
         registerClaimedServer(serverId);
 
         JsonObject data = new JsonObject();
@@ -830,8 +835,19 @@ final class StubHttpApi {
 
         private final String serverName;
 
-        ClaimCode(String serverName) {
+        /**
+         * The id to register, or empty to invent one.
+         *
+         * <p>The real bot always has an id already — the dashboard created the row when it minted
+         * the code — so supplying one is the more faithful shape, not a shortcut. It exists because
+         * the smoke matrix has to assert on log lines naming the server, and a random UUID cannot be
+         * written into a shell script in advance.
+         */
+        private final String serverId;
+
+        ClaimCode(String serverName, String serverId) {
             this.serverName = serverName;
+            this.serverId = serverId == null ? "" : serverId.trim();
         }
     }
 
@@ -857,8 +873,21 @@ final class StubHttpApi {
      * bot consumes one atomically so two servers racing on the same code cannot both win.
      */
     public String issueClaimCode(String code, String serverName) {
+        return issueClaimCode(code, serverName, "");
+    }
+
+    /**
+     * Issues a code that will register a specific server id rather than a random one.
+     *
+     * <p>For a caller that has to know the id in advance — the smoke matrix asserts on the stub's
+     * own {@code ws connected: guild=… server=…} line, which it cannot do against a UUID minted
+     * inside the container.
+     */
+    public String issueClaimCode(String code, String serverName, String serverId) {
         String normalised = code.trim().toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]", "");
-        claimCodes.put(normalised, new ClaimCode(serverName));
+        claimCodes.put(normalised, new ClaimCode(serverName, serverId));
+        StubLog.info("issued setup code " + normalised + " for " + serverName
+                + (serverId == null || serverId.isEmpty() ? "" : " (server " + serverId + ")"));
         return normalised;
     }
 

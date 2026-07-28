@@ -82,6 +82,29 @@ public final class StubBot implements AutoCloseable {
     }
 
     /**
+     * Issues a setup code {@code POST /api/minecraft/claim} will accept, exactly once.
+     *
+     * <p>On {@link StubBot} rather than only on {@code StubHttpApi} because that class is
+     * package-private, so a consumer outside {@code com.heimdall.stubbot} — which is every consumer
+     * — cannot name its type. The dashboard mints these in production; here a test does.
+     *
+     * @param serverId the id to register on a successful claim, or empty for a random one
+     */
+    public String issueClaimCode(String code, String serverName, String serverId) {
+        return http.issueClaimCode(code, serverName, serverId);
+    }
+
+    /** Issues a setup code that will register a random server id. */
+    public String issueClaimCode(String code, String serverName) {
+        return http.issueClaimCode(code, serverName, "");
+    }
+
+    /** The config document imported for a server id, or {@code null}. */
+    public com.google.gson.JsonObject importedConfig(String serverId) {
+        return http.importedConfig(serverId);
+    }
+
+    /**
      * The registry checks the bot runs before it hands a socket to the WebSocket library.
      *
      * <p>Two rejections, and the difference between them is what a plugin needs in order to know
