@@ -104,10 +104,14 @@ public final class MigrationBoot {
      */
     public static void scheduleImport(
             final HeimdallLogger logger, final HeimdallRuntime runtime, final MigrationResult result) {
-        if (result == null || result.status() != MigrationResult.Status.MIGRATED) {
+        if (result == null) {
             return;
         }
-        if (result.modules() == null || result.modules().isEmpty()) {
+        // Both a first migration and a "restore the backup" re-import hand the same settings to the
+        // dashboard; the import is write-once bot-side, so re-offering costs nothing.
+        boolean importable = result.status() == MigrationResult.Status.MIGRATED
+                || result.status() == MigrationResult.Status.REIMPORT;
+        if (!importable || result.modules() == null || result.modules().isEmpty()) {
             return;
         }
         final String serverId = runtime.bootstrap().serverId();
@@ -163,8 +167,19 @@ public final class MigrationBoot {
                     @Override
                     public void accept(ConfigImportResult imported, Throwable failure) {
                         if (failure != null) {
-                            logger.warn("could not hand the migrated v2 settings to the dashboard ("
-                                    + failure + "); they can be set there by hand");
+                            // A failed POST is retried within the same window as a not-yet-usable
+                            // API. The window is what was promised, and a bot that 500s once or drops
+                            // the connection mid-request is exactly the transient this is for — giving
+                            // up after a single try would lose the operator's settings to one blip.
+                            if (attempts.incrementAndGet() < IMPORT_ATTEMPTS) {
+                                logger.debug(() -> "the migrated-settings import failed ("
+                                        + failure + "); retrying");
+                                schedule(logger, runtime, result, serverId, attempts);
+                            } else {
+                                logger.warn("gave up handing the migrated v2 settings to the "
+                                        + "dashboard after repeated failures (" + failure
+                                        + "); they can be set there by hand");
+                            }
                             return;
                         }
                         if (imported.imported()) {

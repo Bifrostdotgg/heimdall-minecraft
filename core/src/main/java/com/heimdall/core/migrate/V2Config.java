@@ -113,6 +113,21 @@ public final class V2Config {
         return bool("logging.debug", false);
     }
 
+    /** v2 {@code api.timeout}, in ms. v2 shipped 1500; v3's default is 5000. Preserved on migration. */
+    public long apiTimeoutMs() {
+        return longValue("api.timeout", 1500L);
+    }
+
+    /** v2 {@code api.retries}. v2 shipped 1; v3's default is 3. Preserved on migration. */
+    public long apiRetries() {
+        return longValue("api.retries", 1L);
+    }
+
+    /** v2 {@code api.retryDelay}, in ms. Preserved on migration. */
+    public long apiRetryDelayMs() {
+        return longValue("api.retryDelay", 1000L);
+    }
+
     // ── Everything else: what becomes the dashboard's config document ────────
 
     /**
@@ -228,6 +243,21 @@ public final class V2Config {
     /** v2 {@code updates.checkIntervalHours}. v2 documented a minimum of 1; it is not clamped here. */
     public long updateCheckIntervalHours() {
         return longValue("updates.checkIntervalHours", 12L);
+    }
+
+    // ── Keys v3 has no home for, checked for presence rather than read ───────
+
+    /**
+     * Whether a dotted path is <em>present</em> in the file, whatever its value.
+     *
+     * <p>The value accessors above cannot answer this: they return a default for an absent key, so
+     * {@code cacheEnabled()} would read {@code true} for a file that never mentioned it and for one
+     * that set it to {@code true}. The migration needs to tell those apart — a key it drops that the
+     * operator actually set is something they have to be told about, and a key they never touched is
+     * not — so presence is a separate question from value.
+     */
+    public boolean hasKey(String path) {
+        return valueAt(path) != null;
     }
 
     // ── The one judgement ────────────────────────────────────────────────────

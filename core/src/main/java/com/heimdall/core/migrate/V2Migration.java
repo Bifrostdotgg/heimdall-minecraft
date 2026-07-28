@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -114,6 +115,22 @@ public final class V2Migration {
         }
 
         if (store.exists()) {
+            // A configured server. Normally there is nothing to do — but if a v2 config has been
+            // dropped back in beside it, that is the "restore the backup and reboot" recovery, and
+            // the operator wants its settings re-imported without their credentials being touched.
+            Path restored = findV2Config(searchDirectories);
+            if (restored != null) {
+                V2Config config = reader.read(restored);
+                if (config != null && config.hasCredentials()) {
+                    logger.info("Found a v2 config at " + restored + " beside an existing "
+                            + store.file() + " — re-offering its settings for import. Nothing on "
+                            + "disk has been changed; delete the v2 file once you are satisfied.");
+                    return MigrationResult.reimport(restored, toModules(config),
+                            "Re-importing settings from the v2 config restored at " + restored
+                                    + ". Credentials were left untouched. Delete that file when the "
+                                    + "dashboard shows what you expect.");
+                }
+            }
             MigrationResult result = MigrationResult.alreadyConfigured(
                     store.file() + " already exists — no v2 migration attempted.");
             logger.debug(result::detail);
@@ -153,7 +170,8 @@ public final class V2Migration {
 
         Path backup = backUp(source);
         MigrationResult result = MigrationResult.migrated(
-                source, backup, bootstrap, toModules(config), describe(source, backup, store.file()));
+                source, backup, bootstrap,
+                toModules(config), describe(source, backup, store.file(), unmappedKeys(config)));
         logger.info(result.detail());
         return result;
     }
@@ -203,6 +221,18 @@ public final class V2Migration {
                 .guildId(config.guildId())
                 .role(ServerRole.AUTO)
                 .debug(config.debug())
+                // The login budget. Carried across so a v2 server tuned for a flaky link keeps its
+                // own patience rather than inheriting v3's more generous defaults — a 1500ms/1-retry
+                // v2 server would otherwise balloon to ~18s per login (departure D62). ApiSettings
+                // clamps these on build, so a nonsense value cannot break the client.
+                .timeoutMs((int) config.apiTimeoutMs())
+                .retries((int) config.apiRetries())
+                .retryDelayMs((int) config.apiRetryDelayMs())
+                // The self-updater's knobs live locally, because v3 has no `updates` capability for
+                // the dashboard to push one through — this is the only place they can be controlled.
+                .updatesCheckEnabled(config.updateCheckEnabled())
+                .updatesNotifyAdmins(config.updateNotifyAdmins())
+                .updatesCheckIntervalHours(config.updateCheckIntervalHours())
                 .build();
     }
 
@@ -224,6 +254,12 @@ public final class V2Migration {
      * {@code prewarmIntervalMinutes}, and the two {@code messages.*} entries gain their
      * {@code Message} suffix. Those are the names {@code WhitelistSettings} reads, and the names it
      * reads are the only ones that do anything.
+     *
+     * <p><strong>There is deliberately no {@code updates} module here.</strong> The self-updater's
+     * settings went into {@code bootstrap.yml} instead: v3 has no {@code updates} capability, so the
+     * bot's {@code config.push} narrowing would drop an {@code updates} section on the way out and it
+     * would never reach the plugin. Putting it in the import doc would be writing a value nothing
+     * could ever read.
      */
     private static Payload toModules(V2Config config) {
         Payload whitelistSettings = Payload.builder()
@@ -240,16 +276,10 @@ public final class V2Migration {
                 .put("apiUnavailableAllowedMessage", config.apiUnavailableAllowedMessage())
                 .build();
 
-        Payload updateSettings = Payload.builder()
-                .put("notifyAdmins", config.updateNotifyAdmins())
-                .put("checkIntervalHours", config.updateCheckIntervalHours())
-                .build();
-
         return Payload.builder()
                 .put("whitelist", module(config.pluginEnabled(), whitelistSettings))
                 .put("rolesync", module(config.roleSyncEnabled(), Payload.empty()))
                 .put("console", module(config.consoleStream(), Payload.empty()))
-                .put("updates", module(config.updateCheckEnabled(), updateSettings))
                 .build();
     }
 
@@ -316,15 +346,65 @@ public final class V2Migration {
         return null;
     }
 
-    /** The one sentence an operator reads about all of this. */
-    private static String describe(Path source, Path backup, Path bootstrap) {
+    /**
+     * v2 keys that were <em>set</em> in this file and have no equivalent in v3, described for the
+     * operator so the migration's completeness claim is honest.
+     *
+     * <p>Every one of these is a deliberate non-port, not an oversight — but a deliberate non-port
+     * an operator who relied on it must be told about, because the alternative is a migration that
+     * silently changes behaviour and calls itself complete. The value accessors cannot answer this;
+     * presence is checked with {@link V2Config#hasKey}, so a key the operator never touched stays
+     * quiet.
+     */
+    private static List<String> unmappedKeys(V2Config config) {
+        List<String> notes = new ArrayList<String>();
+        if (config.hasKey("cache.enabled")) {
+            notes.add("cache.enabled (v3 always mirrors while the whitelist module is on; there is "
+                    + "no per-decision cache toggle)");
+        }
+        if (config.hasKey("websocket.enabled")) {
+            notes.add("websocket.enabled (v3's tunnel is not optional — realtime role-sync, the "
+                    + "console feed and remote updates all ride it)");
+        }
+        if (config.hasKey("performance.cacheTimeout")) {
+            notes.add("performance.cacheTimeout (v2's 30-second response cache is deliberately not "
+                    + "ported — it caused the 2.4.0 role-sync outage, departure D7)");
+        }
+        if (config.hasKey("performance.maxConcurrentRequests")) {
+            notes.add("performance.maxConcurrentRequests (v3 bounds concurrency with a fixed IO pool "
+                    + "rather than a per-server setting)");
+        }
+        if (config.hasKey("logging.logDecisions")) {
+            notes.add("logging.logDecisions (v3 logs every login decision; the toggle is gone)");
+        }
+        if (config.hasKey("server.displayName")) {
+            notes.add("server.displayName (the dashboard names a server when its setup code is "
+                    + "minted; v3 does not take the name from this file)");
+        }
+        if (config.hasKey("server.publicIp")) {
+            notes.add("server.publicIp (v3 reports the address each connection actually arrives on "
+                    + "rather than a configured one)");
+        }
+        return notes;
+    }
+
+    /** The one sentence an operator reads about all of this, plus the list of what did not survive. */
+    private static String describe(Path source, Path backup, Path bootstrap, List<String> unmapped) {
         String moved = backup == null
                 ? "the v2 file could not be renamed and is still at " + source + " (it is no longer read)"
                 : "the v2 file has been kept as " + backup;
-        return "Migrated the v2 config at " + source + " — wrote " + bootstrap + " and " + moved
-                + ". Its other settings have been prepared for import into the dashboard, but an "
-                + "imported configuration stays inert until this server is claimed: run /hd setup to "
-                + "claim it and they take effect. Until then Heimdall runs its built-in defaults, "
-                + "which are v2's, so nothing changes for your players in the meantime.";
+        StringBuilder out = new StringBuilder();
+        out.append("Migrated the v2 config at ").append(source).append(" — wrote ").append(bootstrap)
+                .append(" and ").append(moved)
+                .append(". Its other settings have been prepared for import into the dashboard, but "
+                        + "an imported configuration stays inert until this server is claimed: run "
+                        + "/hd setup to claim it and they take effect. Until then Heimdall runs its "
+                        + "built-in defaults, which are v2's, so nothing changes for your players in "
+                        + "the meantime.");
+        if (!unmapped.isEmpty()) {
+            out.append(" These v2 settings have no v3 equivalent and were NOT carried over: ")
+                    .append(String.join("; ", unmapped)).append(".");
+        }
+        return out.toString();
     }
 }

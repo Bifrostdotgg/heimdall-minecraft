@@ -120,10 +120,18 @@ class V2MigrationTest {
 
         assertTrue(result.modules().child("rolesync").bool("enabled", false));
         assertFalse(result.modules().child("console").bool("enabled", true));
-        Payload updates = result.modules().child("updates");
-        assertTrue(updates.bool("enabled", false));
-        assertFalse(updates.child("settings").bool("notifyAdmins", true));
-        assertEquals(6L, updates.child("settings").longValue("checkIntervalHours", -1L));
+
+        // The login budget is preserved from v2 (1500ms/1 retry), not ballooned to v3's defaults —
+        // it flows through bootstrap.yml because ApiSettings has no remote-config source (B4/D62).
+        assertEquals(1500, bootstrap.timeoutMs());
+        assertEquals(1, bootstrap.retries());
+        assertEquals(1000, bootstrap.retryDelayMs());
+
+        // The updater's knobs live locally too — v3 has no `updates` capability, so a dashboard
+        // value there would be narrowed out of every push.
+        assertTrue(bootstrap.updatesCheckEnabled());
+        assertFalse(bootstrap.updatesNotifyAdmins());
+        assertEquals(6L, bootstrap.updatesCheckIntervalHours());
     }
 
     @Test
@@ -171,14 +179,20 @@ class V2MigrationTest {
         assertEquals(5L, settings.longValue("prewarmIntervalMinutes", -1L));
         assertFalse(result.modules().child("rolesync").bool("enabled", true));
         assertTrue(result.modules().child("console").bool("enabled", false));
-        assertTrue(result.modules().child("updates").bool("enabled", false));
-        assertEquals(12L, result.modules().child("updates").child("settings")
-                .longValue("checkIntervalHours", -1L));
+
+        // Timing preserved from the JSON fixture; the update knobs default because v2's Velocity
+        // build wrote no `updates` block.
+        assertEquals(1500, bootstrap.timeoutMs());
+        assertEquals(1, bootstrap.retries());
+        assertTrue(bootstrap.updatesCheckEnabled());
+        assertEquals(12L, bootstrap.updatesCheckIntervalHours());
     }
 
     /** The module ids and the whitelist settings keys, exactly and in order. */
     private static void assertModulesShape(Payload modules) {
-        assertEquals(Arrays.asList("whitelist", "rolesync", "console", "updates"), keys(modules));
+        // No `updates` here: the self-updater's settings went to bootstrap.yml, because v3 has no
+        // `updates` capability and the bot would narrow such a section out of every push (B4).
+        assertEquals(Arrays.asList("whitelist", "rolesync", "console"), keys(modules));
         for (String id : keys(modules)) {
             assertEquals(Arrays.asList("enabled", "settings"), keys(modules.child(id)),
                     id + " must use the nested {enabled, settings} form");
@@ -186,16 +200,15 @@ class V2MigrationTest {
         assertEquals(WHITELIST_SETTING_KEYS, keys(modules.child("whitelist").child("settings")));
         assertTrue(modules.child("rolesync").child("settings").isEmpty());
         assertTrue(modules.child("console").child("settings").isEmpty());
-        assertEquals(Arrays.asList("notifyAdmins", "checkIntervalHours"),
-                keys(modules.child("updates").child("settings")));
     }
 
     // ── The refusals ─────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("an existing bootstrap.yml stops everything, and the v2 file is not touched")
-    void existingBootstrapIsNeverOverwritten(@TempDir Path dir) throws IOException {
-        Path source = copyFixture("config.yml", dir, "config.yml");
+    @DisplayName("an existing bootstrap with no v2 config beside it does nothing at all")
+    void existingBootstrapWithNoV2ConfigDoesNothing(@TempDir Path dir) throws IOException {
+        // The ordinary steady state: a configured server booting, with no v2 file anywhere. (A v2
+        // file dropped back in beside the bootstrap is the REIMPORT recovery, covered separately.)
         BootstrapStore store = storeIn(dir);
         store.save(BootstrapConfig.builder()
                 .endpoint("https://already.example")
@@ -212,8 +225,6 @@ class V2MigrationTest {
         assertTrue(result.modules().isEmpty());
         assertFalse(result.legacyToken());
         assertEquals(before, readBootstrap(dir), "the live bootstrap must be byte-identical");
-        assertTrue(Files.isRegularFile(source), "the v2 file is left exactly where it was");
-        assertFalse(Files.exists(dir.resolve("config.yml" + V2Migration.BACKUP_SUFFIX)));
     }
 
     @Test
@@ -355,5 +366,74 @@ class V2MigrationTest {
         assertTrue(detail.contains("inert"), detail);
         assertTrue(detail.contains("/hd setup"), detail);
         assertTrue(logger.logged(LogLevel.INFO, "inert"), "and it is logged, not just returned");
+    }
+
+    @Test
+    @DisplayName("a v2 setting with no v3 home surfaces in detail() — caching turned off is not silently lost")
+    void unmappedKeysAreEnumerated(@TempDir Path dir) throws IOException {
+        // The whole point: an operator who deliberately turned caching and the socket OFF must not
+        // migrate into a server that mirrors and dials while the migration calls itself complete.
+        write(dir, "config.yml", String.join("\n",
+                "enabled: true",
+                "api:",
+                "  baseUrl: \"https://api.bifrost.gg\"",
+                "  apiKey: \"hwl_a_real_key_not_placeholder\"",
+                "cache:",
+                "  enabled: false",
+                "websocket:",
+                "  enabled: false",
+                "logging:",
+                "  logDecisions: false",
+                "performance:",
+                "  cacheTimeout: 45",
+                ""));
+
+        MigrationResult result = migration.run(Collections.singletonList(dir), storeIn(dir));
+
+        assertEquals(MigrationResult.Status.MIGRATED, result.status());
+        String detail = result.detail();
+        assertTrue(detail.contains("NOT carried over"), detail);
+        assertTrue(detail.contains("cache.enabled"), detail);
+        assertTrue(detail.contains("websocket.enabled"), detail);
+        assertTrue(detail.contains("logging.logDecisions"), detail);
+        assertTrue(detail.contains("performance.cacheTimeout"), detail);
+    }
+
+    @Test
+    @DisplayName("a config left at every default names nothing unmapped — no false alarm")
+    void aPlainConfigEnumeratesNothing(@TempDir Path dir) throws IOException {
+        write(dir, "config.yml", String.join("\n",
+                "enabled: true",
+                "api:",
+                "  baseUrl: \"https://api.bifrost.gg\"",
+                "  apiKey: \"hwl_a_real_key_value_here\"",
+                ""));
+
+        MigrationResult result = migration.run(Collections.singletonList(dir), storeIn(dir));
+
+        assertEquals(MigrationResult.Status.MIGRATED, result.status());
+        assertFalse(result.detail().contains("NOT carried over"),
+                "a key the operator never set must stay quiet — presence, not value, is the test");
+    }
+
+    @Test
+    @DisplayName("a v2 config restored beside an existing bootstrap re-offers its settings, touching nothing")
+    void restoringAV2ConfigReimportsSettings(@TempDir Path dir) throws IOException {
+        // First migrate normally.
+        copyFixture("config.yml", dir, "config.yml");
+        BootstrapStore store = storeIn(dir);
+        migration.run(Collections.singletonList(dir), store);
+        BootstrapConfig afterFirst = store.load();
+
+        // Now the operator restores their v2 config beside the bootstrap and reboots.
+        copyFixture("config.yml", dir, "config.yml");
+
+        MigrationResult reimport = migration.run(Collections.singletonList(dir), store);
+
+        assertEquals(MigrationResult.Status.REIMPORT, reimport.status());
+        assertFalse(reimport.modules().isEmpty(), "it carries the settings for a fresh import");
+        assertEquals(afterFirst, store.load(), "the credentials were left exactly as they were");
+        assertTrue(Files.isRegularFile(dir.resolve("config.yml")),
+                "the restored file is left in place for the operator to delete when satisfied");
     }
 }

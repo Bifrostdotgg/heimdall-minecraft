@@ -53,7 +53,19 @@ public final class MigrationResult {
         UNUSABLE,
 
         /** A {@code bootstrap.yml} was written and the v2 file was kept as a backup. */
-        MIGRATED
+        MIGRATED,
+
+        /**
+         * A {@code bootstrap.yml} already existed <em>and</em> a v2 config was found beside it, so
+         * its settings are offered for (re-)import without touching the credentials.
+         *
+         * <p>This is the "restore the backup and reboot" recovery made real: an operator who wants
+         * their v2 tuning re-imported drops their {@code config.yml} back and restarts, and its
+         * module settings are posted again — write-once on the bot, so a second import is a harmless
+         * no-op. Nothing on disk is changed: the bootstrap keeps its credentials, and the v2 file is
+         * left in place (an operator deletes it when satisfied), so this can never lose anything.
+         */
+        REIMPORT
     }
 
     private final Status status;
@@ -103,7 +115,17 @@ public final class MigrationResult {
         return new MigrationResult(Status.MIGRATED, source, backup, bootstrap, modules, detail);
     }
 
-    /** Which of the four things happened. Never {@code null}. */
+    /**
+     * A v2 config was found beside an already-configured server; offer its settings for re-import.
+     *
+     * @param source the restored v2 file, left exactly where it is
+     * @param modules its translated settings, for {@code config/import}
+     */
+    public static MigrationResult reimport(Path source, Payload modules, String detail) {
+        return new MigrationResult(Status.REIMPORT, source, null, null, modules, detail);
+    }
+
+    /** Which of the outcomes happened. Never {@code null}. */
     public Status status() {
         return status;
     }
