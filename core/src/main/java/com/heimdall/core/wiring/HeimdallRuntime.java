@@ -26,7 +26,9 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Everything the plugin is, assembled once, in an order that has to be right.
@@ -281,7 +283,10 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         registrations.add(tunnel.onModeChange(remoteConfig));
         registrations.add(modules.followRemoteConfig());
-        modules.reconcileFromConfig();
+        // Applies bootstrap.yml's local-disable set AND does the first reconcile against it, so a
+        // module an operator switched off locally is never even started, whatever the cached or
+        // pushed config says.
+        modules.setLocallyDisabled(parseModuleIds(bootstrap.disabledModules()));
 
         if (!bootstrap.isConfigured()) {
             logger.info("not set up yet — run /hd setup <code> to connect this server to Discord "
@@ -371,8 +376,9 @@ public final class HeimdallRuntime implements AutoCloseable {
         this.guildDiscovery = buildGuildDiscovery();
 
         // Only after everything is pointed at the new bot. A module reading its config during the
-        // reconcile below must not see a half-applied setup.
-        modules.reconcileFromConfig();
+        // reconcile below must not see a half-applied setup. Goes through the local-disable filter,
+        // which setup does not change but must not drop.
+        modules.setLocallyDisabled(parseModuleIds(bootstrap.disabledModules()));
         dial();
     }
 
@@ -396,6 +402,56 @@ public final class HeimdallRuntime implements AutoCloseable {
             bootstrapStore.save(updated);
             this.bootstrap = updated;
         }
+    }
+
+    /**
+     * Switches a module off, or back on, locally — the offline escape hatch (departure D66).
+     *
+     * <p>Persists the change to {@code bootstrap.yml} and reconciles immediately, so it takes effect
+     * now and survives a restart. A locally-disabled module stays off even while the tunnel is up and
+     * the dashboard says on, until it is enabled again here — which is the whole point: it is the one
+     * lever an operator has when the bot is unreachable, and "I turned it off here" has to win.
+     *
+     * @param disabled {@code true} to disable, {@code false} to clear the local override
+     * @return the module ids now disabled locally
+     * @throws IOException if the change could not be written; the in-memory state is left unchanged
+     */
+    public Set<String> setModuleLocallyDisabled(String moduleId, boolean disabled) throws IOException {
+        if (moduleId == null || moduleId.trim().isEmpty()) {
+            throw new IllegalArgumentException("a module id is required");
+        }
+        synchronized (reconfigureLock) {
+            Set<String> current = new LinkedHashSet<String>(parseModuleIds(bootstrap.disabledModules()));
+            if (disabled) {
+                current.add(moduleId.trim());
+            } else {
+                current.remove(moduleId.trim());
+            }
+            BootstrapConfig updated =
+                    bootstrap.toBuilder().disabledModules(String.join(" ", current)).build();
+            bootstrapStore.save(updated);
+            this.bootstrap = updated;
+            modules.setLocallyDisabled(current);
+            return current;
+        }
+    }
+
+    /** The module ids currently switched off locally. */
+    public Set<String> locallyDisabledModules() {
+        return modules.locallyDisabled();
+    }
+
+    private static Set<String> parseModuleIds(String spaceSeparated) {
+        Set<String> ids = new LinkedHashSet<String>();
+        if (spaceSeparated == null) {
+            return ids;
+        }
+        for (String token : spaceSeparated.trim().split("\\s+")) {
+            if (!token.isEmpty()) {
+                ids.add(token);
+            }
+        }
+        return ids;
     }
 
     /**
@@ -449,7 +505,9 @@ public final class HeimdallRuntime implements AutoCloseable {
         // that has not connected yet. Harmless in the common case, and the only way to pick up the
         // uncommon one without a restart.
         remoteConfig.loadFromCache();
-        modules.reconcileFromConfig();
+        // Re-reads the local-disable set from the file the operator may have just edited, and
+        // reconciles against it.
+        modules.setLocallyDisabled(parseModuleIds(onDisk.disabledModules()));
 
         if (!onDisk.isConfigured()) {
             return "re-read " + bootstrapStore.file() + "; this server is still not set up";

@@ -69,7 +69,7 @@ final class PunishmentSubcommands {
                 list(source, offenses.types());
                 return;
             }
-            source.sendMessage(Msg.legacy("§cUsage: §f/hd offense <reload|types>"));
+            source.sendMessage(Msg.legacy("§cUsage: §f/" + context.label() + " offense <reload|types>"));
         }
 
         @Override

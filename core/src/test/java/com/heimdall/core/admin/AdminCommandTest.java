@@ -92,6 +92,79 @@ class AdminCommandTest {
         return new ArrayList<String>(admin.messageText());
     }
 
+    @Nested
+    @DisplayName("the label is threaded, not hardcoded")
+    class Label {
+
+        @Test
+        @DisplayName("a proxy's usage strings say /hdp, not /hd")
+        void proxyUsageUsesHdp() {
+            installed = AdminCommand.install(commands(), context().label("hdp").build(),
+                    "hdp", Collections.singletonList("heimdallproxy"));
+
+            admin.clearMessages();
+            assertTrue(commands().run(admin, "hdp", "setup"));
+            assertTrue(anyContains(new ArrayList<String>(admin.messageText()), "/hdp setup"),
+                    "on Velocity the verb is hdp, so /hdp setup must not reply 'Usage: /hd setup'");
+            assertFalse(anyContains(new ArrayList<String>(admin.messageText()), "/hd setup"));
+        }
+    }
+
+    @Nested
+    @DisplayName("enable / disable — the offline escape hatch")
+    class LocalToggle {
+
+        @Test
+        @DisplayName("disable persists to bootstrap.yml and status shows it")
+        void disablePersistsAndShows() {
+            // A registered module the command can actually act on.
+            runtime.modules().register(new com.heimdall.core.module.HeimdallModule() {
+                @Override
+                public String id() {
+                    return "whitelist";
+                }
+
+                @Override
+                public java.util.Set<String> capabilities() {
+                    return Collections.emptySet();
+                }
+
+                @Override
+                public java.util.Set<ServerRole> roles() {
+                    return Collections.emptySet();
+                }
+
+                @Override
+                public void enable(com.heimdall.core.module.ModuleContext ctx) {
+                }
+
+                @Override
+                public void disable() {
+                }
+            });
+            install();
+
+            assertTrue(anyContains(say("disable"), "off locally"),
+                    "no argument disables the whitelist — v2's 'let everyone in'");
+            assertTrue(runtime.locallyDisabledModules().contains("whitelist"));
+            BootstrapConfig onDisk = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml")).load();
+            assertTrue(onDisk.disabledModules().contains("whitelist"),
+                    "the override has to survive a restart, or it is no escape hatch");
+
+            assertTrue(anyContains(say("status"), "locally disabled"));
+
+            assertTrue(anyContains(say("enable", "whitelist"), "dashboard controls it again"));
+            assertFalse(runtime.locallyDisabledModules().contains("whitelist"));
+        }
+
+        @Test
+        @DisplayName("disabling a module this build does not have says so")
+        void unknownModule() {
+            install();
+            assertTrue(anyContains(say("disable", "teleport"), "no module called"));
+        }
+    }
+
     private static boolean anyContains(List<String> lines, String needle) {
         for (String line : lines) {
             if (line.contains(needle)) {

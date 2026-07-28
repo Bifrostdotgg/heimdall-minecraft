@@ -102,8 +102,9 @@ final class UpdateSubcommands {
                 return;
             }
             if (!updates.isUpdateAvailable()) {
-                source.sendMessage(Msg.legacy("§eNo update is known to be available. Run §f/hd "
-                        + "version§e first — this only installs something a check has found."));
+                source.sendMessage(Msg.legacy("§eNo update is known to be available. Run §f/"
+                        + context.label()
+                        + " version§e first — this only installs something a check has found."));
                 return;
             }
             String latest = updates.latestVersion();

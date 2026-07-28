@@ -31,6 +31,7 @@ public final class AdminContext {
     private final HeimdallRuntime runtime;
     private final ServerRole role;
     private final String pluginVersion;
+    private final String label;
     private final WhitelistAdmin whitelist;
     private final OffenseAdmin offenses;
     private final UpdateAdmin updates;
@@ -42,6 +43,7 @@ public final class AdminContext {
         this.runtime = builder.runtime;
         this.role = builder.role == null ? ServerRole.AUTO : builder.role;
         this.pluginVersion = builder.pluginVersion == null ? "" : builder.pluginVersion;
+        this.label = builder.label == null || builder.label.isEmpty() ? "hd" : builder.label;
         this.whitelist = builder.whitelist == null ? WhitelistAdmin.NONE : builder.whitelist;
         this.offenses = builder.offenses == null ? OffenseAdmin.NONE : builder.offenses;
         this.updates = builder.updates == null ? UpdateAdmin.NONE : builder.updates;
@@ -64,6 +66,18 @@ public final class AdminContext {
     /** The build's version string, for {@code /hd version} and the status banner. */
     public String pluginVersion() {
         return pluginVersion;
+    }
+
+    /**
+     * The primary verb on this platform — {@code hd} on the Bukkit family, {@code hdp} on the proxy.
+     *
+     * <p>Threaded into usage strings so {@code /hdp setup} does not reply "Usage: /hd setup...".
+     * Every subcommand builds its usage line as {@code "/" + context.label() + " …"} rather than
+     * hardcoding one, which the setup and migrate smoke rows being Bukkit-only would otherwise have
+     * hidden.
+     */
+    public String label() {
+        return label;
     }
 
     public WhitelistAdmin whitelist() {
@@ -103,6 +117,7 @@ public final class AdminContext {
         private HeimdallRuntime runtime;
         private ServerRole role;
         private String pluginVersion;
+        private String label;
         private WhitelistAdmin whitelist;
         private OffenseAdmin offenses;
         private UpdateAdmin updates;
@@ -122,6 +137,12 @@ public final class AdminContext {
 
         public Builder pluginVersion(String value) {
             this.pluginVersion = value;
+            return this;
+        }
+
+        /** The platform's primary verb, {@code hd} or {@code hdp}. Defaults to {@code hd}. */
+        public Builder label(String value) {
+            this.label = value;
             return this;
         }
 

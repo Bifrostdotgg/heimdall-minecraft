@@ -110,18 +110,39 @@ final class RuntimeSubcommands {
                 source.sendMessage(Msg.legacy("§eThis build ships no feature modules at all."));
                 return;
             }
+            boolean connected = context.runtime().tunnel().isConnected();
+            Set<String> locallyOff = context.runtime().locallyDisabledModules();
             source.sendMessage(Msg.legacy("§6Modules §7(" + ids.size() + ")"));
             for (String id : ids) {
                 ModuleState state = modules.state(id);
                 Set<String> capabilities = modules.capabilitiesOf(id);
-                source.sendMessage(Msg.legacy("§7 - §f" + id + " §7" + explain(state)
-                        + (capabilities.isEmpty() ? "" : " §8" + capabilities)));
+                String tail = locallyOff.contains(id) ? " §c(disabled locally)"
+                        : (capabilities.isEmpty() ? "" : " §8" + capabilities);
+                source.sendMessage(Msg.legacy("§7 - §f" + id + " §7" + explain(state, locallyOff.contains(id))
+                        + tail));
             }
-            source.sendMessage(Msg.legacy("§8A module absent from this list is not in this jar. "
-                    + "Toggle the rest on the Minecraft page of the dashboard."));
+            // Where to change a module depends on whether the bot can be reached. Telling an operator
+            // to use the dashboard while /hd status says the tunnel is down is precisely useless — it
+            // is the moment the local escape hatch exists for.
+            if (connected) {
+                source.sendMessage(Msg.legacy("§8A module absent from this list is not in this jar. "
+                        + "Toggle the rest on the Minecraft page of the dashboard, or locally with "
+                        + "§7/" + context.label() + " disable <module>§8."));
+            } else {
+                source.sendMessage(Msg.legacy("§eThe bot is not reachable, so the dashboard cannot "
+                        + "change these right now. Use §f/" + context.label()
+                        + " disable <module>§e / §f" + context.label() + " enable <module>§e — a "
+                        + "local override that works offline and survives a restart."));
+            }
         }
 
-        private static String explain(ModuleState state) {
+        private static String explain(ModuleState state, boolean locallyOff) {
+            if (locallyOff) {
+                // The local override wins over the module's own state, so say so first: a module the
+                // dashboard wants ON shows as STOPPED here, and "switched off in the dashboard" would
+                // be a lie about why.
+                return "§cswitched off locally";
+            }
             if (state == null) {
                 return "§8in an unknown state";
             }
@@ -136,6 +157,101 @@ final class RuntimeSubcommands {
                 default:
                     return "§8cannot run on a server with this role";
             }
+        }
+    }
+
+    /** {@code /hd enable <module>} — clears a local disable. See {@link LocalToggle}. */
+    static final class Enable extends LocalToggle {
+
+        Enable() {
+            super(false, "enable", "clear a local disable so the dashboard controls this module again");
+        }
+    }
+
+    /** {@code /hd disable <module>} — the offline escape hatch. See {@link LocalToggle}. */
+    static final class Disable extends LocalToggle {
+
+        Disable() {
+            super(true, "disable", "switch a module off locally, even with the bot unreachable");
+        }
+    }
+
+    /**
+     * {@code /hd enable|disable <module>} — v2's global on/off, made per-module and made local.
+     *
+     * <h2>Why this is not the dashboard toggle</h2>
+     *
+     * <p>v3's module state is dashboard-owned and arrives over the tunnel (departure D66). That is
+     * right almost always, and exactly wrong in the one case an operator most needs a lever: the
+     * whitelist is refusing everybody and the bot cannot be reached to turn it off. So this writes a
+     * <em>local</em> override to {@code bootstrap.yml} that wins over the pushed config and survives a
+     * restart — a module disabled here stays off until it is enabled here, whatever the dashboard
+     * says. {@code /hd status} shows what is locally off so it is never a mystery.
+     *
+     * <p>No argument disables (or re-enables) the {@code whitelist} module, because that is the one
+     * the escape hatch exists for — "let everyone in" is what v2's bare {@code /hwl disable} did.
+     */
+    abstract static class LocalToggle implements AdminSubcommand {
+
+        /** The module the bare verb acts on: the whitelist, which is what "let everyone in" means. */
+        private static final String DEFAULT_MODULE = "whitelist";
+
+        private final boolean disable;
+        private final String name;
+        private final String description;
+
+        LocalToggle(boolean disable, String name, String description) {
+            this.disable = disable;
+            this.name = name;
+            this.description = description;
+        }
+
+        @Override
+        public String name() {
+            return name;
+        }
+
+        @Override
+        public String usage() {
+            return "[module]";
+        }
+
+        @Override
+        public String description() {
+            return description;
+        }
+
+        @Override
+        public void run(CommandSource source, List<String> args, AdminContext context) {
+            String module = args.isEmpty() ? DEFAULT_MODULE : args.get(0).toLowerCase(Locale.ROOT);
+            if (context.runtime().modules().state(module) == null) {
+                source.sendMessage(Msg.legacy("§cThis build has no module called §f" + module
+                        + "§c. §7/" + context.label() + " modules§c lists the ones it has."));
+                return;
+            }
+            try {
+                context.runtime().setModuleLocallyDisabled(module, disable);
+            } catch (IOException notPersisted) {
+                source.sendMessage(Msg.legacy("§cCould not write " + context.runtime().bootstrapStore().file()
+                        + " (" + notPersisted.getMessage() + "), so the change would not survive a "
+                        + "restart — leaving it unchanged."));
+                return;
+            }
+            if (disable) {
+                source.sendMessage(Msg.legacy("§aSwitched §f" + module + "§a off locally. It stays "
+                        + "off — even if the dashboard says on — until §f/" + context.label()
+                        + " enable " + module + "§a."));
+            } else {
+                source.sendMessage(Msg.legacy("§aCleared the local override on §f" + module
+                        + "§a; the dashboard controls it again."));
+            }
+        }
+
+        @Override
+        public List<String> complete(CommandSource source, List<String> args, AdminContext context) {
+            return args.size() <= 1
+                    ? new java.util.ArrayList<String>(context.runtime().modules().registeredIds())
+                    : java.util.Collections.<String>emptyList();
         }
     }
 
@@ -174,7 +290,7 @@ final class RuntimeSubcommands {
             if (args.isEmpty()) {
                 source.sendMessage(Msg.legacy("§7Debug logging is currently §f"
                         + (runtime.bootstrap().debug() ? "on" : "off")
-                        + "§7. Usage: §f/hd debug <on|off>"));
+                        + "§7. Usage: §f/" + context.label() + " debug <on|off>"));
                 return;
             }
             Boolean wanted = parse(args.get(0));

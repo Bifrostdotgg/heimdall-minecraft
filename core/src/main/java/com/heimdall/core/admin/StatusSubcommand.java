@@ -65,6 +65,10 @@ final class StatusSubcommand implements AdminSubcommand {
                 + " §8— §7" + describeServer(runtime)));
         source.sendMessage(Msg.legacy("§7role: §f" + context.role().wireName()
                 + "   §7serverId: §f" + orNone(bootstrap.serverId())));
+        // The endpoint is the whitelabel field: a customer claiming against their own instance has a
+        // different one, and "which bot is this server actually talking to?" is the first question a
+        // whitelabel support conversation asks.
+        source.sendMessage(Msg.legacy("§7endpoint: §f" + orNone(bootstrap.endpoint())));
         source.sendMessage(Msg.legacy("§7bot: §f" + runtime.connectionStatus()));
         source.sendMessage(Msg.legacy("§7api: §f" + runtime.api().describe()
                 + "   §7guild: §f" + orNone(runtime.guildId())));
@@ -73,6 +77,10 @@ final class StatusSubcommand implements AdminSubcommand {
         source.sendMessage(Msg.legacy("§7whitelist mirror: §f" + context.whitelist().stats()));
         source.sendMessage(Msg.legacy("§7console tap: §f" + describeConsole(runtime)));
         source.sendMessage(Msg.legacy("§7updates: §f" + describeUpdates(context)));
+        if (!runtime.locallyDisabledModules().isEmpty()) {
+            source.sendMessage(Msg.legacy("§7locally disabled: §e" + runtime.locallyDisabledModules()
+                    + " §8(/" + context.label() + " enable <module> to restore)"));
+        }
     }
 
     /**
@@ -184,7 +192,7 @@ final class StatusSubcommand implements AdminSubcommand {
         if (!updates.isUpdateAvailable()) {
             return "up to date as far as the last check knows";
         }
-        return "version " + updates.latestVersion() + " is available — run /hd update";
+        return "version " + updates.latestVersion() + " is available — run update";
     }
 
     private static String orNone(String value) {

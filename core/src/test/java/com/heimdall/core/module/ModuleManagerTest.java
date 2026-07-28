@@ -101,6 +101,39 @@ class ModuleManagerTest {
     }
 
     @Test
+    @DisplayName("a locally-disabled module is not started, even when the desired set wants it")
+    void localDisableWinsOverReconcile() {
+        ModuleManager manager = manager(ServerRole.STANDALONE);
+        RecordingModule whitelist = new RecordingModule("whitelist");
+        RecordingModule console = new RecordingModule("console");
+        manager.register(whitelist);
+        manager.register(console);
+
+        // The dashboard wants both on — pushed through remote config, which is the source of truth
+        // setLocallyDisabled reconciles against.
+        remoteConfig.onConfigPush(bothEnabled(1));
+        manager.reconcileFromConfig();
+        assertEquals(ModuleState.ENABLED, manager.state("whitelist"));
+        assertEquals(ModuleState.ENABLED, manager.state("console"));
+
+        // The operator switches whitelist off locally. It must stop and stay stopped, which is the
+        // offline escape hatch (departure D66): the one lever when the bot is unreachable.
+        manager.setLocallyDisabled(desire("whitelist"));
+        assertEquals(ModuleState.STOPPED, manager.state("whitelist"));
+        assertEquals(ModuleState.ENABLED, manager.state("console"), "the rest is untouched");
+
+        // A fresh push wanting it on again cannot override the local disable.
+        remoteConfig.onConfigPush(bothEnabled(2));
+        manager.reconcileFromConfig();
+        assertEquals(ModuleState.STOPPED, manager.state("whitelist"),
+                "the local disable has to win over remote config, or it is no escape hatch at all");
+
+        // Clearing the override lets the dashboard control it again.
+        manager.setLocallyDisabled(Collections.<String>emptySet());
+        assertEquals(ModuleState.ENABLED, manager.state("whitelist"));
+    }
+
+    @Test
     @DisplayName("reconciling with an unchanged set does not restart anything")
     void reconcileIsIdempotent() {
         ModuleManager manager = manager(ServerRole.STANDALONE);
@@ -500,6 +533,16 @@ class ModuleManagerTest {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static Payload bothEnabled(int version) {
+        return Payload.builder()
+                .put("version", version)
+                .put("modules", Payload.builder()
+                        .put("whitelist", Payload.builder().put("enabled", true).build())
+                        .put("console", Payload.builder().put("enabled", true).build())
+                        .build())
+                .build();
+    }
 
     private static Payload document(int version, String moduleId, boolean enabled) {
         return Payload.builder()

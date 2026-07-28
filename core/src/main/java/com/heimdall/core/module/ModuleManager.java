@@ -78,6 +78,18 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
     /** The declared capability set. Recomputed under the lock, read without it. */
     private volatile Set<String> declaredCapabilities = Collections.emptySet();
 
+    /**
+     * Module ids an operator has switched off <em>locally</em> — the offline escape hatch.
+     *
+     * <p>Subtracted from every desired set in {@link #reconcile}, so a module named here stays off
+     * whatever the dashboard's {@code config.push} says. That is the whole point: when the tunnel is
+     * dead an operator has no other lever, and even when it is alive "I turned this off here" must
+     * win over a stale remote value until they turn it back on. Persisted in {@code bootstrap.yml} by
+     * the runtime; volatile because {@code /hd disable} sets it from a server thread while a config
+     * push reconciles from the socket's reading thread.
+     */
+    private volatile Set<String> locallyDisabled = Collections.emptySet();
+
     public ModuleManager(ModuleEnvironment environment) {
         if (environment == null) {
             throw new IllegalArgumentException("environment is required");
@@ -113,6 +125,27 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
             // transition would leave the first identify declaring nothing.
             recomputeCapabilities();
         }
+    }
+
+    /**
+     * Replaces the local-disable set and reconciles against it immediately.
+     *
+     * <p>Idempotent in effect: reconciling stops what should no longer run and starts what should,
+     * so calling this with a module added disables it now, and with it removed re-enables it if the
+     * dashboard still wants it on.
+     */
+    public void setLocallyDisabled(Set<String> ids) {
+        synchronized (lifecycleLock) {
+            this.locallyDisabled = ids == null
+                    ? Collections.<String>emptySet()
+                    : Collections.unmodifiableSet(new LinkedHashSet<String>(ids));
+            reconcile(environment.remoteConfig().enabledModuleIds());
+        }
+    }
+
+    /** The module ids currently switched off locally. */
+    public Set<String> locallyDisabled() {
+        return locallyDisabled;
     }
 
     /** Every registered module id, in registration order. */
@@ -183,6 +216,9 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
         Set<String> wanted = desired == null
                 ? Collections.<String>emptySet()
                 : new LinkedHashSet<String>(desired);
+        // The local escape hatch wins over remote config. A module an operator disabled here is not
+        // enabled even if a push says it should be — see the field.
+        wanted.removeAll(locallyDisabled);
         synchronized (lifecycleLock) {
             List<String> toStop = new ArrayList<String>();
             for (Map.Entry<String, Managed> entry : modules.entrySet()) {

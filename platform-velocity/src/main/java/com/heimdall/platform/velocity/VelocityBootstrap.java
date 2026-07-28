@@ -119,6 +119,7 @@ final class VelocityBootstrap {
         // next config push.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
+                .label("hdp")
                 .pluginVersion(BuildConstants.VERSION);
         HeimdallModules.registerAll(runtime, admin);
 

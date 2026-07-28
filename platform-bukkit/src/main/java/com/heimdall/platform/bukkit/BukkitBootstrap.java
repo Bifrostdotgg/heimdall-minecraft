@@ -152,6 +152,7 @@ final class BukkitBootstrap {
         // modules must be registered before the first reconcile, and start() is what runs it.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
+                .label("hd")
                 .pluginVersion(BuildConstants.VERSION);
         HeimdallModules.registerAll(runtime, admin);
 

@@ -88,6 +88,8 @@ public final class AdminCommand {
                 new StatusSubcommand(),
                 new RuntimeSubcommands.Reload(),
                 new RuntimeSubcommands.Modules(),
+                new RuntimeSubcommands.Enable(),
+                new RuntimeSubcommands.Disable(),
                 new WhitelistSubcommands.Test(),
                 new WhitelistSubcommands.Cache(),
                 new PunishmentSubcommands.Offense(),
@@ -115,8 +117,11 @@ public final class AdminCommand {
         AdminCommand command = new AdminCommand(context, primary);
         final List<Registration> handles = new ArrayList<Registration>();
         handles.add(registrar.register(command.spec(primary, aliases, false)));
+        // `heimdallwhitelist` was v2's spelled-out form of /hwl on BOTH platforms, so it comes along
+        // as an alias of the deprecated verb — a runbook that spells it out keeps working. On Bukkit
+        // the descriptor must also declare it (plugin.yml does); on Velocity the registrar binds it.
         handles.add(registrar.register(
-                command.spec(DEPRECATED_NAME, Collections.<String>emptyList(), true)));
+                command.spec(DEPRECATED_NAME, Collections.singletonList("heimdallwhitelist"), true)));
         return Registration.once(new Runnable() {
             @Override
             public void run() {

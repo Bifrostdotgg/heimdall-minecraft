@@ -66,7 +66,7 @@ final class WhitelistSubcommands {
         @Override
         public void run(final CommandSource source, List<String> args, final AdminContext context) {
             if (args.isEmpty()) {
-                source.sendMessage(Msg.legacy("§cUsage: §f/hd test <player>"));
+                source.sendMessage(Msg.legacy("§cUsage: §f/" + context.label() + " test <player>"));
                 return;
             }
             if (!context.whitelist().isAvailable()) {
@@ -186,7 +186,7 @@ final class WhitelistSubcommands {
                 });
                 return;
             }
-            source.sendMessage(Msg.legacy("§cUsage: §f/hd cache <stats|clear|cleanup|sync>"));
+            source.sendMessage(Msg.legacy("§cUsage: §f/" + context.label() + " cache <stats|clear|cleanup|sync>"));
         }
 
         @Override

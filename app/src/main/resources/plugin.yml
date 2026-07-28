@@ -20,28 +20,43 @@ description: Discord-to-Minecraft whitelist, role sync, punishments and console 
 #
 # A name declared here that no enabled module has claimed answers with its usage
 # line, which is the right behaviour for a feature that is switched off.
+#
+# `permission:` is declared on every command, and it is not decoration. Without it
+# Bukkit gives a command NAME-level visibility to everyone: an unprivileged player
+# typing `/h<tab>` sees hd, heimdall, hwl and offend in their completion, which is
+# both noise and a hint at commands they cannot run. Declaring the node here makes
+# Bukkit hide the name from a player who lacks it — the registrar's own gate stops
+# the command running, but only the descriptor can stop it being *seen*.
 commands:
   hd:
     description: Heimdall administration
     usage: /<command>
     aliases: [heimdall]
+    permission: heimdall.admin
   hwl:
     # v2's admin verb. Kept as a real command rather than as an alias of `hd`,
     # because Bukkit fixes aliases at load time and the plugin has to be able to
     # tell the two apart: this one prints "the name changed" once per start
     # before forwarding. Deliberately absent from /hd's own help listing — help
     # is for what to type next, not for what used to work.
+    #
+    # `heimdallwhitelist` was v2's spelled-out alias for it and is restored here,
+    # so a runbook or a macro that spells it out keeps working across the upgrade.
     description: Deprecated alias for /hd
     usage: /<command>
+    aliases: [heimdallwhitelist]
+    permission: heimdall.admin
   linkdiscord:
     description: Get a code to link this Minecraft account to Discord
     usage: /<command>
     # /link is the alias players actually type. Declared here because Bukkit will
     # not accept one at runtime; the proxy registers the same pair dynamically.
     aliases: [link]
+    permission: heimdall.linkdiscord
   offend:
     description: Record an offence against a player and apply the escalation tier
     usage: /<command> <player> <offense> [notes]
+    permission: heimdall.offend
 
 permissions:
   heimdall.admin:
