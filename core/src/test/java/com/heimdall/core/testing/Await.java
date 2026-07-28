@@ -21,8 +21,23 @@ import java.util.function.Supplier;
  */
 public final class Await {
 
-    /** Long enough to absorb a stalled CI runner, short enough that a hang is still a fast failure. */
-    public static final long DEFAULT_TIMEOUT_MS = 5_000L;
+    /**
+     * Long enough to absorb a stalled CI runner, short enough that a hang is still a fast failure.
+     *
+     * <p><strong>Raised from five seconds in 1e, after five seconds turned out not to satisfy the
+     * first half of that sentence.</strong> {@code TunnelStubIntegrationTest}'s hot-re-push case
+     * timed out once on a CI runner and passed on a re-run, having never failed locally across
+     * repeated runs of both the class and the whole suite. That is a loaded two-core runner losing a
+     * WebSocket round trip to scheduling, not a regression — and 1e added two suites to the same JVM
+     * that each start a stub bot with real sockets, so the pressure that produced it is now
+     * permanent.
+     *
+     * <p>The ceiling costs nothing when the code is correct: the loop returns the moment the
+     * condition holds, so only a <em>failing</em> test waits it out. Fifteen seconds is still an
+     * order of magnitude below the job timeout, so a genuine hang is still reported as a named
+     * assertion failure rather than as a killed runner.
+     */
+    public static final long DEFAULT_TIMEOUT_MS = 15_000L;
 
     private static final long POLL_INTERVAL_MS = 5L;
 
