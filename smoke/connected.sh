@@ -15,11 +15,20 @@
 #
 # What this deliberately does NOT do is join a player. There is no headless client in this harness,
 # so the login gate's six outcomes are proven by module tests against the same stub over a real
-# socket, and are not re-proven here.
+# socket, and are not re-proven here. `/hd test` is the closest this gets: it drives the real login
+# interceptor for a named player, writes nothing, and is asserted at BOTH ends — the plugin's own
+# decision line and, for the branch that reaches the bot, the stub's record of the request.
 #
-#   PHASE 1e ADDS: `/hd test <player>` makes a real connection-attempt from the server console, at
-#   which point this script can assert an allow and a deny end to end through rcon — and, with the
-#   headless-client work D43's residual risk 2 needs, an actual join.
+# Four rows, in three modes, because two of the flows cannot be exercised on a server that is
+# already configured:
+#
+#   configured  the steady state: a bootstrap.yml exists, the plugin dials, and /hd test probes.
+#   setup       no bootstrap.yml at all. A setup code is minted in the stub, `/hd setup` is driven
+#               down the console, and the tunnel has to come up WITHOUT a restart — which is the
+#               whole of departure D56 and was impossible before phase 1e.
+#   migrate     a v2 config.yml in the sibling plugins/HeimdallWhitelist/ directory. The plugin has
+#               to find it, write a bootstrap.yml from it, connect on the legacy guild key, keep the
+#               original as *.v2-backup, and hand the translated settings to the dashboard.
 #
 # Environment:
 #   SMOKE_JAR             path to the shaded jar (default: newest app/build/libs/heimdall-whitelist-*.jar)
@@ -82,6 +91,44 @@ STUB_SYNC_PATTERN="GET /api/guilds/${STUB_GUILD}/minecraft/whitelist/sync"
 # a socket that had already dropped ten minutes earlier would look identical.
 STUB_CLEAN_CLOSE_PATTERN="ws disconnected: guild=${STUB_GUILD} server=${STUB_SERVER_ID}.*Plugin shutting down"
 
+# ── The login probe (/hd test) ───────────────────────────────────────────────
+#
+# Two players, chosen so the two halves of the login path are both exercised.
+#
+# AllowedSteve is in smoke/fixtures/players.json with outcome `allow`, so the pre-warm sync has put
+# him in the mirror — and the probe therefore short-circuits there, which is the COMMON path on a
+# real server and the one v2 shipped without a report on. Resolving his name to the right UUID at
+# all is the interesting part: he is not online, so the probe reads the mirror's own uuid-to-name
+# mapping rather than hashing his name into an offline-mode UUID that belongs to nobody.
+#
+# NobodyKnowsThisName has no fixture, so the probe misses the mirror, asks the bot, and is denied by
+# the stub's default outcome. That is the branch with a wire round trip in it, so it is the one the
+# STUB has to corroborate.
+PROBE_ALLOWED_PLAYER="AllowedSteve"
+PROBE_DENIED_PLAYER="NobodyKnowsThisName"
+PROBE_ALLOW_PATTERN="mirror hit for ${PROBE_ALLOWED_PLAYER}"
+PROBE_DENY_PATTERN="refusing ${PROBE_DENIED_PLAYER}: not whitelisted"
+STUB_PROBE_PATTERN="POST /api/guilds/${STUB_GUILD}/minecraft/connection-attempt"
+
+# ── The setup flow ───────────────────────────────────────────────────────────
+#
+# The code and the server id are fixed rather than random, because the assertions below are on the
+# stub's own log lines and a shell script cannot know a UUID minted inside a container.
+SETUP_CODE="ABCD2345"
+SETUP_SERVER_ID="smoke-setup"
+STUB_CLAIMED_PATTERN="claimed setup code ${SETUP_CODE} -> server ${SETUP_SERVER_ID}"
+STUB_SETUP_CONNECTED_PATTERN="ws connected: guild=${STUB_GUILD} server=${SETUP_SERVER_ID}"
+STUB_SETUP_IDENTIFIED_PATTERN="identified: server=${SETUP_SERVER_ID} .* protocol=3 .* capabilities=\\[.*whitelist@1"
+# A module going from off to on is the proof that the config push landed and was applied — which is
+# what "modules go live without a restart" actually means. The plugin logs one line per module.
+SETUP_MODULE_ENABLED_PATTERN="module 'whitelist' enabled"
+
+# ── The v2 migration ─────────────────────────────────────────────────────────
+MIGRATE_SERVER_ID="migrated-survival"
+MIGRATED_PATTERN='Migrated the v2 config at .*config\.yml'
+STUB_MIGRATE_CONNECTED_PATTERN="ws connected: guild=${STUB_GUILD} server=${MIGRATE_SERVER_ID}"
+STUB_IMPORT_PATTERN="config import for ${MIGRATE_SERVER_ID} \\(imported=true\\)"
+
 # The plugin's own banners, shared with run.sh. Kept in step by the self-test below.
 ENABLE_PATTERN='Heimdall v[0-9][^ ]* enabled'
 DISABLE_PATTERN='Heimdall v[0-9][^ ]* shutting down'
@@ -94,10 +141,19 @@ READY_PATTERN='Done \([0-9.]+s\)'
 # all six. One current server from each family is what proves the one-jar design still reaches a bot
 # from both entry points, and it costs two boots instead of six.
 #
-#   row | image | TYPE | VERSION | platform | memory
+#   row | image | TYPE | VERSION | platform | memory | mode
+#
+# The two flow rows are Bukkit-only, and that is a harness limitation stated rather than hidden: the
+# Paper image exposes RCON and a console pipe, and the proxy image in this matrix exposes neither,
+# so there is no way to type a command into a running Velocity here. The code under test is the
+# same on both — the admin tree is one platform-free class registered through each platform's own
+# CommandRegistrar — so what the missing rows would prove is the registrar binding, which the
+# configured Velocity row already exercises by answering /hdp at all.
 ROWS=(
-    "paper-1.21.8|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G"
-    "velocity-3.5.1|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G"
+    "paper-1.21.8|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|configured"
+    "velocity-3.5.1|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G|configured"
+    "paper-setup|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|setup"
+    "paper-migrate|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|migrate"
 )
 
 CURRENT_CONTAINERS=""
@@ -232,11 +288,67 @@ selftest() {
         "[22:41:04 INFO]: [Heimdall] [whitelist] Mirror reconcile (whitelist-mirror.json): 0 added, 0 refreshed, 0 pruned (0 held)" \
         no "a reconcile that took nothing proves nothing" || failures=$((failures + 1))
 
-    local row name image type version platform memory
+    # ── The login probe ──────────────────────────────────────────────────────
+    check_match "${PROBE_ALLOW_PATTERN}" \
+        "[13:51:02 INFO]: [Heimdall] [whitelist] mirror hit for ${PROBE_ALLOWED_PLAYER}" \
+        yes "probe: allowed from the mirror" || failures=$((failures + 1))
+    # The near-miss that matters: the same player denied would also mention them by name, so a
+    # pattern that only looked for the name would pass on the exact outcome this row exists to
+    # distinguish.
+    check_match "${PROBE_ALLOW_PATTERN}" \
+        "[13:51:02 INFO]: [Heimdall] [whitelist] refusing ${PROBE_ALLOWED_PLAYER}: not whitelisted" \
+        no "probe: an allow is not a deny" || failures=$((failures + 1))
+    check_match "${PROBE_DENY_PATTERN}" \
+        "[13:51:04 INFO]: [Heimdall] [whitelist] refusing ${PROBE_DENIED_PLAYER}: not whitelisted" \
+        yes "probe: denied by the bot" || failures=$((failures + 1))
+    check_match "${PROBE_DENY_PATTERN}" \
+        "[13:51:04 INFO]: [Heimdall] [whitelist] refusing ${PROBE_DENIED_PLAYER}: their whitelist was revoked" \
+        no "probe: 'not whitelisted' vs a revocation" || failures=$((failures + 1))
+    check_match "${STUB_PROBE_PATTERN}" \
+        "[stub-bot 22:41:09.001] DEBUG POST /api/guilds/${STUB_GUILD}/minecraft/connection-attempt" \
+        yes "probe: the stub saw the connection attempt" || failures=$((failures + 1))
+
+    # ── Setup ────────────────────────────────────────────────────────────────
+    check_match "${STUB_CLAIMED_PATTERN}" \
+        "[stub-bot] claimed setup code ${SETUP_CODE} -> server ${SETUP_SERVER_ID}" \
+        yes "setup: the stub consumed the code" || failures=$((failures + 1))
+    check_match "${STUB_CLAIMED_PATTERN}" \
+        "[stub-bot] issued setup code ${SETUP_CODE} for Smoke (server ${SETUP_SERVER_ID})" \
+        no "setup: claimed vs merely issued" || failures=$((failures + 1))
+    check_match "${STUB_SETUP_CONNECTED_PATTERN}" \
+        "[stub-bot] ws connected: guild=${STUB_GUILD} server=${SETUP_SERVER_ID}" \
+        yes "setup: the tunnel came up on the claimed server id" || failures=$((failures + 1))
+    check_match "${STUB_SETUP_IDENTIFIED_PATTERN}" \
+        "[stub-bot] identified: server=${SETUP_SERVER_ID} name=Smoke protocol=3 registered=true capabilities=[whitelist@1, rolesync@1, console@1]" \
+        yes "setup: v3 identify after the claim" || failures=$((failures + 1))
+    check_match "${SETUP_MODULE_ENABLED_PATTERN}" \
+        "[13:52:00 INFO]: [Heimdall] module 'whitelist' enabled" \
+        yes "setup: a module went live" || failures=$((failures + 1))
+    check_match "${SETUP_MODULE_ENABLED_PATTERN}" \
+        "[13:52:00 INFO]: [Heimdall] module 'whitelist' disabled" \
+        no "setup: enabled vs disabled" || failures=$((failures + 1))
+
+    # ── Migration ────────────────────────────────────────────────────────────
+    check_match "${MIGRATED_PATTERN}" \
+        "[13:53:00 INFO]: [Heimdall] Migrated the v2 config at /data/plugins/HeimdallWhitelist/config.yml - wrote /data/plugins/Heimdall/bootstrap.yml and the v2 file has been kept as /data/plugins/HeimdallWhitelist/config.yml.v2-backup." \
+        yes "migrate: the v2 config was found and rewritten" || failures=$((failures + 1))
+    check_match "${MIGRATED_PATTERN}" \
+        "[13:53:00 INFO]: [Heimdall] not set up yet - run /hd setup <code> to connect this server to Discord" \
+        no "migrate: a migration vs a fresh install" || failures=$((failures + 1))
+    check_match "${STUB_IMPORT_PATTERN}" \
+        "[stub-bot] config import for ${MIGRATE_SERVER_ID} (imported=true)" \
+        yes "migrate: the translated settings reached the dashboard" || failures=$((failures + 1))
+    # Write-once means a second import answers imported=false, which is a SUCCESS bot-side and
+    # would be a silent nothing here. The row asserts the first one specifically.
+    check_match "${STUB_IMPORT_PATTERN}" \
+        "[stub-bot] config import for ${MIGRATE_SERVER_ID} (imported=false)" \
+        no "migrate: imported vs already present" || failures=$((failures + 1))
+
+    local row name image type version platform memory mode
     for row in "${ROWS[@]}"; do
-        IFS='|' read -r name image type version platform memory <<<"${row}"
+        IFS='|' read -r name image type version platform memory mode <<<"${row}"
         if [ -z "${name}" ] || [ -z "${image}" ] || [ -z "${type}" ] || [ -z "${version}" ] \
-                || [ -z "${memory}" ]; then
+                || [ -z "${memory}" ] || [ -z "${mode}" ]; then
             fail "malformed row: ${row}"
             failures=$((failures + 1))
         elif [ "${platform}" != "bukkit" ] && [ "${platform}" != "velocity" ]; then
@@ -244,6 +356,15 @@ selftest() {
             # value does not fail — it silently takes the velocity path, mounts the wrong
             # directory, and reports a plugin that would not load.
             fail "row ${name} has unknown platform '${platform}'"
+            failures=$((failures + 1))
+        elif [ "${mode}" != "configured" ] && [ "${mode}" != "setup" ] && [ "${mode}" != "migrate" ]; then
+            # Same trap, one field along: an unknown mode would take the `configured` branch, write
+            # a bootstrap.yml, and quietly prove the thing the row was not written for.
+            fail "row ${name} has unknown mode '${mode}'"
+            failures=$((failures + 1))
+        elif [ "${mode}" != "configured" ] && [ "${platform}" != "bukkit" ]; then
+            # The flow rows drive commands over RCON, which only the Paper image in this matrix has.
+            fail "row ${name} is mode '${mode}' on '${platform}', which has no console to drive"
             failures=$((failures + 1))
         fi
     done
@@ -315,6 +436,84 @@ YAML
     return 0
 }
 
+# Writes the v2 config.yml the migration row has to find.
+#
+# Deliberately in the SIBLING directory. v2's plugin was called HeimdallWhitelist and v3's is called
+# Heimdall, so a server whose jar has just been swapped has a brand-new empty plugins/Heimdall/ and
+# its entire configuration next door. A migration that only looked in its own directory would find
+# nothing on every real upgrade, which is the one case it exists for — so the row reproduces the
+# real layout rather than a convenient one.
+#
+# The credentials are the stub's, so the migrated server connects on a LEGACY guild key: v2 had no
+# token id, and the whole point of legacy mode is that the same HMAC still authenticates.
+write_v2_config() {
+    local target="$1"
+    if ! mkdir -p "$(dirname "${target}")"; then
+        fail "HARNESS: could not create $(dirname "${target}")"
+        return 1
+    fi
+    if ! cat >"${target}" <<YAML
+enabled: true
+api:
+  baseUrl: "http://stub-bot:8080"
+  apiKey: "${STUB_SECRET}"
+  guildId: "${STUB_GUILD}"
+  timeout: 1500
+  retries: 1
+  retryDelay: 1000
+server:
+  serverId: "${MIGRATE_SERVER_ID}"
+  displayName: "Migrated Survival"
+logging:
+  debug: true
+cache:
+  cacheWindow: 90
+  extendOnJoin: 120
+  extendOnLeave: 180
+  maxExtensionHours: 12
+  cleanupInterval: 45
+  prewarm:
+    enabled: true
+    intervalMinutes: 15
+advanced:
+  apiFallbackMode: whitelist-only
+bypass:
+  uuids: []
+roleSync:
+  enabled: true
+console:
+  stream: true
+updates:
+  checkEnabled: true
+  notifyAdmins: false
+  checkIntervalHours: 6
+YAML
+    then
+        fail "HARNESS: could not write ${target}"
+        return 1
+    fi
+    return 0
+}
+
+# Waits for RCON to answer, then runs one command and prints whatever it said.
+#
+# Readiness and the action are separate, and that separation cost five red runs to learn in run.sh:
+# retrying the ACTION conflates "RCON is not up yet" with "the command was accepted and the
+# connection dropped", and the second is often the normal case. RCON opens some time AFTER the Done
+# line and on a loaded runner that gap has been seen past 30s, so the budget is generous and the
+# thing polled is `list`, which is idempotent.
+wait_for_rcon() {
+    local container="$1" budget="$2"
+    local deadline=$(( $(date +%s) + budget ))
+    while [ "$(date +%s)" -lt "${deadline}" ]; do
+        if timeout 20 docker exec "${container}" rcon-cli list >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 3
+    done
+    return 1
+}
+
 # Deletes a work directory that a container may have written into as root.
 #
 # This is B4, and it is the assertion-disarming kind of bug. The Bukkit row mounts its work
@@ -353,7 +552,8 @@ purge_work_dir() {
 # ── One row ──────────────────────────────────────────────────────────────────────────────────
 
 run_row() {
-    local name="$1" image="$2" type="$3" version="$4" platform="$5" memory="$6" jar="$7" stub="$8"
+    local name="$1" image="$2" type="$3" version="$4" platform="$5" memory="$6" mode="$7"
+    local jar="$8" stub="$9"
 
     local network="heimdall-connected-${name}"
     local stub_container="heimdall-connected-stub-${name}"
@@ -381,7 +581,7 @@ run_row() {
 
 # shellcheck disable=SC2317
 row_body() {
-    log "── ${name}: ${type} ${version} against stub-bot"
+    log "── ${name}: ${type} ${version} against stub-bot (${mode})"
 
     docker rm -f "${server_container}" "${stub_container}" >/dev/null 2>&1 || true
     docker network rm "${network}" >/dev/null 2>&1 || true
@@ -408,6 +608,14 @@ row_body() {
     #
     # STUB_BOT_MODULES overrides the default, which has console DISABLED because it streams every log
     # line. This scenario is the one place that is exactly what we want to observe.
+    # The setup row needs a code waiting before the server boots. STUB_BOT_CLAIM_CODES exists for
+    # exactly this: bot.issueClaimCode() is a Java hook, and a shell script driving a container has
+    # no way to reach into the JVM. The server id is fixed so the assertions below can name it.
+    local -a stub_env=()
+    if [ "${mode}" = "setup" ]; then
+        stub_env=(-e "STUB_BOT_CLAIM_CODES=${SETUP_CODE}:Smoke:${SETUP_SERVER_ID}")
+    fi
+
     if ! docker run -d --name "${stub_container}" --network "${network}" \
             --network-alias stub-bot \
             -v "$(host_path "${stub}"):/opt/stub-bot:ro" \
@@ -418,6 +626,7 @@ row_body() {
             -e "STUB_BOT_API_KEY=${STUB_SECRET}" \
             -e STUB_BOT_VERBOSE=true \
             -e 'STUB_BOT_MODULES={"whitelist":{"enabled":true},"rolesync":{"enabled":true},"offenses":{"enabled":true},"console":{"enabled":true}}' \
+            ${stub_env[@]+"${stub_env[@]}"} \
             eclipse-temurin:21-jre /opt/stub-bot/bin/stub-bot >/dev/null; then
         fail "HARNESS: could not start the stub bot"
         return 1
@@ -448,10 +657,29 @@ row_body() {
         # host side. That is safe here and nowhere near production: this directory is created and
         # deleted by this script. Mounting only /data/plugins/Heimdall does NOT work — Docker then
         # creates the /data/plugins parent as root, and Paper fails exactly as described above.
-        if ! write_bootstrap "${work}/data-plugins/Heimdall/bootstrap.yml"; then
-            kill "${stub_tail}" 2>/dev/null || true
-            return 1
-        fi
+        # Three modes, three starting states. `setup` writes nothing at all, which is what a
+        # freshly dropped-in jar looks like and what makes the /hd setup assertions mean anything.
+        case "${mode}" in
+            configured)
+                if ! write_bootstrap "${work}/data-plugins/Heimdall/bootstrap.yml"; then
+                    kill "${stub_tail}" 2>/dev/null || true
+                    return 1
+                fi
+                ;;
+            migrate)
+                if ! write_v2_config "${work}/data-plugins/HeimdallWhitelist/config.yml"; then
+                    kill "${stub_tail}" 2>/dev/null || true
+                    return 1
+                fi
+                ;;
+            setup)
+                if ! mkdir -p "${work}/data-plugins"; then
+                    fail "HARNESS: could not create ${work}/data-plugins"
+                    kill "${stub_tail}" 2>/dev/null || true
+                    return 1
+                fi
+                ;;
+        esac
         if ! cp "${jar}" "${work}/data-plugins/"; then
             fail "HARNESS: could not stage the jar into ${work}/data-plugins"
             kill "${stub_tail}" 2>/dev/null || true
@@ -484,8 +712,11 @@ row_body() {
     # The premise, asserted rather than assumed. If a previous run's cache survived, the two
     # headline claims below are silently vacuous — so this is checked here, where it is a harness
     # failure, instead of being discovered as a mysteriously fast "guild resolved".
-    if grep -q "guildIdCache" "${work}"/*/Heimdall/bootstrap.yml \
-            "${work}"/*/heimdall/bootstrap.yml 2>/dev/null; then
+    #
+    # Only for the configured rows. The migration row's whole point is that v2's api.guildId becomes
+    # the cache (departure D54), and the setup row has no bootstrap.yml to check.
+    if [ "${mode}" = "configured" ] && grep -q "guildIdCache" \
+            "${work}"/*/Heimdall/bootstrap.yml "${work}"/*/heimdall/bootstrap.yml 2>/dev/null; then
         fail "HARNESS: the bootstrap.yml carries a cached guild, so the discovery assertion would"
         fail "pass without the identify endpoint ever being called"
         kill "${stub_tail}" 2>/dev/null || true
@@ -501,7 +732,11 @@ row_body() {
     local server_tail=$!
 
     local rc=0
-    assert_row || rc=$?
+    case "${mode}" in
+        configured) assert_row || rc=$? ;;
+        setup) assert_setup_row || rc=$? ;;
+        migrate) assert_migrate_row || rc=$? ;;
+    esac
 
     # Stop the server first, so its disable banner and the stub's disconnect line both land.
     if [ "${platform}" = "bukkit" ]; then
@@ -515,14 +750,10 @@ row_body() {
         # RCON opens some time AFTER the Done line, and on a loaded runner that gap has been seen
         # past 30s — so the budget is generous and `list` is what is polled, being idempotent.
         log "waiting for rcon to answer (budget ${RCON_TIMEOUT}s)"
-        local rcon_deadline=$(( $(date +%s) + RCON_TIMEOUT )) rcon_ready=0
-        while [ "$(date +%s)" -lt "${rcon_deadline}" ]; do
-            if timeout 20 docker exec "${server_container}" rcon-cli list >/dev/null 2>&1; then
-                rcon_ready=1
-                break
-            fi
-            sleep 3
-        done
+        local rcon_ready=0
+        if wait_for_rcon "${server_container}" "${RCON_TIMEOUT}"; then
+            rcon_ready=1
+        fi
         if [ "${rcon_ready}" -eq 1 ]; then
             timeout 30 docker exec "${server_container}" rcon-cli stop >/dev/null 2>&1 || true
         else
@@ -543,6 +774,11 @@ row_body() {
             explain_runner_kill "${server_log}" \
                 || fail "no disable banner — the shutdown handler did not run, or threw first"
             rc=1
+        elif [ "${mode}" != "configured" ]; then
+            # The clean-close pattern names the configured rows' server id, and the flow rows connect
+            # under a different one. Their disable banner is the assertion available here; the
+            # tunnel-was-live claim is the configured rows' to make.
+            pass "plugin disabled cleanly"
         elif ! wait_for_pattern "${stub_log}" "${STUB_CLEAN_CLOSE_PATTERN}" 30 \
                 "the stub to see the tunnel closed deliberately"; then
             fail "the plugin logged its disable banner, but the stub never saw a deliberate close —"
@@ -627,7 +863,175 @@ assert_row() {
     if [ "${platform}" = "bukkit" ]; then
         wait_for_pattern "${server_log}" "${READY_PATTERN}" "${BOOT_TIMEOUT}" "the server to finish starting" \
             || return 1
+        assert_login_probe || return 1
     fi
+    return 0
+}
+
+# The login gate, driven for two named players without either of them joining.
+#
+# This is as close as the harness gets to a real login, and the gap is worth naming: `/hd test`
+# runs the ACTUAL interceptor — module toggle, role check, bypass list, mirror, bot, fallback mode —
+# with its writes suppressed, so what it reports is the decision those players would get. What it
+# does not exercise is the platform's own login listener and the kick screen, which still need a
+# headless client (D43's residual risk 2).
+#
+# Asserted from both ends wherever both ends have something to say. The deny path reaches the bot,
+# so the STUB has to have seen the request; the allow path is answered by the mirror, which is the
+# common path on a warmed server and the one v2 shipped without a report on.
+# shellcheck disable=SC2317
+assert_login_probe() {
+    if ! wait_for_rcon "${server_container}" "${RCON_TIMEOUT}"; then
+        fail "rcon never answered, so the login probe could not be driven"
+        return 1
+    fi
+
+    if ! timeout 30 docker exec "${server_container}" \
+            rcon-cli hd test "${PROBE_DENIED_PLAYER}" >/dev/null 2>&1; then
+        fail "HARNESS: /hd test ${PROBE_DENIED_PLAYER} could not be dispatched over rcon"
+        return 1
+    fi
+    if ! wait_for_pattern "${server_log}" "${PROBE_DENY_PATTERN}" 60 \
+            "the probe to refuse an unknown player"; then
+        fail "the probe either never ran or decided something else — /hd test drives the real"
+        fail "interceptor, so this is the login path disagreeing with the bot"
+        return 1
+    fi
+    if ! wait_for_pattern "${stub_log}" "${STUB_PROBE_PATTERN}" 30 \
+            "the stub to have been asked about that player"; then
+        fail "the plugin refused them without asking anybody, which is a fallback rather than a"
+        fail "decision — the mirror should have missed and the bot should have been consulted"
+        return 1
+    fi
+    pass "login probe: an unknown player is refused, and the bot was asked"
+
+    if ! timeout 30 docker exec "${server_container}" \
+            rcon-cli hd test "${PROBE_ALLOWED_PLAYER}" >/dev/null 2>&1; then
+        fail "HARNESS: /hd test ${PROBE_ALLOWED_PLAYER} could not be dispatched over rcon"
+        return 1
+    fi
+    if ! wait_for_pattern "${server_log}" "${PROBE_ALLOW_PATTERN}" 60 \
+            "the probe to admit a whitelisted player from the mirror"; then
+        fail "the mirror holds ${PROBE_ALLOWED_PLAYER} — the pre-warm assertion above proved that —"
+        fail "so either the name was not resolved to his UUID or the mirror was not consulted"
+        return 1
+    fi
+    pass "login probe: a whitelisted player is admitted from the pre-warmed mirror"
+    return 0
+}
+
+# The setup flow: an unclaimed server becomes a connected one, without a restart.
+#
+# Departure D56 in one row. Before phase 1e the modules captured whatever API client existed at
+# registration — null, on a server nobody had set up — so a claim produced a live tunnel and an
+# /offend that still refused, and only a restart fixed it. So the assertions are deliberately about
+# what happens AFTER the command, in the same boot: the tunnel comes up, the handshake negotiates
+# v3, and a module goes from off to on because a config push arrived and was applied.
+# shellcheck disable=SC2317
+assert_setup_row() {
+    if ! wait_for_pattern "${server_log}" "${ENABLE_PATTERN}" "${BOOT_TIMEOUT}" \
+            "the plugin's enable banner"; then
+        return 1
+    fi
+    if ! wait_for_pattern "${server_log}" 'not set up yet' 60 \
+            "the plugin to say it has no credentials"; then
+        fail "this row must start UNCLAIMED, or the claim below proves nothing"
+        return 1
+    fi
+    pass "plugin enabled with no bootstrap.yml, and said so"
+
+    wait_for_pattern "${server_log}" "${READY_PATTERN}" "${BOOT_TIMEOUT}" \
+        "the server to finish starting" || return 1
+    if ! wait_for_rcon "${server_container}" "${RCON_TIMEOUT}"; then
+        fail "rcon never answered, so /hd setup could not be driven"
+        return 1
+    fi
+
+    # The endpoint is passed explicitly, which is also the documented answer for a whitelabel
+    # instance: its setup codes live in its own database and are not claimable anywhere else.
+    if ! timeout 60 docker exec "${server_container}" \
+            rcon-cli hd setup "${SETUP_CODE}" http://stub-bot:8080 >/dev/null 2>&1; then
+        fail "HARNESS: /hd setup could not be dispatched over rcon"
+        return 1
+    fi
+
+    if ! wait_for_pattern "${stub_log}" "${STUB_CLAIMED_PATTERN}" 60 \
+            "the stub to consume the setup code"; then
+        fail "the claim never reached the bot — it is the one unsigned endpoint, so a signature"
+        fail "problem here would be the client signing something it should not"
+        return 1
+    fi
+    pass "setup code claimed"
+
+    if ! wait_for_pattern "${stub_log}" "${STUB_SETUP_CONNECTED_PATTERN}" 90 \
+            "the tunnel to come up on the claimed server id"; then
+        fail "the credentials landed but nothing dialled. Before 1e this needed a restart, which is"
+        fail "the entire point of the row — see departure D56."
+        return 1
+    fi
+    if ! wait_for_pattern "${stub_log}" "${STUB_SETUP_IDENTIFIED_PATTERN}" 60 \
+            "a v3 identify from the freshly claimed server"; then
+        return 1
+    fi
+    pass "tunnel connected and negotiated v3 after the claim, with no restart"
+
+    if ! wait_for_pattern "${server_log}" "${SETUP_MODULE_ENABLED_PATTERN}" 60 \
+            "a module to go live on the pushed configuration"; then
+        fail "the tunnel is up but nothing enabled, so the config push did not reach a client that"
+        fail "was listening — which is what a module holding a dead reference looks like"
+        return 1
+    fi
+    pass "modules went live on the pushed config, in the same boot"
+    return 0
+}
+
+# The v2 migration: a config.yml next door becomes a working v3 install.
+# shellcheck disable=SC2317
+assert_migrate_row() {
+    if ! wait_for_pattern "${server_log}" "${ENABLE_PATTERN}" "${BOOT_TIMEOUT}" \
+            "the plugin's enable banner"; then
+        return 1
+    fi
+    if ! wait_for_pattern "${server_log}" "${MIGRATED_PATTERN}" 60 \
+            "the v2 config to be found and migrated"; then
+        fail "the v2 file is in the SIBLING plugins/HeimdallWhitelist/ directory, which is where a"
+        fail "real upgrade leaves it — a migration that only searches its own directory finds"
+        fail "nothing on every install it exists for"
+        return 1
+    fi
+    pass "v2 config found and migrated"
+
+    # The original is kept, never deleted. Checked on the host rather than in the log, because the
+    # log line is the plugin's account of what it did and this is the file system's.
+    if [ ! -f "${work}/data-plugins/HeimdallWhitelist/config.yml.v2-backup" ]; then
+        fail "no config.yml.v2-backup beside the original — the migration must never delete an"
+        fail "operator's configuration, whatever it made of it"
+        return 1
+    fi
+    if [ -f "${work}/data-plugins/HeimdallWhitelist/config.yml" ]; then
+        fail "the v2 config.yml is still in place, so the next boot would migrate it again"
+        return 1
+    fi
+    pass "the v2 file was kept as a backup, and moved out of the way"
+
+    # Legacy mode: v2 had no token id, so the migrated bootstrap signs with the guild key alone.
+    # A connection at all is the assertion — the bot accepts the same HMAC either way, and if it
+    # did not, this is where it would show.
+    if ! wait_for_pattern "${stub_log}" "${STUB_MIGRATE_CONNECTED_PATTERN}" 90 \
+            "the migrated server to connect on its legacy guild key"; then
+        fail "the credentials came across but did not authenticate. v2's api.apiKey has no token id"
+        fail "beside it, so this is the legacy-key signing path failing."
+        return 1
+    fi
+    pass "connected in legacy mode, on credentials migrated from v2"
+
+    if ! wait_for_pattern "${stub_log}" "${STUB_IMPORT_PATTERN}" 120 \
+            "the translated v2 settings to reach the dashboard"; then
+        fail "the settings translation was lost. It is deferred until the guild resolves, so a"
+        fail "failure here is either the deferral never firing or the import being refused."
+        return 1
+    fi
+    pass "the v2 settings were handed to the dashboard, once"
     return 0
 }
 
@@ -654,15 +1058,15 @@ main() {
     log "jar: ${jar}"
     log "stub: ${stub}"
 
-    local failures=0 ran=0 row name image type version platform memory
+    local failures=0 ran=0 row name image type version platform memory mode
     for row in "${ROWS[@]}"; do
-        IFS='|' read -r name image type version platform memory <<<"${row}"
+        IFS='|' read -r name image type version platform memory mode <<<"${row}"
         if [ "${selection}" != "all" ] && [ "${selection}" != "${name}" ]; then
             continue
         fi
         ran=$((ran + 1))
         if run_row "${name}" "${image}" "${type}" "${version}" "${platform}" "${memory}" \
-                "${jar}" "${stub}"; then
+                "${mode}" "${jar}" "${stub}"; then
             pass "${name}"
         else
             fail "${name}"

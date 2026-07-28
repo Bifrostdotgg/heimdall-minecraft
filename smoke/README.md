@@ -211,22 +211,54 @@ capability. A fresh install could never have been configured, and every later bo
 in the same state. Nothing in 434 unit tests could see it — it needed real modules and a real bot in
 one process, which is exactly what this scenario is.
 
+### The login gate, without a login
+
+`/hd test <player>` drives the **real** interceptor — module toggle, role check, bypass list, mirror,
+bot, fallback mode — with its writes suppressed, so what it reports is the decision that player would
+actually get. The `paper-1.21.8` row runs it twice, over RCON, and asserts both ends where both ends
+have something to say:
+
+| Probe | Asserted on the plugin | Asserted on the stub |
+|---|---|---|
+| a name with no fixture | refused, `not whitelisted` | the `connection-attempt` request arrived |
+| `AllowedSteve` | admitted, `mirror hit` | (the pre-warm assertion above is what put him there) |
+
+The two players are chosen so both halves of the path run. The deny misses the mirror and reaches the
+bot, which is the branch with a wire round trip in it. The allow is answered by the mirror, which is
+the *common* path on a warmed server and the one v2 shipped without a report on — and resolving his
+name to the right UUID at all is the interesting part, since he is not online and the probe reads the
+mirror's own uuid-to-name mapping rather than hashing his name into an id that belongs to nobody.
+
 ### What it deliberately does not do
 
 **No player ever joins.** There is no headless client here, so the login gate's six outcomes are
 proven by the whitelist module's tests against the same stub over a real socket, and are not
-re-proven at this level.
-
-**Phase 1e adds `/hd test <player>`**, which makes a real connection-attempt from the server console.
-At that point this script can assert an allow and a deny end to end through rcon. An actual join —
-which is also what departure D43's residual risk 2 needs to close — waits on the headless-client
+re-proven at this level. What `/hd test` does not reach is everything downstream of the decision —
+the platform's own login listener, the kick screen, and chat cancellation — all of which need a
+client to be connected. That is departure D43's residual risk 2, and it waits on the headless-client
 work.
 
-### Two rows, not six
+### Four rows, in three modes
 
 The wire does not vary by Minecraft version. What varies is class loading and the log4j tap, and
 `run.sh` already covers those on all six. One current server from each family is what proves the
-one-jar design still reaches a bot from both entry points, for two boots instead of six.
+one-jar design still reaches a bot from both entry points.
+
+Two of the four rows are not about the steady state at all, because two flows cannot be exercised on
+a server that is already configured:
+
+| Mode | Starting state | What it proves |
+|---|---|---|
+| `configured` | a `bootstrap.yml` exists | the steady state, plus the login probe |
+| `setup` | **nothing** — no `bootstrap.yml` at all | a setup code is claimed over the console and the tunnel comes up, negotiates v3 and enables modules **in the same boot**. That is departure D56, and it was impossible before phase 1e |
+| `migrate` | a v2 `config.yml` in the sibling `plugins/HeimdallWhitelist/` | the migration finds it next door, writes a `bootstrap.yml`, connects on the **legacy** guild key, keeps the original as `*.v2-backup`, and hands the translated settings to the dashboard once |
+
+Both flow rows are Bukkit-only, and that is a harness limitation stated rather than hidden: the Paper
+image exposes RCON and the proxy image in this matrix does not, so there is no way to type a command
+into a running Velocity here. The code under test is the same on both — the admin tree is one
+platform-free class registered through each platform's own `CommandRegistrar` — so what the missing
+rows would prove is the registrar binding, which the configured Velocity row already exercises by
+answering `/hdp` at all.
 
 ### Why the Bukkit row mounts `/data/plugins` when `run.sh` does not
 
