@@ -44,6 +44,11 @@
 /smoke/.work/
 /smoke/.work-connected/
 
+# Local dev stack: compose project with a staged plugin jar, server data
+# directories, and a machine-local .env (MC/proxy versions, host ports).
+# Anchored like everything else above.
+/dev-server/
+
 # OS
 .DS_Store
 Thumbs.db
