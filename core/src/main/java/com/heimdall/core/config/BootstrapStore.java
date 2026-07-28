@@ -42,9 +42,9 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
  *
  * <p><strong>Comments in a hand-edited file are lost on save</strong>, because SnakeYAML discards
  * them at parse time. The justification this used to carry — "saves come from the setup flow, which
- * only ever rewrites a file it wrote itself" — is not true yet: {@code /hd setup} lands in phase 1e,
- * so <em>every</em> {@code bootstrap.yml} in existence today was written by hand, and the plugin
- * already saves over it the moment guild discovery answers.
+ * only ever rewrites a file it wrote itself" — is still not the whole story now that {@code /hd
+ * setup} exists: a v2 migration writes this file too, guild discovery saves over it unprompted the
+ * moment it answers, and plenty of installs were hand-written before any of that.
  *
  * <p>It is still the right trade, for a different reason: the alternative is carrying a
  * comment-preserving YAML editor to protect four keys and a cache. What the loss is not allowed to

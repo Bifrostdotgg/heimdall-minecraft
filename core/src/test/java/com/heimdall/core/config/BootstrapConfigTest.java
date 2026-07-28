@@ -41,11 +41,20 @@ class BootstrapConfigTest {
     }
 
     @Test
-    @DisplayName("credentials without an endpoint are not enough")
+    @DisplayName("an endpoint without a token, or a token without an endpoint, is not enough")
     void partialConfigIsNotConfigured() {
         assertFalse(BootstrapConfig.builder().tokenId("t").token("s").build().isConfigured());
-        assertFalse(BootstrapConfig.builder().endpoint("https://x").token("s").build().isConfigured());
         assertFalse(BootstrapConfig.builder().endpoint("https://x").tokenId("t").build().isConfigured());
+    }
+
+    @Test
+    @DisplayName("a token with no token id IS configured — that is what a v2 migration produces")
+    void legacyCredentialsAreConfigured() {
+        assertTrue(BootstrapConfig.builder().endpoint("https://x").token("s").build().isConfigured(),
+                "v2 had one guild key and no id for it, and the signature is what authenticates. "
+                        + "Requiring the id here made every migrated server permanently 'not set "
+                        + "up': its HTTP client worked, its guild resolved, and its tunnel never "
+                        + "dialled.");
     }
 
     @Test

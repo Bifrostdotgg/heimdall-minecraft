@@ -125,9 +125,21 @@ public final class BootstrapConfig {
      *
      * <p>{@code false} means the setup flow has not run: no endpoint, or no credentials. It is not
      * a claim that the credentials are <em>valid</em> — only the bot can say that.
+     *
+     * <p><strong>{@link #tokenId()} is deliberately not required</strong>, and getting that wrong
+     * cost a phase. The signature is what authenticates: the token id is a hint that rides along on
+     * {@code identify} so the bot can look the secret up faster, and it is optional on the wire by
+     * design — a token issued before the field existed still has to work. Requiring it here made
+     * every server migrated from v2 permanently "not set up": v2 had one key and no id for it, so
+     * the HTTP client worked, the guild resolved, and the tunnel never dialled, with the plugin
+     * cheerfully advising the operator to run a setup command they had already completed.
+     *
+     * <p>Caught by the migration row of {@code smoke/connected.sh} on its first run, which is
+     * exactly the class of thing a unit test could not have noticed — every unit test built a
+     * config with all three fields, because that is what a claim returns.
      */
     public boolean isConfigured() {
-        return Strings.isNotBlank(endpoint) && Strings.isNotBlank(tokenId) && Strings.isNotBlank(token);
+        return Strings.isNotBlank(endpoint) && Strings.isNotBlank(token);
     }
 
     @Override
