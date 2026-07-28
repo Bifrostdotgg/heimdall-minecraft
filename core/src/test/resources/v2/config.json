@@ -1,0 +1,53 @@
+{
+  "enabled": true,
+  "api": {
+    "baseUrl": "https://api.bifrost.gg/",
+    "apiKey": "hwl_3b8e5d21c74f4a06b19d8e33f0a25c47",
+    "guildId": "1046473775487176835",
+    "timeout": 1500,
+    "retries": 1,
+    "retryDelay": 1000
+  },
+  "server": {
+    "serverId": "proxy-lobby",
+    "displayName": "Bifröst Network",
+    "publicIp": "play.example.net"
+  },
+  "messages": {
+    "apiUnavailable": "§cThe network is having a moment. Try again shortly.",
+    "apiUnavailableAllowed": "§eWhitelist API is temporarily unavailable. You have been allowed in from cache.",
+    "reloaded": "§aHeimdall Whitelist plugin reloaded successfully!",
+    "status": "§7Heimdall Whitelist Status:\n§7API URL: §f{url}\n§7Server ID: §f{serverId}\n§7Last Check: §f{lastCheck}"
+  },
+  "logging": {
+    "debug": true,
+    "logDecisions": true
+  },
+  "performance": {
+    "cacheTimeout": 30,
+    "maxConcurrentRequests": 128
+  },
+  "cache": {
+    "enabled": true,
+    "cacheWindow": 45,
+    "extendOnJoin": 240,
+    "extendOnLeave": 300,
+    "maxExtensionHours": 0,
+    "cleanupInterval": 15
+  },
+  "advanced": {
+    "apiFallbackMode": "allow"
+  },
+  "bypass": {
+    "uuids": [
+      "069a79f4-44e9-4726-a5be-fca90e38aaf5"
+    ]
+  },
+  "websocket": {
+    "enabled": true,
+    "reconnect-delay": 5000,
+    "max-reconnect-delay": 30000,
+    "heartbeat-interval": 30000,
+    "heartbeat-timeout": 10000
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "enabled": "true",
+  "api": {
+    "baseUrl": "https://bot.example.test",
+    "apiKey": "hwl_partial_key"
+  },
+  "cache": {
+    "cacheWindow": "75",
+    "cleanupInterval": "45"
+  },
+  "console": {
+    "stream": "no"
+  },
+  "updates": {
+    "checkEnabled": "false"
+  },
+  "bypass": {
+    "uuids": null
+  }
+}

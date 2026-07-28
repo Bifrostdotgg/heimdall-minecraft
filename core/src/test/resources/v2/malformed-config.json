@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "api": {
+    "baseUrl": "https://api.bifrost.gg",
+    "apiKey": "hwl_never_read",
