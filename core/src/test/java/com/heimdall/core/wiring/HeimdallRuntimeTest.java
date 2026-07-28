@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.config.BootstrapConfig;
@@ -436,5 +437,142 @@ class HeimdallRuntimeTest {
         runtime.close();
         runtime.start();
         assertTrue(runtime.executors().isShutdown());
+    }
+
+    /**
+     * Health reporting is a module core registers itself, and it defaults to on. Departure D69.
+     *
+     * <p>The bug this closes was visible in production rather than here: a real v3 plugin declared
+     * {@code [whitelist@1, rolesync@1, console@1]} while sending health frames on every heartbeat, so
+     * the dashboard rendered a locked row reading "Not available in this plugin build" about a
+     * capability the jar was demonstrably exercising. Nothing contributed the capability because
+     * nothing owned the feature.
+     *
+     * <p>The interesting half is the default. Making it a module means it becomes subject to
+     * {@code enabledModuleIds()}, and an unmentioned module entry parses as {@code enabled: false} —
+     * so a naive version of this change would have silently switched health <em>off</em> on every
+     * server that had not yet received a push, which is every fresh install, every offline server and
+     * every one in v2-compat.
+     */
+    @Nested
+    @DisplayName("health as a module")
+    class HealthIsAModule {
+
+        private com.heimdall.core.json.Payload modulePush(
+                int version, String moduleId, boolean enabled) {
+            return com.heimdall.core.json.Payload.builder()
+                    .put("version", version)
+                    .put("modules", com.heimdall.core.json.Payload.builder()
+                            .put(moduleId, com.heimdall.core.json.Payload.builder()
+                                    .put("enabled", enabled)
+                                    .build())
+                            .build())
+                    .build();
+        }
+
+        @Test
+        @DisplayName("the capability is declared from construction, before any config exists")
+        void declaredBeforeAnythingIsConfigured(@TempDir Path dataDir) {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime runtime = runtime(dataDir, store).build();
+
+            // Not after start(), and not after a push — departure D55. The bot narrows its
+            // config.push to the declared capabilities, so a health capability that only appeared
+            // once health was enabled could never be enabled by a bot that never heard of it.
+            assertTrue(runtime.modules().capabilities().contains("health@1"),
+                    "identify must declare health@1 on a jar that has never been configured: "
+                            + runtime.modules().capabilities());
+            assertTrue(runtime.modules().registeredIds().contains("health"));
+
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("with no config at all, health reporting is ON")
+        void defaultsToOnWithNoConfigAtAll(@TempDir Path dataDir) {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime runtime = runtime(dataDir, store).build();
+
+            assertTrue(runtime.tunnel().isHealthReportingEnabled(),
+                    "the tunnel's own flag is the floor: even a runtime whose reconcile never ran "
+                            + "must report health, because that is what every build before D69 did");
+
+            runtime.start();
+
+            assertEquals(ModuleState.ENABLED, runtime.modules().state("health"),
+                    "the built-in defaults must enable health without a push — an unconfigured, "
+                            + "offline or v2-compat server keeps reporting exactly as it did");
+            assertTrue(runtime.remoteConfig().moduleEnabled("health"));
+            assertTrue(runtime.tunnel().isHealthReportingEnabled());
+
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("a push that never mentions health leaves it on")
+        void aPushAboutSomethingElseLeavesHealthAlone(@TempDir Path dataDir) {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime runtime = runtime(dataDir, store).build();
+            Marker marker = new Marker();
+            runtime.modules().register(marker);
+            runtime.start();
+
+            runtime.remoteConfig().onConfigPush(modulePush(1, "marker", true));
+
+            assertTrue(marker.enabled(), "the push must actually have been applied");
+            assertEquals(ModuleState.ENABLED, runtime.modules().state("health"),
+                    "the layers overlay rather than replace, so a document with no health entry "
+                            + "keeps the built-in default rather than switching it off");
+            assertTrue(runtime.tunnel().isHealthReportingEnabled());
+
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("an explicit disable stops it, and a later enable resumes it — no reconnect")
+        void theDashboardToggleWorksBothWays(@TempDir Path dataDir) {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime runtime = runtime(dataDir, store).build();
+            runtime.start();
+            Object tunnelBefore = runtime.tunnel();
+
+            runtime.remoteConfig().onConfigPush(modulePush(1, "health", false));
+
+            assertEquals(ModuleState.STOPPED, runtime.modules().state("health"));
+            assertFalse(runtime.tunnel().isHealthReportingEnabled(),
+                    "an operator who does not want TPS and player counts leaving their box has a "
+                            + "switch that actually stops the frames");
+
+            runtime.remoteConfig().onConfigPush(modulePush(2, "health", true));
+
+            assertEquals(ModuleState.ENABLED, runtime.modules().state("health"));
+            assertTrue(runtime.tunnel().isHealthReportingEnabled());
+            assertSame(tunnelBefore, runtime.tunnel(),
+                    "both toggles land on the live tunnel — hot, without a reconnect");
+
+            // Still declared throughout: the capability describes the build, not the state.
+            assertTrue(runtime.modules().capabilities().contains("health@1"));
+
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("the local escape hatch reaches it too")
+        void localDisableTurnsItOff(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime runtime = runtime(dataDir, store).build();
+            runtime.start();
+            assertTrue(runtime.tunnel().isHealthReportingEnabled());
+
+            // Departure D67's lever, which health inherits by being a real module rather than a
+            // special case in the heartbeat.
+            runtime.setModuleLocallyDisabled("health", true);
+            assertFalse(runtime.tunnel().isHealthReportingEnabled());
+
+            runtime.setModuleLocallyDisabled("health", false);
+            assertTrue(runtime.tunnel().isHealthReportingEnabled());
+
+            runtime.close();
+        }
     }
 }

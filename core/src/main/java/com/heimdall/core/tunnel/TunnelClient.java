@@ -88,6 +88,22 @@ public final class TunnelClient implements TunnelBus {
     private volatile long lastInboundMs;
     private volatile ScheduledFuture<?> reconnectTask;
     private volatile HealthSnapshotSource healthSource;
+
+    /**
+     * Whether the heartbeat may carry a {@code health} snapshot.
+     *
+     * <p><strong>Defaults to {@code true}, and that default is the compatibility guarantee.</strong>
+     * Health reporting is an operator-controllable module in v3 (departure D69), but v2 sent it
+     * unconditionally and so did v3 until the module existed. A client nothing ever toggles —
+     * offline, in v2-compat, unregistered, or simply built without a module manager, which is every
+     * tunnel unit test — therefore behaves exactly as it did before.
+     *
+     * <p>Written by {@code HealthModule} on the reconciliation thread; read by the heartbeat on
+     * {@code heimdall-ws}. Volatile, so a dashboard toggle takes effect on the next tick rather than
+     * on the next reconnect.
+     */
+    private volatile boolean healthReportingEnabled = true;
+
     private volatile CapabilitySource capabilitySource;
     private volatile TunnelMessageHandler unhandledHandler;
 
@@ -343,6 +359,29 @@ public final class TunnelClient implements TunnelBus {
     /** Sets the health snapshot source; {@code null} stops health messages being sent. */
     public void setHealthSource(HealthSnapshotSource source) {
         this.healthSource = source;
+    }
+
+    /**
+     * Turns the heartbeat's health snapshot on or off — what the dashboard's health module toggles.
+     *
+     * <p>Separate from {@link #setHealthSource} on purpose: one answers "can this platform read its
+     * own TPS at all", the other "may we report it". Collapsing them would make an operator's choice
+     * indistinguishable from a platform limitation, and re-enabling would have to re-derive a source
+     * core does not own.
+     *
+     * <p><strong>{@code ping} is unaffected.</strong> The bot's 90-second sweep refreshes a
+     * connection's last-seen on {@code pong} <em>and</em> on {@code health}; gating the ping on this
+     * as well would mean an operator who switched health off had their server reaped as dead.
+     *
+     * @see #isHealthReportingEnabled()
+     */
+    public void setHealthReportingEnabled(boolean enabled) {
+        this.healthReportingEnabled = enabled;
+    }
+
+    /** Whether the heartbeat is currently allowed to carry health. Defaults to {@code true}. */
+    public boolean isHealthReportingEnabled() {
+        return healthReportingEnabled;
     }
 
     /**

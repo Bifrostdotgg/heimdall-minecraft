@@ -35,6 +35,14 @@ import java.util.concurrent.TimeUnit;
  * <p>The health message on the same tick is the one that actually does double duty: it carries the
  * dashboard's TPS and memory numbers <em>and</em> refreshes the bot's liveness timer.
  *
+ * <h2>Health is optional; the ping is not</h2>
+ *
+ * <p>Health reporting is a module an operator can switch off from the dashboard (departure D69), so
+ * {@link #sendHealth()} consults {@link TunnelClient#isHealthReportingEnabled()}. The ping is sent
+ * <em>before</em> that check and is never gated: because health doubles as a liveness signal,
+ * dropping both would let the bot's 90-second sweep reap a server whose operator had only asked it
+ * to stop publishing TPS.
+ *
  * <h2>Threading</h2>
  *
  * <p>Everything here runs on {@code heimdall-ws}. {@link #start} and {@link #stop} may be called
@@ -112,6 +120,12 @@ final class TunnelHeartbeat {
     }
 
     private void sendHealth() {
+        if (!client.isHealthReportingEnabled()) {
+            // The operator switched the health module off. The ping above has already gone, which is
+            // the whole reason this check is here and not up in tick(): liveness must not depend on
+            // a reporting preference.
+            return;
+        }
         HealthSnapshotSource source = client.healthSource();
         if (source == null) {
             return;

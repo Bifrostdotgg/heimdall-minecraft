@@ -7,13 +7,16 @@ import com.heimdall.core.http.ApiClient;
 import com.heimdall.core.http.BedrockIdentityProvider;
 import com.heimdall.core.http.ClaimClient;
 import com.heimdall.core.http.HeimdallApi;
+import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
+import com.heimdall.core.module.HealthModule;
 import com.heimdall.core.module.ModuleEnvironment;
 import com.heimdall.core.module.ModuleManager;
 import com.heimdall.core.pipeline.ChatPipeline;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.ConfigDocument;
+import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.RemoteConfig;
 import com.heimdall.core.session.PlayerSessionEvents;
 import com.heimdall.core.tunnel.HealthSnapshotSource;
@@ -26,8 +29,10 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -180,7 +185,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         this.chatPipeline = new ChatPipeline(logger);
 
         Path cachePath = platform.dataDirectory().resolve("config-cache.json");
-        this.remoteConfig = new RemoteConfig(logger, cachePath, ConfigDocument.empty());
+        this.remoteConfig = new RemoteConfig(logger, cachePath, builtInDefaults());
 
         this.apiClient = buildApiClient(builder);
         this.api = new HeimdallApi(apiClient);
@@ -205,10 +210,38 @@ public final class HeimdallRuntime implements AutoCloseable {
                 .playerSessions(playerSessions)
                 .build());
 
+        // Core's own module, registered here rather than in HeimdallModules: health is emitted by
+        // the tunnel heartbeat, so core is the only place that can own it, and core must not depend
+        // on the feature modules. Registered in the constructor — not in start() — because the
+        // declared capability set is about what is REGISTERED (departure D55), and a platform
+        // registers its modules in the gap between build() and start().
+        this.modules.register(new HealthModule(tunnel));
+
         // Set after the manager exists: the dependency genuinely runs both ways — the manager hands
         // each module a bus backed by the client, and the client asks the manager what to declare.
         // See CapabilitySource.
         tunnel.setCapabilitySource(modules);
+    }
+
+    /**
+     * The configuration this plugin runs on when nothing upstream has said otherwise.
+     *
+     * <p>The bottom layer of {@code RemoteConfig}'s "live push &gt; disk cache &gt; built-in
+     * defaults" overlay, and the reason it is no longer empty is departure D69: {@code health} must
+     * default to <strong>on</strong>. A module entry parsed from a document defaults to
+     * {@code enabled: false} — the right answer for a module the bot declined to mention — but health
+     * was sent unconditionally by v2 and by every v3 build before the module existed, so inheriting
+     * that default would silently stop the dashboard's TPS chart on every server that has not
+     * received a push yet: a fresh install, a server whose bot is unreachable, one running in
+     * v2-compat, or one that was never registered.
+     *
+     * <p>Because the layers overlay rather than replace, an explicit {@code health: {enabled: false}}
+     * from the dashboard still wins — which is the entire point of making the row a working toggle.
+     */
+    private static ConfigDocument builtInDefaults() {
+        Map<String, ModuleConfig> defaults = new LinkedHashMap<String, ModuleConfig>();
+        defaults.put(HealthModule.ID, ModuleConfig.of(true, Payload.empty()));
+        return ConfigDocument.of(ConfigDocument.UNVERSIONED, defaults, Payload.empty());
     }
 
     public static Builder builder(HeimdallLogger logger, PlatformFacade platform) {
