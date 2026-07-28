@@ -366,6 +366,21 @@ public final class V2Migration {
             notes.add("websocket.enabled (v3's tunnel is not optional — realtime role-sync, the "
                     + "console feed and remote updates all ride it)");
         }
+        if (config.hasKey("websocket.reconnect-delay")
+                || config.hasKey("websocket.max-reconnect-delay")
+                || config.hasKey("websocket.heartbeat-interval")
+                || config.hasKey("websocket.heartbeat-timeout")) {
+            // Grouped, but every key is named so the exhaustiveness test can find each literal.
+            notes.add("the tunnel's reconnect and heartbeat timings (websocket.reconnect-delay, "
+                    + "websocket.max-reconnect-delay, websocket.heartbeat-interval, "
+                    + "websocket.heartbeat-timeout) — v3 uses fixed, tuned values (TunnelSettings' "
+                    + "own defaults) rather than per-server ones, the same as logging.logDecisions "
+                    + "below");
+        }
+        if (config.hasKey("messages.reloaded") || config.hasKey("messages.status")) {
+            notes.add("the reload and status message templates (messages.reloaded, messages.status) "
+                    + "— v3 renders these itself and no longer reads them from config");
+        }
         if (config.hasKey("performance.cacheTimeout")) {
             notes.add("performance.cacheTimeout (v2's 30-second response cache is deliberately not "
                     + "ported — it caused the 2.4.0 role-sync outage, departure D7)");

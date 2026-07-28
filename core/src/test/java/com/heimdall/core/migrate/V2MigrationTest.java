@@ -20,11 +20,17 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 /**
  * The whole first-boot migration, against real directories and real v2 files.
@@ -435,5 +441,88 @@ class V2MigrationTest {
         assertEquals(afterFirst, store.load(), "the credentials were left exactly as they were");
         assertTrue(Files.isRegularFile(dir.resolve("config.yml")),
                 "the restored file is left in place for the operator to delete when satisfied");
+    }
+
+    /**
+     * Every dotted path v2's config carries that the migration maps somewhere the plugin reads —
+     * into {@code bootstrap.yml} or into the {@code config/import} document.
+     *
+     * <p>This list, together with the exhaustiveness test below, is the guard the completeness claim
+     * needs: a v2 key is <em>accounted for</em> iff it is here or is named in {@code detail()}. A
+     * future v2 key added to the fixture that is neither mapped nor enumerated fails the test rather
+     * than being silently dropped — which is the B4 bug, one level down.
+     */
+    private static final Set<String> MAPPED_KEYS = new LinkedHashSet<String>(Arrays.asList(
+            "enabled",
+            "api.baseUrl", "api.apiKey", "api.guildId", "api.timeout", "api.retries", "api.retryDelay",
+            "server.serverId",
+            "logging.debug",
+            "messages.apiUnavailable", "messages.apiUnavailableAllowed",
+            "advanced.apiFallbackMode",
+            "bypass.uuids",
+            "cache.cacheWindow", "cache.extendOnJoin", "cache.extendOnLeave", "cache.maxExtensionHours",
+            "cache.cleanupInterval", "cache.prewarm.enabled", "cache.prewarm.intervalMinutes",
+            "console.stream",
+            "roleSync.enabled",
+            "updates.checkEnabled", "updates.notifyAdmins", "updates.checkIntervalHours"));
+
+    @Test
+    @DisplayName("EXHAUSTIVE: every key in v2's config is either mapped or named in detail()")
+    void everyV2KeyIsAccountedFor(@TempDir Path dir) throws IOException {
+        copyFixture("config.yml", dir, "config.yml");
+
+        MigrationResult result = migration.run(Collections.singletonList(dir), storeIn(dir));
+        assertEquals(MigrationResult.Status.MIGRATED, result.status());
+        String detail = result.detail();
+
+        // The fixture is v2's own shipped config.yml — every knob v2 ever wrote — so walking its
+        // leaf keys is walking the whole v2 surface. Backup was renamed, so read from it.
+        Set<String> leafKeys = leafKeysOf(dir.resolve("config.yml" + V2Migration.BACKUP_SUFFIX));
+        assertTrue(leafKeys.size() >= 30,
+                "the fixture must be v2's full config, not a trimmed one; found " + leafKeys.size());
+
+        List<String> unaccounted = new ArrayList<String>();
+        for (String key : leafKeys) {
+            if (!MAPPED_KEYS.contains(key) && !detail.contains(key)) {
+                unaccounted.add(key);
+            }
+        }
+        assertTrue(unaccounted.isEmpty(),
+                "these v2 keys are neither mapped nor named in detail(), so the migration silently "
+                        + "drops them while calling itself complete — the B4 bug: " + unaccounted
+                        + "\n\ndetail() was:\n" + detail);
+
+        // And the six the gate review named specifically must be the enumerated (not mapped) kind.
+        for (String dropped : Arrays.asList(
+                "websocket.reconnect-delay", "websocket.max-reconnect-delay",
+                "websocket.heartbeat-interval", "websocket.heartbeat-timeout",
+                "messages.reloaded", "messages.status")) {
+            assertFalse(MAPPED_KEYS.contains(dropped), dropped + " has no v3 home, so it is not mapped");
+            assertTrue(detail.contains(dropped), dropped + " must be named in detail(): " + detail);
+        }
+    }
+
+    /** Every leaf (non-mapping) key in a YAML file, as dotted paths. */
+    private static Set<String> leafKeysOf(Path yaml) throws IOException {
+        Object root = new Yaml(new SafeConstructor(new LoaderOptions()))
+                .load(new String(Files.readAllBytes(yaml), StandardCharsets.UTF_8));
+        Set<String> keys = new LinkedHashSet<String>();
+        collectLeaves("", root, keys);
+        return keys;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void collectLeaves(String prefix, Object node, Set<String> out) {
+        if (node instanceof Map) {
+            for (Map.Entry<Object, Object> entry : ((Map<Object, Object>) node).entrySet()) {
+                String path = prefix.isEmpty()
+                        ? String.valueOf(entry.getKey())
+                        : prefix + "." + entry.getKey();
+                collectLeaves(path, entry.getValue(), out);
+            }
+            return;
+        }
+        // A scalar or a list is a leaf — bypass.uuids is a list and is one key, not many.
+        out.add(prefix);
     }
 }
