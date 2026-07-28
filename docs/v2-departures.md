@@ -965,6 +965,55 @@ dashboard genuinely cannot own it:
 Every one of these fails D17's test in the same way: *the dashboard cannot deliver it, and a broken
 server still has to read it.* That, and only that, is what earns a field a place in `bootstrap.yml`.
 
+### D69 — health reporting is a module an operator can switch off, and it defaults to on
+
+**v2:** the heartbeat carried a health snapshot unconditionally. There was no capability for it, no
+setting, and no way to stop it.
+**v3:** `health@1` is a declared capability backed by a real module, and the heartbeat's health
+payload is gated on that module's enabled state. **The `ping` is not gated.**
+
+**Found live, on a real server.** A v3 plugin connected declaring
+`["whitelist@1", "rolesync@1", "console@1"]` while sending health frames on every heartbeat — the
+frames that drive `lastPing`, the bot's health-history ring buffer and its `low_tps`,
+`player_surge` and `offline` alerts. The bot advertises `managedModules: ["whitelist", "rolesync",
+"console", "health"]`, so the dashboard compared the two, found no `health` capability, and rendered
+a **locked** row reading *"Health reporting — Not available in this plugin build"* about a feature
+the jar was demonstrably exercising at that moment. The UI was stating something false about the jar.
+
+The cause was structural rather than a missing string: health was emitted by **core** — the tunnel
+heartbeat piggybacking a payload from the injected `HealthSnapshotSource` — so no feature module
+existed to contribute a capability. Adding the constant to `identify` alone would have fixed the lie
+and left the row a dead switch, which is the same lie one click later. So health became what the
+capability list already claimed it was:
+
+- **`HealthModule`** (in core, registered by `HeimdallRuntime` itself — core must not depend on the
+  feature modules, and this one is core's own) declares `Capabilities.HEALTH` and does exactly one
+  thing on enable and disable: flips `TunnelClient.setHealthReportingEnabled`.
+- **The gate is in `TunnelHeartbeat.sendHealth()`**, *after* the ping has been written. Health
+  doubles as a liveness signal — the bot's 90-second sweep refreshes last-seen on `pong` **and** on
+  `health` — so gating the tick rather than the payload would have every server with health switched
+  off reaped as dead ninety seconds later. An operator asking to stop publishing TPS is not asking
+  to be marked offline.
+- **Registered, not enabled**, so the capability is declared from construction. Departure D55 in
+  full: a jar that declared `health@1` only once health was running could never be told to run it.
+
+**The default is the part that needed care.** Making health a module subjects it to
+`enabledModuleIds()`, and a module entry the bot never mentions parses as `enabled: false` — the
+right answer for an unknown module and the wrong one here. A naive version of this change would
+therefore have silently switched health **off** on every server that had not yet received a push:
+every fresh install, every server whose bot is unreachable, every one in v2-compat, every
+unregistered one. So the default is on, twice over and independently:
+
+1. `TunnelClient`'s flag starts `true`, so a tunnel whose reconcile never ran — including every
+   tunnel unit test — behaves exactly as it did before this existed; and
+2. `HeimdallRuntime`'s **built-in config defaults** now carry `health: {enabled: true}`, which the
+   `live push > disk cache > built-in defaults` overlay preserves for any document that does not
+   mention health.
+
+Only an explicit `health: {enabled: false}` from the dashboard turns it off. `/hd disable health`
+reaches it too, because it is a real module rather than a special case — departure D67 applies to it
+for free.
+
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 
 **New in 1d.**
