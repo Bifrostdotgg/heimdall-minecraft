@@ -605,7 +605,8 @@ row_body() {
     #
     # Deliberately weaker than the Bukkit check, and said out loud rather than dressed up. Proving
     # /hdp answers needs a client connection, which is the same missing capability as the chat test
-    # in D43 — TODO(1d): assert both from one headless-client row.
+    # in D43 — TODO(1f): assert both from one headless-client row. (/hd is now driven for real on
+    # the Bukkit connected rows via /hd test and /hd setup; /hdp still waits on a headless client.)
 
     # ── Graceful stop ────────────────────────────────────────────────────────────────────────
     if [ "${platform}" = "bukkit" ]; then

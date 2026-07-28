@@ -128,6 +128,10 @@ MIGRATE_SERVER_ID="migrated-survival"
 MIGRATED_PATTERN='Migrated the v2 config at .*config\.yml'
 STUB_MIGRATE_CONNECTED_PATTERN="ws connected: guild=${STUB_GUILD} server=${MIGRATE_SERVER_ID}"
 STUB_IMPORT_PATTERN="config import for ${MIGRATE_SERVER_ID} \\(imported=true\\)"
+# The legacy HMAC path, proven rather than assumed: v2 had no token id, so a migrated server signs
+# identify with the guild key alone and sends NO X-Token-Id. The stub logs which path it saw, so the
+# migrate row is not tautological on the legacy signing.
+STUB_LEGACY_IDENTIFY_PATTERN="identify: guild=${STUB_GUILD} \\(legacy: no token id\\)"
 
 # The plugin's own banners, shared with run.sh. Kept in step by the self-test below.
 ENABLE_PATTERN='Heimdall v[0-9][^ ]* enabled'
@@ -343,6 +347,12 @@ selftest() {
     check_match "${STUB_IMPORT_PATTERN}" \
         "[stub-bot] config import for ${MIGRATE_SERVER_ID} (imported=false)" \
         no "migrate: imported vs already present" || failures=$((failures + 1))
+    check_match "${STUB_LEGACY_IDENTIFY_PATTERN}" \
+        "[stub-bot] identify: guild=${STUB_GUILD} (legacy: no token id)" \
+        yes "migrate: the stub saw a legacy identify" || failures=$((failures + 1))
+    check_match "${STUB_LEGACY_IDENTIFY_PATTERN}" \
+        "[stub-bot] identify: guild=${STUB_GUILD} tokenId=stub-token-abc12345" \
+        no "migrate: legacy identify vs a token-id one" || failures=$((failures + 1))
 
     local row name image type version platform memory mode
     for row in "${ROWS[@]}"; do
@@ -1023,7 +1033,13 @@ assert_migrate_row() {
         fail "beside it, so this is the legacy-key signing path failing."
         return 1
     fi
-    pass "connected in legacy mode, on credentials migrated from v2"
+    if ! wait_for_pattern "${stub_log}" "${STUB_LEGACY_IDENTIFY_PATTERN}" 60 \
+            "the stub to record a legacy (no token id) identify"; then
+        fail "the server connected, but the stub did not see the legacy signing path — a migrated"
+        fail "server must send NO X-Token-Id, and this proves it did."
+        return 1
+    fi
+    pass "connected in legacy mode, on credentials migrated from v2 (no token id)"
 
     if ! wait_for_pattern "${stub_log}" "${STUB_IMPORT_PATTERN}" 120 \
             "the translated v2 settings to reach the dashboard"; then
