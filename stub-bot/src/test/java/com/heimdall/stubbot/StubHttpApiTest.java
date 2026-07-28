@@ -81,6 +81,20 @@ class StubHttpApiTest {
         }
 
         @Test
+        @DisplayName("a legacy identify — signed, but with no X-Token-Id — resolves the guild")
+        void legacyIdentifyWithNoTokenId() throws Exception {
+            // A v2-migrated server signs with the guild key and sends NO token id. SignedClient adds
+            // no X-Token-Id header, so this IS the legacy path. It must be accepted exactly as a
+            // modern token is — the signature authenticates, the header is only a lookup hint — which
+            // is what makes the migrate smoke row's legacy connection meaningful rather than assumed.
+            HttpResponse<String> response = client.post("/api/minecraft/identify", "{}");
+
+            assertEquals(200, response.statusCode());
+            assertEquals(StubBotConfig.DEFAULT_GUILD_ID,
+                    SignedClient.envelope(response).getAsJsonObject("data").get("guildId").getAsString());
+        }
+
+        @Test
         void anUnknownGuildIsNotConfigured() throws Exception {
             HttpResponse<String> response = client.post(
                     "/api/guilds/999999999999999999/minecraft/connection-attempt", attempt("x", "y"));

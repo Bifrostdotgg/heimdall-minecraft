@@ -201,6 +201,34 @@ class ApiClientRequestTest {
         }
 
         @Test
+        @DisplayName("identify sends X-Token-Id when there is one")
+        void identifySendsTokenId() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"guildId\":\"" + GUILD + "\"}}");
+            client.reconfigure(settings(3, 20).toBuilder().tokenId("tok_live").build());
+
+            await(client.identify());
+
+            assertEquals("tok_live", server.lastRequest().header("X-Token-Id"));
+        }
+
+        @Test
+        @DisplayName("a LEGACY token (no token id) omits the header, and the bot still resolves")
+        void legacyIdentifyOmitsTheHeader() throws Exception {
+            // A v2-migrated server signs with the guild key and has no token id. The header is a
+            // lookup hint, optional on the wire by design — the signature authenticates. This is the
+            // path the migrate smoke row exercises, pinned here so it is not tautological: the header
+            // must be ABSENT, and the request must still succeed.
+            server.respond(200, "{\"success\":true,\"data\":{\"guildId\":\"" + GUILD + "\"}}");
+            client.reconfigure(settings(3, 20).toBuilder().tokenId("").build());
+
+            String guild = await(client.identify());
+
+            assertEquals(GUILD, guild);
+            assertNull(server.lastRequest().header("X-Token-Id"),
+                    "a blank token id must not put an empty X-Token-Id header on the wire");
+        }
+
+        @Test
         @DisplayName("an unsigned client warns rather than silently sending a request that 401s")
         void missingApiKeyIsReported() throws Exception {
             client.reconfigure(settings(1, 0).toBuilder().apiKey("").build());

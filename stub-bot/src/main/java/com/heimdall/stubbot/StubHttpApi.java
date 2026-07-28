@@ -272,7 +272,8 @@ final class StubHttpApi {
 
         JsonObject data = new JsonObject();
         data.addProperty("guildId", config.guildId());
-        data.addProperty("tokenId", "stub-token-" + serverId.substring(0, 8));
+        data.addProperty("tokenId",
+                "stub-token-" + serverId.substring(0, Math.min(8, serverId.length())));
         // The plaintext key, returned exactly once — which is why the stub hands back its own,
         // rather than inventing one the plugin could then not sign with.
         data.addProperty("token", config.apiKey());
@@ -345,6 +346,16 @@ final class StubHttpApi {
             sendError(exchange, 401, "UNAUTHORIZED", "No matching guild found for this API key");
             return;
         }
+        // The signature is what authenticates; X-Token-Id is only a lookup hint and is OPTIONAL. A
+        // v2-migrated server signs with the guild key and sends no token id at all — the "legacy"
+        // path — and it must be accepted exactly as a modern token is. This logs which path was
+        // taken so a test, and the migrate smoke row, can prove the legacy one was actually
+        // exercised rather than assumed: without this the two are indistinguishable here, which is
+        // what made the migrate row tautological on the legacy path.
+        String tokenId = exchange.getRequestHeaders().getFirst("X-Token-Id");
+        boolean legacy = tokenId == null || tokenId.trim().isEmpty();
+        StubLog.info("identify: guild=" + config.guildId()
+                + (legacy ? " (legacy: no token id)" : " tokenId=" + tokenId));
         JsonObject data = new JsonObject();
         data.addProperty("guildId", config.guildId());
         sendEnvelope(exchange, 200, data);
