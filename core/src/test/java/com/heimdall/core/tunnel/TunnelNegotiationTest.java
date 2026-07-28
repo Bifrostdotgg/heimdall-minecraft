@@ -237,8 +237,11 @@ class TunnelNegotiationTest {
                 "a fleet is upgraded one bot at a time; a reconnect may land on a different one, so "
                         + "caching 'this bot is v3' across connections is how a server ends up on "
                         + "stale config until somebody restarts it");
-        assertNotNull(sockets.latest().firstFrameOfType("identify"),
-                "the replacement socket has to identify itself all over again");
+        // Awaited, not read once: connected=true is published in onOpen BEFORE the negotiator sends
+        // identify on that same callback, so "the tunnel is up" can be true a beat before the frame
+        // exists. Reading it once here is a race that only a loaded CI runner loses — which it did.
+        Await.until("the replacement socket to identify itself all over again",
+                () -> sockets.latest().firstFrameOfType("identify") != null);
     }
 
     @Test
