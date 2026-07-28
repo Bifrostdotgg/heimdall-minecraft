@@ -3,6 +3,8 @@ package com.heimdall.core.admin;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.http.ApiError;
+import com.heimdall.core.http.BotEndpoint;
+import com.heimdall.core.http.ClaimClient;
 import com.heimdall.core.http.ClaimRequest;
 import com.heimdall.core.http.model.ClaimResult;
 import com.heimdall.core.text.Msg;
@@ -66,8 +68,18 @@ final class SetupSubcommand implements AdminSubcommand {
      */
     static final String DEFAULT_ENDPOINT = "https://api.bifrost.gg";
 
-    /** How long to wait on the claim before giving up on it. The client's own timeout, plus slack. */
-    private static final long CLAIM_WAIT_MS = 20_000L;
+    /**
+     * How long to block on the claim before giving up on the {@code get()}.
+     *
+     * <p>Derived from {@link ClaimClient#TIMEOUT_MS} rather than guessed, and the factor of two is
+     * not padding. {@code HttpURLConnection} applies its timeout <strong>twice</strong> — once as the
+     * connect timeout and once as the read timeout — so a single attempt that stalls at both ends
+     * costs nearly {@code 2 × TIMEOUT_MS} of wall clock. This is the same reason {@code JOIN_SLACK_MS}
+     * exists on the login path (departure D16). A wait shorter than the request's own worst case is
+     * the B1 bug: the {@code get()} abandons the future, {@code supplyAsync} keeps running, the bot
+     * still spends the code and mints a token nobody reads, and the operator is told nothing happened.
+     */
+    private static final long CLAIM_WAIT_MS = 2L * ClaimClient.TIMEOUT_MS + 1_000L;
 
     @Override
     public String name() {
@@ -87,14 +99,26 @@ final class SetupSubcommand implements AdminSubcommand {
     @Override
     public void run(final CommandSource source, List<String> args, final AdminContext context) {
         if (args.isEmpty()) {
-            source.sendMessage(Msg.legacy("§cUsage: §f/hd setup <code> [endpoint]"));
+            source.sendMessage(Msg.legacy("§cUsage: §f/" + context.label() + " setup <code> [endpoint]"));
             source.sendMessage(Msg.legacy(
                     "§7Mint a code on the Minecraft page of the Heimdall dashboard."));
             return;
         }
         final HeimdallRuntime runtime = context.runtime();
         final String code = args.get(0);
-        final String endpoint = resolveEndpoint(args, runtime.bootstrap());
+
+        // Validated BEFORE the code is spent. A bad endpoint rejected here costs nothing; a bad
+        // endpoint discovered after the claim has burned a single-use code — and a bad endpoint that
+        // is NOT discovered is written to bootstrap.yml and becomes the bot that chooses this
+        // server's token, answers its login gate and dispatches its console commands. See
+        // BotEndpoint for the whole threat.
+        BotEndpoint.Result validated = BotEndpoint.validate(resolveEndpoint(args, runtime.bootstrap()));
+        if (!validated.valid()) {
+            source.sendMessage(Msg.legacy("§c" + validated.error()));
+            source.sendMessage(Msg.legacy("§7No code was claimed. Fix the endpoint and try again."));
+            return;
+        }
+        final String endpoint = validated.endpoint();
 
         if (runtime.isConfigured()) {
             source.sendMessage(Msg.legacy("§eThis server is already set up. Claiming a new code "
@@ -138,7 +162,11 @@ final class SetupSubcommand implements AdminSubcommand {
                     .get(CLAIM_WAIT_MS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            source.sendMessage(Msg.legacy("§cSetup was interrupted; nothing has changed."));
+            // Same honesty as the transport branch below: the request may already be in flight, so
+            // "nothing has changed" would be a claim this cannot make.
+            source.sendMessage(Msg.legacy("§cSetup was interrupted before it could be confirmed. "
+                    + "The code may already have been used — if this server does not connect "
+                    + "shortly, mint a new one."));
             return;
         } catch (Exception failed) {
             source.sendMessage(Msg.legacy("§c" + explain(failed, endpoint)));
@@ -178,8 +206,8 @@ final class SetupSubcommand implements AdminSubcommand {
         source.sendMessage(Msg.legacy("§aSet up as §f"
                 + (Strings.isBlank(claimed.serverName()) ? claimed.serverId() : claimed.serverName())
                 + "§a in guild §f" + claimed.guildId() + "§a."));
-        source.sendMessage(Msg.legacy("§7Connecting now — no restart needed. §f/hd status§7 will "
-                + "show the tunnel once it is up."));
+        source.sendMessage(Msg.legacy("§7Connecting now — no restart needed. §f/" + context.label()
+                + " status§7 will show the tunnel once it is up."));
     }
 
     /**
@@ -235,8 +263,13 @@ final class SetupSubcommand implements AdminSubcommand {
             }
             return "The bot refused the claim: " + apiError.getMessage();
         }
-        return "Could not reach " + endpoint + " (" + rootMessage(failure) + "). Nothing has "
-                + "changed, and the code has not been used.";
+        // NOT "the code has not been used". A timeout or an IOException means the get() gave up,
+        // but the request may have reached the bot and been answered — the future is abandoned, not
+        // cancelled, and supplyAsync keeps running. Telling the operator the code is safe to reuse
+        // when it may already be spent is the B1 lie; this says what is actually true.
+        return "Could not confirm the claim against " + endpoint + " (" + rootMessage(failure)
+                + "). The code may already have been used — if this server does not connect "
+                + "shortly, mint a new one and try again.";
     }
 
     private static ApiError findApiError(Throwable failure) {
