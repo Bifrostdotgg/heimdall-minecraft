@@ -22,7 +22,15 @@ public final class ApiSettings {
     /** Default per-attempt timeout. The login path is latency-sensitive. */
     public static final int DEFAULT_TIMEOUT_MS = 5000;
 
-    /** Default total attempts, matching v2's shipped config. */
+    /**
+     * Default total attempts.
+     *
+     * <p><strong>Not v2's shipped value.</strong> v2 shipped {@code retries: 1}; v3 chooses 3 for
+     * resilience, so a single dropped packet does not refuse a player. A server migrated from v2
+     * keeps its own value — {@code ApiSettingsFactory.fromBootstrap} reads it from the bootstrap,
+     * which the migration populated (departure D62) — so this default applies only to a freshly
+     * claimed server that never expressed a preference.
+     */
     public static final int DEFAULT_RETRIES = 3;
 
     /** Default pause between attempts. */

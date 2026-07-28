@@ -3,15 +3,32 @@ package com.heimdall.core.config;
 import com.heimdall.core.util.Strings;
 
 /**
- * The contents of {@code bootstrap.yml}: how to reach the bot, and how to prove who we are.
+ * The contents of {@code bootstrap.yml}: how to reach the bot, how to prove who we are, and the few
+ * operational knobs that have to work when the dashboard cannot be reached.
  *
- * <p><strong>Nothing else belongs in this file, ever.</strong> Every other setting — messages,
- * cache windows, which modules are on, role-sync groups, offense templates — is owned by the
- * dashboard and arrives over the tunnel as remote config (phase 1b). That is the whole point of
- * the split: v2 had a 200-line {@code config.yml} per server, so a fleet operator changing one
- * message edited it on every box, and support could never be sure what a given server was actually
- * running. If you are about to add a field here, the question to answer first is why the dashboard
- * cannot own it.
+ * <p><strong>Almost nothing else belongs in this file.</strong> Every setting the dashboard can own —
+ * messages, cache windows, which modules are on, role-sync groups, offense templates — arrives over
+ * the tunnel as remote config (departure D17). The exceptions are the handful of fields below the
+ * credentials, and they earn their place by a single test: <em>can the dashboard actually deliver
+ * this, and would a server in trouble still be able to read it?</em>
+ *
+ * <ul>
+ *   <li>{@link #debug()} — the diagnostic an operator most needs when the tunnel is down.
+ *   <li>{@link #timeoutMs()}, {@link #retries()}, {@link #retryDelayMs()} — how patient the login
+ *       path is with the bot. The dashboard cannot own these: they shape the request that would
+ *       <em>fetch</em> the dashboard's config, so a server that got them wrong could never load the
+ *       settings that would fix them. A migrated v2 server also needs its own tuning preserved here,
+ *       or its login budget balloons to v3's more generous defaults (departure D62).
+ *   <li>{@link #updatesCheckEnabled()}, {@link #updatesNotifyAdmins()},
+ *       {@link #updatesCheckIntervalHours()} — the self-updater's knobs. v2 kept these in
+ *       {@code config.yml} and an operator could turn the check off; v3 has no {@code updates}
+ *       capability, so the bot's {@code config.push} narrowing would drop an {@code updates} section
+ *       before it ever reached the plugin. Local is the only place they can actually be controlled.
+ * </ul>
+ *
+ * <p>If you are about to add a field here, the question to answer first is why the dashboard cannot
+ * own it. "It cannot be delivered by the dashboard, and a broken server still has to read it" is the
+ * only answer that passes.
  *
  * <p>Instances are immutable. {@link #toBuilder()} produces the mutable writer the setup flow uses;
  * {@link BootstrapStore} persists it.
@@ -22,12 +39,42 @@ import com.heimdall.core.util.Strings;
  */
 public final class BootstrapConfig {
 
+    /** Default per-attempt login timeout, matching {@code ApiSettings.DEFAULT_TIMEOUT_MS}. */
+    public static final int DEFAULT_TIMEOUT_MS = 5000;
+
+    /**
+     * Default total login attempts.
+     *
+     * <p><strong>Three, not one, and deliberately not v2's.</strong> v2 shipped {@code retries: 1}.
+     * v3 chooses 3 for resilience — a single dropped packet should not refuse a player — and a
+     * migration preserves whatever the operator actually had (departure D62), so a v2 server tuned
+     * for a flaky link keeps its own value rather than inheriting this one.
+     */
+    public static final int DEFAULT_RETRIES = 3;
+
+    /** Default pause between login attempts, matching {@code ApiSettings.DEFAULT_RETRY_DELAY_MS}. */
+    public static final int DEFAULT_RETRY_DELAY_MS = 1000;
+
+    /** Default self-update cadence, matching {@code UpdateSettings.DEFAULT_CHECK_INTERVAL_HOURS}. */
+    public static final long DEFAULT_UPDATE_INTERVAL_HOURS = 12L;
+
     private final String endpoint;
     private final String tokenId;
     private final String token;
     private final String serverId;
     private final ServerRole role;
     private final boolean debug;
+
+    private final int timeoutMs;
+    private final int retries;
+    private final int retryDelayMs;
+
+    private final boolean updatesCheckEnabled;
+    private final boolean updatesNotifyAdmins;
+    private final long updatesCheckIntervalHours;
+
+    /** Module ids an operator has switched off LOCALLY, space-separated. The offline escape hatch. */
+    private final String disabledModules;
 
     /**
      * The guild this token resolved to, remembered from the last successful {@code identify}.
@@ -48,6 +95,13 @@ public final class BootstrapConfig {
         this.serverId = Strings.trimToEmpty(builder.serverId);
         this.role = builder.role == null ? ServerRole.AUTO : builder.role;
         this.debug = builder.debug;
+        this.timeoutMs = builder.timeoutMs;
+        this.retries = builder.retries;
+        this.retryDelayMs = builder.retryDelayMs;
+        this.updatesCheckEnabled = builder.updatesCheckEnabled;
+        this.updatesNotifyAdmins = builder.updatesNotifyAdmins;
+        this.updatesCheckIntervalHours = builder.updatesCheckIntervalHours;
+        this.disabledModules = Strings.trimToEmpty(builder.disabledModules);
         this.guildId = Strings.trimToEmpty(builder.guildId);
     }
 
@@ -70,6 +124,13 @@ public final class BootstrapConfig {
                 .serverId(serverId)
                 .role(role)
                 .debug(debug)
+                .timeoutMs(timeoutMs)
+                .retries(retries)
+                .retryDelayMs(retryDelayMs)
+                .updatesCheckEnabled(updatesCheckEnabled)
+                .updatesNotifyAdmins(updatesNotifyAdmins)
+                .updatesCheckIntervalHours(updatesCheckIntervalHours)
+                .disabledModules(disabledModules)
                 .guildId(guildId);
     }
 
@@ -109,6 +170,48 @@ public final class BootstrapConfig {
         return debug;
     }
 
+    /** Per-attempt login timeout in ms. Preserved from v2 on migration; {@link #DEFAULT_TIMEOUT_MS} otherwise. */
+    public int timeoutMs() {
+        return timeoutMs;
+    }
+
+    /** Total login attempts including the first. Preserved from v2 on migration. */
+    public int retries() {
+        return retries;
+    }
+
+    /** Pause between login attempts, in ms. Preserved from v2 on migration. */
+    public int retryDelayMs() {
+        return retryDelayMs;
+    }
+
+    /** Whether the self-update check runs. The one place this can be turned off — see the class note. */
+    public boolean updatesCheckEnabled() {
+        return updatesCheckEnabled;
+    }
+
+    /** Whether an admin joining is told about a pending update. */
+    public boolean updatesNotifyAdmins() {
+        return updatesNotifyAdmins;
+    }
+
+    /** How often the self-update check runs, in hours. */
+    public long updatesCheckIntervalHours() {
+        return updatesCheckIntervalHours;
+    }
+
+    /**
+     * Module ids switched off locally, space-separated, or {@code ""}.
+     *
+     * <p>The offline escape hatch (departure D66): a module named here stays off whatever the
+     * dashboard's {@code config.push} says, and it stays off across a restart because it is on disk.
+     * This is what {@code /hd disable} writes, and the one lever an operator has over a module when
+     * the tunnel is dead — v2's global {@code /hwl disable}, made per-module and made local.
+     */
+    public String disabledModules() {
+        return disabledModules;
+    }
+
     /**
      * The last guild this server's token resolved to, or {@code ""} if it never has.
      *
@@ -123,7 +226,7 @@ public final class BootstrapConfig {
     /**
      * Whether this config carries enough to talk to the bot at all.
      *
-     * <p>{@code false} means the setup flow has not run: no endpoint, or no credentials. It is not
+     * <p>{@code false} means the setup flow has not run: no endpoint, or no token. It is not
      * a claim that the credentials are <em>valid</em> — only the bot can say that.
      *
      * <p><strong>{@link #tokenId()} is deliberately not required</strong>, and getting that wrong
@@ -152,6 +255,13 @@ public final class BootstrapConfig {
         }
         BootstrapConfig that = (BootstrapConfig) other;
         return debug == that.debug
+                && disabledModules.equals(that.disabledModules)
+                && timeoutMs == that.timeoutMs
+                && retries == that.retries
+                && retryDelayMs == that.retryDelayMs
+                && updatesCheckEnabled == that.updatesCheckEnabled
+                && updatesNotifyAdmins == that.updatesNotifyAdmins
+                && updatesCheckIntervalHours == that.updatesCheckIntervalHours
                 && role == that.role
                 && endpoint.equals(that.endpoint)
                 && tokenId.equals(that.tokenId)
@@ -168,6 +278,13 @@ public final class BootstrapConfig {
         result = 31 * result + serverId.hashCode();
         result = 31 * result + role.hashCode();
         result = 31 * result + (debug ? 1 : 0);
+        result = 31 * result + timeoutMs;
+        result = 31 * result + retries;
+        result = 31 * result + retryDelayMs;
+        result = 31 * result + (updatesCheckEnabled ? 1 : 0);
+        result = 31 * result + (updatesNotifyAdmins ? 1 : 0);
+        result = 31 * result + (int) (updatesCheckIntervalHours ^ (updatesCheckIntervalHours >>> 32));
+        result = 31 * result + disabledModules.hashCode();
         result = 31 * result + guildId.hashCode();
         return result;
     }
@@ -182,6 +299,10 @@ public final class BootstrapConfig {
                 + "', role=" + role.wireName()
                 + ", guildId='" + guildId
                 + "', debug=" + debug
+                + ", timeoutMs=" + timeoutMs
+                + ", retries=" + retries
+                + ", retryDelayMs=" + retryDelayMs
+                + ", updatesCheckEnabled=" + updatesCheckEnabled
                 + "}";
     }
 
@@ -202,6 +323,13 @@ public final class BootstrapConfig {
         private String serverId = "";
         private ServerRole role = ServerRole.AUTO;
         private boolean debug;
+        private int timeoutMs = DEFAULT_TIMEOUT_MS;
+        private int retries = DEFAULT_RETRIES;
+        private int retryDelayMs = DEFAULT_RETRY_DELAY_MS;
+        private boolean updatesCheckEnabled = true;
+        private boolean updatesNotifyAdmins = true;
+        private long updatesCheckIntervalHours = DEFAULT_UPDATE_INTERVAL_HOURS;
+        private String disabledModules = "";
         private String guildId = "";
 
         private Builder() {
@@ -235,6 +363,42 @@ public final class BootstrapConfig {
 
         public Builder debug(boolean value) {
             this.debug = value;
+            return this;
+        }
+
+        public Builder timeoutMs(int value) {
+            this.timeoutMs = value;
+            return this;
+        }
+
+        public Builder retries(int value) {
+            this.retries = value;
+            return this;
+        }
+
+        public Builder retryDelayMs(int value) {
+            this.retryDelayMs = value;
+            return this;
+        }
+
+        public Builder updatesCheckEnabled(boolean value) {
+            this.updatesCheckEnabled = value;
+            return this;
+        }
+
+        public Builder updatesNotifyAdmins(boolean value) {
+            this.updatesNotifyAdmins = value;
+            return this;
+        }
+
+        public Builder updatesCheckIntervalHours(long value) {
+            this.updatesCheckIntervalHours = value;
+            return this;
+        }
+
+        /** Space-separated module ids to keep off locally. */
+        public Builder disabledModules(String value) {
+            this.disabledModules = value;
             return this;
         }
 

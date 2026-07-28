@@ -34,13 +34,31 @@ class ApiSettingsFactoryTest {
     }
 
     @Test
-    @DisplayName("the timing defaults are left alone — the dashboard owns them, not bootstrap.yml")
-    void timingKeepsTheDefaults() {
+    @DisplayName("a claimed server (default bootstrap timing) gets v3's defaults")
+    void defaultTimingMatchesV3Defaults() {
         ApiSettings settings = ApiSettingsFactory.fromBootstrap(bootstrap(), "1").build();
 
         assertEquals(ApiSettings.DEFAULT_TIMEOUT_MS, settings.timeoutMs());
         assertEquals(ApiSettings.DEFAULT_RETRIES, settings.retries());
         assertEquals(ApiSettings.DEFAULT_RETRY_DELAY_MS, settings.retryDelayMs());
+    }
+
+    @Test
+    @DisplayName("a migrated v2 server's own login budget flows through, not v3's defaults (B4/D62)")
+    void bootstrapTimingFlowsThrough() {
+        // A v2 server tuned tight: 1500ms, one attempt. This must reach ApiSettings, or the login
+        // budget balloons to v3's ~18s worst case on upgrade.
+        BootstrapConfig migrated = bootstrap().toBuilder()
+                .timeoutMs(1500)
+                .retries(1)
+                .retryDelayMs(500)
+                .build();
+
+        ApiSettings settings = ApiSettingsFactory.fromBootstrap(migrated, "1").build();
+
+        assertEquals(1500, settings.timeoutMs());
+        assertEquals(1, settings.retries());
+        assertEquals(500, settings.retryDelayMs());
     }
 
     @Test

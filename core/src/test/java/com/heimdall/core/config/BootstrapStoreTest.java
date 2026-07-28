@@ -57,12 +57,60 @@ class BootstrapStoreTest {
                 .serverId("survival")
                 .role(ServerRole.ENFORCER)
                 .debug(true)
+                // The 1e additions: the login budget, the update knobs and the local-disable set all
+                // have to survive a round trip, since bootstrap.yml is the only place they live.
+                .timeoutMs(1500)
+                .retries(1)
+                .retryDelayMs(750)
+                .updatesCheckEnabled(false)
+                .updatesNotifyAdmins(false)
+                .updatesCheckIntervalHours(6)
+                .disabledModules("whitelist rolesync")
                 .build();
 
         store.save(config);
 
         assertTrue(store.exists());
         assertEquals(config, storeIn(dir).load());
+    }
+
+    @Test
+    @DisplayName("the login budget, update knobs and local disable set are read from the file")
+    void operationalKnobsAreRead(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: https://bot.example\n"
+                + "token: shhh\n"
+                + "timeoutMs: 1500\n"
+                + "retries: 1\n"
+                + "retryDelayMs: 750\n"
+                + "updatesCheckEnabled: false\n"
+                + "updatesNotifyAdmins: false\n"
+                + "updatesCheckIntervalHours: 6\n"
+                + "disabledModules: whitelist rolesync\n");
+
+        BootstrapConfig config = storeIn(dir).load();
+
+        assertEquals(1500, config.timeoutMs());
+        assertEquals(1, config.retries());
+        assertEquals(750, config.retryDelayMs());
+        assertFalse(config.updatesCheckEnabled(), "an operator must be able to turn the check off");
+        assertFalse(config.updatesNotifyAdmins());
+        assertEquals(6, config.updatesCheckIntervalHours());
+        assertEquals("whitelist rolesync", config.disabledModules());
+    }
+
+    @Test
+    @DisplayName("a file that predates these keys reads their defaults, not zero")
+    void missingKnobsDefaultRatherThanZero(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: https://bot.example\ntoken: shhh\n");
+
+        BootstrapConfig config = storeIn(dir).load();
+
+        assertEquals(BootstrapConfig.DEFAULT_TIMEOUT_MS, config.timeoutMs());
+        assertEquals(BootstrapConfig.DEFAULT_RETRIES, config.retries());
+        assertTrue(config.updatesCheckEnabled(),
+                "an absent updatesCheckEnabled must default ON — a pre-1e file did not silently "
+                        + "disable its own update check");
+        assertEquals("", config.disabledModules());
     }
 
     @Test

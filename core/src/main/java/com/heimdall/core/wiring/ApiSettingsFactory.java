@@ -11,8 +11,13 @@ import com.heimdall.core.http.ApiSettings;
  * config pushed down the tunnel — which will get its own factory here rather than a second static
  * method on the settings type.
  *
- * <p>The timing knobs are left at their defaults. They are not bootstrap concerns; the dashboard
- * owns them.
+ * <p>The timing knobs <em>are</em> read from the bootstrap now, and that is a correction to this
+ * class's original claim that "the dashboard owns them". It cannot: the login timeout and retry
+ * count shape the very request that would fetch the dashboard's configuration, so a server that got
+ * them wrong could never load the settings that would fix them, and there is no {@code http}
+ * capability for the bot to narrow a push to anyway. They live in {@code bootstrap.yml} (departures
+ * D17's exceptions list, D62), default to v3's values for a claimed server, and carry a migrated v2
+ * server's own tuning so its login budget does not balloon from ~1.5s to ~18s on upgrade.
  */
 public final class ApiSettingsFactory {
 
@@ -38,6 +43,12 @@ public final class ApiSettingsFactory {
                 // guild-scoped and already names the guild in its path.
                 .tokenId(bootstrap.tokenId())
                 .serverId(bootstrap.serverId())
-                .guildId(guildId);
+                .guildId(guildId)
+                // ApiSettings clamps each of these on build (a min timeout, a floor of 1 retry), so
+                // a nonsense hand-edited value cannot make the client unusable — it becomes the
+                // clamped value, not an exception.
+                .timeoutMs(bootstrap.timeoutMs())
+                .retries(bootstrap.retries())
+                .retryDelayMs(bootstrap.retryDelayMs());
     }
 }

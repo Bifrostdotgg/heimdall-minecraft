@@ -62,6 +62,13 @@ public final class BootstrapStore {
     private static final String KEY_SERVER_ID = "serverId";
     private static final String KEY_ROLE = "role";
     private static final String KEY_DEBUG = "debug";
+    private static final String KEY_TIMEOUT_MS = "timeoutMs";
+    private static final String KEY_RETRIES = "retries";
+    private static final String KEY_RETRY_DELAY_MS = "retryDelayMs";
+    private static final String KEY_UPDATES_CHECK = "updatesCheckEnabled";
+    private static final String KEY_UPDATES_NOTIFY = "updatesNotifyAdmins";
+    private static final String KEY_UPDATES_INTERVAL = "updatesCheckIntervalHours";
+    private static final String KEY_DISABLED_MODULES = "disabledModules";
 
     /**
      * A <strong>cache</strong>, written by the plugin, not a setting an operator fills in.
@@ -94,6 +101,8 @@ public final class BootstrapStore {
     /** Every key this version knows how to interpret. Anything else is passed through untouched. */
     private static final Set<String> KNOWN_KEYS = new HashSet<String>(Arrays.asList(
             KEY_ENDPOINT, KEY_TOKEN_ID, KEY_TOKEN, KEY_SERVER_ID, KEY_ROLE, KEY_DEBUG,
+            KEY_TIMEOUT_MS, KEY_RETRIES, KEY_RETRY_DELAY_MS,
+            KEY_UPDATES_CHECK, KEY_UPDATES_NOTIFY, KEY_UPDATES_INTERVAL, KEY_DISABLED_MODULES,
             KEY_GUILD_ID_CACHE, LEGACY_KEY_GUILD_ID));
 
     private final HeimdallLogger logger;
@@ -155,6 +164,21 @@ public final class BootstrapStore {
                 builder.role(parseRole(asString(value)));
             } else if (KEY_DEBUG.equals(key)) {
                 builder.debug(asBoolean(value));
+            } else if (KEY_TIMEOUT_MS.equals(key)) {
+                builder.timeoutMs((int) asLong(value, BootstrapConfig.DEFAULT_TIMEOUT_MS));
+            } else if (KEY_RETRIES.equals(key)) {
+                builder.retries((int) asLong(value, BootstrapConfig.DEFAULT_RETRIES));
+            } else if (KEY_RETRY_DELAY_MS.equals(key)) {
+                builder.retryDelayMs((int) asLong(value, BootstrapConfig.DEFAULT_RETRY_DELAY_MS));
+            } else if (KEY_UPDATES_CHECK.equals(key)) {
+                builder.updatesCheckEnabled(asBooleanOr(value, true));
+            } else if (KEY_UPDATES_NOTIFY.equals(key)) {
+                builder.updatesNotifyAdmins(asBooleanOr(value, true));
+            } else if (KEY_UPDATES_INTERVAL.equals(key)) {
+                builder.updatesCheckIntervalHours(
+                        asLong(value, BootstrapConfig.DEFAULT_UPDATE_INTERVAL_HOURS));
+            } else if (KEY_DISABLED_MODULES.equals(key)) {
+                builder.disabledModules(asString(value));
             } else if (KEY_GUILD_ID_CACHE.equals(key)) {
                 builder.guildId(asString(value));
             } else if (LEGACY_KEY_GUILD_ID.equals(key) && !raw.containsKey(KEY_GUILD_ID_CACHE)) {
@@ -192,6 +216,18 @@ public final class BootstrapStore {
         document.put(KEY_SERVER_ID, config.serverId());
         document.put(KEY_ROLE, config.role().wireName());
         document.put(KEY_DEBUG, Boolean.valueOf(config.debug()));
+        // Written unconditionally rather than only-when-non-default. A file that omits them reads
+        // the defaults back (load() fills any missing key), but writing them makes bootstrap.yml a
+        // complete statement of the login budget and the update cadence — which is what an operator
+        // migrating from v2 needs to be able to see and edit, since these are the one place v3 can
+        // actually control them (see the BootstrapConfig class note).
+        document.put(KEY_TIMEOUT_MS, Integer.valueOf(config.timeoutMs()));
+        document.put(KEY_RETRIES, Integer.valueOf(config.retries()));
+        document.put(KEY_RETRY_DELAY_MS, Integer.valueOf(config.retryDelayMs()));
+        document.put(KEY_UPDATES_CHECK, Boolean.valueOf(config.updatesCheckEnabled()));
+        document.put(KEY_UPDATES_NOTIFY, Boolean.valueOf(config.updatesNotifyAdmins()));
+        document.put(KEY_UPDATES_INTERVAL, Long.valueOf(config.updatesCheckIntervalHours()));
+        document.put(KEY_DISABLED_MODULES, config.disabledModules());
         // Written last of the known keys so it reads as what it is: an appendix the plugin
         // maintains, below the fields the operator was actually asked for. The legacy spelling is
         // deliberately not written back, so a file rewritten by this version ends up with one key
@@ -310,5 +346,49 @@ public final class BootstrapStore {
         }
         String text = String.valueOf(value).trim();
         return "true".equalsIgnoreCase(text) || "yes".equalsIgnoreCase(text) || "on".equalsIgnoreCase(text);
+    }
+
+    /**
+     * A boolean whose <em>default is a parameter</em>, for a key whose sensible default is true.
+     *
+     * <p>{@link #asBoolean} answers {@code false} for a missing or unrecognised value, which is right
+     * for a field that defaults off (debug) and wrong for one that defaults on (the update check). A
+     * hand-edited {@code updatesCheckEnabled: maybe} must not silently disable update checks.
+     */
+    private static boolean asBooleanOr(Object value, boolean fallback) {
+        if (value instanceof Boolean) {
+            return ((Boolean) value).booleanValue();
+        }
+        if (value == null) {
+            return fallback;
+        }
+        String text = String.valueOf(value).trim();
+        if ("true".equalsIgnoreCase(text) || "yes".equalsIgnoreCase(text) || "on".equalsIgnoreCase(text)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(text) || "no".equalsIgnoreCase(text) || "off".equalsIgnoreCase(text)) {
+            return false;
+        }
+        return fallback;
+    }
+
+    /**
+     * A whole number, tolerating the quoted form a hand-edited YAML file often carries.
+     *
+     * <p>An unparseable value yields the default rather than throwing: a typo in a tuning knob must
+     * not stop a server booting far enough to say what is wrong with its config.
+     */
+    private static long asLong(Object value, long fallback) {
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(String.valueOf(value).trim());
+        } catch (NumberFormatException notANumber) {
+            return fallback;
+        }
     }
 }
