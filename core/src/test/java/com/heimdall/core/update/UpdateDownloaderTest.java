@@ -212,6 +212,98 @@ class UpdateDownloaderTest {
         }
     }
 
+    @Nested
+    @DisplayName("redirects and concurrency")
+    class RedirectsAndConcurrency {
+
+        private LoopbackServer server;
+
+        @BeforeEach
+        void start() {
+            server = new LoopbackServer();
+        }
+
+        @AfterEach
+        void stop() {
+            server.close();
+        }
+
+        private DownloadPolicy loopbackPolicy() {
+            return DownloadPolicy.builder()
+                    .allowedHosts("127.0.0.1")
+                    .requireHttps(false)
+                    .maxBytes(DownloadPolicy.MAX_DOWNLOAD_BYTES)
+                    .connectTimeoutMs(5000)
+                    .readTimeoutMs(5000)
+                    .build();
+        }
+
+        @Test
+        @DisplayName("a same-host redirect is followed to the jar")
+        void followsAnAllowedRedirect(@TempDir Path dir) throws IOException {
+            server.serve(200, JAR_BYTES);
+            server.redirectTo(server.url("/final.jar"));
+            UpdateDownloader downloader = new UpdateDownloader(logger, loopbackPolicy());
+            File target = dir.resolve("plugin.jar").toFile();
+
+            long written = downloader.download(server.url("/start.jar"), target);
+
+            assertEquals(JAR_BYTES.length, written);
+            assertArrayEquals(JAR_BYTES, Files.readAllBytes(target.toPath()));
+        }
+
+        @Test
+        @DisplayName("a redirect to a DISALLOWED host is refused — the JDK would have followed it")
+        void refusesARedirectOffTheAllowlist(@TempDir Path dir) {
+            // The whole point: the JDK's automatic follower re-checks only the scheme, not the host,
+            // so github.com -> attacker.example would sail past a single up-front check. Manual
+            // following re-validates every hop, so this is refused before a socket is even opened to
+            // the attacker's host.
+            server.serve(200, JAR_BYTES);
+            server.redirectTo("http://attacker.example.com/evil.jar");
+            UpdateDownloader downloader = new UpdateDownloader(logger, loopbackPolicy());
+            File target = dir.resolve("plugin.jar").toFile();
+
+            IOException refused = assertThrows(IOException.class,
+                    () -> downloader.download(server.url("/start.jar"), target));
+
+            assertTrue(refused.getMessage().contains("attacker.example.com"), refused.getMessage());
+            assertFalse(target.exists());
+        }
+
+        @Test
+        @DisplayName("two downloads to the same target — the second is refused, not interleaved")
+        void concurrentDownloadsToOneTargetAreGuarded(@TempDir Path dir) throws Exception {
+            // The first download blocks in the server until released, so it is provably in flight
+            // when the second starts. Interleaving two transfers into one .part is how a
+            // half-of-each corrupt jar reaches plugins/update/.
+            server.blockUntilReleased();
+            server.serve(200, JAR_BYTES);
+            UpdateDownloader downloader = new UpdateDownloader(logger, loopbackPolicy());
+            File target = dir.resolve("plugin.jar").toFile();
+
+            java.util.concurrent.atomic.AtomicReference<Throwable> firstError =
+                    new java.util.concurrent.atomic.AtomicReference<Throwable>();
+            Thread first = new Thread(() -> {
+                try {
+                    downloader.download(server.url("/a.jar"), target);
+                } catch (Throwable t) {
+                    firstError.set(t);
+                }
+            });
+            first.start();
+            assertTrue(server.awaitRequest(5000), "the first download never reached the server");
+
+            IOException refused = assertThrows(IOException.class,
+                    () -> downloader.download(server.url("/b.jar"), target));
+            assertTrue(refused.getMessage().toLowerCase().contains("in progress"), refused.getMessage());
+
+            server.release();
+            first.join(10_000);
+            assertEquals(null, firstError.get(), "the first download should have completed cleanly");
+        }
+    }
+
     private static void assertNoPartFile(File target) {
         File part = new File(target.getAbsolutePath() + ".part");
         assertFalse(part.exists(), "a .part file was left behind at " + part);
@@ -224,6 +316,10 @@ class UpdateDownloaderTest {
 
         private volatile int status = 200;
         private volatile byte[] body = new byte[0];
+        private volatile String redirectLocation;
+        private volatile java.util.concurrent.CountDownLatch release;
+        private final java.util.concurrent.CountDownLatch requestSeen =
+                new java.util.concurrent.CountDownLatch(1);
 
         LoopbackServer() {
             try {
@@ -240,6 +336,27 @@ class UpdateDownloaderTest {
             this.body = body;
         }
 
+        /** A path not containing "final" gets a 302 here; "final" paths serve the body. */
+        void redirectTo(String location) {
+            this.redirectLocation = location;
+        }
+
+        /** Makes the next served body block until {@link #release()}, so a download can be caught mid-flight. */
+        void blockUntilReleased() {
+            this.release = new java.util.concurrent.CountDownLatch(1);
+        }
+
+        void release() {
+            java.util.concurrent.CountDownLatch latch = release;
+            if (latch != null) {
+                latch.countDown();
+            }
+        }
+
+        boolean awaitRequest(long ms) throws InterruptedException {
+            return requestSeen.await(ms, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
+
         String url(String path) {
             return "http://127.0.0.1:" + server.getAddress().getPort() + path;
         }
@@ -251,8 +368,23 @@ class UpdateDownloaderTest {
 
         private void handle(HttpExchange exchange) throws IOException {
             byte[] payload = body;
+            requestSeen.countDown();
             try {
                 exchange.getRequestBody().close();
+                String path = exchange.getRequestURI().getPath();
+                if (redirectLocation != null && !path.contains("final")) {
+                    exchange.getResponseHeaders().set("Location", redirectLocation);
+                    exchange.sendResponseHeaders(302, -1);
+                    return;
+                }
+                java.util.concurrent.CountDownLatch latch = release;
+                if (latch != null) {
+                    try {
+                        latch.await(15, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
                 exchange.getResponseHeaders().set("Content-Type", "application/octet-stream");
                 // -1 rather than 0 for an empty body: com.sun's HttpServer reads 0 as "chunked,
                 // length unknown", which is not what an empty response means.

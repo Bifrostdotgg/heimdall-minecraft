@@ -10,7 +10,12 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Fetches a release jar to a path an {@link UpdateInstaller} chose, under a {@link DownloadPolicy}.
@@ -62,9 +67,10 @@ import java.nio.file.Files;
  * is only ever reached from {@code heimdall-sched} or a command's async handler.
  *
  * <p>Owns no resources between calls: the connection and both streams are opened and closed inside
- * {@link #download}. Safe for concurrent use, though two concurrent downloads to the <em>same</em>
- * target would race over one {@code .part} path — nothing in v3 does that, and serialising it here
- * would be pretending the class knows about a coordination problem that belongs to the caller.
+ * {@link #download}. Safe for concurrent use, and two downloads to the <em>same</em> target are
+ * guarded rather than left to race: the second is refused with a clear {@link IOException}, because
+ * interleaving two transfers into one {@code .part} produces a half-of-each jar. Different targets
+ * proceed in parallel.
  */
 public final class UpdateDownloader {
 
@@ -79,6 +85,25 @@ public final class UpdateDownloader {
     static final String USER_AGENT = "Heimdall/" + BuildConstants.VERSION;
 
     private static final int BUFFER_BYTES = 8192;
+
+    /**
+     * Redirect hops followed manually, so each one's host and scheme can be re-checked.
+     *
+     * <p>Generous — GitHub's asset URL bounces through a release redirect to a CDN — but bounded, so
+     * a redirect loop cannot spin forever.
+     */
+    private static final int MAX_REDIRECTS = 10;
+
+    /**
+     * Targets a download is in flight to, so two {@code updateNow()} calls cannot race one
+     * {@code .part} path.
+     *
+     * <p>Static because the guard is about a filesystem path, and two {@link UpdateDownloader}
+     * instances writing the same target is the same corruption as one instance doing it twice. A path
+     * already present means a download is running; the second caller is refused rather than allowed to
+     * interleave writes into the same staging file.
+     */
+    private static final Set<String> IN_FLIGHT = ConcurrentHashMap.newKeySet();
 
     private final HeimdallLogger logger;
     private final DownloadPolicy policy;
@@ -115,14 +140,7 @@ public final class UpdateDownloader {
             throw new IOException("No download target was chosen.");
         }
 
-        URL url = new URL(downloadUrl.trim());
-        if (!policy.allowsHost(url.getHost())) {
-            throw new IOException("Refusing to download update from untrusted host: " + url.getHost());
-        }
-        if (!policy.allowsScheme(url.getProtocol())) {
-            throw new IOException(
-                    "Refusing to download update over insecure protocol: " + url.getProtocol());
-        }
+        checkAllowed(new URL(downloadUrl.trim()));
 
         File parent = target.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
@@ -130,28 +148,89 @@ public final class UpdateDownloader {
         }
 
         File tmp = new File(target.getAbsolutePath() + ".part");
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        connection.setInstanceFollowRedirects(true);
-        connection.setRequestMethod("GET");
-        connection.setRequestProperty("User-Agent", USER_AGENT);
-        connection.setRequestProperty("Accept", "application/octet-stream");
-        connection.setConnectTimeout(policy.connectTimeoutMs());
-        connection.setReadTimeout(policy.readTimeoutMs());
-
+        String key = target.getAbsolutePath();
+        if (!IN_FLIGHT.add(key)) {
+            // Another update is already writing this exact jar. Interleaving two downloads into one
+            // .part is how a half-of-each corrupt jar reaches plugins/update/. Refuse the second.
+            throw new IOException("An update to " + target + " is already in progress.");
+        }
         try {
-            int code = connection.getResponseCode();
-            if (code != HttpURLConnection.HTTP_OK) {
-                throw new IOException("Download failed: HTTP " + code);
+            HttpURLConnection connection = open(downloadUrl.trim());
+            try {
+                long total = transfer(connection, tmp);
+                swap(tmp, target);
+                logger.info("downloaded " + total + " bytes to " + target);
+                return total;
+            } finally {
+                connection.disconnect();
+                deleteQuietly(tmp);
             }
-
-            long total = transfer(connection, tmp);
-            swap(tmp, target);
-            final long written = total;
-            logger.info("downloaded " + written + " bytes to " + target);
-            return written;
         } finally {
+            IN_FLIGHT.remove(key);
+        }
+    }
+
+    /**
+     * Opens the connection, following redirects <strong>manually</strong> so the policy is enforced
+     * on <em>every</em> hop.
+     *
+     * <p>The JDK's automatic redirect following is off here on purpose. It will refuse an
+     * {@code https → http} downgrade, but it will happily follow {@code https://github.com → https://<attacker>}
+     * — the host is not re-checked, only the scheme. So an allowlisted URL that redirects to an
+     * arbitrary host would sail past the single up-front {@link DownloadPolicy#allowsHost} check. Here
+     * each {@code Location} is re-validated before it is followed, which closes that: an attacker who
+     * can influence a redirect target still cannot leave the allowlist.
+     */
+    private HttpURLConnection open(String startUrl) throws IOException {
+        String current = startUrl;
+        for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
+            URL url = new URL(current);
+            checkAllowed(url);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("User-Agent", USER_AGENT);
+            connection.setRequestProperty("Accept", "application/octet-stream");
+            connection.setConnectTimeout(policy.connectTimeoutMs());
+            connection.setReadTimeout(policy.readTimeoutMs());
+
+            int code = connection.getResponseCode();
+            if (code == HttpURLConnection.HTTP_OK) {
+                return connection;
+            }
+            if (isRedirect(code)) {
+                String location = connection.getHeaderField("Location");
+                connection.disconnect();
+                if (location == null || location.trim().isEmpty()) {
+                    throw new IOException("Download redirected (" + code + ") with no Location header.");
+                }
+                // Resolve relative to the current URL, so a relative Location is handled the same as
+                // an absolute one — and re-checked on the next loop before it is opened.
+                current = new URL(url, location.trim()).toString();
+                continue;
+            }
             connection.disconnect();
-            deleteQuietly(tmp);
+            throw new IOException("Download failed: HTTP " + code);
+        }
+        throw new IOException("Download followed too many redirects (over " + MAX_REDIRECTS + ").");
+    }
+
+    private static boolean isRedirect(int code) {
+        return code == HttpURLConnection.HTTP_MOVED_PERM
+                || code == HttpURLConnection.HTTP_MOVED_TEMP
+                || code == HttpURLConnection.HTTP_SEE_OTHER
+                || code == 307
+                || code == 308;
+    }
+
+    /** Enforces the host allowlist and the scheme rule, naming whatever was refused. */
+    private void checkAllowed(URL url) throws IOException {
+        if (!policy.allowsHost(url.getHost())) {
+            throw new IOException("Refusing to download update from untrusted host: " + url.getHost());
+        }
+        if (!policy.allowsScheme(url.getProtocol())) {
+            throw new IOException(
+                    "Refusing to download update over insecure protocol: " + url.getProtocol());
         }
     }
 
@@ -182,17 +261,45 @@ public final class UpdateDownloader {
     }
 
     /**
-     * Moves the completed {@code .part} onto the target.
+     * Moves the completed {@code .part} onto the target, <strong>never destroying the target until a
+     * complete replacement exists</strong>.
      *
-     * <p>{@code renameTo} first, with a copy as the fallback: the two can end up on different
-     * filesystems when a server's {@code plugins} directory is a bind mount or a network share, and
-     * {@code File.renameTo} answers {@code false} there rather than throwing. v2 hit this.
+     * <p>v2 — and this class's own first version — did {@code deleteIfExists(target)} and then
+     * {@code copy(tmp, target)}. On a full disk the delete succeeds and the copy throws, and the
+     * result is the running jar <em>gone</em> with nothing to replace it: the server does not come
+     * back up. So the order is inverted. An atomic move is tried first (one syscall, no window at
+     * all); if the filesystem cannot do it — a bind mount, a network share, a cross-device
+     * {@code .part} — the {@code .part} is copied to a fresh sibling and only then atomically moved
+     * onto the target, so the target is overwritten in one step by a file that already exists in
+     * full. At no point is the old jar deleted before the new one is complete.
      */
     private static void swap(File tmp, File target) throws IOException {
-        Files.deleteIfExists(target.toPath());
-        if (!tmp.renameTo(target)) {
-            Files.copy(tmp.toPath(), target.toPath());
-            Files.deleteIfExists(tmp.toPath());
+        Path tmpPath = tmp.toPath();
+        Path targetPath = target.toPath();
+        try {
+            Files.move(tmpPath, targetPath,
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            return;
+        } catch (AtomicMoveNotSupportedException crossDevice) {
+            // Expected on a bind mount / network share. Fall through to copy-then-atomic-move.
+        }
+        // Copy the finished bytes to a sibling of the TARGET (same filesystem, so the move below can
+        // be atomic), then swap it in. The staged sibling — not the target — is what a failed copy
+        // leaves behind, and the target is untouched until a whole file is ready to replace it.
+        Path staged = targetPath.resolveSibling(target.getName() + ".swap");
+        try {
+            Files.copy(tmpPath, staged, StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Files.move(staged, targetPath,
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException stillCrossDevice) {
+                // The sibling really should be on the target's own filesystem, but if even this move
+                // cannot be atomic, a plain replace is the last resort — and it still copies from a
+                // COMPLETE staged file rather than from a stream that might fail mid-write.
+                Files.move(staged, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(staged);
         }
     }
 
