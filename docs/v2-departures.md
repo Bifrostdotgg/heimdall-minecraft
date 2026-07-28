@@ -433,14 +433,21 @@ because the day either one bites, this is the file somebody will search.
    demonstrated that: the smoke matrix boots servers, it does not join them, so no chat has ever
    been cancelled on 1.21 by any test.
 
-TODO(**1e**, moved from 1d): a headless-client join on the `paper-1.21.8` row — connect, send a
-message, assert it is suppressed and that the client stays connected. That single test settles risk 2
-and turns the chat interceptor from a design into a behaviour.
+TODO(**1f**, moved from 1d and then from 1e): a headless-client join on the `paper-1.21.8` row —
+connect, send a message, assert it is suppressed and that the client stays connected. That single
+test settles risk 2 and turns the chat interceptor from a design into a behaviour.
 
 1d added `smoke/connected.sh`, which boots a server against a real bot and asserts the whole wire, but
-it still never joins a player: there is no headless client in the harness. Risk 2 therefore remains
-exactly as open as it was. What 1d *did* do is build the container topology a headless client would
-plug into, so the remaining work is the client itself rather than the scenario around it.
+it still never joins a player: there is no headless client in the harness. What 1d *did* do is build
+the container topology a headless client would plug into, so the remaining work is the client itself
+rather than the scenario around it.
+
+**1e narrowed the gap without closing it.** `/hd test <player>` drives the real login interceptor for
+a named player and the smoke matrix asserts both a deny (corroborated by the stub) and an allow from
+the pre-warmed mirror — so the login *decision* is now exercised end to end on a real server. What is
+still unexercised is everything downstream of the decision: the platform's own login listener, the
+kick screen, and chat cancellation. All three need a client to be connected, and none of them is
+reachable from a console command.
 
 ### D44 — Velocity's text boundary is crossed reflectively
 
@@ -521,6 +528,18 @@ The module commands added in 1d follow the same rule from the other direction: `
 `/link` and `/offend` are registered **identically on both platforms**, because unlike the admin
 command they mean the same thing wherever they are typed. A player linking their account does not
 care whether the proxy or the backend answered.
+
+**`/hwl` still answers, on both platforms, and says so once (1e).** Every v2 install's operators,
+runbooks and staff macros say `/hwl`, and v2 registered it on the proxy as well as on the backend, so
+removing it outright would make "Unknown command" the first thing a migrating server says to the
+person who just upgraded it. It is registered on both, forwards to the same tree, and tells the
+sender the name changed **once per server start** — not once per use, which is a notice people learn
+to scroll past. It is excluded from the help listing, because help is for what to type next rather
+than for what used to work.
+
+It is a real command rather than an alias of `/hd`, and on the Bukkit family it has to be: aliases
+are fixed in `plugin.yml` at load time and the plugin has to be able to tell the two names apart in
+order to warn about one of them.
 
 ### D52 — session handlers run off the event thread, and carry their own timestamp
 
@@ -657,9 +676,53 @@ with real modules and a real bot in one process. 434 unit tests could not see it
 had no tunnel, and the tunnel tests had no modules. That is the whole argument for the connected
 scenario existing.
 
-### D56 — a module reaches the API client through its constructor, not its context
+### D56 — a module reaches the API through a gateway, not a captured client (RESOLVED in 1e)
 
-**New in 1d**, and recorded because it is a seam that will have to change.
+**Raised in 1d as a seam that would have to change; 1e changed it.** The original entry is kept
+below because the failure it describes is the one somebody will go looking for, and because the
+answer 1e chose is not the one it proposed.
+
+**What 1e built.** `ModuleContext.api()` returns a `HeimdallApi` and is **never null**. There is one
+per plugin, created before any module is registered, and it wraps the single `ApiClient` core has
+always reconfigured in place. Its three states are *derived from the settings* rather than tracked
+separately, so they cannot disagree with what the next request would do:
+
+| State | Meaning |
+|---|---|
+| `NOT_CONFIGURED` | no endpoint or no token. Run `/hd setup`. |
+| `DISCOVERING` | credentials, but `identify` has not answered, so there is no guild for a path. |
+| `READY` | go. |
+
+In the first two, every endpoint returns an **already-failed** future carrying
+`ApiUnavailableException` with the reason on it. Nothing is sent, and that is load-bearing rather
+than tidy: without a guild the client would build `/api/guilds//minecraft/connection-attempt`, and a
+warm mirror on a restarting server turns that into one signed, malformed, guaranteed-404 request per
+returning player. A caller that would rather branch than catch asks `isUsable()` first, which is what
+the whitelist interceptor does — "no guild yet" is a reason to run the configured fallback, not a
+reason to report an error.
+
+**Neither of the two options the original entry offered was taken.** `Optional` would have put a
+branch at every call site and said nothing about *why*; a queue would have made a login wait for a
+bot that might never answer. Deriving the state and failing fast is the third answer, and it fell out
+of the observation the entry itself makes: guild discovery never had this problem because it
+reconfigures one client in place. So everything else was made to work the same way.
+
+**Three bugs, one shape.** The same "captured once, at enable, and never replaced" mistake had three
+instances, and all three are closed by making the objects stable rather than by fixing each:
+
+- a module's API client (this entry);
+- a module's **tunnel subscriptions**, which went to the offline no-op bus on an unconfigured server
+  and were never re-made — so a freshly claimed server received role syncs nothing was listening for.
+  The `TunnelClient` is now built on every boot, configured or not, and `applySettings` re-points it;
+- **`TunnelSpiService`**, which captured the same absent bus at enable, leaving a third-party
+  plugin's SPI dead until a restart. That was the 1c TODO; it needed no re-install, only a tunnel
+  that was already there.
+
+`smoke/connected.sh`'s `paper-setup` row is the end-to-end proof: an unclaimed server, a code minted
+in the stub, `/hd setup` typed into the console, and a tunnel that comes up and enables modules in
+the same boot.
+
+The original entry follows.
 
 `ModuleContext` exposes the tunnel, the pipelines, the scheduler, the mirror factory, the platform
 and the settings — but not `ApiClient`. Three of the four feature modules need it, so each takes it
@@ -673,6 +736,9 @@ made alongside the setup flow in 1e than in passing here. **Prerequisite for 1e:
 `ModuleContext.api()` returning an `Optional`, and a core-owned gateway that queues or fails calls
 made before the guild resolves. Do not add a fourth nullable constructor argument first.
 
+*(In the event there were two nullable arguments, not three — the role-sync module never took one —
+and neither of the two options above was chosen. See the resolution above.)*
+
 **There is a live consequence, not only an aesthetic one.** Each module captures the reference it was
 constructed with, once, at registration — before `start()`, and therefore before anything could have
 resolved a guild. On a server that was never set up that reference is `null` forever, so when
@@ -683,6 +749,132 @@ Guild discovery does not have this problem, because it reconfigures the single `
 in place rather than replacing it — which is the shape the gateway needs. Whatever 1e builds must
 make a module's view of the API survive the server being configured underneath it, and the setup
 flow is not testable end to end until it does.
+
+### D61 — the admin command tree is one platform-free class, and the platforms only name it
+
+**v2:** a chain of `equalsIgnoreCase` branches inside two entry points of 1,086 and 1,311 lines.
+**v3:** `com.heimdall.core.admin`, registered through each platform's own `CommandRegistrar`.
+
+The two halves of v2's tree had drifted and nothing could have noticed. `/hwl cache` on the proxy
+never grew the `cleanup` branch the Paper one had; `/hwl test` printed different fields on each; and
+neither could be exercised without starting a Minecraft server, so neither ever was. Both are the
+same defect: a command tree that lives inside a `JavaPlugin` is a command tree nobody can run a test
+against.
+
+Everything in the new package takes a `CommandSource` and returns nothing platform-shaped, so the
+whole tree is driven in `AdminCommandTest` with a fake sender. What differs per platform is one
+string — `hd` or `hdp` — and one list of aliases.
+
+Two consequences worth stating:
+
+- **Three verbs need a feature module, and core cannot name one.** `test`, `cache` and `offense` go
+  through small interfaces (`WhitelistAdmin`, `OffenseAdmin`, `UpdateAdmin`) that the modules
+  implement and `HeimdallModules` — the one place that already depends on both sides — introduces.
+  Each has a `NONE` implementation, so a build compiled without a module has a verb that says the
+  feature is not installed rather than a hole in the tree.
+- **Every blocking verb hands off to `heimdall-io` and acknowledges first.** A command handler is on
+  the main server thread on the Bukkit family, and half of these make a signed round trip with a
+  retry budget behind it — up to 47 seconds for a whitelist sync. The acknowledgement is not
+  politeness: silence for that long reads as a command that did not register.
+
+### D62 — a v2 config is migrated on first boot, and its settings stay inert until the server is claimed
+
+**v2:** a ~200-line `config.yml` (Bukkit) or `config.json` (Velocity) per server.
+**v3:** found on first boot, translated, and the original kept as `*.v2-backup`.
+
+The credentials become a `bootstrap.yml` in **legacy mode** — v2 had no token id, and the guild key
+signs identically on both HTTP and the WebSocket upgrade, so a migrated server connects with exactly
+what it had. v2's `api.guildId` is carried across as the *cache* (departure D54), not as a setting:
+it is provisional, and `identify` overwrites it.
+
+Three details that are not obvious:
+
+- **The v2 file is next door, not in the new plugin's directory.** v2's plugin is called
+  `HeimdallWhitelist` and v3's is called `Heimdall`, so a server whose jar has just been swapped has
+  a brand-new empty directory and its entire configuration in the sibling one. A migration that only
+  searched its own directory would find nothing on every real upgrade — which is the one case it
+  exists for. Both are searched, the new one first, because an operator who moved the file by hand
+  meant it.
+- **The translated settings are posted to `config/import`, which is write-once, and the document is
+  inert until the server is claimed.** The bot never reads a config store for a serverId it has no
+  registry row for, so a migrated-but-unclaimed server runs its **built-in defaults** — which are
+  v2's shipped values, so nothing changes for its players. The imported settings activate the moment
+  `/hd setup` claims it. That is correct and it is surprising, so the migration log line says it in
+  as many words: otherwise the operator's experience is "migration succeeded, dashboard shows my
+  settings, server ignores them".
+- **Nothing is ever deleted, and nothing is renamed until the write succeeds.** A migration that
+  could not write `bootstrap.yml` leaves the v2 file exactly where it was, so fixing the permissions
+  and restarting retries it. A backup name that is taken gets `.1`, `.2`, and a rename that fails
+  is a warning on a migration that has already succeeded.
+
+### D63 — the update check runs immediately, and publishes one snapshot
+
+**v2:** `UpdateChecker` with two independent volatile fields, and a periodic check that first ran
+after a full interval.
+**v3:** one immutable holder in one volatile field, and the first check runs at start.
+
+The hardening is deliberately **verbatim** — the `github.com`/`githubusercontent.com` allowlist, the
+HTTPS-only rule, the 50 MB streaming cap, the `.part` staging and atomic swap, both jar-install
+strategies. What changed is two things v2 got wrong in ways that only show under concurrency or on
+the first boot:
+
+- v2's `latestRelease` and `updateAvailable` were separate volatiles written one after the other, so
+  a reader between the two writes could render "3.0.0 → 3.0.0". They are now one object, assigned
+  once, and every multi-fact reader takes a single snapshot into a local.
+- v2 scheduled the first check a full interval out, so a server restarted more often than every
+  twelve hours never checked at all. The first one is now immediate, which is also when the answer
+  is most useful — a server that has just started is the one whose operator is looking at the log.
+
+The download policy is an object rather than a set of constants so the hardening can be tested
+against a loopback HTTP fixture, and there is a test asserting that the production policy refuses
+both `127.0.0.1` and plain `http://` — so the loosening cannot quietly become the default.
+
+### D64 — `/hd test` runs the real interceptor with its writes suppressed
+
+**v2:** `/hwl test` made a bare `connection-attempt` call and printed four fields from the answer.
+**v3:** the whole login path runs, and reports which check decided.
+
+The bot's answer is not the login decision, and the gap between them is where the hard support cases
+live: a bypassed UUID never reaches the bot, a backend with `enforceOnBackend` off abstains, a warm
+mirror answers during an outage, and the fallback mode decides when nothing else could. v2's test
+command was blind to all four.
+
+So the interceptor gained one internal method taking a `commit` flag, and `intercept` is a one-line
+wrapper over it. With `commit == false` nothing is written: no mirror extension, no verified record,
+and no background connection report — because an operator asking whether somebody *can* join must
+not thereby cache them as somebody who did. The probe also bypasses the in-flight request collapsing
+for the same reason: joining a real login's outstanding request would mean its completion applied a
+role snapshot on the probe's behalf.
+
+A reimplementation would have been the obvious alternative and is the wrong one. The states worth
+testing are exactly the ones a second implementation would get subtly wrong, and a diagnostic that
+disagrees with the thing it is diagnosing is worse than no diagnostic.
+
+**Resolving the name is part of the answer.** Online player first, then the mirror's own
+uuid-to-name mapping — which covers anybody on the whitelist, i.e. the case an operator actually has
+— and only then vanilla's `OfflinePlayer:<name>` hash. The command prints whichever UUID it used, so
+an operator can see for themselves when the answer is about a derived identity. Asking Mojang is
+deliberately not a fourth option; the bot holds the mapping, and a fabricated identity is the failure
+departure D58 is about.
+
+### D65 — a setup code is never retried
+
+**New in v3** (v2 had no setup flow).
+
+Every other request in the plugin retries on a transport failure. The claim does not:
+`ClaimClient` pins `retries` to 1. A setup code is single-use and the bot consumes it atomically, so
+a retry after a response the client failed to read presents a code the bot has already spent — and
+the operator is told their code is invalid while the credentials it bought are lost bot-side, with
+no way to ask for them again.
+
+Failing the first attempt and saying so is the honest outcome. The bot's own rate limit makes the
+same point from the other end: ten failures and it answers `429` to everything, valid codes
+included, which is worth knowing before somebody burns three of them.
+
+The endpoint is also the one call in the plugin that carries **no signature**, because the caller has
+nothing to sign with yet. That is modelled as a flag on `HttpCall` rather than as a second transport,
+so departure D20's "one place a request actually happens" still holds — a fifth copy-pasted request
+method for this would be v2's mistake in miniature.
 
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 
@@ -900,10 +1092,10 @@ SnakeYAML discards them at parse time.
 
 **The original justification was wrong and is corrected here rather than deleted**, because it is the
 reasoning somebody will reach for again. It said saves come from the setup flow, which only ever
-rewrites a file it wrote itself — but `/hd setup` does not exist until phase 1e, so *every*
-`bootstrap.yml` in existence today is hand-written, and since 1d the plugin saves over it
-unprompted the first time guild discovery answers. Hand-written comments really are being lost, on
-real installs, today.
+rewrites a file it wrote itself. `/hd setup` exists as of 1e and that is still not true: guild
+discovery saves over the file unprompted the first time it answers, the v2 migration writes it from
+a file somebody else authored, and every install that predates the setup command was hand-written.
+Hand-written comments really are being lost, on real installs.
 
 It is still the right trade, for a different reason: the alternative is carrying a
 comment-preserving YAML editor to protect four keys and a cache. What the loss is not allowed to be
