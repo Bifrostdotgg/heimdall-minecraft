@@ -840,11 +840,20 @@ mirror answers during an outage, and the fallback mode decides when nothing else
 command was blind to all four.
 
 So the interceptor gained one internal method taking a `commit` flag, and `intercept` is a one-line
-wrapper over it. With `commit == false` nothing is written: no mirror extension, no verified record,
-and no background connection report — because an operator asking whether somebody *can* join must
-not thereby cache them as somebody who did. The probe also bypasses the in-flight request collapsing
-for the same reason: joining a real login's outstanding request would mean its completion applied a
-role snapshot on the probe's behalf.
+wrapper over it. With `commit == false` nothing is written *locally*: no mirror extension, no verified
+record, and no background connection report — because an operator asking whether somebody *can* join
+must not thereby cache them as somebody who did. The probe also bypasses the in-flight request
+collapsing for the same reason: joining a real login's outstanding request would mean its completion
+applied a role snapshot on the probe's behalf.
+
+**One thing a probe on a mirror MISS does write, and it is bot-side: a real `connection-attempt`.**
+When the mirror does not hold the player, the probe asks the bot exactly as a login would, and the
+bot records that as a connection-history / `lastSeen` / join-feed entry against that player — because
+to the bot it is indistinguishable from a real attempt. This is v2's behaviour (its `/hwl test` made
+the same call) and it is kept for parity, but it is the surprising survivor an operator running
+`/hd test <someone>` in a loop must know about: they are writing to that player's history on the
+dashboard, once per probe that misses the mirror. A probe that *hits* the mirror never reaches the
+bot and writes nothing anywhere.
 
 A reimplementation would have been the obvious alternative and is the wrong one. The states worth
 testing are exactly the ones a second implementation would get subtly wrong, and a diagnostic that
@@ -875,6 +884,86 @@ The endpoint is also the one call in the plugin that carries **no signature**, b
 nothing to sign with yet. That is modelled as a flag on `HttpCall` rather than as a second transport,
 so departure D20's "one place a request actually happens" still holds — a fifth copy-pasted request
 method for this would be v2's mistake in miniature.
+
+**The wait on the claim is derived, not guessed, and a transport failure never claims the code is
+unspent.** `HttpURLConnection` applies its timeout twice — once to connect, once to read — so the
+real worst case of a `ClaimClient.TIMEOUT_MS` request is nearly `2 × TIMEOUT_MS`, which is the same
+reason `JOIN_SLACK_MS` exists on the login path (D16). A wait shorter than that is the bug the gate
+review caught: the `get()` abandons the future while `supplyAsync` keeps running, the bot still spends
+the code and mints a token nobody reads, and the operator is told "nothing has changed, and the code
+has not been used" — both false. The wait is `2 × TIMEOUT_MS + slack`, and on any transport failure
+(timeout, `IOException`, interrupt) the message becomes "the code may already have been used; if this
+server does not connect shortly, mint a new one".
+
+### D66 — the endpoint is validated before the code is spent, and it is a security boundary
+
+**New in 1e**, and the gate review's "do not ship without this".
+
+`/hd setup [endpoint]` writes whatever it is handed to `bootstrap.yml`, and from then on that URL is
+the bot: it chooses the token, answers the login gate, pushes the role-sync snapshots that grant
+LuckPerms groups, and — through the offenses module dispatching the punishment it is handed — runs
+console commands of its choosing. A typo'd or hostile endpoint is therefore **remote code execution
+on that server**, and a plain `http://` endpoint leaks the token in cleartext.
+
+`BotEndpoint.validate` applies the equivalent of `DownloadPolicy`'s jar guard, *before the code is
+spent* so a rejection costs nothing:
+
+- **HTTPS for a public host; http allowed for a loopback or private one** — a self-hosted bot on a
+  LAN and the smoke harness's `http://stub-bot:8080` are legitimate and have no certificate. "Private"
+  is decided from the host string with **no DNS lookup** (an IP literal is range-checked; a
+  single-label name like `stub-bot` cannot be a public FQDN), because resolving a name here would
+  itself be a network call driven by operator input.
+- **No path, query, userinfo or fragment** — the endpoint is a base URL the client concatenates
+  onto, and a `user:pass@` authority is a credential-in-a-config smell that has no business here.
+
+The safe default to be wrong in is "assume public", so a genuinely-private host misjudged as public
+costs its operator a `https://` they have to type, while the reverse would wave a cleartext token onto
+the internet.
+
+### D67 — v2's global enable/disable becomes a per-module *local* override
+
+**v2:** `/hwl enable` / `/hwl disable` — a global switch (`config.enabled`) that turned all whitelist
+checking on or off.
+**v3:** `/hd disable [module]` / `/hd enable <module>` — a per-module override, persisted in
+`bootstrap.yml`, that **wins over the dashboard** until cleared.
+
+Module state in v3 is dashboard-owned and arrives over the tunnel, which is right almost always and
+exactly wrong in the one case an operator most needs a lever: the whitelist is refusing everybody and
+the bot cannot be reached to turn it off. So `/hd disable` writes a local set the module manager
+subtracts from every desired set — a module named there is not started even if a `config.push` says
+it should be, and it stays off across a restart because it is on disk. `/hd disable` with no argument
+targets the `whitelist` module, which is what v2's bare `/hwl disable` did ("let everyone in").
+`/hd status` lists what is locally off so it is never a silent mystery, and `/hd modules` stops
+telling an operator to use the dashboard when the tunnel is down — it points at this instead.
+
+The verbs were dropped in 1e's first cut with no replacement and no entry, which the gate review
+caught: a tree called "full" that quietly lost v2's safety valve is a parity regression whether or
+not anyone reaches for it.
+
+### D68 — a few operational knobs live in `bootstrap.yml`, because the dashboard cannot deliver them
+
+**New in 1e**, and a stated exception to D17's "everything but the credentials is remote config".
+
+Three sets of settings moved *out* of remote config and into `bootstrap.yml`, each because the
+dashboard genuinely cannot own it:
+
+- **The login budget** (`timeoutMs`, `retries`, `retryDelayMs`). These shape the very request that
+  would *fetch* the dashboard's config, so a server that got them wrong could never load the settings
+  that would fix them. They also had to be a real thing a migration preserves: v2 shipped
+  `timeout: 1500, retries: 1`, and inheriting v3's `5000 × 3` defaults balloons a tuned v2 server's
+  login budget from ~1.5s to ~18s. `ApiSettingsFactory` reads them; `ApiSettings` clamps them, so a
+  nonsense value cannot break the client. (This also corrects `DEFAULT_RETRIES`' old claim to "match
+  v2's shipped config" — v2 shipped 1, not 3; v3's 3 is a deliberate resilience choice, and the
+  migration overrides it with the operator's real value.)
+- **The self-updater's knobs** (`updatesCheckEnabled`, `updatesNotifyAdmins`,
+  `updatesCheckIntervalHours`). v3 has no `updates` capability, so the bot's `config.push` narrowing
+  drops an `updates` section before it reaches the plugin — a dashboard value there would be
+  permanently unread. Local is the only place an operator can actually turn the check off, which v2
+  could.
+- **The local module-disable set** (`disabledModules`) — departure D67.
+
+Every one of these fails D17's test in the same way: *the dashboard cannot deliver it, and a broken
+server still has to read it.* That, and only that, is what earns a field a place in `bootstrap.yml`.
 
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 

@@ -16,7 +16,7 @@ The plugin can be used on either the backend servers, the proxy, or both dependi
 - **Real-time Decisions**: Staff can approve/deny players through the Discord dashboard without server restarts
 - **Fallback System**: If the API is unavailable, configurable fallback modes (allow, deny, or whitelist-only)
 - **Performance Optimized**: Response caching and async processing to minimize server impact
-- **Configurable Messages**: Customize all player-facing messages through the config file
+- **Configurable Messages**: Customize all player-facing messages from the Heimdall dashboard — pushed to every connected server live, no config file editing or restart
 - **LuckPerms Integration**: Sync Discord roles to LuckPerms groups (Paper only)
 - **Multi-Platform Support**: Single JAR works on both Paper and Velocity
 
@@ -33,21 +33,42 @@ Download the latest `heimdall-whitelist-X.X.X.jar` from the
 [**Releases page**](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest).
 The same JAR works on both Paper and Velocity.
 
-### Paper/Spigot Installation
+### Paper/Spigot Installation (fresh install)
 
 1. Download the latest `heimdall-whitelist-X.X.X.jar` from the [Releases page](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest)
-2. Place the JAR file in your server's `plugins/` folder
-3. Start your server to generate the default configuration
-4. Edit `plugins/HeimdallWhitelist/config.yml`
-5. Restart your server or use `/hwl reload`
+2. Place the JAR file in your server's `plugins/` folder and start the server
+3. On the Heimdall dashboard, open the guild's **Minecraft** page and mint a setup code for this server
+4. In-game or from the console, run `/hd setup <code>` — the server connects immediately, no restart needed
+5. There is no config file to hand-edit. Everything else — messages, cache windows, which modules are on, role sync, offense templates — is configured on the dashboard and pushed to the plugin over its tunnel. `plugins/Heimdall/bootstrap.yml` only holds the connection itself (see [Configuration](#configuration))
+6. After a config change later, `/hd reload` re-reads `bootstrap.yml` and reconnects in place — you rarely need it, since dashboard settings apply live already
 
-### Velocity Installation
+### Velocity Installation (fresh install)
 
 1. Download the latest `heimdall-whitelist-X.X.X.jar` from the [Releases page](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest)
-2. Place the JAR file in your Velocity proxy's `plugins/` folder
-3. Start your proxy to generate the default configuration
-4. Edit `plugins/heimdall-whitelist/config.json`
-5. Restart your proxy or use `/hwl reload`
+2. Place the JAR file in your Velocity proxy's `plugins/` folder and start the proxy
+3. On the Heimdall dashboard, open the guild's **Minecraft** page and mint a setup code for this proxy
+4. From the console (or in-game as an operator), run `/hdp setup <code>` — the proxy connects immediately, no restart needed
+5. As above, there is no config file to hand-edit; `bootstrap.yml` holds only the connection
+
+### Upgrading from v2
+
+Stop the server, drop in the new JAR in place of the old one, and start it back up — no config
+edits required. On its first boot, v3 looks for a v2 `config.yml` (Bukkit/Paper) or `config.json`
+(Velocity) both in its own data directory and in the sibling `HeimdallWhitelist`/`heimdallwhitelist`
+directory a v2 install actually used, and migrates it automatically:
+
+- Credentials, server id and the login-timing knobs (`timeout`, `retries`, `retryDelay`) are written
+  into a new `bootstrap.yml`.
+- Everything else the old config held (messages, cache windows, fallback mode, etc.) is staged for
+  import into the dashboard, and lights up once the server is claimed — see the next step.
+- The old config file is renamed to `*.v2-backup` (`config.yml.v2-backup` / `config.json.v2-backup`),
+  never deleted.
+- Until the server is claimed, it keeps running on v2-equivalent defaults.
+
+Finish the upgrade by running `/hd setup <code>` (`/hdp setup` on Velocity) with a code minted on the
+dashboard, same as a fresh install — this is what actually applies the imported settings. `/hwl` still
+works post-upgrade as a deprecated alias that forwards to `/hd`/`/hdp` (see [Commands](#commands)), so
+existing runbooks and macros are not broken by the upgrade.
 
 ### Keeping the plugin updated
 
@@ -55,157 +76,119 @@ The plugin checks your Heimdall bot for the latest published version on startup
 and every few hours. When a newer version is available:
 
 - A warning is logged to the server console.
-- Admins (`heimdall.admin`) are notified as they join (if `updates.notifyAdmins` is on).
-- Run `/hwl version` to see the installed vs. latest version on demand.
-- Run `/hwl update` to download the latest JAR:
+- Admins (`heimdall.admin`) are notified as they join (if `updatesNotifyAdmins` is on).
+- Run `/hd version` (`/hdp version` on Velocity) to see the installed vs. latest version on demand.
+- Run `/hd update` (`/hdp update` on Velocity) to download the latest JAR:
   - **Paper**: it is placed in `plugins/update/` and applied automatically on the
     next server restart.
   - **Velocity**: it is downloaded into the plugin's data folder; move it into the
     proxy's `plugins/` directory (replacing the old JAR) and restart.
 
-Update behavior is configurable under the `updates:` section of the config:
+`/hwl version` / `/hwl update` still work as the deprecated alias, forwarding to the same commands.
+
+Unlike most plugin behaviour, the update check has no dashboard equivalent — it has to keep working
+on a server the bot cannot currently push config to — so it is controlled locally in `bootstrap.yml`:
 
 ```yaml
-updates:
-  checkEnabled: true       # check for new versions on startup + interval
-  notifyAdmins: true       # message admins on join when an update is available
-  checkIntervalHours: 12   # how often to re-check (minimum 1)
+updatesCheckEnabled: true       # check for new versions on startup + interval
+updatesNotifyAdmins: true       # message admins on join when an update is available
+updatesCheckIntervalHours: 12   # how often to re-check (minimum 1)
 ```
 
 ## Configuration
 
-### Paper Configuration (config.yml)
+v3 does not use a per-server `config.yml`/`config.json` the way v2 did. The only local file is a
+small `bootstrap.yml`, holding just enough to connect. Everything else — player-facing messages,
+cache windows, which modules are enabled, role-sync groups, offense templates, API fallback
+behaviour — lives on the Heimdall dashboard's **Minecraft** page and is pushed to the plugin live
+over its tunnel. Changing any of it does not need a server restart or a file edit.
+
+### bootstrap.yml
+
+Written by `/hd setup` (`/hdp setup` on Velocity) the first time a server is claimed, and lives at
+`plugins/Heimdall/bootstrap.yml` on Paper, or the plugin's data directory on Velocity:
 
 ```yaml
-# Global Plugin Control (IMPORTANT!)
-# Plugin starts DISABLED by default for security
-# When disabled, ALL players can join without any whitelist checks
-enabled: false
-
-# Bot API Configuration
-api:
-  # The URL of your Heimdall bot API endpoint
-  baseUrl: "http://localhost:3001"
-  hmacSecret: "your-hmac-secret-here" # Must match the bot's INTERNAL_API_KEY
-  timeout: 5000
-  retries: 3
-  retryDelay: 1000
-
-# Server identification
-server:
-  serverId: "auto-generated-uuid"
-  displayName: "My Minecraft Server"
-  publicIp: "localhost"
-
-# Customize messages shown to players
-messages:
-  notWhitelisted: "§cYou are not whitelisted on this server!"
-  authCodeRequired: "§eYour auth code: §a{code}"
-  whitelistSuccess: "§aYou have been whitelisted!"
-  apiError: "§cWhitelist system unavailable. Try again later."
-
-# Cache settings
-cache:
-  enabled: true
-  cacheWindow: 60 # Minutes to cache whitelist decisions
-  extendOnJoin: 120 # Extend cache when player joins
-  extendOnLeave: 180 # Extend cache when player leaves
-  cleanupInterval: 30 # Minutes between cache cleanup
-
-# Advanced settings
-advanced:
-  apiFallbackMode: "deny" # Options: allow, deny, whitelist-only
+endpoint: "https://api.bifrost.gg" # which Heimdall instance this server talks to
+tokenId: "..." # public identifier for the guild API token
+token: "..." # the signing secret — never share this
+serverId: "..." # this server's identity within the guild
+role: "auto" # auto | standalone | gatekeeper | enforcer — see ServerRole
+debug: false # verbose logging; toggle live with /hd debug on|off
+timeoutMs: 5000 # per-attempt login timeout
+retries: 3 # total login attempts, including the first
+retryDelayMs: 1000 # pause between login attempts
+updatesCheckEnabled: true # self-updater — see "Keeping the plugin updated"
+updatesNotifyAdmins: true
+updatesCheckIntervalHours: 12
+disabledModules: "" # space-separated local module overrides — see /hd disable
+guildIdCache: "..." # cache of the last resolved guild; written by the plugin, not a setting
 ```
 
-### Velocity Configuration (config.json)
+`token`, `tokenId`, `serverId` and `guildIdCache` are written by `/hd setup` and by the plugin
+itself — don't hand-edit them. The login-timing fields (`timeoutMs`/`retries`/`retryDelayMs`) and
+the update knobs are the ones you might reasonably tune by hand; they stay local because they shape
+the very request that would otherwise fetch the dashboard's config, so the dashboard can't own them.
 
-The Velocity version uses JSON configuration with the same options:
-
-```json
-{
-  "enabled": false,
-  "api": {
-    "baseUrl": "http://localhost:3001",
-    "hmacSecret": "your-hmac-secret-here",
-    "timeout": 5000,
-    "retries": 3,
-    "retryDelay": 1000
-  },
-  "server": {
-    "serverId": "",
-    "displayName": "My Minecraft Network",
-    "publicIp": "localhost"
-  },
-  "cache": {
-    "enabled": true,
-    "cacheWindow": 60,
-    "extendOnJoin": 120,
-    "extendOnLeave": 180,
-    "cleanupInterval": 30
-  },
-  "advanced": {
-    "apiFallbackMode": "deny"
-  }
-}
-```
+`endpoint` is the field whitelabel instances care about: most installs talk to the public
+`https://api.bifrost.gg`, but a whitelabel instance has its own URL, and its setup codes are only
+claimable there — pass it as the optional second argument, `/hd setup <code> <endpoint>`.
 
 ### WebSocket Tunnel
 
-Both platforms keep a persistent 2-way WebSocket connection to the Heimdall bot
-(URL derived from `api.baseUrl`, no inbound ports needed). It powers realtime
-Discord→Minecraft role-sync push, the dashboard's live console, player list and
-status, and remote plugin updates. **Enabled by default** — set
-`websocket.enabled: false` to fall back to HTTP-only (role sync then applies on
-the player's next join).
-
-```yaml
-websocket:
-  enabled: true # set false to disable the tunnel
-  reconnect-delay: 5000 # initial reconnect delay (ms), doubles up to the max
-  max-reconnect-delay: 30000
-  heartbeat-interval: 30000 # ping interval (ms)
-  heartbeat-timeout: 10000 # how long to wait for a pong (ms)
-```
-
-### Important Configuration Notes
-
-- **enabled**: Controls whether whitelist protection is active. Starts `false` for security
-- **api.baseUrl**: Must point to your Heimdall bot's API endpoint (e.g., `http://your-bot-server.com:3001`)
-- **api.hmacSecret**: Shared HMAC secret — must match the bot's `INTERNAL_API_KEY` environment variable
-- **server.serverId**: Auto-generated unique identifier - don't change this after setup
-- **advanced.apiFallbackMode**: What to do when API is unavailable:
-  - `deny` - Deny all connections (fail-closed, most secure)
-  - `allow` - Allow all connections (fail-open)
-  - `whitelist-only` - Only allow players with positive cache entries
-
-⚠️ **Security Notice**: The plugin starts **DISABLED** by default to prevent unauthorized access when using default configuration. Enable only after properly configuring your API settings.
+Both platforms keep a persistent 2-way WebSocket connection to the Heimdall bot (derived from
+`endpoint`, no inbound ports needed). It is core to how v3 works, not an optional extra — it is how
+the dashboard's pushed configuration actually reaches the plugin, and it also carries
+Discord→Minecraft role-sync, the dashboard's live console, player list and status, and remote
+plugin updates. There is no setting to disable it. `/hd status` reports whether it is currently
+connected; while it is down the plugin keeps running on the last configuration it received (or
+built-in v2-equivalent defaults, for a server that has not been claimed yet).
 
 ## Commands
 
-### Player Commands (Paper only)
+### Player Commands (both platforms)
 
-- `/linkdiscord` - Request a code to link your Minecraft account to Discord
+- `/linkdiscord` (alias `/link`) - request a code to link this Minecraft account to Discord
+- `/offend <player> <offense> [notes]` - record an offence against a player and apply the
+  escalation tier (requires `heimdall.offend`)
 
 ### Admin Commands
 
-- `/hwl` - Show available commands
-- `/hwl reload` - Reload configuration from file
-- `/hwl status` - Display plugin status and connectivity
-- `/hwl enable` - Enable whitelist protection (requires proper API config)
-- `/hwl disable` - Disable whitelist protection (allows all players)
-- `/hwl test <player>` - Test whitelist check for a specific player
-- `/hwl cache stats` - Show cache statistics
-- `/hwl cache clear` - Clear the whitelist cache
-- `/hwl version` - Show the installed version and check for updates
-- `/hwl update` - Download the latest version (applied on restart)
+The admin tree is `/hd` (alias `/heimdall`) on Paper/Spigot backend servers, and `/hdp` (alias
+`/heimdallproxy`) on Velocity proxies — replace `/hd` with `/hdp` for everything below when running
+on a proxy. `/hwl` (alias `/heimdallwhitelist`) still works on both platforms as a **deprecated
+alias**: it forwards to the same tree and prints a one-time-per-start warning telling you to switch.
+
+- `/hd setup <code> [endpoint]` - claim this server with a setup code minted on the dashboard;
+  connects immediately, no restart
+- `/hd status` - version, role, serverId, endpoint, guild, tunnel state, per-module state, whitelist
+  mirror stats, console tap health and update availability
+- `/hd reload` - re-read `bootstrap.yml` and reconnect the tunnel in place
+- `/hd modules` - list this build's modules and each one's state
+- `/hd enable [module]` / `/hd disable [module]` - a **local** override, persisted in
+  `bootstrap.yml`, that switches a module off/on even while the bot is unreachable and wins over
+  the dashboard until cleared. With no argument, `/hd disable` targets the `whitelist` module — the
+  "let everyone in" escape hatch, v2's global `/hwl disable` made per-module and made local
+- `/hd test <player>` - run the real login check for a player without changing anything; reports
+  the decision and which check made it
+- `/hd cache stats|clear|cleanup|sync` - inspect, empty, sweep or refresh the local whitelist mirror
+- `/hd offense reload|types` - refresh or list the offense types `/offend` accepts
+- `/hd version` - show the installed version and check for a newer one
+- `/hd update` - download the newest release; applied on the next restart
+- `/hd debug on|off` - toggle debug logging, persisted to `bootstrap.yml`
 
 **Permission Required**: `heimdall.admin` (defaults to OP)
 
 ## Permissions
 
-- `heimdall.admin` - Access to admin commands (default: OP)
-- `heimdall.bypass` - Bypass all whitelist checks (default: OP, Paper only)
-- `heimdall.linkdiscord` - Use the /linkdiscord command (default: true, Paper only)
+- `heimdall.admin` - access to the `/hd`/`/hdp`/`/hwl` admin tree (default: OP)
+- `heimdall.linkdiscord` - use `/linkdiscord` (default: true — everyone, since it only ever acts on
+  the sender's own account)
+- `heimdall.offend` - use `/offend` (default: OP)
+- `heimdall.bypass` - skip Heimdall's per-player command cooldowns, e.g. the `/linkdiscord` cooldown
+  (default: OP). This does **not** bypass the whitelist itself — the login-time bypass is a UUID
+  list managed on the dashboard, since permissions aren't available yet at
+  `AsyncPlayerPreLoginEvent`
 
 ## How It Works
 
@@ -243,7 +226,7 @@ websocket:
 **"Whitelist system is temporarily unavailable"**
 
 - Check that your bot API is running and accessible
-- Verify the `api.baseUrl` in your config
+- Verify `endpoint` in `bootstrap.yml`, and check `/hd status` for the tunnel and connection state
 - Check server logs for connection errors
 
 **Players can't get auth codes**
@@ -260,16 +243,10 @@ websocket:
 
 ### Debug Mode
 
-Enable debug logging in `config.yml`:
-
-```yaml
-logging:
-  debug: true
-  logRequests: true
-  logDecisions: true
-```
-
-This will log detailed information about API requests and whitelist decisions.
+Run `/hd debug on` (`/hdp debug on` on Velocity) to turn on verbose logging — it takes effect
+immediately and is persisted to `bootstrap.yml` so it survives a restart. `/hd debug off` turns it
+back off. Debug is local for a reason: it's the diagnostic you most need when the server can't
+reach the dashboard to be told anything else.
 
 ## Error Handling & Fail-Open Behavior
 
@@ -279,19 +256,17 @@ The plugin implements a robust error handling system with configurable fallback 
 
 When the API is unreachable or returns errors, the plugin will:
 
-1. **Retry 3 times** (configurable via `api.retries`)
-2. **Wait between retries** (configurable via `api.retryDelay`)
-3. **Fall back** to the configured `apiFallbackMode` after all retries fail
+1. **Retry** up to the configured attempt count (`retries` in `bootstrap.yml`, default 3)
+2. **Wait between retries** (`retryDelayMs` in `bootstrap.yml`, default 1000ms)
+3. **Fall back** to the fallback mode configured on the dashboard after all retries fail
 
 ### Fallback Modes
 
-Configure the fallback behavior in `config.yml` under `advanced.apiFallbackMode`:
-
-```yaml
-advanced:
-  # Fallback behavior when API is completely unavailable after all retries
-  apiFallbackMode: "allow" # Recommended for production
-```
+Unlike the retry timing above, the fallback mode itself is not a `bootstrap.yml` field — it's part
+of the whitelist module's settings on the dashboard's Minecraft page, pushed to the plugin like
+everything else module-related. If the bot can't be reached at all (including on a server that has
+never been claimed), the plugin falls back to its last-known pushed value, or a safe built-in
+default.
 
 **Available modes:**
 
@@ -313,7 +288,7 @@ advanced:
 
 ### Production Recommendation
 
-For production servers, use `apiFallbackMode: "allow"` to ensure your server remains accessible even during:
+For production servers, set the fallback mode to `allow` on the dashboard's Minecraft page to ensure your server remains accessible even during:
 
 - Network connectivity issues
 - Bot maintenance/updates
@@ -326,10 +301,10 @@ Players connecting during fail-open mode will receive a message encouraging them
 
 If you're experiencing lag:
 
-1. Increase `performance.cacheTimeout` to reduce API calls
+1. Increase the whitelist cache window on the dashboard's Minecraft page to reduce API calls, or
+   run `/hd cache stats` to see how the local mirror is doing
 2. Check your API server performance and network latency
-3. Monitor the `performance.maxConcurrentRequests` setting
-4. Consider if your API server needs more resources
+3. Consider if your API server needs more resources
 
 ## Integration with Heimdall Bot
 
