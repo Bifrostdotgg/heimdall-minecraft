@@ -78,4 +78,23 @@ public interface ConsoleBridge {
      * @return a handle that unsubscribes; closing it twice is a no-op
      */
     Registration attachLogTap(Consumer<LogLine> consumer);
+
+    /**
+     * How many tap consumers have been unsubscribed for throwing, since this server started.
+     *
+     * <p>A diagnostic rather than a feature, and it is here because there is nowhere else it could
+     * be observed from. A consumer that throws is dropped <em>silently</em>, and necessarily so: the
+     * drop happens inside the delivery guard, where a log line would be captured and fed back into
+     * the loop the guard exists to break. So the implementation counts instead, and something
+     * outside the capture path — {@code /hd status} — reports the number.
+     *
+     * <p>Without it, "the dashboard's console went quiet" and "a plugin's tap threw once and was
+     * unsubscribed" are indistinguishable from every angle an operator has.
+     *
+     * <p>Defaults to zero, for a platform whose console cannot be tapped at all: no taps means no
+     * drops, which is the honest answer rather than a stub.
+     */
+    default int droppedTapConsumers() {
+        return 0;
+    }
 }

@@ -1,15 +1,21 @@
 package com.heimdall.module.whitelist;
 
+import com.heimdall.core.admin.LoginProbe;
+import com.heimdall.core.admin.WhitelistAdmin;
 import com.heimdall.core.config.ServerRole;
-import com.heimdall.core.http.ApiClient;
 import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
+import com.heimdall.core.pipeline.LoginAttempt;
+import com.heimdall.core.platform.PlatformFacade;
+import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.tunnel.Capabilities;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
@@ -40,6 +46,14 @@ import java.util.function.Supplier;
  * write still pending, is a way to lose the file. The module logs when it sees such a change, so an
  * operator is not left wondering why a saved value did nothing.
  *
+ * <h2>The API arrives through the context, not the constructor</h2>
+ *
+ * <p>It used to be a constructor argument that was {@code null} on a server nobody had set up, and
+ * that is what made {@code /hd setup} unable to work without a restart: the reference was captured
+ * once, before anything could have configured it, and nothing could re-hand a live one. Since 1e it
+ * is {@link ModuleContext#api()}, which is one stable gateway that core re-points underneath — see
+ * departure D56.
+ *
  * <h2>Threading and ownership</h2>
  *
  * <p>Everything is registered through {@code ModuleContext} and unwound mechanically on disable: the
@@ -48,12 +62,10 @@ import java.util.function.Supplier;
  * collaborators, and they are rebuilt on every enable so a toggle cannot leave an interceptor
  * holding a store that has already been shut.
  */
-public final class HeimdallWhitelistModule implements HeimdallModule {
+public final class HeimdallWhitelistModule implements HeimdallModule, WhitelistAdmin {
 
     /** The module's stable identifier, and its key in the remote-config document. */
     public static final String ID = "whitelist";
-
-    private final ApiClient api;
 
     /**
      * Where a login response's role snapshot goes.
@@ -65,18 +77,10 @@ public final class HeimdallWhitelistModule implements HeimdallModule {
     private volatile RoleSyncSink roleSync = RoleSyncSink.NONE;
 
     private volatile WhitelistMirrorService mirror;
+    private volatile WhitelistLoginInterceptor interceptor;
+    private volatile PlatformFacade platform;
     private volatile long openedWithCacheWindowMs;
     private volatile long openedWithMaxExtensionHours;
-
-    /**
-     * @param api the HTTP client, or {@code null} on a server that was never set up. Null is a
-     *     supported state rather than a guard clause at every call site: the module still enables,
-     *     the mirror still serves what it holds, and the fallback mode decides logins — which is
-     *     exactly what a server whose bot is unreachable needs anyway.
-     */
-    public HeimdallWhitelistModule(ApiClient api) {
-        this.api = api;
-    }
 
     /** Wires the role-sync module in. Called once by the runtime, before anything is enabled. */
     public void setRoleSyncSink(RoleSyncSink sink) {
@@ -114,32 +118,33 @@ public final class HeimdallWhitelistModule implements HeimdallModule {
         openedWithMaxExtensionHours = atOpen.maxExtensionHours();
 
         final WhitelistMirrorService mirrorService = new WhitelistMirrorService(
-                ctx.logger(), api, WhitelistMirrorService.openMirror(ctx, atOpen), settings);
+                ctx.logger(), ctx.api(), WhitelistMirrorService.openMirror(ctx, atOpen), settings);
         ConnectionAttemptReporter reporter = new ConnectionAttemptReporter(
-                ctx.logger(), api, ctx.platform(), ctx.executors().io(),
+                ctx.logger(), ctx.api(), ctx.platform(), ctx.executors().io(),
                 new Supplier<RoleSyncSink>() {
                     @Override
                     public RoleSyncSink get() {
                         return roleSync;
                     }
                 });
+        WhitelistLoginInterceptor gate = new WhitelistLoginInterceptor(
+                ctx.logger(), ctx.platform().role(), settings, mirrorService, reporter,
+                new Supplier<Boolean>() {
+                    @Override
+                    public Boolean get() {
+                        return Boolean.valueOf(ctx.config().enabled());
+                    }
+                });
         this.mirror = mirrorService;
+        this.interceptor = gate;
+        this.platform = ctx.platform();
 
-        ctx.interceptLogin(
-                new WhitelistLoginInterceptor(
-                        ctx.logger(), ctx.platform().role(), settings, mirrorService, reporter,
-                        new Supplier<Boolean>() {
-                            @Override
-                            public Boolean get() {
-                                return Boolean.valueOf(ctx.config().enabled());
-                            }
-                        }),
-                WhitelistLoginInterceptor.PRIORITY);
+        ctx.interceptLogin(gate, WhitelistLoginInterceptor.PRIORITY);
 
         ctx.onPlayerJoin(mirrorService.onJoin());
         ctx.onPlayerQuit(mirrorService.onQuit());
         schedulePolls(ctx, atOpen, mirrorService);
-        ctx.registerCommand(new LinkDiscordCommand(ctx.logger(), api).spec());
+        ctx.registerCommand(new LinkDiscordCommand(ctx.logger(), ctx.api()).spec());
 
         ctx.onConfigChanged(new ModuleConfigListener() {
             @Override
@@ -157,9 +162,12 @@ public final class HeimdallWhitelistModule implements HeimdallModule {
     @Override
     public void disable() {
         // Nothing to undo — every handle belongs to the context, and the mirror is flushed as it
-        // closes. Dropping the reference is what stops a re-enable from finding a store that has
-        // already been shut. Safe after a failed enable, where it is already null.
+        // closes. Dropping the references is what stops a re-enable from finding a store that has
+        // already been shut, and what makes the WhitelistAdmin surface below answer "not running"
+        // rather than acting on a dead one. Safe after a failed enable, where they are already null.
         mirror = null;
+        interceptor = null;
+        platform = null;
     }
 
     /**
@@ -204,18 +212,151 @@ public final class HeimdallWhitelistModule implements HeimdallModule {
         }
     }
 
-    // ── For the runtime, and for phase 1e ────────────────────────────────────
+    // ── WhitelistAdmin: what /hd cache and /hd test reach ────────────────────
+
+    @Override
+    public boolean isAvailable() {
+        return mirror != null;
+    }
 
     /**
      * A one-line description of the mirror, for a status command.
      *
      * <p>Answers even while the module is disabled, because "it is off" is a perfectly good thing
      * for {@code /hd status} to print and throwing would make every caller branch first.
+     *
+     * <p>Carries the age of the last successful sync as well as the counts — see
+     * {@link WhitelistMirrorService#adminStats()} for why the age is the part that answers the
+     * question an operator is really asking.
      */
-    public String mirrorStats() {
+    @Override
+    public String stats() {
+        WhitelistMirrorService live = mirror;
+        return live == null ? "the whitelist module is not running" : live.adminStats();
+    }
+
+    /**
+     * The store's own counts, without the sync age.
+     *
+     * <p>Separate from {@link #stats()} because it is what the tests assert against, and a line that
+     * ends in "last synced 3s ago" is not something an equality assertion can hold still. Nothing in
+     * production reads it; {@code /hd status} and {@code /hd cache stats} both want the age.
+     */
+    String mirrorStats() {
         WhitelistMirrorService live = mirror;
         return live == null ? "whitelist module is not enabled" : live.stats();
     }
+
+    @Override
+    public void clear() {
+        WhitelistMirrorService live = mirror;
+        if (live != null) {
+            live.clear();
+        }
+    }
+
+    @Override
+    public int cleanup() {
+        WhitelistMirrorService live = mirror;
+        return live == null ? 0 : live.sweepExpired();
+    }
+
+    /** Runs the pre-warm poll now. What {@code /hd cache sync} calls. Blocking. */
+    @Override
+    public void syncNow() {
+        WhitelistMirrorService live = mirror;
+        if (live != null) {
+            live.syncNow();
+        }
+    }
+
+    /**
+     * Runs the whole login path for a player and reports what it decided, writing nothing.
+     *
+     * <p>Blocking. The translation from the interceptor's internal outcome to the platform-free
+     * {@link LoginProbe} happens here rather than in core, so the admin tree never learns the
+     * interceptor's vocabulary and this module stays free to change it.
+     */
+    @Override
+    public LoginProbe probe(String playerName) {
+        WhitelistLoginInterceptor gate = interceptor;
+        if (gate == null) {
+            return WhitelistAdmin.NONE.probe(playerName);
+        }
+        LoginAttempt attempt = attemptFor(playerName);
+        WhitelistLoginInterceptor.Outcome outcome = gate.evaluate(attempt, false);
+        WhitelistMirrorService live = mirror;
+        return LoginProbe.forPlayer(attempt.username(), attempt.uuid().toString())
+                // Abstain counts as allowed here, and it is the honest reading: a bypassed player
+                // or a backend that leaves the decision to its gatekeeper is one this check will
+                // not stop. Reporting "abstain" to an operator asking whether somebody can join
+                // would answer a question about the pipeline rather than about the player.
+                .allowed(!outcome.verdict().isDeny())
+                .stage(outcome.stage())
+                .message(outcome.message())
+                .queuePosition(outcome.queuePosition())
+                .mirrored(live != null && live.isWhitelisted(attempt.uuid()))
+                .build();
+    }
+
+    /**
+     * Builds the login this probe pretends to be.
+     *
+     * <p>Three sources, in descending order of how much they can be trusted:
+     *
+     * <ol>
+     *   <li><strong>An online player</strong> contributes their real UUID and their real address,
+     *       which is the only way the probe can be about the player rather than about a name.
+     *   <li><strong>The mirror</strong>, which is this plugin's own copy of the bot's uuid-to-name
+     *       mapping. Anybody on the whitelist is in it, which covers the case an operator actually
+     *       has: "why can this person not get in?"
+     *   <li><strong>The offline-mode UUID</strong>, vanilla's own {@code OfflinePlayer:<name>}
+     *       derivation. Exact on a cracked server and about nobody at all on a premium one, which is
+     *       why {@link LoginProbe#uuid()} reports whichever was used — an operator can see for
+     *       themselves that the answer is about a derived identity.
+     * </ol>
+     *
+     * <p>Asking Mojang is deliberately not a fourth option. The bot already holds the mapping, the
+     * plugin has no business making that call, and a fabricated identity is exactly the failure
+     * departure D58 is about.
+     */
+    private LoginAttempt attemptFor(String playerName) {
+        PlatformFacade facade = platform;
+        if (facade != null) {
+            PlayerHandle online = facade.players().byName(playerName).orElse(null);
+            if (online != null) {
+                return LoginAttempt.builder(online.uuid())
+                        .username(online.name())
+                        .ipAddress("127.0.0.1")
+                        .build();
+            }
+        }
+        WhitelistMirrorService live = mirror;
+        UUID mirrored = live == null ? null : live.uuidForName(playerName);
+        if (mirrored != null) {
+            return LoginAttempt.builder(mirrored)
+                    .username(playerName)
+                    .ipAddress("127.0.0.1")
+                    .build();
+        }
+        return LoginAttempt.builder(offlineUuid(playerName))
+                .username(playerName)
+                .ipAddress("127.0.0.1")
+                .build();
+    }
+
+    /**
+     * Minecraft's offline-mode UUID for a name: {@code UUID.nameUUIDFromBytes("OfflinePlayer:" + name)}.
+     *
+     * <p>Vanilla's own derivation, so on a cracked server this is the player's real id and the probe
+     * is exact. On a premium server it is not, which is why the command prints the UUID it used.
+     */
+    private static UUID offlineUuid(String playerName) {
+        return UUID.nameUUIDFromBytes(
+                ("OfflinePlayer:" + playerName).getBytes(StandardCharsets.UTF_8));
+    }
+
+    // ── For tests ────────────────────────────────────────────────────────────
 
     /**
      * Records a player in the mirror directly.
@@ -224,18 +365,10 @@ public final class HeimdallWhitelistModule implements HeimdallModule {
      * bot", which by definition cannot be reached by asking a bot. Production writes to the mirror
      * only through the login path, where the bot has just vouched for the player.
      */
-    void recordForTest(java.util.UUID uuid, String username) {
+    void recordForTest(UUID uuid, String username) {
         WhitelistMirrorService live = mirror;
         if (live != null) {
             live.record(uuid, username);
-        }
-    }
-
-    /** Runs the pre-warm poll now. What {@code /hd whitelist sync} calls in 1e. Blocking. */
-    public void syncNow() {
-        WhitelistMirrorService live = mirror;
-        if (live != null) {
-            live.syncNow();
         }
     }
 }

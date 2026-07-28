@@ -3,7 +3,7 @@ package com.heimdall.module.whitelist;
 import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
-import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.model.LinkCodeResult;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.text.Msg;
@@ -57,7 +57,7 @@ final class LinkDiscordCommand {
     private static final String BORDER = "&a==================================================";
 
     private final HeimdallLogger logger;
-    private final ApiClient api;
+    private final HeimdallApi api;
 
     /**
      * Last use per player.
@@ -69,7 +69,7 @@ final class LinkDiscordCommand {
      */
     private final Map<UUID, Long> lastUsed = new ConcurrentHashMap<UUID, Long>();
 
-    LinkDiscordCommand(HeimdallLogger logger, ApiClient api) {
+    LinkDiscordCommand(HeimdallLogger logger, HeimdallApi api) {
         this.logger = logger;
         this.api = api;
     }
@@ -101,7 +101,7 @@ final class LinkDiscordCommand {
             send(source, "&cOnly a player can link a Discord account.");
             return;
         }
-        if (api == null || !api.settings().isUsable()) {
+        if (!api.isUsable()) {
             send(source, "&cThis server is not connected to Discord yet. Ask an administrator.");
             return;
         }

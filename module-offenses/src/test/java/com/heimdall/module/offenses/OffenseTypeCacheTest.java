@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.ApiSettings;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.log.LogLevel;
@@ -72,7 +73,20 @@ class OffenseTypeCacheTest {
     }
 
     private OffenseTypeCache cache(ApiClient api) {
-        return new OffenseTypeCache(logger, api);
+        return new OffenseTypeCache(logger, new HeimdallApi(api));
+    }
+
+    /**
+     * The gateway a server that has never been set up holds.
+     *
+     * <p>Not {@code null} any more, and the difference is the point of departure D56: an
+     * unconfigured server has a real gateway over a client with no settings, which answers
+     * {@code NOT_CONFIGURED} to everything and becomes usable when {@code /hd setup} reconfigures
+     * the client underneath it. A test that passed {@code null} would be testing a state production
+     * no longer has.
+     */
+    private OffenseTypeCache unconfiguredCache() {
+        return cache(new ApiClient(logger, ApiSettings.builder().build(), Runnable::run));
     }
 
     private static void await(OffenseTypeCache cache) throws Exception {
@@ -126,9 +140,9 @@ class OffenseTypeCacheTest {
         }
 
         @Test
-        @DisplayName("a server that was never set up has no client, and that is not an error")
-        void noApiClientIsSurvivable() throws Exception {
-            OffenseTypeCache cache = cache(null);
+        @DisplayName("a server that was never set up cannot be asked, and that is not an error")
+        void anUnconfiguredGatewayIsSurvivable() throws Exception {
+            OffenseTypeCache cache = unconfiguredCache();
 
             await(cache);
 
@@ -146,7 +160,7 @@ class OffenseTypeCacheTest {
     @DisplayName("matchingSlugs")
     class Filtering {
 
-        private final OffenseTypeCache cache = cache(null);
+        private final OffenseTypeCache cache = unconfiguredCache();
 
         @Test
         @DisplayName("only enabled types are offered")

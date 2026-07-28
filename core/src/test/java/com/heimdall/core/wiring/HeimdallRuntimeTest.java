@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.module.HeimdallModule;
@@ -94,8 +95,15 @@ class HeimdallRuntimeTest {
             HeimdallRuntime runtime = runtime(dataDir, store).build();
 
             assertFalse(runtime.isConfigured(), "an absent bootstrap.yml cannot be configured");
-            assertNull(runtime.tunnel(), "nothing to dial, so there should be no tunnel");
-            assertNull(runtime.api(), "nothing to sign for, so there should be no api client");
+            // Both exist, and that is departure D56 rather than an oversight. Before 1e they were
+            // null here, which is what made /hd setup unable to work without a restart: a module
+            // captured the null once, at registration, and nothing could re-hand it a live one. The
+            // objects are stable now, and their SETTINGS are what setup moves.
+            assertNotNull(runtime.tunnel(), "the tunnel exists and is idle, rather than being absent");
+            assertNotNull(runtime.api(), "the API gateway exists in every state — see departure D56");
+            assertEquals(HeimdallApi.Availability.NOT_CONFIGURED, runtime.api().availability(),
+                    "with no endpoint and no token, every call must fail fast rather than be sent");
+            assertFalse(runtime.tunnel().isConnected(), "nothing to dial, so nothing is dialled");
             assertNotNull(runtime.executors(), "the pools exist regardless — modules use them");
 
             runtime.start();

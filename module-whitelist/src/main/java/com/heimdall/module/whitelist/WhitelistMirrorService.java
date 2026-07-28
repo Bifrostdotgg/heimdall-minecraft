@@ -1,6 +1,6 @@
 package com.heimdall.module.whitelist;
 
-import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.model.WhitelistSyncEntry;
 import com.heimdall.core.http.model.WhitelistSyncResult;
 import com.heimdall.core.log.HeimdallLogger;
@@ -62,13 +62,21 @@ final class WhitelistMirrorService {
     static final String MIRROR_NAME = "whitelist-mirror";
 
     private final HeimdallLogger logger;
-    private final ApiClient api;
+    private final HeimdallApi api;
     private final MirrorStore<String> mirror;
     private final Supplier<WhitelistSettings> settings;
 
+    /**
+     * When the last poll last confirmed the mirror against the bot, or {@code 0}.
+     *
+     * <p>Volatile: written on {@code heimdall-sched} by the poll, read from a command handler on a
+     * server thread. Set by a 304 as well as by a full reconcile — see {@link #syncNow()}.
+     */
+    private volatile long lastSyncAtMs;
+
     WhitelistMirrorService(
             HeimdallLogger logger,
-            ApiClient api,
+            HeimdallApi api,
             MirrorStore<String> mirror,
             Supplier<WhitelistSettings> settings) {
         this.logger = logger;
@@ -107,9 +115,31 @@ final class WhitelistMirrorService {
         }
     }
 
-    /** For {@code /hd whitelist} in phase 1e, and for the log line after a sync. */
+    /** The store's own summary: entries, expired, ETag. What the log line after a sync prints. */
     String stats() {
         return mirror.stats();
+    }
+
+    /**
+     * The same summary with the age of the last successful sync on the end, for {@code /hd status}.
+     *
+     * <p>The age is the part that answers the question an operator is actually asking. "412 entries"
+     * looks healthy whether the last successful pull was ninety seconds ago or three days ago, and
+     * only one of those is a mirror that would still be right during an outage — which is the entire
+     * property the pre-warm poll exists to provide.
+     */
+    String adminStats() {
+        long at = lastSyncAtMs;
+        if (at == 0L) {
+            return mirror.stats() + ", never synced";
+        }
+        long agoSeconds = Math.max(0L, (System.currentTimeMillis() - at) / 1000L);
+        return mirror.stats() + ", last synced " + agoSeconds + "s ago";
+    }
+
+    /** Empties the mirror and its ETag, so the next poll is a full one. {@code /hd cache clear}. */
+    void clear() {
+        mirror.clear();
     }
 
     // ── The pre-warm poll ────────────────────────────────────────────────────
@@ -125,7 +155,7 @@ final class WhitelistMirrorService {
         if (!settings.get().prewarmEnabled()) {
             return;
         }
-        if (api == null || !api.settings().isUsable()) {
+        if (!api.isUsable()) {
             // The discovering state, or a server that was never set up. Not a warning: it is the
             // state every server is in for the first seconds of its life.
             logger.debug("skipping the whitelist pre-warm: this server has no guild yet");
@@ -135,6 +165,10 @@ final class WhitelistMirrorService {
             WhitelistSyncResult result = api.whitelistSync(mirror.lastEtag())
                     .get(api.settings().whitelistSyncJoinTimeoutMs(), TimeUnit.MILLISECONDS);
             if (result.notModified()) {
+                // Still a successful sync: the bot confirmed the mirror is current, which is exactly
+                // what the age in adminStats() is claiming. Not stamping it here would make a server
+                // whose whitelist never changes look like one whose polls have been failing for days.
+                lastSyncAtMs = System.currentTimeMillis();
                 logger.debug(() -> "whitelist unchanged since the last sync (" + mirror.stats() + ")");
                 return;
             }
@@ -149,6 +183,7 @@ final class WhitelistMirrorService {
             // Stored only after a successful reconcile. Recording it first would mean a reconcile
             // that failed half-way left the mirror answering 304 against rows it never applied.
             mirror.setLastEtag(result.etag());
+            lastSyncAtMs = System.currentTimeMillis();
         } catch (Exception failed) {
             // Everything, including an interrupt and a timeout. The mirror is left exactly as it
             // was: a transient bot outage must not erase the very entries that protect against it.
@@ -158,9 +193,13 @@ final class WhitelistMirrorService {
         }
     }
 
-    /** Drops entries whose window has closed. Cheap, and keeps the file from growing forever. */
-    void sweepExpired() {
-        mirror.sweepExpired();
+    /**
+     * Drops entries whose window has closed. Cheap, and keeps the file from growing forever.
+     *
+     * @return how many were removed, so {@code /hd cache cleanup} can say
+     */
+    int sweepExpired() {
+        return mirror.sweepExpired();
     }
 
     // ── Session windows ──────────────────────────────────────────────────────
@@ -237,12 +276,44 @@ final class WhitelistMirrorService {
         return message == null ? failure.getClass().getSimpleName() : message;
     }
 
+    /**
+     * The UUID the mirror holds for a username, or {@code null}.
+     *
+     * <p>For {@code /hd test} on a player who is not online. The mirror is the plugin's own copy of
+     * the bot's uuid-to-name mapping, refreshed by every pre-warm poll, so this is a real answer
+     * rather than the offline-mode UUID a name would otherwise be hashed into — and that matters,
+     * because on a premium server the derived id belongs to nobody and the probe would then be
+     * about a player who does not exist.
+     *
+     * <p>A linear scan, deliberately: the reverse index it would otherwise need is a second thing to
+     * keep consistent on every write, and this runs once per admin command rather than once per
+     * login. Case-insensitive, because an operator typing a name is not checking its capitalisation.
+     */
+    UUID uuidForName(String username) {
+        if (Strings.isBlank(username)) {
+            return null;
+        }
+        String wanted = username.trim();
+        for (String key : mirror.keys()) {
+            String held = mirror.get(key);
+            if (held != null && held.equalsIgnoreCase(wanted)) {
+                try {
+                    return UUID.fromString(key);
+                } catch (IllegalArgumentException notAUuid) {
+                    // A hand-edited mirror file. Skipping it is better than failing the command.
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
     /** Only for the tests that need to reach past the service at the store itself. */
     MirrorStore<String> store() {
         return mirror;
     }
 
-    /** The keys currently held. For {@code /hd whitelist} in 1e, and for assertions. */
+    /** The keys currently held. For assertions; {@code /hd cache stats} reads the summary instead. */
     List<String> keys() {
         return new java.util.ArrayList<String>(mirror.keys());
     }

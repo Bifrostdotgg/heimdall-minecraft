@@ -1,7 +1,7 @@
 package com.heimdall.module.whitelist;
 
 import com.heimdall.core.concurrent.InFlight;
-import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.model.ConnectionAttempt;
 import com.heimdall.core.http.model.ConnectionAttemptResult;
 import com.heimdall.core.log.HeimdallLogger;
@@ -57,7 +57,7 @@ import java.util.function.Supplier;
 final class ConnectionAttemptReporter {
 
     private final HeimdallLogger logger;
-    private final ApiClient api;
+    private final HeimdallApi api;
     private final PlatformFacade platform;
     private final Executor io;
     private final Supplier<RoleSyncSink> roleSync;
@@ -67,7 +67,7 @@ final class ConnectionAttemptReporter {
 
     ConnectionAttemptReporter(
             HeimdallLogger logger,
-            ApiClient api,
+            HeimdallApi api,
             PlatformFacade platform,
             Executor io,
             Supplier<RoleSyncSink> roleSync) {
@@ -78,9 +78,17 @@ final class ConnectionAttemptReporter {
         this.roleSync = roleSync;
     }
 
-    /** Whether there is a usable client at all — false while the guild is still being discovered. */
+    /**
+     * Whether the bot can be asked at all — false while the guild is still being discovered.
+     *
+     * <p>Asked <em>before</em> firing rather than caught afterwards. Without a guild the gateway
+     * refuses the call outright (departure D56), which is right, but a mirror hit on a restarting
+     * server would still produce one refused future per returning player and a debug line each. The
+     * interceptor branches on this instead, because "no guild yet" is a reason to run the configured
+     * fallback rather than a reason to report a failure.
+     */
     boolean isUsable() {
-        return api != null && api.settings().isUsable();
+        return api.isUsable();
     }
 
     /**
@@ -110,6 +118,57 @@ final class ConnectionAttemptReporter {
             }
             throw new IllegalStateException("the whitelist check failed", cause == null ? failed : cause);
         }
+    }
+
+    /**
+     * Asks the bot about a player who is <strong>not</strong> joining, and changes nothing.
+     *
+     * <p>What {@code /hd test} runs on. Three deliberate differences from {@link #awaitCheck}, and
+     * each is the difference between a diagnostic and a side effect:
+     *
+     * <ul>
+     *   <li><strong>No role sync.</strong> The response carries a group snapshot, and applying it
+     *       would mean an operator typing a test command silently rewrote somebody's LuckPerms
+     *       groups.
+     *   <li><strong>No {@link InFlight} collapsing.</strong> A probe must not be answered by a real
+     *       login's in-flight request: that request was made with a different
+     *       {@code currentlyWhitelisted}, and its completion applies roles. Bypassing the map costs
+     *       one extra request on a command nobody runs in a loop.
+     *   <li><strong>No mirror write.</strong> That is the interceptor's decision either way, and on
+     *       this path it is simply not made.
+     * </ul>
+     *
+     * <p>Blocking, bounded by the same join budget, and it throws whatever the request failed with
+     * so the caller can report which fallback would have applied.
+     */
+    ConnectionAttemptResult probe(LoginAttempt login) {
+        CompletableFuture<ConnectionAttemptResult> pending = currentGroups(login)
+                .thenCompose(groups -> api.connectionAttempt(request(login, groups, false)));
+        try {
+            return pending.get(api.settings().joinTimeoutMs(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while probing the whitelist", interrupted);
+        } catch (TimeoutException tooSlow) {
+            throw new IllegalStateException(
+                    "the bot did not answer within " + api.settings().joinTimeoutMs() + "ms", tooSlow);
+        } catch (ExecutionException failed) {
+            Throwable cause = failed.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw new IllegalStateException("the whitelist probe failed", cause == null ? failed : cause);
+        }
+    }
+
+    /** The request body, built once so the login path and the probe cannot describe a player differently. */
+    private static ConnectionAttempt request(
+            LoginAttempt login, List<String> groups, boolean currentlyWhitelisted) {
+        return ConnectionAttempt.builder(login.username(), login.uuid().toString())
+                .ip(login.ipAddress())
+                .currentlyWhitelisted(currentlyWhitelisted)
+                .currentGroups(groups)
+                .build();
     }
 
     /**
@@ -160,15 +219,10 @@ final class ConnectionAttemptReporter {
                 // the continuation builds a request and hands it to ApiClient, which does its own
                 // hop onto heimdall-io, and the conformance rules ban the executor-less *Async
                 // overloads rather than the synchronous stages.
-                return currentGroups(login).thenCompose(groups -> {
-                    ConnectionAttempt attempt = ConnectionAttempt
-                            .builder(login.username(), login.uuid().toString())
-                            .ip(login.ipAddress())
-                            .currentlyWhitelisted(currentlyWhitelisted)
-                            .currentGroups(groups)
-                            .build();
-                    return api.connectionAttempt(attempt);
-                }).whenComplete(new BiConsumer<ConnectionAttemptResult, Throwable>() {
+                return currentGroups(login)
+                        .thenCompose(groups -> api.connectionAttempt(
+                                request(login, groups, currentlyWhitelisted)))
+                        .whenComplete(new BiConsumer<ConnectionAttemptResult, Throwable>() {
                     @Override
                     public void accept(ConnectionAttemptResult result, Throwable failure) {
                         if (failure == null && result != null) {

@@ -130,6 +130,29 @@ public final class ModuleManager implements CapabilitySource, ConfigListener {
         }
     }
 
+    /**
+     * What one module declares, whether or not it is running.
+     *
+     * <p>For {@code /hd status}, and the reason it is worth showing there: the bot narrows its
+     * {@code config.push} to the base ids of the declared capabilities, so a module that is enabled
+     * but declares nothing receives no settings at all — silently, because an empty push is a valid
+     * push. Without this line, that state and "the dashboard value is not saving" look identical.
+     *
+     * @return an immutable set, empty for an unknown module and for one that declares nothing
+     */
+    public Set<String> capabilitiesOf(String moduleId) {
+        synchronized (lifecycleLock) {
+            Managed managed = modules.get(moduleId);
+            if (managed == null) {
+                return Collections.emptySet();
+            }
+            Set<String> claimed = managed.module.capabilities();
+            return claimed == null
+                    ? Collections.<String>emptySet()
+                    : Collections.unmodifiableSet(new LinkedHashSet<String>(claimed));
+        }
+    }
+
     /** The ids currently running. */
     public Set<String> enabledIds() {
         Set<String> enabled = new LinkedHashSet<String>();

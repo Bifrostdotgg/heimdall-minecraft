@@ -2,22 +2,28 @@ package com.heimdall.platform.bukkit;
 
 import com.heimdall.api.HeimdallTunnel;
 import com.heimdall.core.BuildConstants;
+import com.heimdall.core.admin.AdminCommand;
+import com.heimdall.core.admin.AdminContext;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.log.JulLogger;
+import com.heimdall.core.migrate.MigrationResult;
 import com.heimdall.core.platform.InstanceRoleDetector;
+import com.heimdall.core.util.Registration;
 import com.heimdall.core.wiring.HeimdallRuntime;
+import com.heimdall.core.wiring.MigrationBoot;
+import com.heimdall.core.wiring.UpdateWiring;
 import com.heimdall.platform.bukkit.adapter.BukkitAdapters;
 import com.heimdall.platform.bukkit.adapter.TickSource;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.TunnelSpiService;
 import java.io.File;
+import java.util.Collections;
 import org.bukkit.Bukkit;
-import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -60,6 +66,18 @@ final class BukkitBootstrap {
     private final long startedAtMs = System.currentTimeMillis();
 
     /**
+     * This plugin's own jar, from {@code JavaPlugin.getFile()}.
+     *
+     * <p>Passed in rather than read here because {@code getFile()} is {@code protected} and only the
+     * {@code JavaPlugin} subclass can call it. The self-updater needs it: Bukkit applies a staged
+     * update by matching <em>file names</em>, so writing the download under the release's own name
+     * rather than this one would leave two Heimdall jars in {@code plugins/} after the restart.
+     * {@code null} on a loader that does not expose it, in which case the updater refuses rather
+     * than guessing.
+     */
+    private final File ownJar;
+
+    /**
      * Held rather than kept in a local, because a throw part-way through {@link #enable()} would
      * otherwise strand three thread pools with nothing holding a reference to them.
      *
@@ -72,8 +90,15 @@ final class BukkitBootstrap {
     private HeimdallRuntime runtime;
     private TunnelSpiService spi;
 
-    BukkitBootstrap(JavaPlugin plugin) {
+    /** The {@code /hd} and {@code /hwl} registrations, unbound on disable. */
+    private Registration adminCommands = Registration.NONE;
+
+    /** The updater's periodic check, its {@code update} subscription and its join notice. */
+    private Registration updates = Registration.NONE;
+
+    BukkitBootstrap(JavaPlugin plugin, File ownJar) {
         this.plugin = plugin;
+        this.ownJar = ownJar;
         this.logger = new JulLogger(plugin.getLogger());
     }
 
@@ -95,6 +120,13 @@ final class BukkitBootstrap {
 
         BootstrapStore store =
                 new BootstrapStore(logger, dataFolder.toPath().resolve("bootstrap.yml"));
+        // Before the bootstrap is read, because on the first boot after a v2 upgrade this is what
+        // writes it. A server that already has one short-circuits immediately, so this costs a
+        // couple of stat calls on every other boot. v2's directory is the sibling
+        // plugins/HeimdallWhitelist/, which is where every real upgrade's config actually is.
+        MigrationResult migration = MigrationBoot.migrate(
+                logger, store, dataFolder.toPath(), MigrationBoot.V2_BUKKIT_DIRECTORY);
+
         // Read once and passed to both consumers. Two reads would be two chances to disagree about
         // what is on disk if a setup command wrote between them, and it is a file parse on the
         // boot path either way.
@@ -118,14 +150,27 @@ final class BukkitBootstrap {
 
         // Between build() and start(), which is the gap the runtime leaves open for exactly this:
         // modules must be registered before the first reconcile, and start() is what runs it.
-        HeimdallModules.registerAll(runtime);
+        AdminContext.Builder admin = AdminContext.builder(runtime)
+                .role(role)
+                .pluginVersion(BuildConstants.VERSION);
+        HeimdallModules.registerAll(runtime, admin);
+
+        BukkitUpdateInstaller installer = new BukkitUpdateInstaller(logger, ownJar, dataFolder);
+        UpdateWiring.Installed update = UpdateWiring.install(
+                logger, BuildConstants.VERSION, runtime, installer.isUsable() ? installer : null);
+        updates = update.periodicChecks();
+        admin.updates(update.admin());
 
         registerListeners();
-        registerCommand(role);
+        registerCommands(admin.build());
         registerSpi();
 
         boolean tapped = platform.attachConsoleTap();
         runtime.start();
+
+        // After start(), because it schedules against the runtime's pools and waits for the guild
+        // that start() is what begins resolving. A no-op unless this boot migrated something.
+        MigrationBoot.scheduleImport(logger, runtime, migration);
 
         logger.info("Heimdall v" + BuildConstants.VERSION + " enabled — role " + role.wireName()
                 + ", ticks via " + ticks.describe() + ", console tap " + (tapped ? "on" : "off"));
@@ -142,6 +187,22 @@ final class BukkitBootstrap {
      * would otherwise own them was never built.
      */
     void disable() {
+        guarded("stopping the update checker", new Runnable() {
+            @Override
+            public void run() {
+                updates.close();
+            }
+        });
+        updates = Registration.NONE;
+
+        guarded("unregistering the admin command", new Runnable() {
+            @Override
+            public void run() {
+                adminCommands.close();
+            }
+        });
+        adminCommands = Registration.NONE;
+
         guarded("uninstalling the tunnel SPI", new Runnable() {
             @Override
             public void run() {
@@ -230,15 +291,20 @@ final class BukkitBootstrap {
                 plugin);
     }
 
-    private void registerCommand(ServerRole role) {
-        PluginCommand command = plugin.getCommand("hd");
-        if (command == null) {
-            // Not fatal, but silent otherwise: a plugin.yml the entry point never claims produces a
-            // command that answers "Unknown command" with nothing anywhere to explain it.
-            logger.warn("plugin.yml does not declare the 'hd' command — /hd will not work");
-            return;
-        }
-        command.setExecutor(new HeimdallBukkitCommand(runtime, platform.messenger(), role));
+    /**
+     * Binds {@code /hd} (and {@code /heimdall}), plus the deprecated {@code /hwl} alias.
+     *
+     * <p>Through the platform's own {@link com.heimdall.core.command.CommandRegistrar} rather than
+     * by reaching for a {@code PluginCommand} directly, so the admin tree gets the same permission
+     * gate, the same containment of a handler that throws and the same collision warning every
+     * module command already gets — and so the proxy's copy is the identical code.
+     *
+     * <p>Both names must be in {@code plugin.yml}: Bukkit fixes a command's existence at load time,
+     * and the registrar warns rather than throwing when one is missing (D53).
+     */
+    private void registerCommands(AdminContext admin) {
+        adminCommands = AdminCommand.install(
+                platform.commands(), admin, "hd", Collections.singletonList("heimdall"));
     }
 
     private void registerSpi() {

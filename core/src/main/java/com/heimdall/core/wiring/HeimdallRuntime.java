@@ -5,6 +5,8 @@ import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.http.ApiClient;
 import com.heimdall.core.http.BedrockIdentityProvider;
+import com.heimdall.core.http.ClaimClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.module.ModuleEnvironment;
 import com.heimdall.core.module.ModuleManager;
@@ -40,16 +42,32 @@ import java.util.List;
  * exists precisely so this code does not. So it lives here, is written once, and the platform
  * entry points shrink to "build a facade, hand it over, start".
  *
- * <h2>Not configured is a first-class state</h2>
+ * <h2>Not configured is a first-class state, and the objects exist anyway</h2>
  *
  * <p>A fresh install has no {@code bootstrap.yml}. That is the normal case, not a failure: the
  * plugin still enables, still registers its commands, and still loads its modules on their defaults
- * — it simply does not dial the bot, and says so once. Anything else means a server operator who
- * dropped the jar in gets a stack trace instead of an instruction.
+ * — it simply does not dial the bot, and says so once.
  *
- * <p>{@link #tunnel()} and {@link #api()} are therefore {@code null} in that state, and everything
- * that could reach for them is either absent or given the offline substitute the module system
- * already provides.
+ * <p><strong>What changed in 1e is that "not configured" no longer means "the collaborators are
+ * null".</strong> The {@link ApiClient}, the {@link HeimdallApi} gateway over it and the
+ * {@link TunnelClient} are all built on every boot, configured or not, and
+ * {@link #applySetup(BootstrapConfig)} reconfigures them <em>in place</em> when {@code /hd setup}
+ * lands. That is what makes setup work without a restart, and it closes three separate versions of
+ * the same bug:
+ *
+ * <ul>
+ *   <li>a module captured a {@code null} {@code ApiClient} at registration and held it forever
+ *       (departure D56), so {@code /offend} refused on a server that was demonstrably connected;
+ *   <li>a module's tunnel subscriptions went to the offline no-op bus and were never re-made
+ *       against the real one, so a freshly claimed server received role syncs nothing was listening
+ *       for;
+ *   <li>{@code TunnelSpiService} captured the same {@code null} bus at enable, so a third-party
+ *       plugin's SPI stayed dead until a restart (the 1c TODO known as N7).
+ * </ul>
+ *
+ * <p>None of those needed three fixes. They needed the objects to be stable and their
+ * <em>settings</em> to be what moves — which is exactly what guild discovery had always done, and
+ * exactly why guild discovery never had this problem.
  *
  * <h2>Construction and start are separate</h2>
  *
@@ -62,13 +80,36 @@ import java.util.List;
  * <p>Modules stop, then the tunnel, then the pools. Shutting the pools down first would strand every
  * in-flight disable on a rejected task, and the symptom — a mirror that did not flush — appears one
  * boot later as data loss.
+ *
+ * <h2>Threading</h2>
+ *
+ * <p>{@link #applySetup}, {@link #reload()} and the private guild adoption are serialised on one
+ * lock: all three re-point the same settings and the same discovery handle, and two of them
+ * genuinely can be concurrent (a command handler on a server thread, and guild discovery completing
+ * on {@code heimdall-io}).
+ *
+ * <p><strong>{@link #close()} deliberately does not take that lock.</strong> It shuts the pools
+ * down, and that <em>waits</em> for {@code heimdall-io} to drain — so a guild adoption blocked on a
+ * lock this method holds would sit there until the grace period expired and then be interrupted,
+ * turning a clean shutdown into fifteen seconds of hanging and three severe lines. That is the
+ * deadlock class the connected smoke scenario already caught once. Teardown reads a volatile
+ * {@code closed} flag instead, and every reconfiguration step re-checks it before touching the
+ * tunnel.
  */
 public final class HeimdallRuntime implements AutoCloseable {
 
     private final HeimdallLogger logger;
     private final PlatformFacade platform;
     private final BootstrapStore bootstrapStore;
-    private final BootstrapConfig bootstrap;
+    private final IdentitySource identitySource;
+
+    /**
+     * What is on disk right now.
+     *
+     * <p>Volatile and no longer final: {@link #applySetup} replaces it, and a status command on a
+     * server thread reads it.
+     */
+    private volatile BootstrapConfig bootstrap;
 
     /**
      * The guild in force. Volatile because guild discovery writes it from {@code heimdall-io} while
@@ -83,25 +124,44 @@ public final class HeimdallRuntime implements AutoCloseable {
     private final PlayerSessionEvents playerSessions;
     private final ModuleManager modules;
 
-    /** {@code null} once the guild is known, or on a server that was never set up. */
-    private final GuildDiscovery guildDiscovery;
+    /** Built on every boot, configured or not. Re-pointed in place; never replaced. */
+    private final ApiClient apiClient;
 
-    /** {@code null} when this server has not been set up yet. */
-    private final ApiClient api;
+    /** The gateway modules hold. One per plugin, for the life of the plugin. See departure D56. */
+    private final HeimdallApi api;
 
-    /** {@code null} when this server has not been set up yet. */
+    /** Built on every boot, configured or not; dials only once it has settings that can. */
     private final TunnelClient tunnel;
+
+    /** Built on demand by {@code /hd setup}, which is the only thing that claims a code. */
+    private volatile ClaimClient claimClient;
+
+    /**
+     * The current attempt to resolve this token's guild, or {@code null} when there is nothing to
+     * resolve with. Replaced by {@link #applySetup}, because a resolved or closed one cannot be
+     * restarted.
+     */
+    private volatile GuildDiscovery guildDiscovery;
 
     /** Everything {@link #start()} registered, closed in reverse on the way out. */
     private final List<Registration> registrations = new ArrayList<Registration>();
 
-    private boolean started;
-    private boolean closed;
+    /**
+     * Serialises the three paths that re-point the client and the tunnel.
+     *
+     * <p>A dedicated object rather than {@code this}, so {@link #close()} can be written without it
+     * — see the threading note on the class. Nothing that waits on a pool may ever hold this.
+     */
+    private final Object reconfigureLock = new Object();
+
+    private volatile boolean started;
+    private volatile boolean closed;
 
     private HeimdallRuntime(Builder builder) {
         this.logger = builder.logger;
         this.platform = builder.platform;
         this.bootstrapStore = builder.bootstrapStore;
+        this.identitySource = builder.identitySource;
         this.bootstrap = bootstrapStore.load();
         // Explicit beats cached beats nothing. The cached value is what a restart during a bot
         // outage runs on — see BootstrapConfig#guildId — and is overwritten by whatever `identify`
@@ -120,18 +180,21 @@ public final class HeimdallRuntime implements AutoCloseable {
         Path cachePath = platform.dataDirectory().resolve("config-cache.json");
         this.remoteConfig = new RemoteConfig(logger, cachePath, ConfigDocument.empty());
 
-        this.api = bootstrap.isConfigured() ? buildApiClient(builder) : null;
-        // Built even with no guild yet: TunnelClient carries `reconnect(guildId)` for exactly this,
-        // so discovery fills the gap in place rather than the runtime having to construct a client
-        // later and re-point everything that already holds a reference to the old one.
-        this.tunnel = bootstrap.isConfigured() ? buildTunnel(builder) : null;
-        this.guildDiscovery = needsGuildDiscovery() ? buildGuildDiscovery() : null;
+        this.apiClient = buildApiClient(builder);
+        this.api = new HeimdallApi(apiClient);
+        // Built unconditionally, with whatever settings there are. TunnelClient tolerates settings
+        // it cannot connect with — connect() says so and returns — and building it here is what
+        // gives every module a subscription registry that survives the server being set up
+        // underneath it.
+        this.tunnel = buildTunnel(builder);
+        this.guildDiscovery = bootstrap.isConfigured() ? buildGuildDiscovery() : null;
 
         this.playerSessions = new PlayerSessionEvents(logger, executors.io());
 
         this.modules = new ModuleManager(ModuleEnvironment.builder()
                 .logger(logger)
                 .executors(executors)
+                .api(api)
                 .tunnel(tunnel)
                 .remoteConfig(remoteConfig)
                 .loginPipeline(loginPipeline)
@@ -140,12 +203,10 @@ public final class HeimdallRuntime implements AutoCloseable {
                 .playerSessions(playerSessions)
                 .build());
 
-        if (tunnel != null) {
-            // Set after the manager exists: the dependency genuinely runs both ways — the manager
-            // hands each module a bus backed by the client, and the client asks the manager what to
-            // declare. See CapabilitySource.
-            tunnel.setCapabilitySource(modules);
-        }
+        // Set after the manager exists: the dependency genuinely runs both ways — the manager hands
+        // each module a bus backed by the client, and the client asks the manager what to declare.
+        // See CapabilitySource.
+        tunnel.setCapabilitySource(modules);
     }
 
     public static Builder builder(HeimdallLogger logger, PlatformFacade platform) {
@@ -164,38 +225,38 @@ public final class HeimdallRuntime implements AutoCloseable {
     }
 
     /**
-     * Discovery runs whenever there is a client to run it with — cached guild or not.
+     * Discovery runs whenever there are credentials to run it with — cached guild or not.
      *
      * <p>The cache is provisional. Skipping the ask because a value exists is the sticky-wrong-guild
      * trap {@link GuildDiscovery} describes: a token moved between guilds, re-issued bot-side, or a
      * {@code bootstrap.yml} copied to a second server leaves the cached value permanently wrong, and
      * a plugin that never re-asks signs perfectly valid requests against somebody else's guild.
      */
-    private boolean needsGuildDiscovery() {
-        return api != null;
-    }
-
     private GuildDiscovery buildGuildDiscovery() {
-        return new GuildDiscovery(logger, api, executors.scheduler(), new java.util.function.Consumer<String>() {
-            @Override
-            public void accept(String resolved) {
-                adoptGuild(resolved);
-            }
-        });
+        return new GuildDiscovery(logger, apiClient, executors.scheduler(),
+                new java.util.function.Consumer<String>() {
+                    @Override
+                    public void accept(String resolved) {
+                        adoptGuild(resolved);
+                    }
+                });
     }
 
     private TunnelClient buildTunnel(Builder builder) {
-        TunnelSettings settings = TunnelSettings.builder()
-                .endpoint(bootstrap.endpoint())
-                .guildId(guildId)
-                .serverId(bootstrap.serverId())
-                .apiKey(bootstrap.token())
-                .build();
         return TunnelClient.builder(logger, executors)
-                .settings(settings)
+                .settings(tunnelSettings(bootstrap, guildId))
                 .identitySource(builder.identitySource)
                 .healthSource(builder.healthSource)
                 .configPushHandler(remoteConfig)
+                .build();
+    }
+
+    private static TunnelSettings tunnelSettings(BootstrapConfig config, String guild) {
+        return TunnelSettings.builder()
+                .endpoint(config.endpoint())
+                .guildId(guild)
+                .serverId(config.serverId())
+                .apiKey(config.token())
                 .build();
     }
 
@@ -218,21 +279,27 @@ public final class HeimdallRuntime implements AutoCloseable {
         // from whenever the bot answers, and a module enabled below reads its settings immediately.
         remoteConfig.loadFromCache();
 
-        if (tunnel != null) {
-            registrations.add(tunnel.onModeChange(remoteConfig));
-        }
+        registrations.add(tunnel.onModeChange(remoteConfig));
         registrations.add(modules.followRemoteConfig());
         modules.reconcileFromConfig();
 
-        if (tunnel == null) {
+        if (!bootstrap.isConfigured()) {
             logger.info("not set up yet — run /hd setup <code> to connect this server to Discord "
                     + "(see " + bootstrapStore.file() + ")");
             return;
         }
-        // Started before the dial, and independently of it. With a cached guild the tunnel goes up
-        // now on the provisional value and this confirms it in the background; without one, this is
-        // the only thing that will produce a tunnel at all.
-        if (guildDiscovery != null) {
+        dial();
+    }
+
+    /**
+     * Starts discovery and, if there is a guild to dial with, the tunnel.
+     *
+     * <p>Shared by {@link #start()} and {@link #applySetup}, because the two want exactly the same
+     * thing to happen and the second used to be reachable only by restarting the server.
+     */
+    private void dial() {
+        GuildDiscovery discovery = guildDiscovery;
+        if (discovery != null) {
             if (Strings.isBlank(guildId)) {
                 logger.info("discovering which guild this server's token belongs to; the tunnel "
                         + "stays idle until it answers");
@@ -240,7 +307,7 @@ public final class HeimdallRuntime implements AutoCloseable {
                 logger.debug(() -> "dialling on the cached guild " + guildId
                         + " and confirming it with the bot in the background");
             }
-            guildDiscovery.start();
+            discovery.start();
         }
 
         if (Strings.isBlank(guildId)) {
@@ -257,6 +324,162 @@ public final class HeimdallRuntime implements AutoCloseable {
     }
 
     /**
+     * Adopts the credentials a setup code was just exchanged for, without a restart.
+     *
+     * <p>The whole of {@code /hd setup}'s second half, and the reason the collaborators above are
+     * built unconditionally. In order: persist, re-point the HTTP client, re-point the tunnel,
+     * confirm the guild, dial. Nothing is replaced and nothing is re-registered, so every module,
+     * every tunnel subscription and the public SPI are all still pointing at the objects that just
+     * became usable.
+     *
+     * <p>The file is written <strong>first</strong>, and a failure to write it aborts the whole
+     * thing. A server that connects but did not persist its token is one that silently reverts to
+     * unconfigured on its next restart, having consumed a single-use setup code that cannot be
+     * claimed again — the operator would have to notice by themselves, weeks later.
+     *
+     * @param updated what to write; must be {@link BootstrapConfig#isConfigured()}
+     * @throws IOException if {@code bootstrap.yml} could not be written, in which case nothing else
+     *     has changed
+     */
+    public void applySetup(BootstrapConfig updated) throws IOException {
+        synchronized (reconfigureLock) {
+            applySetupLocked(updated);
+        }
+    }
+
+    private void applySetupLocked(BootstrapConfig updated) throws IOException {
+        if (updated == null || !updated.isConfigured()) {
+            throw new IllegalArgumentException("setup needs an endpoint and credentials");
+        }
+        if (closed) {
+            throw new IllegalStateException("this runtime has been shut down");
+        }
+        bootstrapStore.save(updated);
+        this.bootstrap = updated;
+        this.guildId = updated.guildId();
+        logger.setDebugEnabled(updated.debug());
+
+        apiClient.reconfigure(ApiSettingsFactory.fromBootstrap(updated, guildId).build());
+        tunnel.applySettings(tunnelSettings(updated, guildId));
+
+        // A resolved or closed discovery cannot be restarted, and the token has just changed, so
+        // whatever the old one concluded is about a credential this server no longer uses.
+        GuildDiscovery previous = guildDiscovery;
+        if (previous != null) {
+            previous.close();
+        }
+        this.guildDiscovery = buildGuildDiscovery();
+
+        // Only after everything is pointed at the new bot. A module reading its config during the
+        // reconcile below must not see a half-applied setup.
+        modules.reconcileFromConfig();
+        dial();
+    }
+
+    /**
+     * Writes a bootstrap that changes nothing about how the bot is reached.
+     *
+     * <p>{@code /hd debug on} is the only caller, and the restriction is the point: this does
+     * <strong>not</strong> re-point the HTTP client, the tunnel or guild discovery, so handing it
+     * changed credentials would produce a file that disagrees with the running process until the
+     * next restart. Anything that touches the endpoint, the token or the server id goes through
+     * {@link #applySetup} instead.
+     *
+     * @throws IOException if the file could not be written, in which case the in-memory config is
+     *     left alone too
+     */
+    public void persist(BootstrapConfig updated) throws IOException {
+        if (updated == null) {
+            throw new IllegalArgumentException("a config is required");
+        }
+        synchronized (reconfigureLock) {
+            bootstrapStore.save(updated);
+            this.bootstrap = updated;
+        }
+    }
+
+    /**
+     * Turns debug logging on or off for every thread, immediately.
+     *
+     * <p>Separate from {@link #persist} so the toggle takes effect even when the file cannot be
+     * written: an operator debugging a server whose data directory is read-only is exactly the
+     * person who needs the flag, and refusing it because the <em>persistence</em> failed would be
+     * the wrong half to drop.
+     */
+    public void setDebugLogging(boolean enabled) {
+        logger.setDebugEnabled(enabled);
+    }
+
+    /**
+     * Re-reads {@code bootstrap.yml} and the config cache, and rebuilds the tunnel in place.
+     *
+     * <p>What {@code /hd reload} calls. "In place" is the whole contract, and it is v2's reload bug
+     * class stated as a requirement: v2 rebuilt its WebSocket client, which orphaned the previous
+     * one's scheduler and selector thread and silently dropped the message-handler wiring, so a
+     * server reloaded a few times was a server with several half-live sockets and no role sync.
+     * {@link TunnelClient#reconnect(String)} reuses the instance, its executors and its
+     * subscriptions.
+     *
+     * <p>Credentials that changed on disk are applied; credentials that did not are left alone, so a
+     * reload on a working server is a reconnect rather than a re-authentication.
+     *
+     * @return a short line describing what it did, for the command that asked
+     */
+    public String reload() {
+        synchronized (reconfigureLock) {
+            return reloadLocked();
+        }
+    }
+
+    private String reloadLocked() {
+        if (closed) {
+            return "this server is shutting down";
+        }
+        BootstrapConfig onDisk = bootstrapStore.load();
+        boolean credentialsChanged = !onDisk.endpoint().equals(bootstrap.endpoint())
+                || !onDisk.token().equals(bootstrap.token())
+                || !onDisk.tokenId().equals(bootstrap.tokenId())
+                || !onDisk.serverId().equals(bootstrap.serverId());
+
+        this.bootstrap = onDisk;
+        logger.setDebugEnabled(onDisk.debug());
+
+        // The cache and the live document are the same thing on a connected server — every push is
+        // written through — so this only ever does something for a hand-edited cache or a server
+        // that has not connected yet. Harmless in the common case, and the only way to pick up the
+        // uncommon one without a restart.
+        remoteConfig.loadFromCache();
+        modules.reconcileFromConfig();
+
+        if (!onDisk.isConfigured()) {
+            return "re-read " + bootstrapStore.file() + "; this server is still not set up";
+        }
+
+        apiClient.reconfigure(ApiSettingsFactory.fromBootstrap(onDisk, guildId).build());
+        tunnel.applySettings(tunnelSettings(onDisk, guildId));
+
+        if (credentialsChanged) {
+            GuildDiscovery previous = guildDiscovery;
+            if (previous != null) {
+                previous.close();
+            }
+            this.guildDiscovery = buildGuildDiscovery();
+            this.guildId = onDisk.guildId();
+            dial();
+            return "re-read " + bootstrapStore.file()
+                    + "; credentials changed, so the guild is being resolved again";
+        }
+        GuildDiscovery discovery = guildDiscovery;
+        if (discovery != null && !discovery.isResolved()) {
+            // Still discovering. Reconnecting on a guild we do not have would only log a refusal.
+            discovery.start();
+            return "re-read configuration; still waiting for the bot to name this token's guild";
+        }
+        tunnel.reconnect(guildId);
+        return "re-read configuration and reconnected the tunnel";
+    }
+
+    /**
      * Adopts a freshly discovered guild: HTTP client, disk cache, then the tunnel.
      *
      * <p>Runs on {@code heimdall-io}, from {@link GuildDiscovery}'s completion.
@@ -270,6 +493,12 @@ public final class HeimdallRuntime implements AutoCloseable {
      * which is a great deal better than refusing to connect.
      */
     private void adoptGuild(String resolved) {
+        synchronized (reconfigureLock) {
+            adoptGuildLocked(resolved);
+        }
+    }
+
+    private void adoptGuildLocked(String resolved) {
         if (resolved.equals(guildId)) {
             // The overwhelmingly common case once a server has booted once: the cache was right.
             // Returning here is what keeps confirm-on-every-boot cheap — no file write, and above
@@ -286,11 +515,12 @@ public final class HeimdallRuntime implements AutoCloseable {
                     + "probably copied from another server.");
         }
         guildId = resolved;
-        if (api != null) {
-            api.reconfigure(ApiSettingsFactory.fromBootstrap(bootstrap, resolved).build());
-        }
+        BootstrapConfig current = bootstrap;
+        apiClient.reconfigure(ApiSettingsFactory.fromBootstrap(current, resolved).build());
         try {
-            bootstrapStore.save(bootstrap.toBuilder().guildId(resolved).build());
+            BootstrapConfig persisted = current.toBuilder().guildId(resolved).build();
+            bootstrapStore.save(persisted);
+            bootstrap = persisted;
         } catch (IOException | RuntimeException notPersisted) {
             logger.warn("could not cache the resolved guild in " + bootstrapStore.file()
                     + "; this server will ask again on its next boot: " + notPersisted);
@@ -317,14 +547,16 @@ public final class HeimdallRuntime implements AutoCloseable {
         }
         closed = true;
 
-        if (guildDiscovery != null) {
+        final GuildDiscovery discovery = guildDiscovery;
+        if (discovery != null) {
             guarded("stopping guild discovery", new Runnable() {
                 @Override
                 public void run() {
-                    guildDiscovery.close();
+                    discovery.close();
                 }
             });
         }
+        guildDiscovery = null;
 
         guarded("stopping modules", new Runnable() {
             @Override
@@ -344,14 +576,12 @@ public final class HeimdallRuntime implements AutoCloseable {
         }
         registrations.clear();
 
-        if (tunnel != null) {
-            guarded("shutting the tunnel down", new Runnable() {
-                @Override
-                public void run() {
-                    tunnel.shutdown();
-                }
-            });
-        }
+        guarded("shutting the tunnel down", new Runnable() {
+            @Override
+            public void run() {
+                tunnel.shutdown();
+            }
+        });
 
         // Last, and bounded: everything above may have scheduled its final work here.
         guarded("shutting the executors down", new Runnable() {
@@ -393,7 +623,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         return bootstrap.isConfigured();
     }
 
-    /** What was on disk at construction. Immutable; re-reading is a restart or a reload. */
+    /** What is on disk now. Replaced wholesale by {@link #applySetup}; never mutated. */
     public BootstrapConfig bootstrap() {
         return bootstrap;
     }
@@ -431,6 +661,23 @@ public final class HeimdallRuntime implements AutoCloseable {
     }
 
     /**
+     * The server underneath.
+     *
+     * <p>Exposed so the admin tree can reach the two diagnostics that live on the platform rather
+     * than in core — the console tap's dropped-consumer count, and the player directory a
+     * {@code /hd test} resolves a name through. Nothing else should use it: everything a module
+     * needs already arrives through {@code ModuleContext}.
+     */
+    public PlatformFacade platform() {
+        return platform;
+    }
+
+    /** What this server tells the bot about itself, or {@code null} if the platform supplied none. */
+    public IdentitySource identitySource() {
+        return identitySource;
+    }
+
+    /**
      * The guild this server belongs to, or {@code ""} while discovery is still asking.
      *
      * <p>A status command reads this to tell "not set up" apart from "set up, still discovering",
@@ -442,7 +689,8 @@ public final class HeimdallRuntime implements AutoCloseable {
 
     /** Whether the guild is still being resolved — the state in which the tunnel stays idle. */
     public boolean isDiscoveringGuild() {
-        return guildDiscovery != null && !guildDiscovery.isResolved();
+        GuildDiscovery discovery = guildDiscovery;
+        return discovery != null && !discovery.isResolved();
     }
 
     /**
@@ -473,9 +721,6 @@ public final class HeimdallRuntime implements AutoCloseable {
                     return "asking the bot which guild this token belongs to" + provisional;
             }
         }
-        if (tunnel == null) {
-            return "configured, but this build has no tunnel";
-        }
         return tunnel.isConnected()
                 ? "connected to guild " + guildId
                 : "guild " + guildId + " resolved; the tunnel is not connected";
@@ -486,12 +731,38 @@ public final class HeimdallRuntime implements AutoCloseable {
         return modules;
     }
 
-    /** The HTTP client, or {@code null} on a server that has not been set up. */
-    public ApiClient api() {
+    /**
+     * The API, as everything outside core sees it. Never {@code null}, in any state.
+     *
+     * <p>Deliberately not the raw {@link ApiClient}: a caller that held one of those would be
+     * holding a reference that says nothing about whether it can be used, which is the shape of the
+     * bug departure D56 describes.
+     */
+    public HeimdallApi api() {
         return api;
     }
 
-    /** The tunnel, or {@code null} on a server that has not been set up. */
+    /**
+     * The unsigned claim client, built on first use.
+     *
+     * <p>Lazy because exactly one command ever touches it, once, on a server that is by definition
+     * not doing anything else yet — and eager construction would put an object with no
+     * configuration and its own request executor into every server's boot path for nothing.
+     */
+    public ClaimClient claimClient() {
+        ClaimClient existing = claimClient;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (this) {
+            if (claimClient == null) {
+                claimClient = new ClaimClient(logger, executors.io());
+            }
+            return claimClient;
+        }
+    }
+
+    /** The tunnel. Never {@code null}; idle rather than absent on a server that is not set up. */
     public TunnelClient tunnel() {
         return tunnel;
     }
@@ -542,9 +813,9 @@ public final class HeimdallRuntime implements AutoCloseable {
         /**
          * The guild this server belongs to.
          *
-         * <p>Not a bootstrap field: a server can be configured with a token alone and resolve its
-         * guild from the bot, which is what the setup flow does in phase 1e. Until then this is
-         * empty and the tunnel stays idle while the HTTP client works.
+         * <p>Not a bootstrap setting: a server is configured with a token alone and resolves its
+         * guild from the bot (departure D54). This exists for a caller that already knows the
+         * answer — a test, or a claim that has just returned one.
          */
         public Builder guildId(String value) {
             this.guildId = value;

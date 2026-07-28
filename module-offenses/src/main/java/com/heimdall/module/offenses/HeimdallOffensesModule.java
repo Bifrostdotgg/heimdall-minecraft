@@ -1,7 +1,7 @@
 package com.heimdall.module.offenses;
 
+import com.heimdall.core.admin.OffenseAdmin;
 import com.heimdall.core.config.ServerRole;
-import com.heimdall.core.http.ApiClient;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Punishments: {@code /offend}, the offense-type cache behind its tab completion, and nothing else.
@@ -44,14 +45,14 @@ import java.util.concurrent.CompletableFuture;
  * offense is not a login decision, and an operator standing on a backend server must be able to
  * punish somebody without hopping to the proxy.
  *
- * <h2>The {@link ApiClient} arrives through the constructor</h2>
+ * <h2>The API arrives through the context</h2>
  *
- * <p>{@link ModuleContext} does not expose one — core owns the client, and on a server that was
- * never set up there is not one to expose. Rather than widening the context or the platform facade
- * for a single module, the client is a constructor argument, and {@code null} is a supported value:
- * the command answers "this server is not set up yet" and the refresh is a logged no-op. A module
- * that could not load without credentials would leave a fresh install unable to run the setup flow
- * that supplies them.
+ * <p>It used to be a constructor argument that was {@code null} on a server nobody had set up. That
+ * is what made {@code /hd setup} unable to work without a restart: the reference was captured once,
+ * at registration, and nothing could re-hand a live one — so a freshly claimed server had a working
+ * tunnel and an {@code /offend} that still refused. Since 1e it is {@link ModuleContext#api()},
+ * which is one stable gateway core re-points underneath (departure D56). It is never {@code null};
+ * it answers "not set up" instead, which the command reports rather than throwing on.
  *
  * <h2>Threading</h2>
  *
@@ -59,10 +60,10 @@ import java.util.concurrent.CompletableFuture;
  * for this module. Both are quick: {@code enable} registers two things and hands the first refresh
  * to {@code heimdall-io} without waiting for it, and {@code disable} closes two handles.
  *
- * <p>{@link #cachedTypes()} and {@link #refreshOffenseTypes()} are safe from any thread — phase 1e
- * calls them from a command handler on a server thread.
+ * <p>{@link #cachedTypes()} and {@link #refreshOffenseTypes()} are safe from any thread; the admin
+ * tree calls them from {@code heimdall-io} behind {@code /hd offense}.
  */
-public final class HeimdallOffensesModule implements HeimdallModule {
+public final class HeimdallOffensesModule implements HeimdallModule, OffenseAdmin {
 
     /** The module's stable identifier, used for config keys and logging. */
     public static final String ID = "offenses";
@@ -78,8 +79,6 @@ public final class HeimdallOffensesModule implements HeimdallModule {
      */
     public static final long REFRESH_INTERVAL_MS = 5L * 60L * 1000L;
 
-    private final ApiClient api;
-
     /**
      * The cache the current enable built, or {@code null} while the module is stopped.
      *
@@ -91,15 +90,6 @@ public final class HeimdallOffensesModule implements HeimdallModule {
 
     private volatile Registration command = Registration.NONE;
     private volatile Registration refresh = Registration.NONE;
-
-    /**
-     * @param api the bot's API, or {@code null} on a server that has not been set up — see the class
-     *     javadoc. The orchestrator constructs this module and supplies whatever {@code
-     *     HeimdallRuntime.api()} currently holds.
-     */
-    public HeimdallOffensesModule(ApiClient api) {
-        this.api = api;
-    }
 
     @Override
     public String id() {
@@ -120,17 +110,17 @@ public final class HeimdallOffensesModule implements HeimdallModule {
 
     @Override
     public void enable(ModuleContext context) {
-        final OffenseTypeCache types = new OffenseTypeCache(context.logger(), api);
+        final OffenseTypeCache types = new OffenseTypeCache(context.logger(), context.api());
         this.cache = types;
 
-        if (api == null) {
-            context.logger().warn("this server is not set up yet, so /offend will refuse to record "
-                    + "anything until it is");
+        if (!context.api().isUsable()) {
+            context.logger().warn("the bot cannot be asked yet (" + context.api().describe()
+                    + "), so /offend will refuse to record anything until it can");
         }
 
         OffendCommand offend = new OffendCommand(
                 context.logger(),
-                api,
+                context.api(),
                 types,
                 context.platform().players(),
                 context.platform().console());
@@ -172,13 +162,51 @@ public final class HeimdallOffensesModule implements HeimdallModule {
         cache = null;
     }
 
-    // ── The surface phase 1e consumes ────────────────────────────────────────
+    // ── OffenseAdmin: what /hd offense reaches ───────────────────────────────
+
+    @Override
+    public boolean isAvailable() {
+        return cache != null;
+    }
+
+    /**
+     * Blocking form of {@link #refreshOffenseTypes()}, for the admin command.
+     *
+     * <p>Bounded rather than a bare {@code join()}. The future completes on {@code heimdall-io} and
+     * this is called from {@code heimdall-io}, which is a fixed pool of four — an unbounded wait
+     * there is one thread of a four-thread pool held indefinitely by a bot that stopped answering,
+     * and four operators being impatient at once would be the whole pool.
+     */
+    @Override
+    public void reload() {
+        try {
+            refreshOffenseTypes().get(RELOAD_WAIT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            // Cleared rather than restored: this runs on a shared pool thread, and leaving it
+            // interrupted breaks the next, unrelated task that lands on it.
+            Thread.interrupted();
+        } catch (Exception failed) {
+            // The refresh never completes exceptionally by contract, so this is a timeout — which
+            // the caller reports by showing the (unchanged) list rather than by claiming success.
+            Thread.interrupted();
+        }
+    }
+
+    @Override
+    public List<OffenseType> types() {
+        return cachedTypes();
+    }
+
+    /** How long {@link #reload()} waits. Comfortably past the login budget's worst case. */
+    private static final long RELOAD_WAIT_MS = 30_000L;
+
+    // ── The wider surface, for callers that want a future ────────────────────
 
     /**
      * Re-reads the offense types from the bot — what {@code /hd offense reload} calls.
      *
-     * <p>The consumer is phase 1e's admin command; nothing else needs it, because the module already
-     * refreshes itself on enable and on a timer.
+     * <p>The consumer is {@link #reload()}, which is what the admin command reaches; nothing else
+     * needs it, because the module already refreshes itself on enable and on a timer.
      *
      * <p>Never completes exceptionally: a failed refresh leaves the previous cache intact and logs.
      * A caller that wants to show a result compares {@link #cachedTypes()} across the call.

@@ -2,6 +2,8 @@ package com.heimdall.core.http;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.heimdall.core.http.model.ConfigImportResult;
 import com.heimdall.core.http.model.ConnectionAttempt;
 import com.heimdall.core.http.model.ConnectionAttemptResult;
 import com.heimdall.core.http.model.LinkCodeResult;
@@ -10,6 +12,7 @@ import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.http.model.WhitelistSyncResult;
+import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.util.Strings;
 import java.util.List;
@@ -18,7 +21,12 @@ import java.util.concurrent.Executor;
 import java.util.function.Supplier;
 
 /**
- * The bot's Minecraft API, as six methods.
+ * The bot's Minecraft API, one method per endpoint.
+ *
+ * <p><strong>Feature modules do not hold one of these.</strong> They reach the API through
+ * {@link HeimdallApi}, which is the same client behind a gateway that answers usefully while this
+ * server has no credentials or no guild yet. This class is core's, and core reconfigures it in
+ * place rather than replacing it — see {@link #reconfigure} and departure D56.
  *
  * <h2>Threading contract</h2>
  *
@@ -246,6 +254,38 @@ public final class ApiClient {
                 call = call.withHeader("If-None-Match", etag);
             }
             return ApiResponses.whitelistSync(requests.execute(current, call));
+        });
+    }
+
+    /**
+     * {@code POST …/servers/{serverId}/config/import} — hand the dashboard a v2 config, once.
+     *
+     * <p>The only route under {@code servers/} a guild-scoped Minecraft token may call; every other
+     * one there is the dashboard's. It is <strong>write-once</strong>, so calling it against a
+     * server that already has a document answers {@code 200} with {@code imported: false} and
+     * changes nothing — which is what makes it safe to call unconditionally from the first-boot
+     * migration without asking permission first.
+     *
+     * <p>There is deliberately no {@code 404} for an unregistered server: the document is simply
+     * inert until a registry row points at it, which is exactly the state a server that has migrated
+     * but not yet run {@code /hd setup} is in.
+     *
+     * @param serverId the server the settings belong to — this server's own id
+     * @param modules the {@code modules} document, in the same shape a {@code config.push} carries
+     */
+    public CompletableFuture<ConfigImportResult> importConfig(String serverId, Payload modules) {
+        if (Strings.isBlank(serverId)) {
+            throw new IllegalArgumentException("a serverId is required to import config for");
+        }
+        final Payload document = modules == null ? Payload.empty() : modules;
+        final String id = serverId.trim();
+        return async(() -> {
+            ApiSettings current = settings;
+            JsonObject body = new JsonObject();
+            body.add("modules", JsonParser.parseString(document.toJson()));
+            return ApiResponses.configImport(requests.execute(current,
+                    HttpCall.post(guildPath(current, "servers/" + id + "/config/import"),
+                            body.toString(), current.timeoutMs())));
         });
     }
 

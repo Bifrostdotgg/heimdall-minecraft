@@ -2,6 +2,7 @@ package com.heimdall.core.module;
 
 import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.concurrent.HeimdallExecutors;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.mirror.MirrorPolicy;
@@ -49,6 +50,27 @@ public interface ModuleContext {
      * the thing that outlives a module that forgot to clean up.
      */
     TunnelBus tunnel();
+
+    /**
+     * The bot's HTTP API. <strong>Never {@code null}</strong>, in any state.
+     *
+     * <p>Before 1e a module took an {@code ApiClient} as a constructor argument and tolerated
+     * {@code null} for a server that had not been set up. That is what made {@code /hd setup}
+     * unable to work without a restart: the reference was captured once, at registration, and
+     * nothing could re-hand a live one afterwards (departure D56).
+     *
+     * <p>So this is a gateway rather than a client. There is one per plugin, it is created before
+     * any module is registered, and core reconfigures the transport underneath it as the server is
+     * set up and as its guild resolves — a module that captures the value returned here is still
+     * holding the right thing an hour later.
+     *
+     * <p>A call made while the bot cannot be asked comes back as an already-failed future carrying
+     * {@link com.heimdall.core.http.ApiUnavailableException}, which names which of the two reasons
+     * applies. A module that would rather branch than catch — because "no guild yet" is a reason to
+     * run a configured fallback rather than to report an error — asks
+     * {@link com.heimdall.core.http.HeimdallApi#isUsable()} first.
+     */
+    HeimdallApi api();
 
     /** A logger that prefixes this module's id, so a log line says which module produced it. */
     HeimdallLogger logger();

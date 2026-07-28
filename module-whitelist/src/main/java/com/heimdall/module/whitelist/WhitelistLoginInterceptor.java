@@ -38,6 +38,16 @@ import java.util.function.Supplier;
  * checks behind this one still run — the punishments gate this interceptor's priority leaves room
  * for, when it lands — whereas allowing would silently veto them. Departure D32.
  *
+ * <h2>One path, two callers</h2>
+ *
+ * <p>{@link #evaluate} is the whole sequence, and {@link #intercept} is a one-line wrapper over it.
+ * The other caller is {@code /hd test}, which runs it with {@code commit == false} so nothing is
+ * written: no mirror extension, no verified record, no background report. That is deliberately the
+ * same code rather than a reimplementation, because the states worth testing — a bypassed UUID, a
+ * backend that abstains, a warm mirror during an outage, the configured fallback mode — are exactly
+ * the ones a second implementation would get subtly wrong, and a diagnostic that disagrees with the
+ * thing it is diagnosing is worse than no diagnostic.
+ *
  * <h2>Failure is this class's problem, not the pipeline's</h2>
  *
  * <p>The fallback mode is applied <em>here</em>, in the catch, exactly as v2's was. That is
@@ -50,7 +60,8 @@ import java.util.function.Supplier;
  *
  * <p>Runs on whatever thread the platform delivers a login on — an async pre-login thread on both
  * supported platforms, which is the one place a network round trip is affordable. It blocks, on
- * purpose, and everything it blocks on is bounded.
+ * purpose, and everything it blocks on is bounded. The probe path runs on {@code heimdall-io} from
+ * a command handler, and is bounded by the same budget.
  */
 final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
 
@@ -89,40 +100,55 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
 
     @Override
     public Verdict intercept(LoginAttempt attempt) {
+        return evaluate(attempt, true).verdict();
+    }
+
+    /**
+     * Runs a player through the whole check, optionally without writing anything.
+     *
+     * @param commit whether to act on what it learns — extend the mirror, record a verified player,
+     *     fire the background connection report. {@code false} makes the path read-only, so an
+     *     operator asking whether somebody <em>can</em> join does not thereby cache them as somebody
+     *     who did.
+     */
+    Outcome evaluate(LoginAttempt attempt, boolean commit) {
         WhitelistSettings current = settings.get();
 
         if (!Boolean.TRUE.equals(moduleEnabled.get())) {
             logger.debug(() -> "whitelist is switched off; abstaining for " + attempt.username());
-            return Verdict.abstain();
+            return Outcome.of(Verdict.abstain(), "the whitelist module is switched off");
         }
         if (role == ServerRole.ENFORCER && !current.enforceOnBackend()) {
             logger.debug(() -> "enforceOnBackend is off and this is a backend; the gatekeeper owns "
                     + "the decision for " + attempt.username());
-            return Verdict.abstain();
+            return Outcome.of(Verdict.abstain(),
+                    "this is a backend and enforceOnBackend is off — the gatekeeper decides");
         }
         if (BypassList.isBypassed(current.bypassUuids(), attempt.uuid().toString())) {
             logger.debug(() -> attempt.username() + " is on the bypass list; skipping the check");
-            return Verdict.abstain();
+            return Outcome.of(Verdict.abstain(), "their UUID is on the bypass list");
         }
 
         if (mirror.isWhitelisted(attempt.uuid())) {
             // The common path on a pre-warmed server, and the one v2 shipped without a report on —
             // which is how role sync, the connection history and the join feed all stopped
             // happening for everybody who was already cached. See ConnectionAttemptReporter.
-            mirror.refreshUsername(attempt.uuid(), attempt.username());
-            if (reporter.isUsable()) {
-                reporter.reportAsync(attempt);
-            } else {
-                // Checked BEFORE firing, not after. Without a guild the client builds
-                // /api/guilds//minecraft/connection-attempt — a malformed path, signed and sent, and
-                // 404'd — once per mirror hit. A server restarting mid-outage with a warm mirror is
-                // exactly the case: every returning player produces one, and none of them can
-                // possibly succeed.
-                logger.debug(() -> "not reporting " + attempt.username() + "'s mirror hit: this "
-                        + "server has not resolved its guild yet");
+            if (commit) {
+                mirror.refreshUsername(attempt.uuid(), attempt.username());
+                if (reporter.isUsable()) {
+                    reporter.reportAsync(attempt);
+                } else {
+                    // Checked BEFORE firing, not after. Without a guild the client would build
+                    // /api/guilds//minecraft/connection-attempt — a malformed path, signed and
+                    // sent, and 404'd — once per mirror hit. A server restarting mid-outage with a
+                    // warm mirror is exactly the case: every returning player produces one, and
+                    // none of them can possibly succeed.
+                    logger.debug(() -> "not reporting " + attempt.username() + "'s mirror hit: this "
+                            + "server has not resolved its guild yet");
+                }
             }
             logger.debug(() -> "mirror hit for " + attempt.username());
-            return Verdict.allow();
+            return Outcome.of(Verdict.allow(), "the local mirror holds them");
         }
 
         if (!reporter.isUsable()) {
@@ -136,7 +162,9 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
         }
 
         try {
-            return decide(current, attempt, reporter.awaitCheck(attempt, false));
+            ConnectionAttemptResult answer =
+                    commit ? reporter.awaitCheck(attempt, false) : reporter.probe(attempt);
+            return decide(current, attempt, answer, commit);
         } catch (Throwable failed) {
             // Throwable, not RuntimeException, and on this path the difference is a security one.
             // An Error escaping here does not reach some other handler that applies the policy — it
@@ -169,19 +197,25 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
      *       is admitted without ever seeing a code, and they can never link — issue #796 / MC-4.
      * </ul>
      */
-    private Verdict decide(
-            WhitelistSettings current, LoginAttempt attempt, ConnectionAttemptResult result) {
+    private Outcome decide(
+            WhitelistSettings current,
+            LoginAttempt attempt,
+            ConnectionAttemptResult result,
+            boolean commit) {
         if (result.action() == ConnectionAction.SHOW_AUTH_CODE) {
             // Deliberately no mirror write on this branch. Both shapes that reach it — a pending
             // link and an existing-link offer — answer whitelisted:true, so a naive "cache if
             // whitelisted" is exactly the MC-4 lockout.
             logger.info("refusing " + attempt.username() + " with a link code");
-            return deny(result, "You need to link your Discord account before joining.");
+            return deny(result, "You need to link your Discord account before joining.",
+                    "the bot wants them to link a Discord account first");
         }
         if (result.whitelisted()) {
-            mirror.record(attempt.uuid(), attempt.username());
+            if (commit) {
+                mirror.record(attempt.uuid(), attempt.username());
+            }
             logger.debug(() -> "the bot allowed " + attempt.username());
-            return Verdict.allow();
+            return Outcome.of(Verdict.allow(), "the bot allowed them");
         }
         if (result.action() == ConnectionAction.PENDING_APPROVAL) {
             // queuePosition is a nullable Integer on purpose (departure D1): the scheduled
@@ -190,16 +224,20 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
             // bot has already rendered whichever message applies, so nothing here has to choose.
             logger.info("refusing " + attempt.username() + ": approval pending"
                     + (result.hasQueuePosition() ? " (position " + result.queuePosition() + ")" : ""));
-            return deny(result, "Your whitelist request is awaiting approval.");
+            return deny(result, "Your whitelist request is awaiting approval.",
+                    "the bot says their request is awaiting approval")
+                    .withQueuePosition(result.queuePosition());
         }
         if (result.revoked()) {
             // Same DENY as never-whitelisted, and worth a different log line: "you were whitelisted
             // and no longer are" is a different support conversation. Departure D6.
             logger.info("refusing " + attempt.username() + ": their whitelist was revoked");
-            return deny(result, "Your whitelist access has been revoked.");
+            return deny(result, "Your whitelist access has been revoked.",
+                    "the bot says their whitelist was revoked");
         }
         logger.info("refusing " + attempt.username() + ": not whitelisted");
-        return deny(result, "You are not whitelisted on this server.");
+        return deny(result, "You are not whitelisted on this server.",
+                "the bot says they are not whitelisted");
     }
 
     /**
@@ -210,26 +248,35 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
      * a bot redeploy is invisible to every whitelisted player rather than to the handful who
      * happened to connect recently.
      */
-    private Verdict fallback(WhitelistSettings current, LoginAttempt attempt, String reason) {
+    private Outcome fallback(WhitelistSettings current, LoginAttempt attempt, String reason) {
         switch (current.apiFallbackMode()) {
             case ALLOW:
                 logger.warn("admitting " + attempt.username() + " with the bot unreachable "
                         + "(apiFallbackMode: allow)");
-                return Verdict.allow();
+                return Outcome.of(Verdict.allow(),
+                        "the bot could not be asked (" + reason + ") and apiFallbackMode is allow");
             case DENY:
                 logger.warn("refusing " + attempt.username() + " with the bot unreachable "
                         + "(apiFallbackMode: deny)");
-                return Verdict.deny(Msg.legacy(colourise(current.apiUnavailableMessage())));
+                return Outcome.of(
+                        Verdict.deny(Msg.legacy(colourise(current.apiUnavailableMessage()))),
+                        "the bot could not be asked (" + reason + ") and apiFallbackMode is deny",
+                        current.apiUnavailableMessage());
             case WHITELIST_ONLY:
             default:
                 if (mirror.isWhitelisted(attempt.uuid())) {
                     logger.warn("admitting " + attempt.username() + " from the mirror with the bot "
                             + "unreachable (" + reason + ")");
-                    return Verdict.allow();
+                    return Outcome.of(Verdict.allow(),
+                            "the bot could not be asked (" + reason + ") and the mirror holds them");
                 }
                 logger.warn("refusing " + attempt.username() + ": the bot is unreachable and the "
                         + "mirror does not hold them (" + reason + ")");
-                return Verdict.deny(Msg.legacy(colourise(current.apiUnavailableMessage())));
+                return Outcome.of(
+                        Verdict.deny(Msg.legacy(colourise(current.apiUnavailableMessage()))),
+                        "the bot could not be asked (" + reason
+                                + ") and the mirror does not hold them",
+                        current.apiUnavailableMessage());
         }
     }
 
@@ -241,9 +288,9 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
      * them. The local text is only for the case where it did not answer at all, or answered without
      * one, which would otherwise be a kick screen with nothing on it.
      */
-    private Verdict deny(ConnectionAttemptResult result, String localFallback) {
+    private Outcome deny(ConnectionAttemptResult result, String localFallback, String stage) {
         String message = Strings.isNotBlank(result.message()) ? result.message() : localFallback;
-        return Verdict.deny(Msg.legacy(colourise(message)));
+        return Outcome.of(Verdict.deny(Msg.legacy(colourise(message))), stage, message);
     }
 
     /**
@@ -255,5 +302,63 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
      */
     private static String colourise(String message) {
         return message == null ? "" : message.replace('&', '§');
+    }
+
+    /**
+     * A verdict, plus the two things a verdict cannot say.
+     *
+     * <p>The pipeline only ever wants {@link #verdict()} — allow, deny or abstain is the whole of
+     * what a login needs. {@code /hd test} wants the rest, and it is the reason the command is worth
+     * having: "denied" is rarely the interesting answer, while "denied by the fallback mode because
+     * the bot could not be asked and the mirror does not hold them" tells an operator what to fix.
+     *
+     * <p>Package-private and immutable. Nothing outside this module sees it — the module translates
+     * it into a {@link com.heimdall.core.admin.LoginProbe} on the way out, so core's admin tree does
+     * not have to learn the interceptor's vocabulary.
+     */
+    static final class Outcome {
+
+        private final Verdict verdict;
+        private final String stage;
+        private final String message;
+        private final Integer queuePosition;
+
+        private Outcome(Verdict verdict, String stage, String message, Integer queuePosition) {
+            this.verdict = verdict;
+            this.stage = stage;
+            this.message = message;
+            this.queuePosition = queuePosition;
+        }
+
+        static Outcome of(Verdict verdict, String stage) {
+            return new Outcome(verdict, stage, "", null);
+        }
+
+        static Outcome of(Verdict verdict, String stage, String message) {
+            return new Outcome(verdict, stage, message, null);
+        }
+
+        Outcome withQueuePosition(Integer position) {
+            return new Outcome(verdict, stage, message, position);
+        }
+
+        Verdict verdict() {
+            return verdict;
+        }
+
+        /** Which check decided, in the words an operator would use. */
+        String stage() {
+            return stage;
+        }
+
+        /** What the player would be shown, or {@code ""} when they would be admitted. */
+        String message() {
+            return message;
+        }
+
+        /** Their place in the approval queue, or {@code null} — absent and zero differ (D1). */
+        Integer queuePosition() {
+            return queuePosition;
+        }
     }
 }

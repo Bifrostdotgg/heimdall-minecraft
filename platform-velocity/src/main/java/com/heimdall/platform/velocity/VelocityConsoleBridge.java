@@ -58,4 +58,17 @@ final class VelocityConsoleBridge implements ConsoleBridge {
     public Registration attachLogTap(Consumer<LogLine> consumer) {
         return tap.addTap(consumer);
     }
+
+    /**
+     * How many tap consumers the appender has dropped for throwing.
+     *
+     * <p>Reported by {@code /hdp status} and nowhere else, because nowhere else is outside the
+     * capture path: the drop itself cannot log, since a line written from inside the appender would
+     * be captured and fed back into the loop the re-entrancy guard exists to break. So the tap
+     * counts silently and something out of band asks.
+     */
+    @Override
+    public int droppedTapConsumers() {
+        return tap.droppedConsumers();
+    }
 }

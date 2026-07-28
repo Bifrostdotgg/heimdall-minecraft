@@ -1,20 +1,26 @@
 package com.heimdall.platform.velocity;
 
 import com.heimdall.core.BuildConstants;
+import com.heimdall.core.admin.AdminCommand;
+import com.heimdall.core.admin.AdminContext;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.HeimdallLogger;
+import com.heimdall.core.migrate.MigrationResult;
+import com.heimdall.core.util.Registration;
 import com.heimdall.core.wiring.HeimdallRuntime;
+import com.heimdall.core.wiring.MigrationBoot;
+import com.heimdall.core.wiring.UpdateWiring;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.TunnelSpiService;
-import com.velocitypowered.api.command.CommandMeta;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 
 /**
  * Everything proxy initialisation does, in a class that is not the plugin.
@@ -49,6 +55,12 @@ final class VelocityBootstrap {
     private HeimdallRuntime runtime;
     private TunnelSpiService spi;
 
+    /** The {@code /hdp} and {@code /hwl} registrations, unregistered on disable. */
+    private Registration adminCommands = Registration.NONE;
+
+    /** The updater's periodic check, its {@code update} subscription and its join notice. */
+    private Registration updates = Registration.NONE;
+
     VelocityBootstrap(Object plugin, ProxyServer proxy, HeimdallLogger logger, Path dataDirectory) {
         this.plugin = plugin;
         this.proxy = proxy;
@@ -72,6 +84,11 @@ final class VelocityBootstrap {
         }
 
         BootstrapStore store = new BootstrapStore(logger, dataDirectory.resolve("bootstrap.yml"));
+        // Before the bootstrap is read, because on the first boot after a v2 upgrade this is what
+        // writes it. v2's proxy config is a config.json in the sibling plugins/heimdallwhitelist/ —
+        // lower-case, because Velocity derives a plugin's directory from its id.
+        MigrationResult migration = MigrationBoot.migrate(
+                logger, store, dataDirectory, MigrationBoot.V2_VELOCITY_DIRECTORY);
         // A proxy IS the gatekeeper — there is nothing to detect, and the question the Bukkit side
         // has to answer ("is something in front of me?") has one answer here. An explicit role in
         // bootstrap.yml still wins, for the operator running a proxy behind another proxy.
@@ -100,14 +117,29 @@ final class VelocityBootstrap {
         // Between build() and start(), like the Bukkit side and for the same reason: the first
         // reconcile happens inside start(), and a module registered after it sits STOPPED until the
         // next config push.
-        HeimdallModules.registerAll(runtime);
+        AdminContext.Builder admin = AdminContext.builder(runtime)
+                .role(role)
+                .pluginVersion(BuildConstants.VERSION);
+        HeimdallModules.registerAll(runtime, admin);
+
+        UpdateWiring.Installed update = UpdateWiring.install(
+                logger,
+                BuildConstants.VERSION,
+                runtime,
+                new VelocityUpdateInstaller(logger, proxy, plugin, dataDirectory));
+        updates = update.periodicChecks();
+        admin.updates(update.admin());
 
         registerListeners();
-        registerCommand(role);
+        registerCommands(admin.build());
         spi = TunnelSpiService.install(logger, runtime);
 
         boolean tapped = platform.attachConsoleTap();
         runtime.start();
+
+        // After start(), because it schedules against the runtime's pools and waits for the guild
+        // that start() begins resolving. A no-op unless this boot migrated something.
+        MigrationBoot.scheduleImport(logger, runtime, migration);
 
         logger.info("Heimdall v" + BuildConstants.VERSION + " enabled — role " + role.wireName()
                 + ", text bridge " + (text.isUsable() ? "ok" : "degraded")
@@ -122,6 +154,22 @@ final class VelocityBootstrap {
      * gracefully, which proves the proxy was not killed but proves nothing about Heimdall unloading.
      */
     void disable() {
+        guarded("stopping the update checker", new Runnable() {
+            @Override
+            public void run() {
+                updates.close();
+            }
+        });
+        updates = Registration.NONE;
+
+        guarded("unregistering the admin command", new Runnable() {
+            @Override
+            public void run() {
+                adminCommands.close();
+            }
+        });
+        adminCommands = Registration.NONE;
+
         guarded("uninstalling the tunnel SPI", new Runnable() {
             @Override
             public void run() {
@@ -194,16 +242,23 @@ final class VelocityBootstrap {
         // to the backend servers. See VelocityLoginListener for the whole reasoning.
     }
 
-    private void registerCommand(ServerRole role) {
-        // "heimdallproxy" spelled out, for the same reason the primary verb is /hdp rather than
-        // /hd: in a proxied network both plugins are installed and the proxy claims a name before
-        // the backend ever sees it, so the two need names that cannot collide — and an operator who
-        // does not remember which abbreviation is which has a word to type instead.
-        CommandMeta meta = proxy.getCommandManager()
-                .metaBuilder("hdp")
-                .aliases("heimdallproxy")
-                .build();
-        proxy.getCommandManager()
-                .register(meta, new HeimdallVelocityCommand(runtime, text, role));
+    /**
+     * Binds {@code /hdp} (and {@code /heimdallproxy}), plus the deprecated {@code /hwl} alias.
+     *
+     * <p>"heimdallproxy" spelled out, for the same reason the primary verb is {@code /hdp} rather
+     * than {@code /hd}: in a proxied network both plugins are installed and the proxy claims a name
+     * before the backend ever sees it, so the two need names that cannot collide — and an operator
+     * who does not remember which abbreviation is which has a word to type instead (departure D47).
+     *
+     * <p>{@code /hwl} is registered here too. v2 used it on <em>both</em> platforms, so a proxy
+     * operator's muscle memory and runbooks say {@code /hwl} just as a backend operator's do; it
+     * forwards to this same tree and says once per start that the name changed.
+     *
+     * <p>Through the shared {@link com.heimdall.core.command.CommandRegistrar}, so the proxy and the
+     * backend run the identical command code — which is the whole reason v2's two trees drifted.
+     */
+    private void registerCommands(AdminContext admin) {
+        adminCommands = AdminCommand.install(
+                platform.commands(), admin, "hdp", Collections.singletonList("heimdallproxy"));
     }
 }

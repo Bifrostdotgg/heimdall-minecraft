@@ -4,7 +4,7 @@ import com.heimdall.core.command.CommandCompleter;
 import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
-import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.model.OffenseReport;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.log.HeimdallLogger;
@@ -58,7 +58,7 @@ import java.util.UUID;
  *
  * <p>{@link #execute} runs on whatever thread the platform dispatches commands on — the main server
  * thread on Bukkit — and <strong>never blocks</strong>. The API call is handed to {@code
- * heimdall-io} by {@link ApiClient} and the sender is answered from the future's completion. Waiting
+ * heimdall-io} by {@link HeimdallApi} and the sender is answered from the future's completion. Waiting
  * inline would stall the tick loop for the endpoint's whole retry budget, which at the defaults is
  * measured in tens of seconds.
  *
@@ -77,8 +77,8 @@ final class OffendCommand implements CommandHandler, CommandCompleter {
 
     private final HeimdallLogger logger;
 
-    /** {@code null} on a server that was never set up; the command says so rather than throwing. */
-    private final ApiClient api;
+    /** Never {@code null}; it answers "not set up" rather than being absent. See departure D56. */
+    private final HeimdallApi api;
 
     private final OffenseTypeCache cache;
     private final PlayerDirectory players;
@@ -86,12 +86,13 @@ final class OffendCommand implements CommandHandler, CommandCompleter {
 
     OffendCommand(
             HeimdallLogger logger,
-            ApiClient api,
+            HeimdallApi api,
             OffenseTypeCache cache,
             PlayerDirectory players,
             ConsoleBridge console) {
-        if (logger == null || cache == null || players == null || console == null) {
-            throw new IllegalArgumentException("logger, cache, players and console are all required");
+        if (logger == null || api == null || cache == null || players == null || console == null) {
+            throw new IllegalArgumentException(
+                    "logger, api, cache, players and console are all required");
         }
         this.logger = logger;
         this.api = api;
@@ -119,12 +120,13 @@ final class OffendCommand implements CommandHandler, CommandCompleter {
             source.sendMessage(Msg.legacy("§cUsage: §f" + USAGE));
             return;
         }
-        ApiClient client = api;
-        if (client == null) {
+        if (!api.isUsable()) {
             // Not an error: a freshly-installed server has no credentials yet, and the operator's
-            // next step is the setup flow rather than a bug report.
-            source.sendMessage(Msg.legacy(
-                    "§cThis server is not set up yet, so offenses cannot be recorded."));
+            // next step is the setup flow rather than a bug report. Asked rather than caught so the
+            // sentence names the state — "not set up" and "still resolving its guild" want
+            // different things done about them.
+            source.sendMessage(Msg.legacy("§cOffenses cannot be recorded yet — " + api.describe()
+                    + ". Run §f/hd setup <code>§c if this server has never been claimed."));
             return;
         }
 
@@ -158,7 +160,7 @@ final class OffendCommand implements CommandHandler, CommandCompleter {
 
         final String recordedName = targetName;
         final String recordedSlug = report.offenseSlug();
-        client.offend(report).whenComplete((result, failure) -> {
+        api.offend(report).whenComplete((result, failure) -> {
             try {
                 if (failure != null) {
                     reportFailure(source, recordedName, recordedSlug, failure);

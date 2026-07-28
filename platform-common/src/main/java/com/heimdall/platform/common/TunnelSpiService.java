@@ -32,22 +32,24 @@ import java.util.concurrent.ConcurrentHashMap;
  * shadow the whitelist or role-sync protocol by claiming its message type, deliberately: the SPI is
  * an extension point, not an override point.
  *
- * <h2>Not configured is still a usable SPI</h2>
+ * <h2>Not configured is still a usable SPI, and it heals by itself</h2>
  *
- * <p>A server with no {@code bootstrap.yml} has no tunnel, and this service is installed anyway with
- * a {@code null} bus. {@link #isConnected()} is then permanently false, {@link #publish} drops, and
- * {@link #request} fails fast — which is the same behaviour a consumer sees during a reconnect, so
- * nobody has to write a second code path for "Heimdall exists but is not set up".
+ * <p>A server with no {@code bootstrap.yml} has a tunnel that is idle rather than absent, so this
+ * captures a real bus in every state. {@link #isConnected()} is false while it is idle,
+ * {@link #publish} drops and {@link #request} fails fast — the same behaviour a consumer already
+ * sees during a reconnect, so nobody has to write a second code path for "Heimdall exists but is not
+ * set up".
  *
- * <p><strong>Permanently, though.</strong> The bus is captured when the service is installed, at
- * enable, so a server set up <em>after</em> boot keeps an SPI wired to nothing until it restarts.
- * That is correct for phase 1c, where nothing can create a tunnel after enable — there is no setup
- * flow yet — and it stops being correct the moment there is one.
+ * <p><strong>This used to be permanent, and that was the 1c TODO known as N7.</strong> The bus was
+ * captured at enable and was {@code null} on an unconfigured server, so a server claimed with
+ * {@code /hd setup} kept an SPI wired to nothing until it restarted — a third-party plugin would
+ * have seen a Heimdall that was demonstrably connected and an SPI that dropped everything.
  *
- * <p>TODO(1e): re-install the service when the setup command builds a tunnel, so a freshly claimed
- * server does not need a restart before other plugins can use the SPI. The compare-and-clear in
- * {@link com.heimdall.api.HeimdallTunnelProvider#uninstall} already makes replacing an instance
- * safe.
+ * <p>It is closed without a re-install, and deliberately so: 1e made the {@code TunnelClient} itself
+ * stable, built on every boot and <em>reconfigured</em> when setup lands rather than constructed
+ * then (departure D56 and {@code HeimdallRuntime}'s class javadoc). One object for the life of the
+ * plugin means one capture, and nothing here has to know that a setup happened. Re-installing the
+ * service would have worked too and would have needed the runtime to know about this class.
  */
 public final class TunnelSpiService implements HeimdallTunnel {
 
@@ -56,7 +58,12 @@ public final class TunnelSpiService implements HeimdallTunnel {
 
     private final HeimdallLogger logger;
 
-    /** {@code null} on a server that has not been set up. */
+    /**
+     * The one tunnel this plugin has, for its whole life.
+     *
+     * <p>Never {@code null} since 1e — an unconfigured server has an idle tunnel, not no tunnel —
+     * which is what makes capturing it here safe across a {@code /hd setup}.
+     */
     private final TunnelBus bus;
 
     private final Map<String, InboundHandler> handlers =
@@ -79,9 +86,7 @@ public final class TunnelSpiService implements HeimdallTunnel {
     public static TunnelSpiService install(HeimdallLogger logger, HeimdallRuntime runtime) {
         TunnelClient tunnel = runtime.tunnel();
         TunnelSpiService service = new TunnelSpiService(logger, tunnel);
-        if (tunnel != null) {
-            tunnel.setUnhandledHandler(service.inbound());
-        }
+        tunnel.setUnhandledHandler(service.inbound());
         HeimdallTunnelProvider.install(service);
         return service;
     }
@@ -126,9 +131,6 @@ public final class TunnelSpiService implements HeimdallTunnel {
     }
 
     private void reply(Envelope request, Payload payload) {
-        if (bus == null) {
-            return;
-        }
         bus.reply(
                 request.id(),
                 request.type() + RESULT_SUFFIX,
@@ -144,25 +146,19 @@ public final class TunnelSpiService implements HeimdallTunnel {
 
     @Override
     public boolean isConnected() {
-        return bus != null && bus.isConnected();
+        return bus.isConnected();
     }
 
     @Override
     public void publish(String type, Payload payload) {
-        if (bus == null) {
-            return;
-        }
         bus.send(type, payload == null ? Payload.empty() : payload);
     }
 
     @Override
     public CompletableFuture<Payload> request(String type, Payload payload, long timeoutMs) {
-        if (bus == null) {
-            CompletableFuture<Payload> failed = new CompletableFuture<Payload>();
-            failed.completeExceptionally(
-                    new IllegalStateException("Heimdall is not connected to a bot"));
-            return failed;
-        }
+        // No null branch any more: an idle tunnel already fails a request with "tunnel is not
+        // connected", which is the same answer a consumer gets mid-reconnect and the same one they
+        // got here before. One code path, one message.
         return bus.sendAndWait(type, payload == null ? Payload.empty() : payload, timeoutMs);
     }
 

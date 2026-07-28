@@ -2,6 +2,7 @@ package com.heimdall.module.offenses;
 
 import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.concurrent.HeimdallExecutors;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.mirror.MirrorPolicy;
@@ -62,6 +63,7 @@ final class TestModuleContext implements ModuleContext {
     private final String moduleId;
     private final HeimdallLogger logger;
     private final HeimdallExecutors executors;
+    private final HeimdallApi api;
     private final PlatformFacade platform;
     private final List<ScheduledTask> scheduled = Collections.synchronizedList(
             new ArrayList<ScheduledTask>());
@@ -70,10 +72,12 @@ final class TestModuleContext implements ModuleContext {
             String moduleId,
             HeimdallLogger logger,
             HeimdallExecutors executors,
+            HeimdallApi api,
             PlatformFacade platform) {
         this.moduleId = moduleId;
         this.logger = logger;
         this.executors = executors;
+        this.api = api;
         this.platform = platform;
     }
 
@@ -97,6 +101,11 @@ final class TestModuleContext implements ModuleContext {
     @Override
     public HeimdallExecutors executors() {
         return executors;
+    }
+
+    @Override
+    public HeimdallApi api() {
+        return api;
     }
 
     @Override

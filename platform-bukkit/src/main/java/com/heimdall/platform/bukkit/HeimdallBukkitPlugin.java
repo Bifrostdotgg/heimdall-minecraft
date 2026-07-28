@@ -25,7 +25,10 @@ public final class HeimdallBukkitPlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        bootstrap = new BukkitBootstrap(this);
+        // getFile() is protected on JavaPlugin, so this shell is the only thing that can read it —
+        // and the self-updater needs it, because Bukkit applies a staged update by matching file
+        // names and a wrong name leaves two Heimdall jars in plugins/ after the restart.
+        bootstrap = new BukkitBootstrap(this, getFile());
         try {
             bootstrap.enable();
         } catch (Throwable failed) {

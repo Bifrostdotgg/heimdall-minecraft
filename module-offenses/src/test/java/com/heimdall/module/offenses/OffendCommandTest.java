@@ -9,6 +9,7 @@ import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.ApiSettings;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.testing.FakeCommandSource;
@@ -84,8 +85,9 @@ class OffendCommandTest {
         platform.join(new FakePlayer(UUID.fromString(TARGET_UUID), TARGET_NAME));
         platform.join(FakePlayer.named("Bystander"));
 
-        context = new TestModuleContext(HeimdallOffensesModule.ID, logger, executors, platform);
-        module = new HeimdallOffensesModule(client);
+        context = new TestModuleContext(
+                HeimdallOffensesModule.ID, logger, executors, new HeimdallApi(client), platform);
+        module = new HeimdallOffensesModule();
         module.enable(context);
         // enable() fires a refresh but does not wait for it; the completion tests need the cache
         // populated deterministically, and a second refresh is idempotent.

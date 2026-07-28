@@ -25,6 +25,14 @@ commands:
     description: Heimdall administration
     usage: /<command>
     aliases: [heimdall]
+  hwl:
+    # v2's admin verb. Kept as a real command rather than as an alias of `hd`,
+    # because Bukkit fixes aliases at load time and the plugin has to be able to
+    # tell the two apart: this one prints "the name changed" once per start
+    # before forwarding. Deliberately absent from /hd's own help listing — help
+    # is for what to type next, not for what used to work.
+    description: Deprecated alias for /hd
+    usage: /<command>
   linkdiscord:
     description: Get a code to link this Minecraft account to Discord
     usage: /<command>

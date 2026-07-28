@@ -140,8 +140,10 @@ public final class Log4jConsoleTap implements AutoCloseable {
      * guard exists to break. So the count is recorded here and reported from
      * {@link #droppedConsumers()}, out of band, by whoever is in a position to say something.
      *
-     * <p>TODO(1e): surface this in {@code /hd status}. "The dashboard console went quiet" and "a
-     * plugin's tap threw and was unsubscribed" look identical from the outside today.
+     * <p>Reported by {@code /hd status}, through {@code ConsoleBridge.droppedTapConsumers()}. That
+     * indirection exists because this is the only number in the plugin that cannot report itself:
+     * "the dashboard console went quiet" and "a plugin's tap threw once and was unsubscribed" are
+     * otherwise identical from every angle an operator has.
      */
     private final AtomicInteger droppedConsumers = new AtomicInteger();
 

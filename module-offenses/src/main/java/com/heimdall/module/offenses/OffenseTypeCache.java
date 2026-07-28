@@ -1,6 +1,6 @@
 package com.heimdall.module.offenses;
 
-import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.util.Lists;
@@ -45,7 +45,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * is what v2's {@code clear()}-then-{@code addAll()} on a {@code CopyOnWriteArrayList} exposed a
  * tab-completing operator to.
  *
- * <p>{@link #refresh()} does no work on the calling thread: {@link ApiClient} runs the request on
+ * <p>{@link #refresh()} does no work on the calling thread: {@link HeimdallApi} runs the request on
  * {@code heimdall-io} and the completion callback is a plain (non-{@code Async}) {@code
  * whenComplete}, so it runs on whichever thread completed the request — {@code heimdall-io} — and
  * never on the caller's.
@@ -55,22 +55,24 @@ public final class OffenseTypeCache {
     private final HeimdallLogger logger;
 
     /**
-     * The bot's API, or {@code null} on a server that was never set up.
+     * The bot's API, as the gateway every module sees.
      *
-     * <p>Core owns the client and does not hand one to modules through {@code ModuleContext}; this
-     * module takes it as a constructor argument instead, and a {@code null} here is the ordinary
-     * state of a freshly-installed server rather than a programming error.
+     * <p>Never {@code null}, in any state. Until 1e this was a raw client that <em>was</em> null on
+     * a server that had never been set up, captured once at registration — so a server claimed with
+     * {@code /hd setup} kept a null here forever and this cache never refreshed until a restart.
+     * Departure D56 is the whole story; the visible half is that this reference stays correct across
+     * a setup.
      */
-    private final ApiClient api;
+    private final HeimdallApi api;
 
     private final AtomicReference<List<OffenseType>> cached =
             new AtomicReference<List<OffenseType>>(Collections.<OffenseType>emptyList());
 
     private volatile long lastRefreshMillis;
 
-    OffenseTypeCache(HeimdallLogger logger, ApiClient api) {
-        if (logger == null) {
-            throw new IllegalArgumentException("logger is required");
+    OffenseTypeCache(HeimdallLogger logger, HeimdallApi api) {
+        if (logger == null || api == null) {
+            throw new IllegalArgumentException("logger and api are required");
         }
         this.logger = logger;
         this.api = api;
@@ -79,7 +81,7 @@ public final class OffenseTypeCache {
     /**
      * Every cached type, enabled or not.
      *
-     * <p>Unfiltered on purpose: {@code /hd offense types} (phase 1e) lists the disabled ones too,
+     * <p>Unfiltered on purpose: {@code /hd offense types} lists the disabled ones too,
      * marked as disabled, because "the type exists but staff may not report against it" and "no such
      * type" are different answers and an operator debugging a missing slug needs to tell them apart.
      * {@link #matchingSlugs(String)} is the filtered view, and it is what the command offers.
@@ -149,16 +151,19 @@ public final class OffenseTypeCache {
      */
     public CompletableFuture<Void> refresh() {
         final CompletableFuture<Void> attempt = new CompletableFuture<Void>();
-        ApiClient client = api;
-        if (client == null) {
-            logger.debug("not refreshing offense types: this server is not set up yet");
+        if (!api.isUsable()) {
+            // Checked rather than caught: the gateway would refuse this call anyway, but a refusal
+            // per five-minute tick on an unconfigured server is a debug line per tick for a state
+            // that is entirely normal.
+            logger.debug("not refreshing offense types: the bot cannot be asked yet ("
+                    + api.describe() + ")");
             attempt.complete(null);
             return attempt;
         }
         // Plain whenComplete, not whenCompleteAsync: the executor-less *Async overloads route onto
         // the common ForkJoinPool and the conformance rules reject them. The non-async form runs on
         // the thread that completed the request, which is already heimdall-io.
-        client.offenseTypes().whenComplete((fetched, failure) -> {
+        api.offenseTypes().whenComplete((fetched, failure) -> {
             try {
                 if (failure != null) {
                     recordFailure(failure);
@@ -167,7 +172,7 @@ public final class OffenseTypeCache {
                 }
             } finally {
                 // In a finally, because a logger that throws must not leave a caller — the module's
-                // /hd offense reload path in 1e — waiting on a future that will never complete.
+                // /hd offense reload path — waiting on a future that will never complete.
                 attempt.complete(null);
             }
         });

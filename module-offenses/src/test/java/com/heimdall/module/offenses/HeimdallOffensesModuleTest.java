@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.ApiSettings;
 import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
@@ -67,7 +68,8 @@ class HeimdallOffensesModuleTest {
                 .retryDelayMs(25)
                 .build(), executors.io());
         platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
-        context = new TestModuleContext(HeimdallOffensesModule.ID, logger, executors, platform);
+        context = new TestModuleContext(
+                HeimdallOffensesModule.ID, logger, executors, new HeimdallApi(client), platform);
     }
 
     @AfterEach
@@ -85,7 +87,7 @@ class HeimdallOffensesModuleTest {
     @Test
     @DisplayName("it is 'offenses', claims no capability, and runs under any role")
     void identity() {
-        HeimdallOffensesModule module = new HeimdallOffensesModule(client);
+        HeimdallOffensesModule module = new HeimdallOffensesModule();
 
         assertEquals("offenses", module.id());
         assertEquals(Collections.<String>emptySet(), module.capabilities(),
@@ -101,7 +103,7 @@ class HeimdallOffensesModuleTest {
     @Test
     @DisplayName("enable registers /offend and one repeating refresh")
     void enableRegistersBothThings() {
-        HeimdallOffensesModule module = new HeimdallOffensesModule(client);
+        HeimdallOffensesModule module = new HeimdallOffensesModule();
 
         module.enable(context);
 
@@ -118,7 +120,7 @@ class HeimdallOffensesModuleTest {
     @Test
     @DisplayName("enable, disable, enable leaves exactly one command and one task")
     void toggleDoesNotDouble() {
-        HeimdallOffensesModule module = new HeimdallOffensesModule(client);
+        HeimdallOffensesModule module = new HeimdallOffensesModule();
 
         module.enable(context);
         module.disable();
@@ -137,13 +139,13 @@ class HeimdallOffensesModuleTest {
     @Test
     @DisplayName("disable is safe when enable was never called")
     void disableWithoutEnable() {
-        new HeimdallOffensesModule(client).disable();
+        new HeimdallOffensesModule().disable();
     }
 
     @Test
     @DisplayName("disable is safe twice, and after a partially-applied enable")
     void disableIsIdempotent() {
-        HeimdallOffensesModule module = new HeimdallOffensesModule(client);
+        HeimdallOffensesModule module = new HeimdallOffensesModule();
         module.enable(context);
 
         module.disable();
@@ -156,7 +158,7 @@ class HeimdallOffensesModuleTest {
     @Test
     @DisplayName("the task the timer holds really is the refresh")
     void theScheduledTaskRefreshes() throws Exception {
-        HeimdallOffensesModule module = new HeimdallOffensesModule(client);
+        HeimdallOffensesModule module = new HeimdallOffensesModule();
         module.enable(context);
         module.refreshOffenseTypes().get(20, TimeUnit.SECONDS);
         assertEquals(1, module.cachedTypes().size());
@@ -183,7 +185,7 @@ class HeimdallOffensesModuleTest {
     @Test
     @DisplayName("cachedTypes and refreshOffenseTypes are inert while the module is stopped")
     void thePhase1eSurfaceToleratesBeingDisabled() throws Exception {
-        HeimdallOffensesModule module = new HeimdallOffensesModule(client);
+        HeimdallOffensesModule module = new HeimdallOffensesModule();
 
         assertTrue(module.cachedTypes().isEmpty());
         module.refreshOffenseTypes().get(5, TimeUnit.SECONDS);
@@ -205,22 +207,32 @@ class HeimdallOffensesModuleTest {
 
     @Test
     @DisplayName("a server that was never set up still loads the module; /offend says so")
-    void withoutAnApiClient() throws Exception {
-        HeimdallOffensesModule module = new HeimdallOffensesModule(null);
+    void withoutCredentials() throws Exception {
+        // A gateway over a client with no settings, which is exactly what an unconfigured server
+        // holds since departure D56 — not a null, which is the state that made /hd setup need a
+        // restart. The module must still load, or an operator cannot reach the setup flow that
+        // would give it credentials.
+        TestModuleContext unconfigured = new TestModuleContext(
+                HeimdallOffensesModule.ID,
+                logger,
+                executors,
+                new HeimdallApi(new ApiClient(logger, ApiSettings.builder().build(), executors.io())),
+                platform);
+        HeimdallOffensesModule module = new HeimdallOffensesModule();
 
-        module.enable(context);
+        module.enable(unconfigured);
 
         assertTrue(platform.commandRegistry().has("offend"),
                 "the module has to load, or the operator cannot reach the setup flow that would "
                         + "give it credentials");
-        assertTrue(logger.logged(LogLevel.WARN, "not set up yet"));
+        assertTrue(logger.logged(LogLevel.WARN, "the bot cannot be asked yet"));
         module.refreshOffenseTypes().get(5, TimeUnit.SECONDS);
         assertTrue(module.cachedTypes().isEmpty());
 
         FakeCommandSource staff = FakeCommandSource.player("ModMandy").grant(OffendCommand.PERMISSION);
         assertTrue(platform.commandRegistry().run(staff, "offend", "Anyone", "xray"));
 
-        assertTrue(staff.wasTold("not set up yet"), staff.messageText().toString());
+        assertTrue(staff.wasTold("not set up"), staff.messageText().toString());
         assertTrue(platform.dispatchedCommands().isEmpty());
     }
 
@@ -238,7 +250,7 @@ class HeimdallOffensesModuleTest {
                 .chatPipeline(new ChatPipeline(logger))
                 .platform(platform)
                 .build());
-        manager.register(new HeimdallOffensesModule(client));
+        manager.register(new HeimdallOffensesModule());
 
         manager.reconcile(new LinkedHashSet<String>(
                 Collections.singletonList(HeimdallOffensesModule.ID)));

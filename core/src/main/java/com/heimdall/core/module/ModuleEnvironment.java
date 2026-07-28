@@ -1,6 +1,9 @@
 package com.heimdall.core.module;
 
 import com.heimdall.core.concurrent.HeimdallExecutors;
+import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.ApiSettings;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.pipeline.ChatPipeline;
 import com.heimdall.core.pipeline.LoginPipeline;
@@ -23,6 +26,7 @@ public final class ModuleEnvironment {
 
     private final HeimdallLogger logger;
     private final HeimdallExecutors executors;
+    private final HeimdallApi api;
     private final TunnelBus tunnel;
     private final RemoteConfig remoteConfig;
     private final LoginPipeline loginPipeline;
@@ -42,6 +46,14 @@ public final class ModuleEnvironment {
         }
         this.logger = builder.logger;
         this.executors = builder.executors;
+        // Defaulted rather than required, and to a real gateway over an unconfigured client rather
+        // than to null. A test assembling a partial environment gets one that answers
+        // NOT_CONFIGURED — which is a state production really has — instead of a null that would
+        // put a guard clause in every module that talks to the bot.
+        this.api = builder.api == null
+                ? new HeimdallApi(new ApiClient(
+                        builder.logger, ApiSettings.builder().build(), builder.executors.io()))
+                : builder.api;
         this.tunnel = builder.tunnel;
         this.remoteConfig = builder.remoteConfig;
         this.loginPipeline = builder.loginPipeline;
@@ -65,6 +77,18 @@ public final class ModuleEnvironment {
 
     public HeimdallExecutors executors() {
         return executors;
+    }
+
+    /**
+     * The bot's HTTP API, as the gateway modules see it.
+     *
+     * <p>Never {@code null}: an unset one is built over a client with no configuration, which
+     * answers {@link HeimdallApi.Availability#NOT_CONFIGURED} to everything. That is a state a real
+     * server is in on its first boot, so a module exercised against it is exercised against
+     * something honest rather than against a null check.
+     */
+    public HeimdallApi api() {
+        return api;
     }
 
     /**
@@ -109,6 +133,7 @@ public final class ModuleEnvironment {
 
         private HeimdallLogger logger;
         private HeimdallExecutors executors;
+        private HeimdallApi api;
         private TunnelBus tunnel;
         private RemoteConfig remoteConfig;
         private LoginPipeline loginPipeline;
@@ -126,6 +151,12 @@ public final class ModuleEnvironment {
 
         public Builder executors(HeimdallExecutors value) {
             this.executors = value;
+            return this;
+        }
+
+        /** The API gateway. Left unset, one over an unconfigured client is built. */
+        public Builder api(HeimdallApi value) {
+            this.api = value;
             return this;
         }
 

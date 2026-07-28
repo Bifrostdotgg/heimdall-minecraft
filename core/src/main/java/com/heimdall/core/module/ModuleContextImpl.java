@@ -2,6 +2,7 @@ package com.heimdall.core.module;
 
 import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.concurrent.HeimdallExecutors;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.log.PrefixedLogger;
@@ -64,6 +65,14 @@ final class ModuleContextImpl implements ModuleContext {
     @Override
     public TunnelBus tunnel() {
         return trackedBus;
+    }
+
+    @Override
+    public HeimdallApi api() {
+        // Not tracked, and nothing to unwind: the gateway is one shared, long-lived object rather
+        // than a registration. That is the whole of departure D56 — a module holding this across a
+        // setup keeps working, where a captured client would not.
+        return environment.api();
     }
 
     @Override

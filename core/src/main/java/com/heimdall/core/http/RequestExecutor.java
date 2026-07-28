@@ -125,6 +125,12 @@ final class RequestExecutor {
     }
 
     private void applySignature(ApiSettings settings, HttpCall call, HttpURLConnection connection) {
+        if (!call.isSigned()) {
+            // The claim route, and only the claim route. Signing it would be harmless but the
+            // absence of a key must not produce the warning below on the one call that is supposed
+            // to be made without one.
+            return;
+        }
         if (settings.apiKey().isEmpty()) {
             // Fail loudly-ish rather than silently sending an unsigned request the bot will 401:
             // "Unauthorized" with no local explanation is the hardest version of this to diagnose.

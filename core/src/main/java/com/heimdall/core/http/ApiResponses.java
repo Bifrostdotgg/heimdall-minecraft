@@ -3,6 +3,8 @@ package com.heimdall.core.http;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.heimdall.core.http.model.ClaimResult;
+import com.heimdall.core.http.model.ConfigImportResult;
 import com.heimdall.core.http.model.ConnectionAction;
 import com.heimdall.core.http.model.ConnectionAttemptResult;
 import com.heimdall.core.http.model.LinkCodeResult;
@@ -177,6 +179,38 @@ final class ApiResponses {
                 .tierDescription(string(data, "tierDescription"))
                 .offenseType(string(data, "offenseType"))
                 .build();
+    }
+
+    /**
+     * Reads {@code POST /api/minecraft/claim}.
+     *
+     * <p>Nothing is validated here beyond the envelope: {@link ClaimResult#isComplete()} is where a
+     * short answer is caught, because the setup command has to be able to say <em>which</em> field
+     * the bot omitted rather than raising an {@code ApiError} that reads like a refusal.
+     */
+    static ClaimResult claim(RawResponse response) {
+        JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
+        return ClaimResult.builder()
+                .guildId(string(data, "guildId"))
+                .tokenId(string(data, "tokenId"))
+                .token(string(data, "token"))
+                .serverId(string(data, "serverId"))
+                .serverName(string(data, "serverName"))
+                .build();
+    }
+
+    /**
+     * Reads {@code POST …/servers/{serverId}/config/import}.
+     *
+     * <p>{@code imported: false} is a success, not a failure — the route is write-once and answers
+     * that when a document already exists. See {@link ConfigImportResult}.
+     */
+    static ConfigImportResult configImport(RawResponse response) {
+        JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
+        return new ConfigImportResult(
+                string(data, "serverId"),
+                bool(data, "imported"),
+                intOr(data, "version", 0));
     }
 
     static PluginRelease pluginRelease(RawResponse response) {

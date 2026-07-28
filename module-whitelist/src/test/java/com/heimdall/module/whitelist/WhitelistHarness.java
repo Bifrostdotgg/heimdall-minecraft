@@ -3,6 +3,7 @@ package com.heimdall.module.whitelist;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.ApiSettings;
 import com.heimdall.core.http.model.RoleSyncDirective;
 import com.heimdall.core.json.Payload;
@@ -65,6 +66,7 @@ final class WhitelistHarness implements AutoCloseable {
     final PlayerSessionEvents sessions;
     final RecordingTunnelBus tunnel = new RecordingTunnelBus();
     final ModuleManager manager;
+    final ApiClient apiClient;
     final HeimdallWhitelistModule module;
     final RecordingRoleSync roleSync = new RecordingRoleSync();
 
@@ -90,8 +92,11 @@ final class WhitelistHarness implements AutoCloseable {
         // is core's property and is pinned in core's own tests.
         this.sessions = new PlayerSessionEvents(logger, Runnable::run);
 
-        ApiClient api = withApi
-                ? new ApiClient(logger, ApiSettings.builder()
+        // An unconfigured server has a gateway over a client with no settings rather than no
+        // gateway at all — that is departure D56's whole shape, and it is what lets a module keep
+        // working after /hd setup without being handed a new reference.
+        ApiSettings settings = withApi
+                ? ApiSettings.builder()
                         .baseUrl(bot.baseUrl())
                         .guildId(StubBotConfig.DEFAULT_GUILD_ID)
                         .apiKey(StubBotConfig.DEFAULT_API_KEY)
@@ -99,14 +104,17 @@ final class WhitelistHarness implements AutoCloseable {
                         .timeoutMs(4000)
                         .retries(1)
                         .retryDelayMs(20)
-                        .build(), executors.io())
-                : null;
+                        .build()
+                : ApiSettings.builder().build();
+        this.apiClient = new ApiClient(logger, settings, executors.io());
+        HeimdallApi api = new HeimdallApi(apiClient);
 
-        this.module = new HeimdallWhitelistModule(api);
+        this.module = new HeimdallWhitelistModule();
         this.module.setRoleSyncSink(roleSync);
         this.manager = new ModuleManager(ModuleEnvironment.builder()
                 .logger(logger)
                 .executors(executors)
+                .api(api)
                 .tunnel(tunnel)
                 .remoteConfig(remoteConfig)
                 .loginPipeline(loginPipeline)
