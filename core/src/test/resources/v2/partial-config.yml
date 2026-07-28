@@ -1,0 +1,20 @@
+# A v2 config that has been cut down to the keys somebody actually changed, with
+# every scalar quoted — which is what several YAML-editing tools produce, and what
+# a Windows operator copying values out of the dashboard tends to leave behind.
+enabled: "yes"
+
+api:
+  baseUrl: "https://bot.example.test"
+  apiKey: "hwl_partial_key"
+
+cache:
+  cacheWindow: "75"
+  prewarm:
+    enabled: "off"
+    intervalMinutes: "3"
+
+logging:
+  debug: "TRUE"
+
+updates:
+  checkIntervalHours: "24"

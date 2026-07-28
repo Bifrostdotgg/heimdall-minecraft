@@ -1,0 +1,10 @@
+# A v2 config an operator broke mid-edit: the quoted scalar on the baseUrl line is
+# never closed, so SnakeYAML's scanner runs to end-of-stream looking for the pair
+# and refuses the whole document. This is the shape a half-finished FTP upload or
+# an interrupted paste actually leaves behind.
+enabled: true
+
+api:
+  baseUrl: "https://api.bifrost.gg
+  apiKey: "hwl_never_read
+  guildId: [1046473775487176835
