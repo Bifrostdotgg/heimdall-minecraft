@@ -72,6 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rows: ${{ steps.rows.outputs.rows }}
+      connectedRows: ${{ steps.rows.outputs.connectedRows }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -88,11 +89,19 @@ jobs:
       - name: Verify the connected assertions themselves
         run: smoke/connected.sh --selftest
 
+      # BOTH matrices are derived from the scripts, and the second one only became so in
+      # phase 1e — it used to be a hardcoded pair, which is precisely the drift this job's own
+      # header warns about. 1e added two rows to connected.sh and they would have run locally,
+      # passed review, and never once run in CI.
       - id: rows
         run: |
           rows="$(smoke/run.sh --list | jq -R -s -c 'split("\n") | map(select(length > 0))')"
           echo "rows=${rows}" >> "$GITHUB_OUTPUT"
           echo "smoke rows: ${rows}"
+
+          connected="$(smoke/connected.sh --list | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+          echo "connectedRows=${connected}" >> "$GITHUB_OUTPUT"
+          echo "connected rows: ${connected}"
 
   smoke:
     name: smoke (${{ matrix.row }})
@@ -142,9 +151,18 @@ jobs:
   # tests have no tunnel and the tunnel tests have no modules. A scenario like
   # that going stale is how the same class of bug comes back.
   #
-  # Two rows rather than six, in parallel: the wire does not vary by Minecraft
-  # version, and what does — class loading, the log4j tap — the matrix above
-  # already covers everywhere.
+  # Four rows rather than twenty-four, in parallel. The wire does not vary by
+  # Minecraft version, and what does — class loading, the log4j tap — the matrix
+  # above already covers everywhere. What the extra two rows vary is the STARTING
+  # STATE, which nothing else can: one boots with no bootstrap.yml at all and
+  # claims a setup code over the console, and one boots with a v2 config.yml next
+  # door. Neither flow is reachable on a server that is already configured, and
+  # the first of them is the whole of departure D56.
+  #
+  # The row list comes from the script, like the matrix above. It was a hardcoded
+  # pair until phase 1e added two rows to connected.sh, at which point the two
+  # would have silently disagreed — a row that runs locally, passes review, and
+  # never runs in CI.
   connected:
     name: connected (${{ matrix.row }})
     needs: [build, smoke-matrix]
@@ -152,7 +170,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        row: [paper-1.21.8, velocity-3.5.1]
+        row: ${{ fromJson(needs.smoke-matrix.outputs.connectedRows) }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
