@@ -6,12 +6,15 @@ import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Turns a v2 install into a v3 one, on the first boot that finds no {@code bootstrap.yml}.
@@ -86,6 +89,12 @@ public final class V2Migration {
     /** How many {@code .1}, {@code .2}… suffixes to try before giving up on a backup name. */
     private static final int MAX_BACKUP_ATTEMPTS = 100;
 
+    /** How many entries of one parent directory the near-miss check looks at before it stops. */
+    private static final int MAX_SIBLINGS_SCANNED = 500;
+
+    /** How many names the near-miss line quotes from inside one candidate directory. */
+    private static final int MAX_CANDIDATE_ENTRIES_SHOWN = 8;
+
     private final HeimdallLogger logger;
     private final V2ConfigReader reader;
 
@@ -101,10 +110,11 @@ public final class V2Migration {
      * Migrates the first v2 config found, if there is one and this server is not already configured.
      *
      * @param searchDirectories where to look, in order. The caller passes v3's own data directory
-     *     first and then the sibling {@code HeimdallWhitelist} directory: v3's plugin is named
-     *     {@code Heimdall}, so a v2 install's config sits next door rather than in v3's folder, and
-     *     the two orders are not interchangeable — a config an operator has already dropped into the
-     *     v3 directory by hand is the one they meant.
+     *     first and then v2's sibling directory — {@code HeimdallWhitelist} on Bukkit,
+     *     {@code heimdall-whitelist} on Velocity: v3's plugin is named {@code Heimdall}, so a v2
+     *     install's config sits next door rather than in v3's folder, and the two orders are not
+     *     interchangeable — a config an operator has already dropped into the v3 directory by hand
+     *     is the one they meant.
      * @param store the v3 bootstrap this would write, and the thing whose existence vetoes the whole
      *     operation
      * @return what happened; never {@code null}, and never throwing
@@ -139,7 +149,10 @@ public final class V2Migration {
 
         Path source = findV2Config(searchDirectories);
         if (source == null) {
-            // Silent. A fresh install has no v2 config and does not need to be told so.
+            // Silent on a fresh install, which has no v2 config and does not need to be told so —
+            // but NOT silent when something that looks exactly like a v2 install is sitting next to
+            // the directories that were searched. See reportNearMiss.
+            reportNearMiss(searchDirectories);
             return MigrationResult.notFound("No v2 config found.");
         }
 
@@ -198,6 +211,145 @@ public final class V2Migration {
             }
         }
         return null;
+    }
+
+    /**
+     * Says something, once, when "no v2 config" is suspicious rather than ordinary.
+     *
+     * <p>A fresh install and a botched upgrade produce the identical outcome here — no bootstrap, no
+     * migration, a server that asks to be set up — and the not-found branch is deliberately silent
+     * so the fresh install is not nagged. The cost of that silence is that an upgrade which looked
+     * in the wrong place is indistinguishable from a first boot, which is exactly how a v3 that had
+     * v2's Velocity directory name wrong (departure D70) reached production and stayed there.
+     *
+     * <p>So: silent unless a directory that <em>looks</em> like v2's is sitting beside the ones that
+     * were searched, in which case the line names every directory searched and every candidate
+     * found, with what each candidate holds. That is enough to see a name mismatch without a
+     * debugger. Matching ignores case and separators, so {@code HeimdallWhitelist},
+     * {@code heimdall-whitelist} and {@code heimdall_whitelist} all count — the point is to catch
+     * the spelling this plugin did not expect, so the test cannot be the expected spelling.
+     */
+    private void reportNearMiss(List<Path> searchDirectories) {
+        List<Path> candidates = v2LookingDirectories(searchDirectories);
+        if (candidates.isEmpty()) {
+            return;
+        }
+        StringBuilder out = new StringBuilder();
+        out.append("No v2 config to migrate, so this server is starting unconfigured — but a "
+                + "directory that looks like a v2 install is beside the ones searched, so this may "
+                + "be an upgrade whose config is not where this version expects it. Looked for ")
+                .append(String.join(" then ", CANDIDATE_FILE_NAMES)).append(" in: ")
+                .append(describeSearched(searchDirectories))
+                .append(". v2-looking directories found: ").append(describeCandidates(candidates))
+                .append(". Move the v2 config into one of the directories searched and restart, or "
+                        + "run /hd setup to configure this server from scratch.");
+        logger.info(out.toString());
+    }
+
+    /**
+     * Directories beside the searched ones whose name reads as "Heimdall whitelist".
+     *
+     * <p>Includes the searched directories themselves when they match: a correctly-named directory
+     * that turned out to hold no config is also worth naming, and the listing of what it holds is
+     * what tells the operator which of the two situations they are in.
+     */
+    private List<Path> v2LookingDirectories(List<Path> searchDirectories) {
+        List<Path> found = new ArrayList<Path>();
+        if (searchDirectories == null) {
+            return found;
+        }
+        Set<Path> parents = new LinkedHashSet<Path>();
+        for (Path directory : searchDirectories) {
+            if (directory == null) {
+                continue;
+            }
+            Path parent = directory.getParent();
+            if (parent != null) {
+                parents.add(parent);
+            }
+        }
+        for (Path parent : parents) {
+            if (!Files.isDirectory(parent)) {
+                continue;
+            }
+            try (DirectoryStream<Path> entries = Files.newDirectoryStream(parent)) {
+                int scanned = 0;
+                for (Path entry : entries) {
+                    if (++scanned > MAX_SIBLINGS_SCANNED) {
+                        break;
+                    }
+                    Path name = entry.getFileName();
+                    if (name == null || !looksLikeV2Directory(name.toString())) {
+                        continue;
+                    }
+                    if (!found.contains(entry) && Files.isDirectory(entry)) {
+                        found.add(entry);
+                    }
+                }
+            } catch (IOException | RuntimeException unreadable) {
+                // A plugins directory that cannot be listed is not worth failing a boot over; this
+                // whole method exists only to make a log line more useful.
+                logger.debug(() -> "could not scan " + parent + " for a v2 directory: " + unreadable);
+            }
+        }
+        return found;
+    }
+
+    /** Lower-cased with separators removed, so one spelling is compared rather than four. */
+    private static boolean looksLikeV2Directory(String directoryName) {
+        StringBuilder normalised = new StringBuilder(directoryName.length());
+        for (int index = 0; index < directoryName.length(); index++) {
+            char character = Character.toLowerCase(directoryName.charAt(index));
+            if (character != '-' && character != '_' && character != ' ' && character != '.') {
+                normalised.append(character);
+            }
+        }
+        String name = normalised.toString();
+        return name.contains("heimdall") && name.contains("whitelist");
+    }
+
+    /** Each searched directory, saying which of them exist — a missing one is the usual answer. */
+    private static String describeSearched(List<Path> searchDirectories) {
+        List<String> parts = new ArrayList<String>();
+        for (Path directory : searchDirectories) {
+            if (directory == null) {
+                continue;
+            }
+            parts.add(Files.isDirectory(directory)
+                    ? directory.toString()
+                    : directory + " (does not exist)");
+        }
+        return parts.isEmpty() ? "(nowhere)" : String.join(", ", parts);
+    }
+
+    /** Each candidate directory and the first few names in it, which is where the config would be. */
+    private static String describeCandidates(List<Path> candidates) {
+        List<String> parts = new ArrayList<String>();
+        for (Path candidate : candidates) {
+            parts.add(candidate + " " + listNames(candidate));
+        }
+        return String.join(", ", parts);
+    }
+
+    private static String listNames(Path directory) {
+        List<String> names = new ArrayList<String>();
+        boolean truncated = false;
+        try (DirectoryStream<Path> entries = Files.newDirectoryStream(directory)) {
+            for (Path entry : entries) {
+                if (names.size() >= MAX_CANDIDATE_ENTRIES_SHOWN) {
+                    truncated = true;
+                    break;
+                }
+                Path name = entry.getFileName();
+                names.add(name == null ? entry.toString() : name.toString());
+            }
+        } catch (IOException | RuntimeException unreadable) {
+            return "(could not be listed: " + unreadable + ")";
+        }
+        if (names.isEmpty()) {
+            return "(empty)";
+        }
+        return "(holds " + String.join(", ", names) + (truncated ? ", ...)" : ")");
     }
 
     /**

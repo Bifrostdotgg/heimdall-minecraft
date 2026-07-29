@@ -235,15 +235,75 @@ class V2MigrationTest {
 
     @Test
     @DisplayName("nothing to migrate is silent")
-    void nothingFoundIsSilent(@TempDir Path dir) {
+    void nothingFoundIsSilent(@TempDir Path root) throws IOException {
+        // A real plugins/ directory rather than a bare temp dir, because the near-miss check below
+        // reads the PARENT of everything searched: a fresh install is defined by what is sitting
+        // beside the plugin, so the test has to own that directory rather than inherit JUnit's.
+        Path plugins = Files.createDirectories(root.resolve("plugins"));
+        Path v3Dir = Files.createDirectories(plugins.resolve("Heimdall"));
+
         MigrationResult result = migration.run(
-                Arrays.asList(dir, dir.resolve("absent")), storeIn(dir));
+                Arrays.asList(v3Dir, plugins.resolve("HeimdallWhitelist")), storeIn(v3Dir));
 
         assertEquals(MigrationResult.Status.NOT_FOUND, result.status());
         assertNull(result.source());
-        assertFalse(storeIn(dir).exists());
+        assertFalse(storeIn(v3Dir).exists());
         assertTrue(logger.at(LogLevel.INFO).isEmpty(), "a fresh install must say nothing about v2");
         assertTrue(logger.at(LogLevel.WARN).isEmpty());
+    }
+
+    @Test
+    @DisplayName("a v2-looking directory that was not searched is named, rather than passed over in silence")
+    void aNearMissIsReported(@TempDir Path root) throws IOException {
+        // The D70 shape exactly: the plugin looks for a directory spelled one way and the v2 install
+        // is spelled another, so nothing is found and the boot is indistinguishable from a fresh
+        // install. The whole point of the line is that it names both spellings.
+        Path plugins = Files.createDirectories(root.resolve("plugins"));
+        Path v3Dir = Files.createDirectories(plugins.resolve("heimdall"));
+        Path v2Dir = Files.createDirectories(plugins.resolve("heimdall-whitelist"));
+        copyFixture("config.yml", v2Dir, "config.yml");
+
+        MigrationResult result = migration.run(
+                Arrays.asList(v3Dir, plugins.resolve("heimdallwhitelist")), storeIn(v3Dir));
+
+        assertEquals(MigrationResult.Status.NOT_FOUND, result.status());
+        assertFalse(storeIn(v3Dir).exists(), "reporting a near miss must not migrate anything");
+        assertTrue(logger.logged(LogLevel.INFO, v2Dir.toString()),
+                "the directory that does exist must be named: " + logger.messagesAt(LogLevel.INFO));
+        assertTrue(logger.logged(LogLevel.INFO, plugins.resolve("heimdallwhitelist").toString()),
+                "and so must the one that was searched for and is missing");
+        assertTrue(logger.logged(LogLevel.INFO, "config.yml"),
+                "naming what the candidate holds is what makes the mismatch obvious");
+        assertTrue(logger.at(LogLevel.WARN).isEmpty(), "a near miss is information, not a failure");
+    }
+
+    @Test
+    @DisplayName("the near-miss check ignores case and separators, so any spelling of v2's name counts")
+    void nearMissMatchingIgnoresCaseAndSeparators(@TempDir Path root) throws IOException {
+        Path plugins = Files.createDirectories(root.resolve("plugins"));
+        Path v3Dir = Files.createDirectories(plugins.resolve("Heimdall"));
+        Path oddlyNamed = Files.createDirectories(plugins.resolve("heimdall_Whitelist"));
+
+        migration.run(Arrays.asList(v3Dir, plugins.resolve("HeimdallWhitelist")), storeIn(v3Dir));
+
+        assertTrue(logger.logged(LogLevel.INFO, oddlyNamed.toString()),
+                "the point is to catch a spelling this plugin did NOT expect: "
+                        + logger.messagesAt(LogLevel.INFO));
+    }
+
+    @Test
+    @DisplayName("v3's own directory is not a near miss — 'Heimdall' alone must not trip it")
+    void v3sOwnDirectoryIsNotANearMiss(@TempDir Path root) throws IOException {
+        Path plugins = Files.createDirectories(root.resolve("plugins"));
+        Path v3Dir = Files.createDirectories(plugins.resolve("Heimdall"));
+        Files.createDirectories(plugins.resolve("LuckPerms"));
+        Files.createFile(plugins.resolve("heimdall-whitelist-3.0.0.jar"));
+
+        migration.run(Arrays.asList(v3Dir, plugins.resolve("HeimdallWhitelist")), storeIn(v3Dir));
+
+        assertTrue(logger.at(LogLevel.INFO).isEmpty(),
+                "every server has the jar and v3's own directory; neither is a v2 install: "
+                        + logger.messagesAt(LogLevel.INFO));
     }
 
     @Test
