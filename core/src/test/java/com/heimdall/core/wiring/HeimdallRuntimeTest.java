@@ -131,6 +131,37 @@ class HeimdallRuntimeTest {
         }
 
         @Test
+        @DisplayName("the dashboard's three request handlers are subscribed even here, and unwound on close")
+        void remoteRequestHandlersAreWiredBeforeSetup(@TempDir Path dataDir) {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime runtime = runtime(dataDir, store).build();
+
+            assertFalse(runtime.tunnel().hasSubscribers("get_players"),
+                    "nothing is wired until start()");
+
+            runtime.start();
+
+            // Asserted in the NOT-configured nest deliberately: start() returns early here, before
+            // it dials anything, and a subscription made after that return would not exist on a
+            // server claimed by /hd setup without a restart. Subscriptions live on the client rather
+            // than on a socket, so making them now is what carries them across that transition and
+            // across every later reconnect.
+            //
+            // This is the assertion that pins the WIRING rather than the handlers:
+            // RemoteRequestWiringTest proves install() subscribes, and would stay green with the
+            // install() call deleted from start() — which is precisely the shape of the bug that
+            // shipped, a complete reply path nothing ever registered.
+            assertTrue(runtime.tunnel().hasSubscribers("get_players"));
+            assertTrue(runtime.tunnel().hasSubscribers("run_command"));
+            assertTrue(runtime.tunnel().hasSubscribers("probe_player"));
+
+            runtime.close();
+
+            assertFalse(runtime.tunnel().hasSubscribers("get_players"),
+                    "the handle goes in the runtime's registration list, so close() unwinds it");
+        }
+
+        @Test
         @DisplayName("modules still load, on their defaults")
         void modulesStillLoad(@TempDir Path dataDir) {
             BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));

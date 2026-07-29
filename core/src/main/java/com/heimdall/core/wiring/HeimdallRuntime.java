@@ -316,6 +316,13 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         registrations.add(tunnel.onModeChange(remoteConfig));
         registrations.add(modules.followRemoteConfig());
+        // The dashboard's three direct questions — the roster, the console box, the mod probe.
+        // Subscribed unconditionally and BEFORE the not-configured return below: a subscription
+        // lives on the client rather than on a socket, so it survives every reconnect and is
+        // already in place when /hd setup brings a tunnel up without a restart. Not a module,
+        // because none of the three is a feature a guild opts into — see RemoteRequestWiring.
+        registrations.add(
+                RemoteRequestWiring.install(logger, platform, tunnel, executors.io()));
         // Applies bootstrap.yml's local-disable set AND does the first reconcile against it, so a
         // module an operator switched off locally is never even started, whatever the cached or
         // pushed config says.

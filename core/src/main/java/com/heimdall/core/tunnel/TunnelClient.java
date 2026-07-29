@@ -328,6 +328,23 @@ public final class TunnelClient implements TunnelBus {
         return subscriptions.subscribe(type, handler, executor);
     }
 
+    /**
+     * Whether anything at all is listening for a message type.
+     *
+     * <p>The one question that separates "this server cannot answer that" from "this server did not
+     * answer that", and it has no other observation point: a frame nobody wants is written off with
+     * a debug line, so from outside the plugin an unsubscribed type and a hung handler look
+     * identical — a request that times out.
+     *
+     * <p>Not hypothetical. v3 shipped with the entire reply path for {@code get_players} built and
+     * nothing subscribed to it, and what the dashboard showed was a ten-second 504 on its Online
+     * Players panel. This is what lets a test assert that a wiring step actually <em>ran</em>, rather
+     * than only that the class it would have called is correct.
+     */
+    public boolean hasSubscribers(String type) {
+        return subscriptions.hasSubscribers(type);
+    }
+
     @Override
     public ProtocolMode mode() {
         return negotiator.mode();

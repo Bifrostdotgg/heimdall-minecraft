@@ -36,12 +36,26 @@ public final class RecordingTunnelBus implements TunnelBus {
     /** One frame the code under test sent. */
     public static final class Sent {
 
+        private final String requestId;
         private final String type;
         private final Payload payload;
 
-        Sent(String type, Payload payload) {
+        Sent(String requestId, String type, Payload payload) {
+            this.requestId = requestId == null ? "" : requestId;
             this.type = type;
             this.payload = payload == null ? Payload.empty() : payload;
+        }
+
+        /**
+         * The id this frame was correlated against, or {@code ""} for an unsolicited send.
+         *
+         * <p>Recorded because for a <em>reply</em> the id is the contract: the bot holds a future
+         * keyed on the id it sent, so a handler that answers with a fresh one produces a reply the
+         * bot files as unsolicited and a request that times out regardless. A test asserting only
+         * the type and the payload passes on exactly that bug.
+         */
+        public String requestId() {
+            return requestId;
         }
 
         public String type() {
@@ -54,7 +68,8 @@ public final class RecordingTunnelBus implements TunnelBus {
 
         @Override
         public String toString() {
-            return "Sent{" + type + " " + payload + "}";
+            return "Sent{" + type + (requestId.isEmpty() ? "" : " id=" + requestId)
+                    + " " + payload + "}";
         }
     }
 
@@ -62,6 +77,8 @@ public final class RecordingTunnelBus implements TunnelBus {
     private final Map<String, CopyOnWriteArrayList<TunnelMessageHandler>> handlers =
             Collections.synchronizedMap(
                     new LinkedHashMap<String, CopyOnWriteArrayList<TunnelMessageHandler>>());
+    private final Map<String, Executor> executors =
+            Collections.synchronizedMap(new LinkedHashMap<String, Executor>());
 
     private volatile boolean connected = true;
     private volatile ProtocolMode mode = ProtocolMode.V3;
@@ -91,6 +108,18 @@ public final class RecordingTunnelBus implements TunnelBus {
     public int subscriberCount(String type) {
         CopyOnWriteArrayList<TunnelMessageHandler> forType = handlers.get(type);
         return forType == null ? 0 : forType.size();
+    }
+
+    /**
+     * The executor the most recent subscription for a type named, or {@code null} for the default.
+     *
+     * <p>Recorded rather than acted on — {@link #push} stays inline, so a test needs no latch — but
+     * <em>which</em> executor a subscriber asked for is a real property worth asserting: a handler
+     * left on the socket's reading thread stops the tunnel reading, and the bot's liveness sweep
+     * then reaps a connection that is working perfectly (departure D27).
+     */
+    public Executor subscribedExecutor(String type) {
+        return executors.get(type);
     }
 
     /** Delivers a frame to whoever subscribed, inline. Returns how many handlers saw it. */
@@ -135,17 +164,17 @@ public final class RecordingTunnelBus implements TunnelBus {
 
     @Override
     public void send(String type, Payload payload) {
-        sent.add(new Sent(type, payload));
+        sent.add(new Sent("", type, payload));
     }
 
     @Override
     public void reply(String requestId, String type, Payload payload) {
-        sent.add(new Sent(type, payload));
+        sent.add(new Sent(requestId, type, payload));
     }
 
     @Override
     public CompletableFuture<Payload> sendAndWait(String type, Payload payload) {
-        sent.add(new Sent(type, payload));
+        sent.add(new Sent("", type, payload));
         return new CompletableFuture<Payload>();
     }
 
@@ -171,6 +200,7 @@ public final class RecordingTunnelBus implements TunnelBus {
             }
             forType = existing;
         }
+        executors.put(type, executor);
         forType.add(handler);
         return Registration.once(new Runnable() {
             @Override

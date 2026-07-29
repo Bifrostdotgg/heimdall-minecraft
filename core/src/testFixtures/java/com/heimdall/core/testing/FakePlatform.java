@@ -66,8 +66,10 @@ public final class FakePlatform implements PlatformFacade {
     private volatile LuckPermsBridge luckPerms;
     private volatile BedrockIdentityProvider floodgate = BedrockIdentityProvider.NONE;
     private volatile Function<PlayerHandle, Payload> describer;
+    private volatile CompletableFuture<Payload> traceProbe;
     private volatile boolean deferLater;
     private volatile RuntimeException dispatchFailure;
+    private volatile CompletableFuture<String> dispatchAnswer;
     private final java.util.Set<String> unknownCommands =
             Collections.synchronizedSet(new java.util.LinkedHashSet<String>());
 
@@ -111,6 +113,17 @@ public final class FakePlatform implements PlatformFacade {
         return this;
     }
 
+    /**
+     * Fixes what {@link Integrations#traceProbe} answers with.
+     *
+     * <p>Including a future that never completes, which is how the probe handler's "the bot is still
+     * waiting" branch is reachable at all.
+     */
+    public FakePlatform withTraceProbe(CompletableFuture<Payload> answer) {
+        this.traceProbe = answer;
+        return this;
+    }
+
     /** Supplies a Bedrock identity provider, as Floodgate would. */
     public FakePlatform withFloodgate(BedrockIdentityProvider provider) {
         this.floodgate = provider == null ? BedrockIdentityProvider.NONE : provider;
@@ -125,6 +138,19 @@ public final class FakePlatform implements PlatformFacade {
      */
     public FakePlatform failingDispatch(RuntimeException failure) {
         this.dispatchFailure = failure;
+        return this;
+    }
+
+    /**
+     * Makes {@link ConsoleBridge#dispatchCommand} return a future the test completes itself.
+     *
+     * <p>The real bridges do not answer inline: Bukkit hops to the main thread and completes there,
+     * Velocity's command manager completes on one of its own. That gap is where a handler that
+     * replies on the <em>completing</em> thread instead of on a named executor hides, and inline
+     * fakes make it structurally untestable.
+     */
+    public FakePlatform dispatchAnswering(CompletableFuture<String> answer) {
+        this.dispatchAnswer = answer;
         return this;
     }
 
@@ -360,7 +386,10 @@ public final class FakePlatform implements PlatformFacade {
                     return unknown;
                 }
                 dispatchedCommands.add(command);
-                return CompletableFuture.completedFuture("dispatched: " + command);
+                CompletableFuture<String> steered = dispatchAnswer;
+                return steered != null
+                        ? steered
+                        : CompletableFuture.completedFuture("dispatched: " + command);
             }
 
             @Override
@@ -396,8 +425,11 @@ public final class FakePlatform implements PlatformFacade {
 
             @Override
             public CompletableFuture<Payload> traceProbe(UUID playerUuid) {
-                return CompletableFuture.completedFuture(
-                        Payload.builder().put("error", "no platform").build());
+                CompletableFuture<Payload> fixed = traceProbe;
+                return fixed != null
+                        ? fixed
+                        : CompletableFuture.completedFuture(
+                                Payload.builder().put("error", "no platform").build());
             }
         };
     }
