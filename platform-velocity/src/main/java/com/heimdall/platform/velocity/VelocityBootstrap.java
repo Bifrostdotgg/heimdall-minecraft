@@ -85,8 +85,8 @@ final class VelocityBootstrap {
 
         BootstrapStore store = new BootstrapStore(logger, dataDirectory.resolve("bootstrap.yml"));
         // Before the bootstrap is read, because on the first boot after a v2 upgrade this is what
-        // writes it. v2's proxy config is a config.json in the sibling plugins/heimdallwhitelist/ —
-        // lower-case, because Velocity derives a plugin's directory from its id.
+        // writes it. v2's proxy config is a config.json in the sibling plugins/heimdall-whitelist/ —
+        // v2's @Plugin id verbatim, because Velocity derives a plugin's directory from its id.
         MigrationResult migration = MigrationBoot.migrate(
                 logger, store, dataDirectory, MigrationBoot.V2_VELOCITY_DIRECTORY);
         // A proxy IS the gatekeeper — there is nothing to detect, and the question the Bukkit side

@@ -32,8 +32,9 @@ import java.util.function.BiConsumer;
  * for. The new directory is searched first anyway, because an operator who moved the file by hand
  * meant it.
  *
- * <p>On Velocity both names are lower-case ({@code heimdall}, {@code heimdallwhitelist}) because the
- * proxy derives a plugin's directory from its id.
+ * <p>On Velocity the names are the two plugins' ids rather than their display names, because the
+ * proxy derives a plugin's directory from its id: v3's is {@code heimdall} and v2's is
+ * {@code heimdall-whitelist}.
  *
  * <h2>The imported settings are inert until the server is claimed, and the log says so</h2>
  *
@@ -59,11 +60,24 @@ import java.util.function.BiConsumer;
  */
 public final class MigrationBoot {
 
-    /** v2's plugin directory on the Bukkit family. */
+    /**
+     * v2's plugin directory on the Bukkit family — v2's {@code plugin.yml} {@code name:} verbatim,
+     * because Bukkit names a plugin's directory after its declared name.
+     */
     public static final String V2_BUKKIT_DIRECTORY = "HeimdallWhitelist";
 
-    /** v2's plugin directory on Velocity, where ids are lower-case. */
-    public static final String V2_VELOCITY_DIRECTORY = "heimdallwhitelist";
+    /**
+     * v2's plugin directory on Velocity — v2's {@code @Plugin} <em>id</em> verbatim, hyphen and all,
+     * because Velocity names a plugin's directory after its id rather than its display name.
+     *
+     * <p>The id is {@code heimdall-whitelist} in every v2 release (v2.0.0 through v2.4.0 and the
+     * {@code v2-maintenance} branch all declare it on {@code HeimdallVelocityPlugin}), so there is
+     * exactly one name to look for. It is spelled out here rather than derived from the display
+     * name, which is what went wrong: this was a hand-lowercased {@code heimdallwhitelist} that no
+     * v2 install has ever had, so on a case-sensitive filesystem a v2 → v3 upgrade on Velocity found
+     * nothing and booted unconfigured.
+     */
+    public static final String V2_VELOCITY_DIRECTORY = "heimdall-whitelist";
 
     /** How often the deferred import re-checks whether the bot can be asked. */
     private static final long IMPORT_RETRY_MS = 10_000L;
