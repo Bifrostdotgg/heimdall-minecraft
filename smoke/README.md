@@ -27,9 +27,9 @@ There are **two** scenarios, and they answer different questions.
 | Script | Question | Rows |
 | --- | --- | --- |
 | `run.sh` | Does the jar load, work and unload with **no bot anywhere**? | six, the whole supported range |
-| `connected.sh` | Pointed at a real bot, does the plugin **actually talk to it**? | two, one per family |
+| `connected.sh` | Pointed at a real bot, does the plugin **actually talk to it**? | five — one steady-state row per family, plus the three flow rows |
 
-Both are CI gates. `connected.sh`'s two rows run as their own job, and both self-tests run in the
+Both are CI gates. `connected.sh`'s five rows run as their own job, and both self-tests run in the
 Docker-free job that gates the matrix.
 
 `connected.sh` is phase 1d's addition and is described in its own section below.
@@ -186,14 +186,17 @@ docker compose -f smoke/docker-compose.yml up
 
 ```bash
 ./gradlew build                        # produces the jar AND stub-bot/build/install/
-smoke/connected.sh                     # both rows
+smoke/connected.sh                     # every row, sequentially
 smoke/connected.sh velocity-3.5.1      # one row
+smoke/connected.sh --list
 smoke/connected.sh --selftest          # the assertions themselves; needs no Docker
 ```
 
 `run.sh` proves the jar survives six servers with nothing to talk to. This proves the other half.
 Each row starts `:stub-bot` — the executable copy of the bot's wire contract — on a private network,
-boots a server whose `bootstrap.yml` points at it, and then asserts from **both ends**.
+boots a server that ends up pointed at it, and then asserts from **both ends**. How the server gets
+there is what the row's *mode* decides: a `bootstrap.yml` staged before boot, a setup code claimed
+over the console, or a v2 config migrated on the first boot (see [the modes](#five-rows-in-three-modes)).
 
 | Asserted | Where the evidence is | Why it is worth a container |
 | --- | --- | --- |
@@ -238,27 +241,38 @@ the platform's own login listener, the kick screen, and chat cancellation — al
 client to be connected. That is departure D43's residual risk 2, and it waits on the headless-client
 work.
 
-### Four rows, in three modes
+### Five rows, in three modes
+
+> **`smoke/connected.sh --list` is the source of truth**, the same as for `run.sh` above. If the
+> `ROWS` array and this section disagree, the script wins.
 
 The wire does not vary by Minecraft version. What varies is class loading and the log4j tap, and
 `run.sh` already covers those on all six. One current server from each family is what proves the
 one-jar design still reaches a bot from both entry points.
 
-Two of the four rows are not about the steady state at all, because two flows cannot be exercised on
-a server that is already configured:
+Three of the five rows are not about the steady state at all, because two of the flows cannot be
+exercised on a server that is already configured:
 
-| Mode | Starting state | What it proves |
-|---|---|---|
-| `configured` | a `bootstrap.yml` exists | the steady state, plus the login probe |
-| `setup` | **nothing** — no `bootstrap.yml` at all | a setup code is claimed over the console and the tunnel comes up, negotiates v3 and enables modules **in the same boot**. That is departure D56, and it was impossible before phase 1e |
-| `migrate` | a v2 `config.yml` in the sibling `plugins/HeimdallWhitelist/` | the migration finds it next door, writes a `bootstrap.yml`, connects on the **legacy** guild key, keeps the original as `*.v2-backup`, and hands the translated settings to the dashboard once |
+| Mode | Rows | Starting state | What it proves |
+|---|---|---|---|
+| `configured` | `paper-1.21.8`, `velocity-3.5.1` | a `bootstrap.yml` exists | the steady state, plus the login probe |
+| `setup` | `paper-setup` | **nothing** — no `bootstrap.yml` at all | a setup code is claimed over the console and the tunnel comes up, negotiates v3 and enables modules **in the same boot**. That is departure D56, and it was impossible before phase 1e |
+| `migrate` | `paper-migrate`, `velocity-migrate` | a v2 config in the sibling directory v2 really used — `plugins/HeimdallWhitelist/config.yml` on Bukkit, `plugins/heimdall-whitelist/config.json` on Velocity | the migration finds it next door, writes a `bootstrap.yml`, connects on the **legacy** guild key, keeps the original as `*.v2-backup`, and hands the translated settings to the dashboard once |
 
-Both flow rows are Bukkit-only, and that is a harness limitation stated rather than hidden: the Paper
-image exposes RCON and the proxy image in this matrix does not, so there is no way to type a command
-into a running Velocity here. The code under test is the same on both — the admin tree is one
-platform-free class registered through each platform's own `CommandRegistrar` — so what the missing
-rows would prove is the registrar binding, which the configured Velocity row already exercises by
-answering `/hdp` at all.
+**`setup` is Bukkit-only, and that is a real harness limitation:** it types a command into a running
+server, which needs RCON, and the Paper image in this matrix exposes it while the proxy image does
+not. The code under test is the same on both — the admin tree is one platform-free class registered
+through each platform's own `CommandRegistrar` — so what a Velocity setup row would prove is the
+registrar binding, which the configured Velocity row already exercises by answering `/hdp` at all.
+
+**`migrate` runs on both, and that is not decoration.** This is the one mode whose *inputs* differ
+per platform: v2 named its data directory after its `plugin.yml` `name:` on Bukkit and after its
+`@Plugin` id on Velocity — `HeimdallWhitelist` versus `heimdall-whitelist`, which are different
+strings — and it wrote YAML into one and JSON into the other. A Bukkit-only migrate row proves
+exactly half of that, and for a while the unproven half was wrong in production: see departure D70.
+The row needs no console (it waits on log lines, then reads the host file system), so its absence was
+never a harness limitation — it simply did not exist. Each row greps for its own platform's directory
+and file name, so neither can go green on the other's log line.
 
 ### Why the Bukkit row mounts `/data/plugins` when `run.sh` does not
 
