@@ -1086,8 +1086,13 @@ a log line failing must not be what stops a server booting.
 point, unconditionally, whenever the tunnel was up. v2 had no module system, so there was nothing
 that could have switched them off.
 **v3:** the same three are subscribed by `RemoteRequestWiring`, called once from
-`HeimdallRuntime.start()`, alongside `update` in `UpdateWiring`. **No module owns any of them and no
-toggle can turn one off.**
+`HeimdallRuntime.start()`. **No module owns any of them and no toggle can turn one off.**
+
+`update` in `UpdateWiring` is the same *category* — a property of having a tunnel rather than a
+feature a guild opts into — but not the same placement, and the difference is worth not blurring:
+`UpdateWiring.install` is called from the two platform bootstraps, because it needs a
+platform-specific `UpdateInstaller`. Nothing here needs anything a `PlatformFacade` cannot supply, so
+this is installed once, in core, rather than twice.
 
 **Found live, on a real Velocity proxy running 3.0.0-rc.2.** v3 had every piece of the reply path —
 `TunnelBus.reply`, the correlation map keyed on the echoed id, the dispatcher's subscription step —
@@ -1115,6 +1120,24 @@ Consequences worth stating, because they are what a future reader will want to r
   *server's main thread* on Bukkit, and replying there would put a socket write on the tick loop.
 - **`TunnelClient.hasSubscribers`** exists so a test can assert that the wiring step ran, not merely
   that the class it would have called is correct. That distinction is the entire bug above.
+- **`probe_player` arms its own 10-second deadline** on `heimdall-sched`, cancelled if Trace answers
+  first, with a compare-and-set so exactly one of the two can reply. It is the only one of the three
+  whose answer comes from *another plugin*, and a `CompletableFuture` a third party never completes
+  reproduces this whole departure's bug one layer further out — where it is much harder to attribute.
+  Ten seconds because the bot's own probe route waits fifteen: a deadline at or above the caller's is
+  not a deadline. Not `heimdall-ws`, whose javadoc reserves it for the tunnel's own sense of time.
+
+**The Bukkit roster read is retried, not merely copied.** `Bukkit.getOnlinePlayers()` is a live
+transforming view over `PlayerList`'s plain `ArrayList`, mutated on the main thread; copying it from
+`heimdall-io` can throw `ConcurrentModificationException`, or `IndexOutOfBoundsException` where the
+view's `size()` and `get()` disagree for an instant. Escaping, that lands in the handler and becomes
+`{players: [], error: …}` — an empty Online Players panel on a busy server, which is the same symptom
+this departure is about. Five attempts, then throw: a race is momentary by definition, so a second
+attempt essentially always wins, and five consecutive failures is something other than a race. It
+throws rather than answering "nobody is online", because a failure disguised as an ordinary state is
+one nothing downstream can detect. `PlayerDirectory.onlinePlayers` now says so — the previous claim
+that these reads were "a read of a concurrent map inside CraftBukkit and safe from any thread" was
+simply false, and v2 having the same race is not a reason to keep a comment that lies.
 
 The roster payload's per-platform third column — `ip` on the Bukkit family, `server` on a proxy — is
 v2's, kept exactly, including the literal `"unknown"` both platforms fall back to. Core owns `uuid`

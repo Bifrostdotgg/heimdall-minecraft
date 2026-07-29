@@ -109,6 +109,18 @@ final class WhitelistChangeNudge {
             return;
         }
         try {
+            // The CAS above and this store are two steps, not one, so a close() landing between them
+            // can publish a handle it has already tried to cancel. That is tolerated rather than
+            // fixed, and the reasons are worth stating because "make it atomic" looks free:
+            //
+            //   * the window is the few microseconds of a schedule() call, against a debounce
+            //     measured in seconds;
+            //   * fire() re-reads the volatile `closed` flag before touching the sync, so the worst
+            //     outcome is a timer that wakes up and does nothing; and
+            //   * closing it properly would mean a lock around schedule(), on the path a tunnel
+            //     handler runs — the one place this class promises not to block.
+            //
+            // The stale handle is dropped on the next close(), which getAndSet(null)s it regardless.
             pending.set(scheduler.schedule(new Runnable() {
                 @Override
                 public void run() {
