@@ -1,148 +1,28 @@
-# Heimdall Minecraft Plugin Setup Guide
+# Setup
 
-This guide will help you set up the Heimdall Minecraft Plugin for dynamic whitelist management with your Discord bot.
+**There is no config file to edit, and no HMAC secret to copy.** If you are looking for
+`plugins/HeimdallWhitelist/config.yml`, that was v2. v3 keeps six connection keys in
+`plugins/Heimdall/bootstrap.yml` (`plugins/heimdall/` on Velocity) and the plugin writes that file
+itself; every other setting lives on the Heimdall dashboard and is pushed to the plugin over its
+tunnel.
 
-## Prerequisites
+The whole of setup is therefore:
 
-- Heimdall Discord bot running with API server enabled
-- Minecraft server (Spigot/Paper 1.19+)
-- Administrator access to both Discord bot and Minecraft server
+1. Drop the JAR in `plugins/` and start the server.
+2. Mint a setup code on the dashboard's **Minecraft** page for that guild.
+3. Run `/hd setup <code>` (`/hdp setup <code>` on a Velocity proxy). It connects immediately — no
+   restart, no file editing.
 
-## Step 1: Enable Minecraft Features in the Bot
+See the [README](README.md) for the full walkthrough:
 
-1. Set the environment variable `ENABLE_MINECRAFT_SYSTEMS=true` in your bot's configuration
-2. Restart your Discord bot to enable Minecraft commands
+- [Installation](README.md#installation) — Paper/Spigot and Velocity, fresh installs
+- [Upgrading from v2](README.md#upgrading-from-v2) — drop the new JAR in, the old config is found
+  next door and migrated on the first boot
+- [Configuration](README.md#configuration) — what `bootstrap.yml` holds and what the dashboard owns
+- [Admin Commands](README.md#admin-commands) — `/hd status`, `/hd test`, `/hd reload` and the rest
 
-## Step 2: Get HMAC Secret
-
-1. Copy the `INTERNAL_API_KEY` value from your bot's `.env` file
-2. This secret is used to sign requests — it is never sent over the wire
-
-## Step 3: Install the Plugin
-
-1. Download `heimdall-whitelist-1.0.0.jar` from the releases
-2. Place it in your Minecraft server's `plugins/` directory
-3. Start your server to generate the default config file
-4. Stop your server
-
-## Step 4: Configure the Plugin
-
-1. Edit `plugins/HeimdallWhitelist/config.yml`:
-
-   ```yaml
-   api:
-     baseUrl: "http://your-bot-server:3001" # Your bot's API URL
-     hmacSecret: "your-internal-api-key-from-step-2" # The bot's INTERNAL_API_KEY value
-
-   server:
-     displayName: "My Minecraft Server" # Name shown in Discord
-
-   messages:
-     notWhitelisted: "§cNot whitelisted! Link your Discord account first."
-   ```
-
-2. Customize other settings as needed (see config-example.yml)
-
-### WebSocket Tunnel
-
-The plugin also keeps a persistent WebSocket connection to the bot (derived from
-`api.baseUrl` — no inbound ports or extra setup needed). It powers realtime
-Discord role-sync push, the dashboard's live console/player list/status, and
-remote plugin updates. It is **enabled by default**; to opt out, set:
-
-```yaml
-websocket:
-  enabled: false
-```
-
-## Step 5: Set Up Discord Commands
-
-1. In your Discord server, run:
-   ```
-   /minecraft-setup
-   ```
-2. Follow the setup wizard to configure:
-   - Server IP/port for status checking
-   - Welcome channels
-   - Role assignments
-
-## Step 6: Test the Integration
-
-1. Start your Minecraft server
-2. Try joining with a player that's not whitelisted
-3. You should see the custom message directing them to Discord
-4. Use `/link-minecraft` in Discord to start the linking process
-
-## How It Works
-
-### Dynamic Whitelist Flow
-
-1. **Player Joins**: Plugin intercepts all login attempts
-2. **API Check**: Plugin calls bot API to check if player should be whitelisted
-3. **Response Handling**:
-   - **Allowed**: Player joins normally
-   - **Denied**: Player sees custom message
-   - **Pending**: Player gets temporary access with auth code
-
-### Discord Integration
-
-- `/link-minecraft` - Start account linking process
-- `/confirm-code` - Complete linking with generated code
-- `/minecraft-status` - Check server status
-- `/mcstatus` - Quick server ping
-
-### Admin Features
-
-- Real-time whitelist management through Discord
-- No need to manually edit whitelist.json
-- Automatic cleanup of expired auth codes
-- Detailed logging and error handling
-
-## Troubleshooting
-
-### "Unauthorized" Error (HTTP 401)
-
-- Check that `api.hmacSecret` in `config.yml` matches the bot's `INTERNAL_API_KEY` env var
-- Ensure the bot is running and API server is accessible
-- Verify your server's clock is accurate (signatures expire after 5 minutes)
-
-### Players Can't Connect
-
-- Check plugin logs for API errors
-- Verify bot API URL is correct and accessible from Minecraft server
-- Test API connection: `curl http://your-bot:3001/api/health` (health endpoint requires no auth)
-
-### API Timeouts
-
-- Increase `api.timeout` in plugin config
-- Check network connectivity between Minecraft and bot servers
-- Consider enabling `advanced.allowTemporaryAccess` for better UX
-
-### Debug Logging
-
-Enable debug logging in the plugin config:
-
-```yaml
-logging:
-  debug: true
-  logApiCalls: true
-```
-
-This will show detailed API request/response information.
-
-## Security Notes
-
-- Keep your HMAC secret secure — treat it like a password
-- The secret is never sent over the wire; only HMAC signatures are transmitted
-- Use HTTPS for production deployments
-- Consider running bot API on internal network only
-- Regularly rotate secrets by updating both the bot's `INTERNAL_API_KEY` and the plugin's `api.hmacSecret`
-
-## Support
-
-If you encounter issues:
-
-1. Check the plugin logs in `logs/latest.log`
-2. Enable debug logging for more details
-3. Verify all configuration settings
-4. Test API connectivity manually
+Upgrading from v2 needs no manual step at all. Leave the old config where it is; the plugin finds
+`plugins/HeimdallWhitelist/config.yml` (Bukkit) or `plugins/heimdall-whitelist/config.json`
+(Velocity), writes a `bootstrap.yml` from its credentials, keeps the original as a `.v2-backup`, and
+hands the rest of its settings to the dashboard. **Do remove the v2 JAR** — the two declare different
+plugin names and ids, so both would load, and only one of them can own the config.
