@@ -58,6 +58,18 @@ final class VelocityPlayerHandle implements PlayerHandle {
         }
     }
 
+    /**
+     * The wrapped player, for the one caller in this package that needs more than the handle offers.
+     *
+     * <p>Package-private and deliberately absent from {@link PlayerHandle}: the interface has no
+     * {@code unwrap()} so that platform-free code cannot reach through it, and
+     * {@link VelocityPlayerDirectory#describe} lives inside the platform module where a Velocity
+     * {@code Player} is an ordinary type.
+     */
+    Player player() {
+        return player;
+    }
+
     @Override
     public String toString() {
         return "VelocityPlayerHandle{" + player.getUsername() + "/" + player.getUniqueId() + "}";

@@ -1,7 +1,9 @@
 package com.heimdall.platform.bukkit;
 
+import com.heimdall.core.json.Payload;
 import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.PlayerHandle;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -69,6 +71,38 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
             }
         }
         return Collections.unmodifiableList(handles);
+    }
+
+    /**
+     * The address this player connected from, under {@code ip} — v2's Bukkit roster field, verbatim.
+     *
+     * <p>{@code "unknown"} rather than an omitted key when the address cannot be read, which is
+     * v2's literal string and is what the dashboard's panel was written against. It happens: the
+     * socket is closed between the roster snapshot and this read, and {@code getAddress()} answers
+     * {@code null} for a player who is on their way out.
+     *
+     * <p>No {@code server} key, because a Bukkit server is not in front of anything — there is no
+     * backend for a player to be "on". The proxy's directory answers that question instead, and
+     * neither platform has to know the other exists.
+     */
+    @Override
+    public Payload describe(PlayerHandle player) {
+        if (!(player instanceof BukkitPlayerHandle)) {
+            return Payload.empty();
+        }
+        String address = "unknown";
+        try {
+            InetSocketAddress socket = ((BukkitPlayerHandle) player).player().getAddress();
+            if (socket != null && socket.getAddress() != null) {
+                address = socket.getAddress().getHostAddress();
+            }
+        } catch (RuntimeException gone) {
+            // A player the server has already begun tearing down. "unknown" is the honest answer and
+            // is the same one v2 gave for a null address; failing the whole roster over one row is
+            // not.
+            address = "unknown";
+        }
+        return Payload.builder().put("ip", address).build();
     }
 
     /**

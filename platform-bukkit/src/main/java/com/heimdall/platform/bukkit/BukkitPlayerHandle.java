@@ -89,6 +89,18 @@ final class BukkitPlayerHandle implements PlayerHandle {
         }
     }
 
+    /**
+     * The wrapped player, for the one caller in this package that needs more than the handle offers.
+     *
+     * <p>Package-private and deliberately not on {@link PlayerHandle}: the interface has no
+     * {@code unwrap()} precisely so platform-free code cannot reach through it, and
+     * {@link BukkitPlayerDirectory#describe} is inside the platform module where a {@code Player} is
+     * an ordinary type.
+     */
+    Player player() {
+        return player;
+    }
+
     @Override
     public String toString() {
         return "BukkitPlayerHandle{" + name + "/" + uuid + "}";

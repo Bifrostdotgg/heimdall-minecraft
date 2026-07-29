@@ -28,6 +28,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * A whole server, in one file, with nothing running behind it.
@@ -64,6 +65,7 @@ public final class FakePlatform implements PlatformFacade {
 
     private volatile LuckPermsBridge luckPerms;
     private volatile BedrockIdentityProvider floodgate = BedrockIdentityProvider.NONE;
+    private volatile Function<PlayerHandle, Payload> describer;
     private volatile boolean deferLater;
     private volatile RuntimeException dispatchFailure;
     private final java.util.Set<String> unknownCommands =
@@ -92,6 +94,20 @@ public final class FakePlatform implements PlatformFacade {
     /** Supplies — or, with {@code null}, withholds — a LuckPerms bridge. */
     public FakePlatform withLuckPerms(LuckPermsBridge bridge) {
         this.luckPerms = bridge;
+        return this;
+    }
+
+    /**
+     * Supplies the platform-specific half of a roster row — Bukkit's {@code ip}, a proxy's
+     * {@code server}.
+     *
+     * <p>Empty by default, and that default is the interesting case rather than a lazy one: a
+     * platform with nothing to add is a legal implementation of
+     * {@link PlayerDirectory#describe(PlayerHandle)}, and the roster reply has to stay well-formed
+     * for it.
+     */
+    public FakePlatform describingPlayers(Function<PlayerHandle, Payload> function) {
+        this.describer = function;
         return this;
     }
 
@@ -283,6 +299,16 @@ public final class FakePlatform implements PlatformFacade {
                     return Collections.unmodifiableList(
                             new ArrayList<PlayerHandle>(online.values()));
                 }
+            }
+
+            @Override
+            public Payload describe(PlayerHandle player) {
+                Function<PlayerHandle, Payload> function = describer;
+                if (function == null || player == null) {
+                    return Payload.empty();
+                }
+                Payload described = function.apply(player);
+                return described == null ? Payload.empty() : described;
             }
         };
     }
