@@ -35,8 +35,17 @@ public interface PlayerDirectory {
     /**
      * Everyone currently online.
      *
-     * <p>A snapshot — iterating it cannot throw {@link java.util.ConcurrentModificationException}
-     * because somebody joined while a caller was halfway through it.
+     * <p>A snapshot — iterating the returned collection cannot throw
+     * {@link java.util.ConcurrentModificationException} because somebody joined while a caller was
+     * halfway through it. <strong>Taking</strong> that snapshot is where the race actually lives, and
+     * containing it is the implementation's job: on the Bukkit family the server's own online list is
+     * a plain {@code ArrayList} mutated on the main thread, so a naive copy made from
+     * {@code heimdall-io} can throw.
+     *
+     * <p>An implementation that cannot produce a consistent snapshot may throw. It must
+     * <strong>not</strong> substitute an empty collection: "nobody is online" is a perfectly ordinary
+     * state that callers render as such, so a failure disguised as one is a wrong answer nothing
+     * downstream can detect. Empty means empty.
      */
     Collection<PlayerHandle> onlinePlayers();
 
