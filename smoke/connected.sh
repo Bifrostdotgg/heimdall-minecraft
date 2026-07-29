@@ -835,6 +835,15 @@ row_body() {
                     return 1
                 fi
                 ;;
+            *)
+                # `setup` would land here, and would be a row that stages nothing and then asserts
+                # against a console this image does not have. The self-test's row-shape guard
+                # already refuses that combination, but this branch should be safe on its own
+                # terms — a guard in a different function is not a precondition this one enforces.
+                fail "HARNESS: unhandled mode '${mode}' for velocity staging"
+                kill "${stub_tail}" 2>/dev/null || true
+                return 1
+                ;;
         esac
         docker_args=(
             run -d --name "${server_container}" --network "${network}"
@@ -1155,7 +1164,14 @@ assert_migrate_row() {
     fi
     # ...and it must be OUR file it migrated, not something it found elsewhere. The pattern accepts
     # either file name so one row cannot pass on the other platform's line.
-    if ! grep -Eq "Migrated the v2 config at .*${v2_directory}/${v2_file}" "${server_log}"; then
+    #
+    # The dot is escaped because this is an ERE, not a literal: bare `config.json` would also match
+    # `config-json`, which is precisely the near-miss genre this assertion exists to refuse.
+    #
+    # The replacement is SINGLE-QUOTED, and it has to be. `${v2_file//./\\.}` — the obvious spelling
+    # — silently produces `config.json` with no backslash at all under bash 5.2, because the
+    # replacement text goes through quote removal; the escaping would look present and do nothing.
+    if ! grep -Eq "Migrated the v2 config at .*${v2_directory}/${v2_file//./'\.'}" "${server_log}"; then
         fail "a migration happened, but not from plugins/${v2_directory}/${v2_file} — which is the"
         fail "only place a real v2 install on this platform would have left it"
         return 1

@@ -44,13 +44,21 @@ class MigrationBootTest {
             "");
 
     /**
-     * v2's Velocity {@code config.json}, in the shape {@code VelocityConfigProvider} actually wrote.
+     * A <strong>subset</strong> of v2's Velocity {@code config.json} — enough for credentials and
+     * the candidate-file fall-through, and no more.
      *
-     * <p>A different document rather than the YAML one renamed, because v2's proxy build really did
-     * write a different file: JSON, and without the {@code roleSync}, {@code console},
-     * {@code cache.prewarm} or {@code updates} blocks its Bukkit build had. A YAML fixture here
-     * would have the Velocity test pass on a file no v2 proxy has ever had, and would never exercise
-     * the {@code config.yml}-then-{@code config.json} fall-through that finding this one depends on.
+     * <p>Trimmed, and said so rather than claimed as v2's document: {@code VelocityConfigProvider}
+     * also wrote {@code messages}, {@code performance} and three further {@code cache} keys
+     * unconditionally, and none of them matter to what this class tests, which is <em>where</em> the
+     * file was found. Describing a paraphrase as the real thing is the exact genre of mistake that
+     * produced departure D70, so the full-fidelity copy is not duplicated here: it lives at
+     * {@code core/src/test/resources/v2/config.json} and {@code V2MigrationTest} is what reads it,
+     * asserting every translated value. One authoritative copy, not two that can drift.
+     *
+     * <p>What is <em>not</em> negotiable is that this is JSON rather than the YAML fixture renamed.
+     * v2's proxy build really did write a different file, so a YAML fixture would have the Velocity
+     * test pass on a document no v2 proxy has ever had — and would never walk the
+     * {@code config.yml}-then-{@code config.json} fall-through that finding this one depends on.
      */
     private static final String V2_CONFIG_JSON = String.join("\n",
             "{",
