@@ -60,6 +60,12 @@ public final class StubWsServer extends WebSocketServer {
     /** The bot's own route regex — a guild id outside 17-20 digits is not a guild id. */
     private static final Pattern WS_PATH = Pattern.compile("^/ws/minecraft/(\\d{17,20})$");
 
+    /**
+     * How long an on-ack request waits. Generous, because a smoke row's server is a cold JVM under
+     * a container, and a timeout here would read as a missing handler when it was only a slow boot.
+     */
+    private static final long ON_ACK_TIMEOUT_MS = 20_000L;
+
     /** See the note on {@code StubHttpApi.GSON} — {@code role_sync} carries an explicit null uuid. */
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
 
@@ -72,6 +78,9 @@ public final class StubWsServer extends WebSocketServer {
 
     /** Outstanding requests awaiting a correlated reply, keyed by message id. */
     private final Map<String, CompletableFuture<JsonObject>> pending = new ConcurrentHashMap<>();
+
+    /** Servers the on-ack requests have already been fired at, as {@code guildId/serverId}. */
+    private final Set<String> onAckAsked = ConcurrentHashMap.newKeySet();
 
     private volatile WsMessageListener messageListener;
     private final AtomicInteger configVersion;
@@ -289,6 +298,7 @@ public final class StubWsServer extends WebSocketServer {
                     StubLog.info("config acked by " + server.serverId() + " at version "
                             + server.acknowledgedConfigVersion());
                 }
+                fireOnAckRequests(server);
                 return;
             }
             default -> {
@@ -448,6 +458,60 @@ public final class StubWsServer extends WebSocketServer {
 
     // ── Test hooks ───────────────────────────────────────────────────────────
 
+    /**
+     * Asks a freshly configured server whatever {@code STUB_BOT_REQUEST_ON_ACK} names, once.
+     *
+     * <p>The point of it is the log line, and the log line is an assertion: a plugin with no handler
+     * for the type replies nothing at all, so the difference between a working server and a broken
+     * one is {@code answered} versus {@code FAILED: Request timed out} rather than a subtle
+     * difference in a payload. That distinction is the one the connected smoke greps for, and it is
+     * the failure that shipped — the plumbing for {@code get_players} was all present and nothing was
+     * subscribed to it, so the dashboard's panel 504ed on every server in the fleet.
+     *
+     * <p>Runs the continuation on this class's own scheduler rather than on a nameless pool, per the
+     * repo-wide rule the conformance suite enforces over this module too.
+     */
+    private void fireOnAckRequests(ConnectedServer server) {
+        List<String> types = config.requestOnAck();
+        if (types.isEmpty() || !onAckAsked.add(server.guildId() + "/" + server.serverId())) {
+            return;
+        }
+        for (final String type : types) {
+            request(server.guildId(), server.serverId(), type, new JsonObject(), ON_ACK_TIMEOUT_MS)
+                    .whenCompleteAsync((reply, failure) -> {
+                        String label = "on-ack " + type + " -> " + server.serverId();
+                        if (failure != null) {
+                            StubLog.warn(label + " FAILED: " + rootMessage(failure));
+                            return;
+                        }
+                        StubLog.info(label + ": " + summarise(reply));
+                    }, scheduler);
+        }
+    }
+
+    /** A one-line description of a reply, chosen so a shell script can assert on it. */
+    private static String summarise(JsonObject reply) {
+        if (reply == null) {
+            return "answered with nothing";
+        }
+        if (reply.has("players") && reply.get("players").isJsonArray()) {
+            return reply.getAsJsonArray("players").size() + " players";
+        }
+        if (reply.has("output") && reply.get("output").isJsonPrimitive()) {
+            return "output=" + reply.get("output").getAsString();
+        }
+        if (reply.has("error") && reply.get("error").isJsonPrimitive()) {
+            return "error=" + reply.get("error").getAsString();
+        }
+        return "answered " + reply;
+    }
+
+    /** The message worth printing, without the CompletionException wrapper around it. */
+    private static String rootMessage(Throwable failure) {
+        Throwable cause = failure.getCause() != null ? failure.getCause() : failure;
+        return cause.getMessage() == null ? String.valueOf(cause) : cause.getMessage();
+    }
+
     /** Registers a listener for envelopes the stub does not handle itself. */
     public void setMessageListener(WsMessageListener listener) {
         this.messageListener = listener;
@@ -526,6 +590,20 @@ public final class StubWsServer extends WebSocketServer {
         payload.add("groupsAdded", toArray(groupsAdded));
         payload.add("groupsRemoved", toArray(groupsRemoved));
         return broadcast(guildId, "role_sync", payload);
+    }
+
+    /**
+     * Sends {@code whitelist_changed} to every connected server in the guild.
+     *
+     * <p>A <strong>notification</strong>: an empty payload, and no reply is expected or waited for.
+     * The {@code id} is a fresh one all the same, because v2's client dropped any frame that lacked
+     * one before dispatch, so the bot puts one on everything it sends whether or not anybody is
+     * correlating on it.
+     *
+     * @return how many sockets it reached
+     */
+    public int sendWhitelistChanged(String guildId) {
+        return broadcast(guildId, "whitelist_changed", new JsonObject());
     }
 
     /** Sends {@code get_players} and waits for the correlated reply. */

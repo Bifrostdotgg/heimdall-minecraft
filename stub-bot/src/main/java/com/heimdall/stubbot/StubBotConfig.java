@@ -78,6 +78,24 @@ public final class StubBotConfig {
     /** When true the registry cannot be read, which is what turns an incumbent clash into a 503. */
     private boolean registryUnreadable;
 
+    /**
+     * Request types to fire at a server the moment it acknowledges its config — once per server.
+     *
+     * <p>Empty by default, so nothing that existed before this flag behaves differently.
+     *
+     * <p>It exists for the same caller as {@link #claimCodes}: the smoke matrix drives a real server
+     * in a container and has no way to reach into this JVM and call {@code bot.ws().getPlayers(...)}.
+     * Without it the on-demand half of the contract — the dashboard asking a live server a question
+     * and getting an answer — is provable only by unit tests, which is precisely the gap that let v3
+     * ship with the plumbing for {@code get_players} and nothing subscribed to it.
+     *
+     * <p>Fired on {@code config.ack} rather than on {@code identify}, so that a request a module has
+     * to answer is asked after the modules are up. Firing it once per server is deliberate: a config
+     * push during a hot-toggle test produces a second ack, and re-asking on every one of those would
+     * turn a debugging aid into noise.
+     */
+    private final List<String> requestOnAck = new ArrayList<>();
+
     private long pingIntervalMs = 30_000L;
     private long livenessTimeoutMs = 90_000L;
 
@@ -152,6 +170,7 @@ public final class StubBotConfig {
                 case "plugin_latest" -> config.pluginLatest = JsonParser.parseString(value).getAsJsonObject();
                 case "verbose" -> StubLog.setVerbose(Boolean.parseBoolean(value.trim()));
                 case "registry_unreadable" -> config.registryUnreadable = Boolean.parseBoolean(value.trim());
+                case "request_on_ack" -> config.requestOnAck(List.of(value.split(",")));
                 case "foreign_servers" -> {
                     config.foreignServers.clear();
                     for (String id : value.split(",")) {
@@ -459,6 +478,24 @@ public final class StubBotConfig {
 
     public boolean registryUnreadable() {
         return registryUnreadable;
+    }
+
+    /** Request types to fire once at each server that acknowledges its config. See the field. */
+    public List<String> requestOnAck() {
+        return Collections.unmodifiableList(requestOnAck);
+    }
+
+    /** Sets the on-ack request list. Blank entries are dropped. */
+    public StubBotConfig requestOnAck(List<String> types) {
+        requestOnAck.clear();
+        if (types != null) {
+            for (String type : types) {
+                if (type != null && !type.trim().isEmpty()) {
+                    requestOnAck.add(type.trim());
+                }
+            }
+        }
+        return this;
     }
 
     /** Puts one serverId back in the registry — what a successful claim does. */

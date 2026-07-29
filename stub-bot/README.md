@@ -57,6 +57,7 @@ Precedence: defaults → `STUB_BOT_*` environment variables → `--key=value` ar
 | `STUB_BOT_CLAIM_CODES` | — | Setup codes to mint at startup, as `CODE:serverName:serverId` triples, comma-separated. `serverId` is optional. |
 | `STUB_BOT_FOREIGN_SERVERS` | — | Comma-separated server ids registered to a *different* token — their upgrade is refused with 403. |
 | `STUB_BOT_REGISTRY_UNREADABLE` | `false` | Simulates a registry outage; with an incumbent under another token the upgrade is refused with 503. |
+| `STUB_BOT_REQUEST_ON_ACK` | — | Comma-separated request types to fire once at each server that acks its config, logging the reply. The only way a shell script can drive an on-demand request — see "Driving an on-demand request" below. |
 | `STUB_BOT_CONFIG_VERSION` | `1` | Starting config version advertised to v3 clients. |
 | `STUB_BOT_MODULES` | all but `console` | Inline JSON for the `config.push` `modules` object. |
 | `STUB_BOT_OFFENSE_TYPES` | one "Cheating" type | Inline JSON array, same shape as the bot's `OffenseType` documents. |
@@ -352,6 +353,27 @@ Every frame, in both directions:
 Anything arriving with an unrecognised id is treated as unsolicited and handed to the registered
 `WsMessageListener` rather than silently dropped.
 
+### Driving an on-demand request
+
+`bot.ws().getPlayers(...)`, `runCommand(...)` and `probePlayer(...)` are Java hooks, and the connected
+smoke drives a real server in a container with no way to reach into this JVM. `STUB_BOT_REQUEST_ON_ACK`
+closes that gap: name one or more request types and the stub fires each of them once, at every server
+that acknowledges its config, then logs what came back.
+
+```
+STUB_BOT_REQUEST_ON_ACK=get_players
+→ on-ack get_players -> survival: 0 players
+→ WARN on-ack get_players -> survival FAILED: Request timed out (get_players)
+```
+
+Those two lines are the assertion. A plugin with no handler subscribed replies **nothing**, so the
+difference between a working server and a broken one is answered-versus-timed-out rather than a subtle
+difference in a payload — which is precisely the failure that shipped in 3.0.0-rc.2, where the whole
+`get_players` reply path existed and nothing was subscribed to the request.
+
+Fired on `config.ack` rather than on `identify`, so a request a module has to answer is asked once the
+modules are up; and once per server, so a config re-push during a hot-toggle test does not re-ask.
+
 ### Message table
 
 Bot → plugin:
@@ -360,6 +382,7 @@ Bot → plugin:
 | --- | --- | --- |
 | `ping` | `{}` | Reply `pong` with the same id. **This is the only keepalive that exists.** |
 | `role_sync` | `{uuid, username, targetGroups, managedGroups, groupsAdded, groupsRemoved}` | No — broadcast to every server in the guild. |
+| `whitelist_changed` | `{}` | **No — a notification.** Broadcast to the guild when the whitelist changes, so the plugin can re-sync its mirror instead of waiting out its poll interval. Carries a fresh id (v2's client dropped id-less frames) but nothing correlates on it, and no reply is expected. |
 | `get_players` | `{}` | Yes → `player_list`. |
 | `run_command` | `{command}` | Yes → `command_result`. |
 | `probe_player` | `{uuid, username}` | Yes → `probe_result`. |
