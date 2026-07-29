@@ -89,6 +89,28 @@ STUB_CONSOLE_PATTERN='ws recv console_line'
 # The whitelist sync really crossed the wire, as a signed request the stub accepted. The plugin's
 # own "Mirror reconcile" line proves it processed a response; only the stub can prove it asked.
 STUB_SYNC_PATTERN="GET /api/guilds/${STUB_GUILD}/minecraft/whitelist/sync"
+
+# ── The dashboard's on-demand questions ──────────────────────────────────────
+#
+# Everything above is the plugin talking. This is the other direction: the BOT asks a live server a
+# question over the tunnel and waits for a correlated reply, which is what the dashboard's Online
+# Players panel, its console command box and its mod-probe button all are.
+#
+# The stub fires these once the server acks its config — STUB_BOT_REQUEST_ON_ACK exists for exactly
+# this, because bot.ws().getPlayers() is a Java hook and a shell script driving a container cannot
+# reach into the JVM.
+#
+# get_players alone, for now. run_command would need a verb that exists on both a Paper server and a
+# Velocity proxy, and probe_player needs the Trace plugin; get_players is the one that is answerable
+# everywhere, and it is the one that actually broke — v3 shipped with the whole reply path built and
+# nothing subscribed to the request, so the panel 504ed after ten seconds on every server in the
+# fleet.
+STUB_ON_ACK_REQUESTS="get_players"
+# `0 players` is the expected count — this harness has no headless client, so nobody is ever online —
+# and it is still a real assertion, because the alternative outcome is not a different number. A
+# plugin with no handler replies NOTHING, and the stub then logs `FAILED: Request timed out (…)`,
+# which this pattern does not match. What is being distinguished is answered-at-all.
+STUB_ROSTER_PATTERN="on-ack get_players -> ${STUB_SERVER_ID}: [0-9]+ players"
 # The tunnel was still live at shutdown and closed deliberately. Without this the "disabled cleanly
 # with a live tunnel" claim rests on the disable banner alone, which says nothing about the tunnel —
 # a socket that had already dropped ten minutes earlier would look identical.
@@ -260,6 +282,20 @@ selftest() {
     check_match "${STUB_CONSOLE_PATTERN}" \
         "[stub-bot] ws recv health id=abc from ${STUB_SERVER_ID}" \
         no "console_line vs the heartbeat's health frame" || failures=$((failures + 1))
+
+    check_match "${STUB_ROSTER_PATTERN}" \
+        "[stub-bot 22:41:07.883] on-ack get_players -> ${STUB_SERVER_ID}: 0 players" \
+        yes "the plugin answered the bot's get_players" || failures=$((failures + 1))
+    # THE near-miss, and the only one that matters here: with no handler subscribed the plugin
+    # replies nothing at all and the stub logs a timeout instead. A pattern that matched this would
+    # be green on exactly the build this row exists to fail.
+    check_match "${STUB_ROSTER_PATTERN}" \
+        "[stub-bot 22:41:27.883] WARN on-ack get_players -> ${STUB_SERVER_ID} FAILED: Request timed out (get_players)" \
+        no "an answered roster vs an unanswered request" || failures=$((failures + 1))
+    # And the other way a reply can be wrong: correlated, but carrying an error instead of a roster.
+    check_match "${STUB_ROSTER_PATTERN}" \
+        "[stub-bot 22:41:07.883] on-ack get_players -> ${STUB_SERVER_ID}: error=the server is shutting down" \
+        no "a roster vs an error payload" || failures=$((failures + 1))
 
     # Every sample below is copied verbatim out of smoke/.work-connected from a green run, not
     # written from memory. A fabricated sample proves the pattern matches the sample.
@@ -747,6 +783,7 @@ row_body() {
             -e "STUB_BOT_API_KEY=${STUB_SECRET}" \
             -e STUB_BOT_VERBOSE=true \
             -e 'STUB_BOT_MODULES={"whitelist":{"enabled":true},"rolesync":{"enabled":true},"offenses":{"enabled":true},"console":{"enabled":true}}' \
+            -e "STUB_BOT_REQUEST_ON_ACK=${STUB_ON_ACK_REQUESTS}" \
             ${stub_env[@]+"${stub_env[@]}"} \
             eclipse-temurin:21-jre /opt/stub-bot/bin/stub-bot >/dev/null; then
         fail "HARNESS: could not start the stub bot"
@@ -1000,6 +1037,16 @@ assert_row() {
         return 1
     fi
     pass "console lines streamed to the bot"
+
+    # The other direction: the bot ASKED and the plugin answered. Everything above this line would
+    # be green on a build with no request handlers subscribed at all — which is the build that
+    # shipped, and what the dashboard saw was a ten-second 504 on its Online Players panel.
+    if ! wait_for_pattern "${stub_log}" "${STUB_ROSTER_PATTERN}" 90 \
+            "the plugin to answer the bot's get_players"; then
+        fail "no correlated player_list came back — the request handler is missing or unsubscribed"
+        return 1
+    fi
+    pass "the bot's on-demand get_players was answered"
 
     # Waited for last rather than first: a server that is still generating its spawn area has not
     # finished booting, and stopping it there loses the shutdown race.

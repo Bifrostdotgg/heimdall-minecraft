@@ -205,7 +205,21 @@ over the console, or a v2 config migrated on the first boot (see [the modes](#fi
 | Config is pushed and acked | stub log | proves the narrowing worked — the bot only pushes config for capabilities the client declared |
 | The whitelist mirror pre-warms | plugin log | a signed `GET whitelist/sync` round trip, reconciled into a real file on a real disk |
 | Console lines reach the bot | stub log | the log4j tap, the module's batching and the tunnel, end to end |
+| The bot's `get_players` is **answered** | stub log | the one assertion pointing the *other* way down the tunnel — see below |
 | It still unloads cleanly | plugin log | with a live tunnel, which `run.sh` never has |
+
+**The `get_players` row is new, and it exists because every other row above it stayed green on a
+build that was broken.** v3.0.0-rc.2 shipped with the entire reply path for the dashboard's on-demand
+requests built — `TunnelBus.reply`, the correlation map, the dispatcher's subscription step — and
+nothing subscribed to any of them. The Online Players panel 504ed after ten seconds on a real proxy
+while this scenario passed, because everything it checked was the plugin *talking* and nothing checked
+the plugin *answering*. `STUB_BOT_REQUEST_ON_ACK=get_players` makes the stub ask, once the server has
+acked its config, and log either `on-ack get_players -> survival: 0 players` or `FAILED: Request timed
+out`. The count is zero — no headless client, so nobody is ever online — and it is still a real
+assertion, because the failure mode is not a different number but no reply at all. `run_command` and
+`probe_player` are deliberately not wired in: the first would need a verb that exists on both a Paper
+server and a Velocity proxy, the second needs the Trace plugin, and both are covered by unit tests
+against the same handlers.
 
 **It earned its keep on the first run.** The plugin declared `capabilities=[]` and the stub logged
 `protocol=v2`: the capability set was the union over *enabled* modules, nothing was enabled because
