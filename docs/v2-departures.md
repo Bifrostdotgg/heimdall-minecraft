@@ -1014,6 +1014,48 @@ Only an explicit `health: {enabled: false}` from the dashboard turns it off. `/h
 reaches it too, because it is a real module rather than a special case — departure D67 applies to it
 for free.
 
+### D70 — v2's directory names are copied out of v2, and "nothing found" is no longer always silent
+
+**v2:** `plugins/HeimdallWhitelist/` on Bukkit (`plugin.yml` `name:`) and
+`plugins/heimdall-whitelist/` on Velocity (`@Plugin(id = …)`), because each platform derives a
+plugin's data directory from a different declaration.
+**v3:** both spelled out as constants in `MigrationBoot`, each one a verbatim copy of v2's own
+declaration, each pinned by a test that cites where it came from.
+
+**Found live, on a real Velocity network.** `V2_VELOCITY_DIRECTORY` was `heimdallwhitelist` — v2's
+*display name*, hand-lowercased, on the reasoning that "Velocity ids are lower-case". Velocity does
+lower-case its ids, but v2's id is `heimdall-whitelist`, hyphen included, and has been in every
+release from v2.0.0 to v2.4.0. So on a case-sensitive filesystem the migration searched a directory
+no v2 install has ever had, found nothing, and the proxy booted with no credentials and the perfectly
+ordinary line *"no bootstrap.yml yet"*. Bukkit was right for a reason that does not generalise: its
+constant came from `plugin.yml`'s `name:`, which is what Bukkit actually uses.
+
+**The lesson is about the test, not the constant.** There *was* a migration test covering "a v2
+install next door", and a connected smoke row (`paper-migrate`) that stages a real v2 `config.yml` in
+a real sibling directory and asserts the whole flow end to end. Neither caught this, for the same
+reason: **the fixture and the constant came from one author's single wrong assumption, so the test
+validated the mistake.** The test created the directory the code was going to look in, and thereby
+proved the code could find a directory it had named itself. A name that is not ours to choose has to
+be checked against the thing that chose it — v2's source — not against a second copy of our guess.
+Hence the pinning tests quote the v2 declaration and the tag range it holds across, and the
+end-to-end test goes *through* `MigrationBoot.migrate` with the real `plugins/heimdall-whitelist/`
+layout rather than asserting one constant equals another.
+
+There is a coverage asymmetry worth stating rather than hiding: the connected smoke matrix's flow
+rows are Bukkit-only (the proxy image in that matrix exposes no console), so the Velocity directory
+name is proven by unit test alone.
+
+**And the silence was the other half of the cost.** `V2Migration.run`'s not-found branch is
+deliberately silent — a fresh install has no v2 config and does not need to be told so — but a
+botched upgrade produces the *identical* observable: no bootstrap, no migration, a server asking to
+be set up. That is why this survived deployment and then cost a debugging session. So the branch now
+distinguishes the two cases: still silent when nothing beside the plugin looks like a v2 install, and
+one INFO line when something does, naming every directory searched (and whether it exists), every
+v2-looking directory found beside them, and what each of those holds. Matching is deliberately
+loose — case-insensitive, separators stripped, so `HeimdallWhitelist`, `heimdall-whitelist` and
+`heimdall_whitelist` all count — because the whole point is to catch a spelling the plugin did *not*
+expect. A check that only recognised the expected spelling would be the original bug again.
+
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 
 **New in 1d.**

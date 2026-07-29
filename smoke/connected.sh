@@ -153,6 +153,13 @@ READY_PATTERN='Done \([0-9.]+s\)'
 # same on both — the admin tree is one platform-free class registered through each platform's own
 # CommandRegistrar — so what the missing rows would prove is the registrar binding, which the
 # configured Velocity row already exercises by answering /hdp at all.
+#
+# The migrate row carries one exception to "the code under test is the same on both", and it is the
+# exception that bit us (departure D70): the directory a v2 install left its config in is v2's Bukkit
+# plugin NAME on Paper and v2's Velocity plugin ID on the proxy, and those are different strings. A
+# Bukkit-only row proves MigrationBoot.V2_BUKKIT_DIRECTORY and says nothing about the Velocity one,
+# which shipped wrong. That name is pinned against v2's own @Plugin annotation by MigrationBootTest,
+# because there is no row here that would notice.
 ROWS=(
     "paper-1.21.8|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|configured"
     "velocity-3.5.1|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G|configured"

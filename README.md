@@ -54,8 +54,9 @@ The same JAR works on both Paper and Velocity.
 
 Stop the server, drop in the new JAR in place of the old one, and start it back up — no config
 edits required. On its first boot, v3 looks for a v2 `config.yml` (Bukkit/Paper) or `config.json`
-(Velocity) both in its own data directory and in the sibling `HeimdallWhitelist`/`heimdallwhitelist`
-directory a v2 install actually used, and migrates it automatically:
+(Velocity) both in its own data directory and in the sibling directory a v2 install actually used —
+`plugins/HeimdallWhitelist/` on Bukkit/Paper, `plugins/heimdall-whitelist/` on Velocity — and
+migrates it automatically:
 
 - Credentials, server id and the login-timing knobs (`timeout`, `retries`, `retryDelay`) are written
   into a new `bootstrap.yml`.
