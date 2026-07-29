@@ -152,7 +152,17 @@ public final class V2Migration {
             // Silent on a fresh install, which has no v2 config and does not need to be told so —
             // but NOT silent when something that looks exactly like a v2 install is sitting next to
             // the directories that were searched. See reportNearMiss.
-            reportNearMiss(searchDirectories);
+            //
+            // Caught, because this method promises never to throw and this is a diagnostic: it
+            // walks directories nobody asked it to walk, so a SecurityManager or an exotic
+            // filesystem can refuse it in ways the migration itself never provoked. A log line
+            // failing must not be what stops a server booting.
+            try {
+                reportNearMiss(searchDirectories);
+            } catch (RuntimeException diagnosticFailed) {
+                logger.debug(() -> "could not check for a near-miss v2 directory: "
+                        + diagnosticFailed);
+            }
             return MigrationResult.notFound("No v2 config found.");
         }
 
@@ -228,22 +238,37 @@ public final class V2Migration {
      * debugger. Matching ignores case and separators, so {@code HeimdallWhitelist},
      * {@code heimdall-whitelist} and {@code heimdall_whitelist} all count — the point is to catch
      * the spelling this plugin did not expect, so the test cannot be the expected spelling.
+     *
+     * <p>The closing advice is branched, because the two near misses have opposite fixes. If every
+     * candidate is a directory that was <em>already searched</em>, the name is right and the file is
+     * wrong, so "move the config into a directory that was searched" is advice the operator has
+     * already followed. Only an unsearched candidate means the directory name is the problem.
      */
     private void reportNearMiss(List<Path> searchDirectories) {
         List<Path> candidates = v2LookingDirectories(searchDirectories);
         if (candidates.isEmpty()) {
             return;
         }
-        StringBuilder out = new StringBuilder();
-        out.append("No v2 config to migrate, so this server is starting unconfigured — but a "
+        boolean anyUnsearched = false;
+        for (Path candidate : candidates) {
+            if (!searchDirectories.contains(candidate)) {
+                anyUnsearched = true;
+                break;
+            }
+        }
+        String advice = anyUnsearched
+                ? "Move the v2 config into one of the directories searched and restart, or run "
+                        + "/hd setup to configure this server from scratch."
+                : "That directory WAS searched and held neither of those file names, so check the "
+                        + "file name inside it — or run /hd setup to configure this server from "
+                        + "scratch.";
+        logger.info("No v2 config to migrate, so this server is starting unconfigured — but a "
                 + "directory that looks like a v2 install is beside the ones searched, so this may "
-                + "be an upgrade whose config is not where this version expects it. Looked for ")
-                .append(String.join(" then ", CANDIDATE_FILE_NAMES)).append(" in: ")
-                .append(describeSearched(searchDirectories))
-                .append(". v2-looking directories found: ").append(describeCandidates(candidates))
-                .append(". Move the v2 config into one of the directories searched and restart, or "
-                        + "run /hd setup to configure this server from scratch.");
-        logger.info(out.toString());
+                + "be an upgrade whose config is not where this version expects it. Looked for "
+                + String.join(" then ", CANDIDATE_FILE_NAMES) + " in: "
+                + describeSearched(searchDirectories)
+                + ". v2-looking directories found: " + describeCandidates(candidates)
+                + ". " + advice);
     }
 
     /**
@@ -308,16 +333,26 @@ public final class V2Migration {
         return name.contains("heimdall") && name.contains("whitelist");
     }
 
-    /** Each searched directory, saying which of them exist — a missing one is the usual answer. */
+    /**
+     * Each searched directory, saying which of them exist — a missing one is the usual answer.
+     *
+     * <p>"Exists but is not a directory" is called out separately rather than folded into "does not
+     * exist". They are different mistakes with different fixes, and reporting a file that is sitting
+     * right there as absent is how a diagnostic loses the operator's trust.
+     */
     private static String describeSearched(List<Path> searchDirectories) {
         List<String> parts = new ArrayList<String>();
         for (Path directory : searchDirectories) {
             if (directory == null) {
                 continue;
             }
-            parts.add(Files.isDirectory(directory)
-                    ? directory.toString()
-                    : directory + " (does not exist)");
+            if (Files.isDirectory(directory)) {
+                parts.add(directory.toString());
+            } else if (Files.exists(directory)) {
+                parts.add(directory + " (is a file, not a directory)");
+            } else {
+                parts.add(directory + " (does not exist)");
+            }
         }
         return parts.isEmpty() ? "(nowhere)" : String.join(", ", parts);
     }

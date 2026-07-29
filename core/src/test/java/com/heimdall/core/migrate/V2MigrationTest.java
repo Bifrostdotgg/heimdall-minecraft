@@ -272,9 +272,62 @@ class V2MigrationTest {
                 "the directory that does exist must be named: " + logger.messagesAt(LogLevel.INFO));
         assertTrue(logger.logged(LogLevel.INFO, plugins.resolve("heimdallwhitelist").toString()),
                 "and so must the one that was searched for and is missing");
-        assertTrue(logger.logged(LogLevel.INFO, "config.yml"),
-                "naming what the candidate holds is what makes the mismatch obvious");
+        // Deliberately NOT a bare "config.yml": the line always says "Looked for config.yml then
+        // config.json", so that substring passes whether or not the candidate's contents were ever
+        // listed. The listing is the part that makes the mismatch obvious, so it is asserted in the
+        // one shape only the listing produces.
+        assertTrue(logger.logged(LogLevel.INFO, "(holds config.yml)"),
+                "naming what the candidate holds is what makes the mismatch obvious: "
+                        + logger.messagesAt(LogLevel.INFO));
         assertTrue(logger.at(LogLevel.WARN).isEmpty(), "a near miss is information, not a failure");
+    }
+
+    @Test
+    @DisplayName("a candidate holding more files than the line will quote is truncated, not dumped")
+    void aCrowdedCandidateIsTruncated(@TempDir Path root) throws IOException {
+        // v2's directory on a long-lived server holds a cache file, a backup or two and whatever
+        // else accumulated. The line is a diagnostic, not a directory listing, so it stops.
+        Path plugins = Files.createDirectories(root.resolve("plugins"));
+        Path v3Dir = Files.createDirectories(plugins.resolve("Heimdall"));
+        Path v2Dir = Files.createDirectories(plugins.resolve("HeimdallWhitelist"));
+        for (int index = 0; index < 20; index++) {
+            Files.createFile(v2Dir.resolve("leftover-" + index + ".dat"));
+        }
+
+        migration.run(Arrays.asList(v3Dir, v2Dir), storeIn(v3Dir));
+
+        List<String> info = logger.messagesAt(LogLevel.INFO);
+        assertEquals(1, info.size(), "one line, however much is in the directory: " + info);
+        String line = info.get(0);
+        assertTrue(line.contains(", ...)"), "the listing must be visibly cut short: " + line);
+        int quoted = 0;
+        for (int index = 0; index < 20; index++) {
+            if (line.contains("leftover-" + index + ".dat")) {
+                quoted++;
+            }
+        }
+        assertEquals(8, quoted, "exactly the cap is quoted, not all 20: " + line);
+    }
+
+    @Test
+    @DisplayName("a v2 directory that was searched and holds nothing usable says so, and does not tell you to move a file there")
+    void anEmptySearchedDirectorySaysWhatIsWrong(@TempDir Path root) throws IOException {
+        // The other near-miss shape: the directory name is right, so the file name or the file
+        // itself is what is wrong. Telling this operator to "move the v2 config into one of the
+        // directories searched" would be advice they have already followed.
+        Path plugins = Files.createDirectories(root.resolve("plugins"));
+        Path v3Dir = Files.createDirectories(plugins.resolve("Heimdall"));
+        Path v2Dir = Files.createDirectories(plugins.resolve("HeimdallWhitelist"));
+        Files.createFile(v2Dir.resolve("config.yaml"));
+
+        migration.run(Arrays.asList(v3Dir, v2Dir), storeIn(v3Dir));
+
+        String line = logger.messagesAt(LogLevel.INFO).get(0);
+        assertTrue(line.contains("(holds config.yaml)"), line);
+        assertFalse(line.contains("Move the v2 config into one of the directories searched"),
+                "that advice is self-contradictory when the directory searched IS the candidate: "
+                        + line);
+        assertTrue(line.contains("check the file name"), line);
     }
 
     @Test

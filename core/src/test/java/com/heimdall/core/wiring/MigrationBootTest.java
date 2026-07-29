@@ -32,7 +32,7 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class MigrationBootTest {
 
-    /** Enough of a v2 config to be migratable — credentials are all {@code hasCredentials} wants. */
+    /** Enough of v2's Bukkit {@code config.yml} to be migratable. */
     private static final String V2_CONFIG_YML = String.join("\n",
             "enabled: true",
             "api:",
@@ -40,7 +40,40 @@ class MigrationBootTest {
             "  apiKey: \"hwl_9f4c1b7ae25d40188c3e6a0f2d5b7c91\"",
             "  guildId: \"1046473775487176835\"",
             "server:",
-            "  serverId: \"proxy-lobby\"",
+            "  serverId: \"survival-01\"",
+            "");
+
+    /**
+     * v2's Velocity {@code config.json}, in the shape {@code VelocityConfigProvider} actually wrote.
+     *
+     * <p>A different document rather than the YAML one renamed, because v2's proxy build really did
+     * write a different file: JSON, and without the {@code roleSync}, {@code console},
+     * {@code cache.prewarm} or {@code updates} blocks its Bukkit build had. A YAML fixture here
+     * would have the Velocity test pass on a file no v2 proxy has ever had, and would never exercise
+     * the {@code config.yml}-then-{@code config.json} fall-through that finding this one depends on.
+     */
+    private static final String V2_CONFIG_JSON = String.join("\n",
+            "{",
+            "  \"enabled\": true,",
+            "  \"api\": {",
+            "    \"baseUrl\": \"https://api.bifrost.gg/\",",
+            "    \"apiKey\": \"hwl_3b8e5d21c74f4a06b19d8e33f0a25c47\",",
+            "    \"guildId\": \"1046473775487176835\",",
+            "    \"timeout\": 1500,",
+            "    \"retries\": 1,",
+            "    \"retryDelay\": 1000",
+            "  },",
+            "  \"server\": {",
+            "    \"serverId\": \"proxy-lobby\",",
+            "    \"displayName\": \"Bifrost Network\",",
+            "    \"publicIp\": \"play.example.net\"",
+            "  },",
+            "  \"logging\": { \"debug\": true, \"logDecisions\": true },",
+            "  \"cache\": { \"enabled\": true, \"cacheWindow\": 45, \"cleanupInterval\": 15 },",
+            "  \"advanced\": { \"apiFallbackMode\": \"allow\" },",
+            "  \"bypass\": { \"uuids\": [] },",
+            "  \"websocket\": { \"enabled\": true }",
+            "}",
             "");
 
     private final RecordingLogger logger = new RecordingLogger(true);
@@ -67,13 +100,14 @@ class MigrationBootTest {
     @Test
     @DisplayName("a v2 Velocity install in plugins/heimdall-whitelist/ migrates on first boot")
     void migratesFromV2sVelocityDirectory(@TempDir Path plugins) throws IOException {
-        // The real layout: Velocity has made plugins/heimdall/ for the new jar, and the v2 install's
-        // config is still next door under v2's id. Nothing about this is contrived — it is what the
-        // proxy looks like the moment after the jar is swapped.
+        // The real layout, both halves of it: Velocity has made plugins/heimdall/ for the new jar,
+        // and the v2 install's config.json is still next door under v2's id. A proxy's v2 config is
+        // JSON — there is no config.yml on this platform — so this also walks the candidate-file
+        // fall-through rather than stopping on the first name.
         Path v3Directory = Files.createDirectories(plugins.resolve("heimdall"));
         Path v2Directory = Files.createDirectories(plugins.resolve("heimdall-whitelist"));
-        Path v2Config = v2Directory.resolve("config.yml");
-        Files.write(v2Config, V2_CONFIG_YML.getBytes(StandardCharsets.UTF_8));
+        Path v2Config = v2Directory.resolve("config.json");
+        Files.write(v2Config, V2_CONFIG_JSON.getBytes(StandardCharsets.UTF_8));
 
         BootstrapStore store = new BootstrapStore(logger, v3Directory.resolve("bootstrap.yml"));
         MigrationResult result = MigrationBoot.migrate(
@@ -84,12 +118,12 @@ class MigrationBootTest {
         assertTrue(store.exists(), "the bootstrap lands in v3's own directory");
 
         BootstrapConfig bootstrap = store.load();
-        assertEquals("https://api.bifrost.gg", bootstrap.endpoint());
-        assertEquals("hwl_9f4c1b7ae25d40188c3e6a0f2d5b7c91", bootstrap.token());
+        assertEquals("https://api.bifrost.gg", bootstrap.endpoint(), "the trailing slash is normalised");
+        assertEquals("hwl_3b8e5d21c74f4a06b19d8e33f0a25c47", bootstrap.token());
         assertEquals("proxy-lobby", bootstrap.serverId());
         assertTrue(result.legacyToken(), "v2 had no token id, so this is legacy mode");
 
-        assertTrue(Files.isRegularFile(v2Directory.resolve("config.yml" + V2Migration.BACKUP_SUFFIX)),
+        assertTrue(Files.isRegularFile(v2Directory.resolve("config.json" + V2Migration.BACKUP_SUFFIX)),
                 "the v2 file is kept beside where it was found");
         assertFalse(Files.exists(v2Config));
     }
