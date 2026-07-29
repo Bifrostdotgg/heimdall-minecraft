@@ -19,16 +19,19 @@
 # interceptor for a named player, writes nothing, and is asserted at BOTH ends — the plugin's own
 # decision line and, for the branch that reaches the bot, the stub's record of the request.
 #
-# Four rows, in three modes, because two of the flows cannot be exercised on a server that is
+# Five rows, in three modes, because two of the flows cannot be exercised on a server that is
 # already configured:
 #
 #   configured  the steady state: a bootstrap.yml exists, the plugin dials, and /hd test probes.
 #   setup       no bootstrap.yml at all. A setup code is minted in the stub, `/hd setup` is driven
 #               down the console, and the tunnel has to come up WITHOUT a restart — which is the
 #               whole of departure D56 and was impossible before phase 1e.
-#   migrate     a v2 config.yml in the sibling plugins/HeimdallWhitelist/ directory. The plugin has
-#               to find it, write a bootstrap.yml from it, connect on the legacy guild key, keep the
-#               original as *.v2-backup, and hand the translated settings to the dashboard.
+#   migrate     a v2 config in the sibling directory v2 actually used — plugins/HeimdallWhitelist/
+#               config.yml on Bukkit, plugins/heimdall-whitelist/config.json on Velocity, which are
+#               different names AND different formats. The plugin has to find it, write a
+#               bootstrap.yml from it, connect on the legacy guild key, keep the original as
+#               *.v2-backup, and hand the translated settings to the dashboard. Run on BOTH
+#               platforms, because this is the one mode whose inputs are not shared between them.
 #
 # Environment:
 #   SMOKE_JAR             path to the shaded jar (default: newest app/build/libs/heimdall-whitelist-*.jar)
@@ -125,7 +128,10 @@ SETUP_MODULE_ENABLED_PATTERN="module 'whitelist' enabled"
 
 # ── The v2 migration ─────────────────────────────────────────────────────────
 MIGRATE_SERVER_ID="migrated-survival"
-MIGRATED_PATTERN='Migrated the v2 config at .*config\.yml'
+# Both file names, because v2 wrote YAML on Bukkit and JSON on Velocity and there is a migrate row
+# for each. The row-specific half — which directory the file was in — is asserted on the file system
+# below rather than in this pattern, so a row cannot pass on the other platform's line.
+MIGRATED_PATTERN='Migrated the v2 config at .*config\.(yml|json)'
 STUB_MIGRATE_CONNECTED_PATTERN="ws connected: guild=${STUB_GUILD} server=${MIGRATE_SERVER_ID}"
 STUB_IMPORT_PATTERN="config import for ${MIGRATE_SERVER_ID} \\(imported=true\\)"
 # The legacy HMAC path, proven rather than assumed: v2 had no token id, so a migrated server signs
@@ -154,17 +160,19 @@ READY_PATTERN='Done \([0-9.]+s\)'
 # CommandRegistrar — so what the missing rows would prove is the registrar binding, which the
 # configured Velocity row already exercises by answering /hdp at all.
 #
-# The migrate row carries one exception to "the code under test is the same on both", and it is the
-# exception that bit us (departure D70): the directory a v2 install left its config in is v2's Bukkit
-# plugin NAME on Paper and v2's Velocity plugin ID on the proxy, and those are different strings. A
-# Bukkit-only row proves MigrationBoot.V2_BUKKIT_DIRECTORY and says nothing about the Velocity one,
-# which shipped wrong. That name is pinned against v2's own @Plugin annotation by MigrationBootTest,
-# because there is no row here that would notice.
+# That reasoning covers the SETUP row and only the setup row. The migrate row needs no console at
+# all — it waits on log lines and then checks the host file system — and it is the one row where the
+# code under test genuinely differs per platform (departure D70): the directory a v2 install left
+# its config in is v2's Bukkit plugin NAME on Paper and v2's Velocity plugin ID on the proxy, and
+# those are different strings that shipped disagreeing. The Velocity migrate row below is the row
+# that would have caught it; it did not exist, which is the whole reason the wrong name reached
+# production. Its absence was never a harness limitation.
 ROWS=(
     "paper-1.21.8|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|configured"
     "velocity-3.5.1|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G|configured"
     "paper-setup|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|setup"
     "paper-migrate|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|migrate"
+    "velocity-migrate|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G|migrate"
 )
 
 CURRENT_CONTAINERS=""
@@ -344,8 +352,22 @@ selftest() {
         "[13:53:00 INFO]: [Heimdall] Migrated the v2 config at /data/plugins/HeimdallWhitelist/config.yml - wrote /data/plugins/Heimdall/bootstrap.yml and the v2 file has been kept as /data/plugins/HeimdallWhitelist/config.yml.v2-backup." \
         yes "migrate: the v2 config was found and rewritten" || failures=$((failures + 1))
     check_match "${MIGRATED_PATTERN}" \
+        "[22:34:45 INFO] [heimdall]: Migrated the v2 config at /server/plugins/heimdall-whitelist/config.json - wrote /server/plugins/heimdall/bootstrap.yml and the v2 file has been kept as /server/plugins/heimdall-whitelist/config.json.v2-backup." \
+        yes "migrate: the v2 config was found and rewritten (velocity/json)" || failures=$((failures + 1))
+    check_match "${MIGRATED_PATTERN}" \
         "[13:53:00 INFO]: [Heimdall] not set up yet - run /hd setup <code> to connect this server to Discord" \
         no "migrate: a migration vs a fresh install" || failures=$((failures + 1))
+    # The row does not stop at MIGRATED_PATTERN: it then greps for its OWN platform's directory and
+    # file name, so a Velocity row cannot go green on the line a Bukkit row would produce. That
+    # second grep is the assertion that would have caught departure D70, so its near miss is pinned
+    # here too — the wrong directory name must NOT match.
+    check_match "Migrated the v2 config at .*heimdall-whitelist/config\.json" \
+        "[22:34:45 INFO] [heimdall]: Migrated the v2 config at /server/plugins/heimdallwhitelist/config.json - wrote /server/plugins/heimdall/bootstrap.yml" \
+        no "migrate: v2's real proxy directory vs the lower-cased display name (D70)" \
+        || failures=$((failures + 1))
+    check_match "Migrated the v2 config at .*heimdall-whitelist/config\.json" \
+        "[22:34:45 INFO] [heimdall]: Migrated the v2 config at /server/plugins/heimdall-whitelist/config.json - wrote /server/plugins/heimdall/bootstrap.yml" \
+        yes "migrate: the proxy row's own directory assertion" || failures=$((failures + 1))
     check_match "${STUB_IMPORT_PATTERN}" \
         "[stub-bot] config import for ${MIGRATE_SERVER_ID} (imported=true)" \
         yes "migrate: the translated settings reached the dashboard" || failures=$((failures + 1))
@@ -379,9 +401,13 @@ selftest() {
             # a bootstrap.yml, and quietly prove the thing the row was not written for.
             fail "row ${name} has unknown mode '${mode}'"
             failures=$((failures + 1))
-        elif [ "${mode}" != "configured" ] && [ "${platform}" != "bukkit" ]; then
-            # The flow rows drive commands over RCON, which only the Paper image in this matrix has.
-            fail "row ${name} is mode '${mode}' on '${platform}', which has no console to drive"
+        elif [ "${mode}" = "setup" ] && [ "${platform}" != "bukkit" ]; then
+            # `setup` types a command into the running server, which needs RCON — and only the Paper
+            # image in this matrix has it. `migrate` is deliberately NOT covered by this rule: it
+            # waits on log lines and then reads the host file system, so it needs no console, and it
+            # is the one mode whose inputs differ per platform (departure D70). Excluding it here
+            # once cost a production incident.
+            fail "row ${name} is mode 'setup' on '${platform}', which has no console to drive"
             failures=$((failures + 1))
         fi
     done
@@ -453,13 +479,13 @@ YAML
     return 0
 }
 
-# Writes the v2 config.yml the migration row has to find.
+# Writes the v2 config.yml the Bukkit migration row has to find.
 #
-# Deliberately in the SIBLING directory. v2's plugin was called HeimdallWhitelist and v3's is called
-# Heimdall, so a server whose jar has just been swapped has a brand-new empty plugins/Heimdall/ and
-# its entire configuration next door. A migration that only looked in its own directory would find
-# nothing on every real upgrade, which is the one case it exists for — so the row reproduces the
-# real layout rather than a convenient one.
+# Deliberately in the SIBLING directory. v2's Bukkit plugin declared `name: HeimdallWhitelist` and
+# v3 declares `Heimdall`, so a server whose jar has just been swapped has a brand-new empty
+# plugins/Heimdall/ and its entire configuration next door. A migration that only looked in its own
+# directory would find nothing on every real upgrade, which is the one case it exists for — so the
+# row reproduces the real layout rather than a convenient one.
 #
 # The credentials are the stub's, so the migrated server connects on a LEGACY guild key: v2 had no
 # token id, and the whole point of legacy mode is that the same HMAC still authenticates.
@@ -505,6 +531,84 @@ updates:
   notifyAdmins: false
   checkIntervalHours: 6
 YAML
+    then
+        fail "HARNESS: could not write ${target}"
+        return 1
+    fi
+    return 0
+}
+
+# Writes the v2 config.json the Velocity migration row has to find.
+#
+# A SEPARATE function rather than the YAML one with a different extension, because v2's proxy build
+# genuinely wrote a different document: VelocityConfigProvider.createDefaultConfig() (see
+# origin/v2-maintenance) emits exactly these blocks and no others. In particular it never wrote
+# `roleSync`, `console`, `cache.prewarm` or `updates` at all — so a real proxy's settings for those
+# are v2's CODE defaults with nothing on disk to read, and a fixture that helpfully added them would
+# be testing a file no v2 install has ever had.
+#
+# It also lands in a differently-named directory: Velocity derives a plugin's data directory from its
+# @Plugin id, and v2's id is `heimdall-whitelist` — hyphen included, and NOT the lower-cased display
+# name. That single character is departure D70, and it is the reason this row exists.
+write_v2_config_json() {
+    local target="$1"
+    if ! mkdir -p "$(dirname "${target}")"; then
+        fail "HARNESS: could not create $(dirname "${target}")"
+        return 1
+    fi
+    if ! cat >"${target}" <<JSON
+{
+  "enabled": true,
+  "api": {
+    "baseUrl": "http://stub-bot:8080",
+    "apiKey": "${STUB_SECRET}",
+    "guildId": "${STUB_GUILD}",
+    "timeout": 1500,
+    "retries": 1,
+    "retryDelay": 1000
+  },
+  "server": {
+    "serverId": "${MIGRATE_SERVER_ID}",
+    "displayName": "Migrated Proxy",
+    "publicIp": "play.example.net"
+  },
+  "messages": {
+    "apiUnavailable": "\\u00a7cThe network is having a moment. Try again shortly.",
+    "apiUnavailableAllowed": "\\u00a7eWhitelist API is temporarily unavailable. You have been allowed in from cache.",
+    "reloaded": "\\u00a7aHeimdall Whitelist plugin reloaded successfully!",
+    "status": "\\u00a77Heimdall Whitelist Status:"
+  },
+  "logging": {
+    "debug": true,
+    "logDecisions": true
+  },
+  "performance": {
+    "cacheTimeout": 30,
+    "maxConcurrentRequests": 128
+  },
+  "cache": {
+    "enabled": true,
+    "cacheWindow": 45,
+    "extendOnJoin": 240,
+    "extendOnLeave": 300,
+    "maxExtensionHours": 12,
+    "cleanupInterval": 15
+  },
+  "advanced": {
+    "apiFallbackMode": "whitelist-only"
+  },
+  "bypass": {
+    "uuids": []
+  },
+  "websocket": {
+    "enabled": true,
+    "reconnect-delay": 5000,
+    "max-reconnect-delay": 30000,
+    "heartbeat-interval": 30000,
+    "heartbeat-timeout": 10000
+  }
+}
+JSON
     then
         fail "HARNESS: could not write ${target}"
         return 1
@@ -714,11 +818,24 @@ row_body() {
     else
         # The proxy image runs as root and writes into its plugins directory, so one writable mount
         # carries both the jar and the plugin's own data directory. Velocity's data directory is
-        # named after the plugin id, which is lower-case `heimdall`.
-        if ! write_bootstrap "${work}/plugins/heimdall/bootstrap.yml"; then
-            kill "${stub_tail}" 2>/dev/null || true
-            return 1
-        fi
+        # named after the plugin id: v3's is `heimdall`, and v2's was `heimdall-whitelist`.
+        case "${mode}" in
+            configured)
+                if ! write_bootstrap "${work}/plugins/heimdall/bootstrap.yml"; then
+                    kill "${stub_tail}" 2>/dev/null || true
+                    return 1
+                fi
+                ;;
+            migrate)
+                # No plugins/heimdall/ is created here on purpose: a proxy that has just had its
+                # jar swapped has never run v3, so its only Heimdall directory is v2's. The plugin
+                # has to make its own and find the config next door.
+                if ! write_v2_config_json "${work}/plugins/heimdall-whitelist/config.json"; then
+                    kill "${stub_tail}" 2>/dev/null || true
+                    return 1
+                fi
+                ;;
+        esac
         docker_args=(
             run -d --name "${server_container}" --network "${network}"
             -e "TYPE=${type}" -e "VELOCITY_VERSION=${version}" -e "MEMORY=${memory}"
@@ -1002,31 +1119,58 @@ assert_setup_row() {
     return 0
 }
 
-# The v2 migration: a config.yml next door becomes a working v3 install.
+# The v2 migration: a v2 config next door becomes a working v3 install.
+#
+# Everything platform-specific about this row is the THREE strings below, and they are the point of
+# running it on both platforms rather than one. Each platform names v2's data directory after a
+# different declaration — Bukkit after `plugin.yml`'s `name:`, Velocity after the `@Plugin` id — and
+# v2 wrote a different file format into each. Getting any of the three wrong looks, at boot, exactly
+# like a fresh install (departure D70), which is why they are asserted against the host file system
+# here and not merely inferred from a log line the plugin wrote about itself.
 # shellcheck disable=SC2317
 assert_migrate_row() {
+    local host_plugins v2_directory v2_file
+    if [ "${platform}" = "bukkit" ]; then
+        host_plugins="${work}/data-plugins"
+        v2_directory="HeimdallWhitelist"
+        v2_file="config.yml"
+    else
+        host_plugins="${work}/plugins"
+        v2_directory="heimdall-whitelist"
+        v2_file="config.json"
+    fi
+    local v2_path="${host_plugins}/${v2_directory}/${v2_file}"
+
     if ! wait_for_pattern "${server_log}" "${ENABLE_PATTERN}" "${BOOT_TIMEOUT}" \
             "the plugin's enable banner"; then
         return 1
     fi
     if ! wait_for_pattern "${server_log}" "${MIGRATED_PATTERN}" 60 \
             "the v2 config to be found and migrated"; then
-        fail "the v2 file is in the SIBLING plugins/HeimdallWhitelist/ directory, which is where a"
-        fail "real upgrade leaves it — a migration that only searches its own directory finds"
-        fail "nothing on every install it exists for"
+        fail "the v2 file is in the SIBLING plugins/${v2_directory}/ directory, which is where a"
+        fail "real upgrade leaves it — a migration that only searches its own directory, or that has"
+        fail "the wrong idea of what v2's directory is called on this platform, finds nothing on"
+        fail "every install it exists for"
         return 1
     fi
-    pass "v2 config found and migrated"
+    # ...and it must be OUR file it migrated, not something it found elsewhere. The pattern accepts
+    # either file name so one row cannot pass on the other platform's line.
+    if ! grep -Eq "Migrated the v2 config at .*${v2_directory}/${v2_file}" "${server_log}"; then
+        fail "a migration happened, but not from plugins/${v2_directory}/${v2_file} — which is the"
+        fail "only place a real v2 install on this platform would have left it"
+        return 1
+    fi
+    pass "v2 config found and migrated, from plugins/${v2_directory}/${v2_file}"
 
     # The original is kept, never deleted. Checked on the host rather than in the log, because the
     # log line is the plugin's account of what it did and this is the file system's.
-    if [ ! -f "${work}/data-plugins/HeimdallWhitelist/config.yml.v2-backup" ]; then
-        fail "no config.yml.v2-backup beside the original — the migration must never delete an"
+    if [ ! -f "${v2_path}.v2-backup" ]; then
+        fail "no ${v2_file}.v2-backup beside the original — the migration must never delete an"
         fail "operator's configuration, whatever it made of it"
         return 1
     fi
-    if [ -f "${work}/data-plugins/HeimdallWhitelist/config.yml" ]; then
-        fail "the v2 config.yml is still in place, so the next boot would migrate it again"
+    if [ -f "${v2_path}" ]; then
+        fail "the v2 ${v2_file} is still in place, so the next boot would migrate it again"
         return 1
     fi
     pass "the v2 file was kept as a backup, and moved out of the way"
