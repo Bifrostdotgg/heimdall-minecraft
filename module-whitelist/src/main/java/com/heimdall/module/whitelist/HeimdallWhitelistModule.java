@@ -3,6 +3,7 @@ package com.heimdall.module.whitelist;
 import com.heimdall.core.admin.LoginProbe;
 import com.heimdall.core.admin.WhitelistAdmin;
 import com.heimdall.core.config.ServerRole;
+import com.heimdall.core.json.Envelope;
 import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.pipeline.LoginAttempt;
@@ -12,6 +13,7 @@ import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.tunnel.Capabilities;
+import com.heimdall.core.tunnel.TunnelMessageHandler;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Set;
@@ -82,6 +84,15 @@ public final class HeimdallWhitelistModule implements HeimdallModule, WhitelistA
     private volatile long openedWithCacheWindowMs;
     private volatile long openedWithMaxExtensionHours;
 
+    /**
+     * The debouncer behind {@code whitelist_changed}.
+     *
+     * <p>Owned rather than tracked through the context — see {@link WhitelistChangeNudge}'s threading
+     * note for why a handle per nudge cannot go in the tracking bag — which makes closing it in
+     * {@link #disable()} load-bearing rather than belt-and-braces.
+     */
+    private volatile WhitelistChangeNudge nudge;
+
     /** Wires the role-sync module in. Called once by the runtime, before anything is enabled. */
     public void setRoleSyncSink(RoleSyncSink sink) {
         this.roleSync = sink == null ? RoleSyncSink.NONE : sink;
@@ -144,6 +155,7 @@ public final class HeimdallWhitelistModule implements HeimdallModule, WhitelistA
         ctx.onPlayerJoin(mirrorService.onJoin());
         ctx.onPlayerQuit(mirrorService.onQuit());
         schedulePolls(ctx, atOpen, mirrorService);
+        subscribeToWhitelistChanges(ctx, mirrorService);
         ctx.registerCommand(new LinkDiscordCommand(ctx.logger(), ctx.api()).spec());
 
         ctx.onConfigChanged(new ModuleConfigListener() {
@@ -161,10 +173,19 @@ public final class HeimdallWhitelistModule implements HeimdallModule, WhitelistA
 
     @Override
     public void disable() {
-        // Nothing to undo — every handle belongs to the context, and the mirror is flushed as it
-        // closes. Dropping the references is what stops a re-enable from finding a store that has
+        // Almost nothing to undo — every handle belongs to the context, and the mirror is flushed as
+        // it closes. Dropping the references is what stops a re-enable from finding a store that has
         // already been shut, and what makes the WhitelistAdmin surface below answer "not running"
         // rather than acting on a dead one. Safe after a failed enable, where they are already null.
+        //
+        // The nudge is the exception, and closing it here is the only thing that closes it: it owns a
+        // ScheduledFuture the context never saw, and a pending one would otherwise fire a sync into a
+        // mirror this method is in the middle of abandoning.
+        WhitelistChangeNudge pending = nudge;
+        if (pending != null) {
+            pending.close();
+        }
+        nudge = null;
         mirror = null;
         interceptor = null;
         platform = null;
@@ -195,6 +216,42 @@ public final class HeimdallWhitelistModule implements HeimdallModule, WhitelistA
                 mirrorService.sweepExpired();
             }
         }, sweepMs, sweepMs);
+    }
+
+    /**
+     * Reacts to the bot saying this guild's whitelist just changed.
+     *
+     * <p>A <strong>notification</strong>, not a request: it carries an empty payload and no reply is
+     * expected or sent, so nothing here echoes an id. What it buys is the difference between a
+     * revocation taking effect within seconds and taking effect at the next pre-warm poll, which is
+     * five minutes by default and was v2's window too.
+     *
+     * <p><strong>Only while this module is enabled.</strong> The subscription is made in
+     * {@code enable()} and unwound by the context on disable, so a guild that has switched the
+     * whitelist off receives the frame, finds nothing subscribed to it, and it is written off with a
+     * debug line — which is the right answer: there is no mirror to refresh and no login decision
+     * being made. The frame is a notification, so silence costs the bot nothing.
+     *
+     * <p>Handled on {@code heimdall-io} — the subscription's default — because that is where the
+     * handler may safely do the one cheap thing it does. The sync itself is never run here; see
+     * {@link WhitelistChangeNudge}.
+     */
+    private void subscribeToWhitelistChanges(
+            ModuleContext ctx, final WhitelistMirrorService mirrorService) {
+        final WhitelistChangeNudge debounced = new WhitelistChangeNudge(
+                ctx.logger(), ctx.executors().scheduler(), new Runnable() {
+                    @Override
+                    public void run() {
+                        mirrorService.syncNow();
+                    }
+                });
+        this.nudge = debounced;
+        ctx.tunnel().subscribe(WhitelistChangeNudge.FRAME_TYPE, new TunnelMessageHandler() {
+            @Override
+            public void onMessage(Envelope envelope) {
+                debounced.nudge();
+            }
+        });
     }
 
     /**

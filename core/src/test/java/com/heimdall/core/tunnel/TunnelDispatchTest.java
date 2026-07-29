@@ -215,6 +215,49 @@ class TunnelDispatchTest {
     }
 
     @Test
+    @DisplayName("a notification carrying an id the plugin never issued is dispatched, not mistaken for a reply")
+    void aNotificationWithAnUnknownIdReachesItsSubscriber() {
+        // The shape of the bot's whitelist_changed push: a real nanoid, an empty payload, and no
+        // reply wanted. The id is there because v2's client dropped any frame without one, so the
+        // bot puts one on every frame whether or not anybody is correlating on it.
+        //
+        // That matters here because route() consults the pending map BEFORE the subscription
+        // registry, so a notification's id takes the correlation path first. An id the plugin never
+        // issued has to miss it silently and fall through — not consume the frame, and not report an
+        // unmatched reply.
+        AtomicReference<Envelope> seen = new AtomicReference<Envelope>();
+        client.subscribe("whitelist_changed", seen::set);
+        // The identify frame is already on the wire from setUp, so the assertion is that nothing
+        // NEW goes out rather than that nothing ever has.
+        int before = socket.sentFrames().size();
+
+        socket.deliver(Envelope.of("V1StGXR8_Z5jdHi6B-myT", "whitelist_changed", Payload.empty()));
+
+        Await.until("the notification handler to run", () -> seen.get() != null);
+        assertEquals("V1StGXR8_Z5jdHi6B-myT", seen.get().id());
+        assertTrue(seen.get().payload().isEmpty());
+        assertEquals(before, socket.sentFrames().size(),
+                "a notification is answered with nothing at all — the bot has no future waiting, so "
+                        + "a reply would be filed as unsolicited and is pure noise");
+        assertTrue(logger.at(com.heimdall.core.log.LogLevel.WARN).isEmpty(),
+                "an id nobody is waiting on is the normal shape of a notification, not a fault");
+    }
+
+    @Test
+    @DisplayName("a notification nobody subscribed to is written off, still without a reply")
+    void anUnsubscribedNotificationIsSilent() {
+        // The module-disabled case at the dispatcher level: with the whitelist module off nothing is
+        // subscribed, and the frame has to go quiet rather than produce an error reply the bot would
+        // have nowhere to put.
+        int before = socket.sentFrames().size();
+
+        socket.deliver(Envelope.of("V1StGXR8_Z5jdHi6B-myT", "whitelist_changed", Payload.empty()));
+
+        assertTrue(client.isConnected());
+        assertEquals(before, socket.sentFrames().size());
+    }
+
+    @Test
     @DisplayName("a message nothing subscribed to goes to the fallback hook")
     void unhandledMessagesReachTheHook() {
         AtomicReference<Envelope> seen = new AtomicReference<Envelope>();
