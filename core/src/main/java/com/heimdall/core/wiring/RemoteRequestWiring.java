@@ -18,6 +18,11 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 
 /**
@@ -44,15 +49,24 @@ import java.util.function.BiConsumer;
  * render beats a timeout it cannot explain — which is exactly the rule
  * {@link com.heimdall.core.platform.Integrations#traceProbe} already states for its own half.
  *
+ * <p>"Every path" includes the ones that end in <em>somebody else's</em> future never completing.
+ * {@code probe_player} hands off to another plugin entirely, so {@link ProbePlayerHandler} arms its
+ * own deadline rather than trusting Trace to finish — see {@link #PROBE_DEADLINE_MS}. Without it a
+ * hung third-party probe reproduces the exact bug this class was written to fix, one layer further
+ * out.
+ *
  * <h2>Why these are wired here and not inside a module</h2>
  *
- * <p>Alongside {@code update} in {@link UpdateWiring}, and for the same reason: these are properties
- * of <em>having a tunnel</em>, not features a guild opts into. v2 had no module system at all, so v2
- * parity means "these work whenever the tunnel is up", and homing any of them in a module would
- * quietly make a dashboard button depend on a toggle that says nothing about it. Putting
- * {@code run_command} in {@code module-console} would be the sharpest version of that: a guild that
- * switches off console <em>streaming</em> would find the console <em>command box</em> had stopped
- * working, with the dashboard still offering it. See departure D71.
+ * <p>The same category as {@code update} in {@link UpdateWiring}: a property of <em>having a
+ * tunnel</em>, not a feature a guild opts into. (The placement is not identical —
+ * {@code UpdateWiring.install} is called from the two platform bootstraps, because it needs a
+ * platform-specific {@code UpdateInstaller}; nothing here needs anything a {@code PlatformFacade}
+ * cannot supply, so this is installed once from {@link HeimdallRuntime#start()} instead.) v2 had no
+ * module system at all, so v2 parity means "these work whenever the tunnel is up", and homing any of
+ * them in a module would quietly make a dashboard button depend on a toggle that says nothing about
+ * it. Putting {@code run_command} in {@code module-console} would be the sharpest version of that: a
+ * guild that switches off console <em>streaming</em> would find the console <em>command box</em> had
+ * stopped working, with the dashboard still offering it. See departure D71.
  *
  * <p>The corollary is that nothing here reads {@code ModuleConfig.enabled()} and no handler can
  * answer "module disabled" — there is no module to be disabled. The one thing a
@@ -88,6 +102,22 @@ public final class RemoteRequestWiring {
     /** The reply to {@link #PROBE_PLAYER}. */
     static final String PROBE_RESULT = "probe_result";
 
+    /**
+     * How long {@link ProbePlayerHandler} waits for Trace before answering without it.
+     *
+     * <p>Ten seconds, chosen to sit comfortably under the bot's own fifteen-second budget for the
+     * probe route: a deadline at or above the caller's is not a deadline, it is a second timeout that
+     * never gets to fire.
+     *
+     * <p>This exists because the probe is the one request that hands off to <strong>another
+     * plugin</strong>. {@code Integrations.traceProbe} answers promptly for every reason it can see —
+     * no Trace, Trace too old, player offline, a proxy — but once Trace's own future is in hand,
+     * nothing in this process guarantees it ever completes. A third-party plugin blocked on its own
+     * network call would leave this handler silent forever, which is precisely the class of bug this
+     * class was written to remove.
+     */
+    static final long PROBE_DEADLINE_MS = 10_000L;
+
     private RemoteRequestWiring() {
     }
 
@@ -99,17 +129,27 @@ public final class RemoteRequestWiring {
      * survive every reconnect and are already in place when a {@code /hd setup} brings a tunnel up
      * without a restart.
      *
+     * @param scheduler where the probe deadline is armed — {@code heimdall-sched}, the plugin's own
+     *     general-purpose timer. Not {@code heimdall-ws}: that pool exists so the tunnel's sense of
+     *     time is unaffected by anything else, and its javadoc says nothing else may schedule there.
+     *     {@code heimdall-sched} can be held for a moment by a blocking whitelist sync, which would
+     *     make a deadline fire late — late is a tolerable degradation of a bound whose purpose is to
+     *     replace <em>never</em>.
      * @return one handle that unsubscribes all three, closed with the runtime
      */
     public static Registration install(
-            HeimdallLogger logger, PlatformFacade platform, TunnelBus tunnel, Executor io) {
+            HeimdallLogger logger,
+            PlatformFacade platform,
+            TunnelBus tunnel,
+            Executor io,
+            ScheduledExecutorService scheduler) {
         List<Registration> handles = new ArrayList<Registration>(3);
         handles.add(tunnel.subscribe(
                 GET_PLAYERS, new PlayerListHandler(logger, platform, tunnel), io));
         handles.add(tunnel.subscribe(
                 RUN_COMMAND, new RunCommandHandler(logger, platform, tunnel, io), io));
         handles.add(tunnel.subscribe(
-                PROBE_PLAYER, new ProbePlayerHandler(logger, platform, tunnel, io), io));
+                PROBE_PLAYER, new ProbePlayerHandler(logger, platform, tunnel, io, scheduler), io));
         return combine(handles);
     }
 
@@ -213,10 +253,19 @@ public final class RemoteRequestWiring {
             reply(logger, tunnel, envelope.id(), PLAYER_LIST, answer.build());
         }
 
-        /** One roster row: the two keys core owns, then the platform's own column. */
+        /**
+         * One roster row: the two keys core owns, then the platform's own column.
+         *
+         * <p>A {@code null} uuid becomes {@code ""}, matching what {@code trimToEmpty} already does
+         * to a null username. {@code String.valueOf} would put the four characters {@code null} on
+         * the wire, which the dashboard would render as a player id and link to — an empty string is
+         * at least visibly absent. The row is kept rather than skipped so the roster count stays
+         * honest and the username, which is what an operator actually reads, still shows.
+         */
         private Payload row(PlayerHandle player) {
+            UUID uuid = player.uuid();
             Payload.Builder row = Payload.builder()
-                    .put("uuid", String.valueOf(player.uuid()))
+                    .put("uuid", uuid == null ? "" : uuid.toString())
                     .put("username", Strings.trimToEmpty(player.name()));
             Payload described = platform.players().describe(player);
             if (described != null) {
@@ -335,8 +384,22 @@ public final class RemoteRequestWiring {
      * <p>Almost all of the branching lives in
      * {@link com.heimdall.core.platform.Integrations#traceProbe}, which already answers with an error
      * payload for every reason it cannot help — no Trace, Trace too old to support remote probing,
-     * player offline, a proxy. This handler owns only the two things that facade cannot see: a
-     * {@code uuid} that is not a uuid, and a future that fails instead of completing.
+     * player offline, a proxy. This handler owns the three things that facade cannot see: a
+     * {@code uuid} that is not a uuid, a future that fails instead of completing, and a future that
+     * does <strong>neither</strong>.
+     *
+     * <h2>The deadline is the point</h2>
+     *
+     * <p>This is the only one of the three requests whose answer comes from <em>another plugin</em>.
+     * Trace hands back a {@code CompletableFuture} and nothing in this process obliges it ever to
+     * complete one: Trace blocked on its own network call, or on a player who stopped responding to
+     * the probe packet, leaves this handler silent forever — the same dangling request this class
+     * exists to abolish, one layer further out and harder to attribute.
+     *
+     * <p>Java 8 has no {@code orTimeout}, so the deadline is a one-shot on {@code heimdall-sched},
+     * cancelled the moment the probe completes. Whichever arrives first wins:
+     * {@code answered.compareAndSet} makes sure exactly one reply is sent, because the bot files a
+     * second reply on the same id as unsolicited and a duplicate is not a harmless one.
      */
     static final class ProbePlayerHandler implements TunnelMessageHandler {
 
@@ -344,13 +407,35 @@ public final class RemoteRequestWiring {
         private final PlatformFacade platform;
         private final TunnelBus tunnel;
         private final Executor io;
+        private final ScheduledExecutorService scheduler;
+        private final long deadlineMs;
 
         ProbePlayerHandler(
-                HeimdallLogger logger, PlatformFacade platform, TunnelBus tunnel, Executor io) {
+                HeimdallLogger logger,
+                PlatformFacade platform,
+                TunnelBus tunnel,
+                Executor io,
+                ScheduledExecutorService scheduler) {
+            this(logger, platform, tunnel, io, scheduler, PROBE_DEADLINE_MS);
+        }
+
+        /**
+         * The deadline is injectable so a test can prove the timeout without waiting ten seconds for
+         * it. Nothing in production passes anything but {@link #PROBE_DEADLINE_MS}.
+         */
+        ProbePlayerHandler(
+                HeimdallLogger logger,
+                PlatformFacade platform,
+                TunnelBus tunnel,
+                Executor io,
+                ScheduledExecutorService scheduler,
+                long deadlineMs) {
             this.logger = logger;
             this.platform = platform;
             this.tunnel = tunnel;
             this.io = io;
+            this.scheduler = scheduler;
+            this.deadlineMs = Math.max(1L, deadlineMs);
         }
 
         @Override
@@ -383,9 +468,25 @@ public final class RemoteRequestWiring {
                 return;
             }
 
+            // Exactly one of the two racers below gets to answer. A duplicate reply on the same id is
+            // filed by the bot as unsolicited, so "both eventually replied" is not a benign outcome.
+            final AtomicBoolean answered = new AtomicBoolean();
+            final ScheduledFuture<?> deadline = armDeadline(id, answered, target);
+
             probe.whenCompleteAsync(new BiConsumer<Payload, Throwable>() {
                 @Override
                 public void accept(Payload result, Throwable failure) {
+                    if (deadline != null) {
+                        // Cancelled first, so a probe that answers at 9.9s cannot be followed by a
+                        // timer firing at 10s into an already-satisfied request.
+                        deadline.cancel(false);
+                    }
+                    if (!answered.compareAndSet(false, true)) {
+                        // The deadline already spoke. Trace turning up afterwards is not news the
+                        // dashboard can use — its request is long since resolved.
+                        logger.debug(() -> "a Trace probe answered after its deadline; dropping it");
+                        return;
+                    }
                     if (failure != null) {
                         Throwable cause = unwrap(failure);
                         logger.debug(() -> "the Trace probe failed: " + cause);
@@ -395,6 +496,36 @@ public final class RemoteRequestWiring {
                     answer(id, result == null ? error("the probe reported nothing") : result);
                 }
             }, io);
+        }
+
+        /**
+         * Schedules the "answer without Trace" fallback, or answers immediately if it cannot be.
+         *
+         * @return the handle to cancel, or {@code null} when the scheduler is shutting down — in
+         *     which case the caller has already been answered and there is nothing to cancel
+         */
+        private ScheduledFuture<?> armDeadline(
+                final String id, final AtomicBoolean answered, final UUID target) {
+            try {
+                return scheduler.schedule(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!answered.compareAndSet(false, true)) {
+                            return;
+                        }
+                        logger.warn("the Trace probe for " + target + " did not answer within "
+                                + deadlineMs + "ms; replying without it");
+                        answer(id, error("the client probe timed out"));
+                    }
+                }, deadlineMs, TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException shuttingDown) {
+                // The pools are going down with the plugin, so nothing would ever fire this. Answer
+                // now rather than leaving the request to depend on a probe nobody is timing.
+                if (answered.compareAndSet(false, true)) {
+                    answer(id, error("the server is shutting down"));
+                }
+                return null;
+            }
         }
 
         private void answer(String id, Payload payload) {

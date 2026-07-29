@@ -19,7 +19,10 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Function;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -56,8 +59,37 @@ class RemoteRequestWiringTest {
         return new FakePlatform(role, dataDir);
     }
 
+    /**
+     * A real single-threaded scheduler, so the probe deadline is armed the way production arms it.
+     *
+     * <p>Named, so a thread assertion reads as the thing it is checking.
+     */
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
+            runnable -> {
+                Thread thread = new Thread(runnable, "pretend-heimdall-sched");
+                thread.setDaemon(true);
+                return thread;
+            });
+
+    @AfterEach
+    void stopScheduler() {
+        scheduler.shutdownNow();
+    }
+
     private Registration install(FakePlatform platform) {
-        return RemoteRequestWiring.install(logger, platform, tunnel, INLINE);
+        return RemoteRequestWiring.install(logger, platform, tunnel, INLINE, scheduler);
+    }
+
+    /** Waits for a condition rather than sleeping a fixed time, so a loaded runner is not flaky. */
+    private static void await(String what, java.util.function.BooleanSupplier condition)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5000L;
+        while (!condition.getAsBoolean()) {
+            if (System.currentTimeMillis() > deadline) {
+                throw new AssertionError("timed out waiting for " + what);
+            }
+            Thread.sleep(5L);
+        }
     }
 
     /** The one reply of a type, or a failure that says what actually came back. */
@@ -102,7 +134,8 @@ class RemoteRequestWiringTest {
     @Test
     @DisplayName("every handler names an executor rather than taking the reading thread")
     void handlersAreSubscribedOnTheGivenExecutor() {
-        RemoteRequestWiring.install(logger, platform(ServerRole.STANDALONE), tunnel, INLINE);
+        RemoteRequestWiring.install(
+                logger, platform(ServerRole.STANDALONE), tunnel, INLINE, scheduler);
 
         // The two-argument subscribe() would also land on heimdall-io, so this is not about which
         // pool; it is that install() decides at all. A handler left on the socket's reading thread
@@ -127,7 +160,7 @@ class RemoteRequestWiringTest {
         };
         CompletableFuture<String> pending = new CompletableFuture<String>();
         FakePlatform platform = platform(ServerRole.STANDALONE).dispatchAnswering(pending);
-        RemoteRequestWiring.install(logger, platform, tunnel, named);
+        RemoteRequestWiring.install(logger, platform, tunnel, named, scheduler);
 
         tunnel.push(Envelope.of("req-async", "run_command",
                 Payload.builder().put("command", "say hi").build()));
@@ -351,6 +384,68 @@ class RemoteRequestWiringTest {
 
         assertEquals("invalid player uuid: ''",
                 onlyReply("probe_result").payload().string("error", ""));
+    }
+
+    @Test
+    @DisplayName("a Trace future that NEVER completes is still answered, on the deadline")
+    void aNeverCompletingProbeIsAnswered() throws Exception {
+        // The case the class's own premise ("every path ends in a reply") did not actually cover.
+        // Trace is another plugin: nothing in this process obliges it to complete the future it
+        // handed back, and a Trace blocked on its own network call used to leave this handler silent
+        // forever — the same dangling request the whole class exists to abolish, one layer out.
+        CompletableFuture<Payload> never = new CompletableFuture<Payload>();
+        FakePlatform platform = platform(ServerRole.STANDALONE).withTraceProbe(never);
+        RemoteRequestWiring.ProbePlayerHandler handler = new RemoteRequestWiring.ProbePlayerHandler(
+                logger, platform, tunnel, INLINE, scheduler, 40L);
+
+        handler.onMessage(Envelope.of("req-hang", "probe_player", Payload.builder()
+                .put("uuid", "11111111-1111-1111-1111-111111111111")
+                .build()));
+
+        await("the deadline to answer", () -> !tunnel.sent("probe_result").isEmpty());
+        RecordingTunnelBus.Sent reply = onlyReply("probe_result");
+        assertEquals("req-hang", reply.requestId());
+        assertEquals("the client probe timed out", reply.payload().string("error", ""));
+        assertFalse(never.isDone(), "the probe itself is left alone — it is not ours to cancel");
+    }
+
+    @Test
+    @DisplayName("Trace turning up after its deadline does not produce a second reply")
+    void aLateProbeDoesNotReplyTwice() throws Exception {
+        CompletableFuture<Payload> late = new CompletableFuture<Payload>();
+        FakePlatform platform = platform(ServerRole.STANDALONE).withTraceProbe(late);
+        RemoteRequestWiring.ProbePlayerHandler handler = new RemoteRequestWiring.ProbePlayerHandler(
+                logger, platform, tunnel, INLINE, scheduler, 40L);
+
+        handler.onMessage(Envelope.of("req-late", "probe_player", Payload.builder()
+                .put("uuid", "11111111-1111-1111-1111-111111111111")
+                .build()));
+        await("the deadline to answer", () -> !tunnel.sent("probe_result").isEmpty());
+
+        late.complete(Payload.builder().put("mods", 3).build());
+        Thread.sleep(80L);
+
+        // The bot files a second reply on the same id as unsolicited, so a duplicate is not a
+        // harmless duplicate — and the dashboard's request is long since resolved either way.
+        assertEquals("the client probe timed out",
+                onlyReply("probe_result").payload().string("error", ""));
+    }
+
+    @Test
+    @DisplayName("a probe that answers in time cancels its deadline and replies once")
+    void aPromptProbeCancelsItsDeadline() throws Exception {
+        FakePlatform platform = platform(ServerRole.STANDALONE).withTraceProbe(
+                CompletableFuture.completedFuture(Payload.builder().put("mods", 7).build()));
+        RemoteRequestWiring.ProbePlayerHandler handler = new RemoteRequestWiring.ProbePlayerHandler(
+                logger, platform, tunnel, INLINE, scheduler, 40L);
+
+        handler.onMessage(Envelope.of("req-prompt", "probe_player", Payload.builder()
+                .put("uuid", "11111111-1111-1111-1111-111111111111")
+                .build()));
+        // Well past the deadline: a timer that was not cancelled would have fired by now.
+        Thread.sleep(120L);
+
+        assertEquals(7, onlyReply("probe_result").payload().intValue("mods", -1));
     }
 
     @Test
