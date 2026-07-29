@@ -1080,6 +1080,123 @@ to do what they have already done. The whole diagnostic is wrapped in a `catch (
 because it walks directories nobody asked it to walk and `V2Migration.run` promises never to throw —
 a log line failing must not be what stops a server booting.
 
+### D71 — the dashboard's three on-demand requests are tunnel-level, not module features
+
+**v2:** `get_players`, `run_command` and `probe_player` were handled inline in each platform's entry
+point, unconditionally, whenever the tunnel was up. v2 had no module system, so there was nothing
+that could have switched them off.
+**v3:** the same three are subscribed by `RemoteRequestWiring`, called once from
+`HeimdallRuntime.start()`, alongside `update` in `UpdateWiring`. **No module owns any of them and no
+toggle can turn one off.**
+
+**Found live, on a real Velocity proxy running 3.0.0-rc.2.** v3 had every piece of the reply path —
+`TunnelBus.reply`, the correlation map keyed on the echoed id, the dispatcher's subscription step —
+and *nothing subscribed to the requests*. So all three frames fell through to the "no handler for
+tunnel message" debug line and were never answered. The dashboard's Online Players panel 504ed after
+ten seconds; from the outside, a missing subscription is indistinguishable from a server that is down.
+
+The placement question is real and has a defensible wrong answer. `run_command` looks like it belongs
+in `module-console`, and `get_players` looks like it could be a roster module. Both are rejected for
+the same reason: a guild that switched off console *streaming* would find the dashboard's console
+*command box* had silently stopped working, with the dashboard still offering it — a behaviour change
+from v2 and from what the dashboard's own permission model (`useWebSocket`) says gates that button.
+These are properties of **having a tunnel**, so they are wired where the tunnel is.
+
+Consequences worth stating, because they are what a future reader will want to re-litigate:
+
+- **No handler can answer "module disabled".** There is no module, so the case cannot arise. The only
+  thing a capability gate would buy here is the ability to refuse a question v2 always answered.
+- **They are subscribed before `start()`'s not-configured early return.** Subscriptions live on the
+  client rather than on a socket, so they survive every reconnect and are already in place when
+  `/hd setup` brings a tunnel up without a restart — departure D56's shape again.
+- **All three run on `heimdall-io`, and both asynchronous continuations name that executor too.** A
+  handler on the socket's reading thread stops the tunnel reading, and the bot's sweep then reaps a
+  link that is working (departure D27). `run_command` matters most: its future completes on the
+  *server's main thread* on Bukkit, and replying there would put a socket write on the tick loop.
+- **`TunnelClient.hasSubscribers`** exists so a test can assert that the wiring step ran, not merely
+  that the class it would have called is correct. That distinction is the entire bug above.
+
+The roster payload's per-platform third column — `ip` on the Bukkit family, `server` on a proxy — is
+v2's, kept exactly, including the literal `"unknown"` both platforms fall back to. Core owns `uuid`
+and `username` and writes them once; the platform contributes its own key through
+`PlayerDirectory.describe`. The alternative — each platform assembling the whole row — is how v2's two
+entry points drifted apart in the first place. A proxy deliberately does **not** report an address,
+even though it knows one: v2's proxy roster had no such column and quietly starting to publish every
+proxied player's IP is not a change a roster reply gets to make on the way past.
+
+### D72 — a console command the server does not have is reported, not acknowledged
+
+**v2:** `run_command` replied `{"output": "Command dispatched: <cmd>"}` whether or not the verb
+existed, because it discarded the platform's own boolean.
+**v3:** `ConsoleBridge.dispatchCommand` fails with `UnknownCommandException` (departure D59's
+subject), and the handler carries that through as `{"output": "no such command: <cmd>"}`. The
+successful case reports the bridge's own acknowledgement — `dispatched: <cmd>` — so the operator who
+clicked the dashboard button and the operator who typed the command get the same account of the same
+event.
+
+The reply *shape* is v2's — `command_result`, one `output` key, which is the only key the dashboard
+reads — so nothing downstream changes. What changes is that the sentence is true. An operator who
+typed a verb this server does not have was previously told it ran.
+
+Two smaller corrections ride along, both of the same family as the one D71 is about:
+
+- **An empty `command` is answered.** v2 hit a bare `break` and replied nothing at all, so an empty
+  console box burned the bot's whole request timeout on a mistake it could have been told about
+  immediately.
+- **A dispatch that throws is answered.** v2 had no such path, because it never read a result.
+
+`probe_player` needed none of this: `Integrations.traceProbe` already answers with an error payload
+for every reason it cannot help, which is v2's #797 / MC-12 fix generalised into the facade. The
+handler adds only the two things that facade cannot see — a `uuid` that is not a uuid, and a future
+that fails rather than completing. The error *strings* are v3's own wording rather than v2's, which
+is deliberate: the shape (`{"error": "..."}`) is the contract, and the text is what an operator reads.
+
+### D73 — a whitelist change is pushed, and the plugin answers it with a debounced pull
+
+**v2:** the mirror was refreshed only by the pre-warm poll, on its interval. A player moved back to
+*pending* on the dashboard stayed admitted for up to a full poll period — five minutes at the default
+— and whoever had just revoked them watched them keep playing.
+**v3:** the bot pushes a `whitelist_changed` **notification** (a real nanoid `id`, an empty payload,
+no reply expected) to the v3 connections of the affected guild, and the whitelist module turns it into
+one `syncNow()` within ~2s.
+
+Four decisions inside that sentence:
+
+- **A notification, not a diff.** The frame carries nothing. The bot is the source of truth and the
+  plugin already has a conditional sync endpoint; a diff on the wire would be a second, weaker copy of
+  it — and one that could disagree.
+- **Debounced.** A bulk import fires one notification per row, and fifty full syncs back to back would
+  land on the single `heimdall-sched` thread that also runs the pre-warm poll and the expiry sweep.
+  `WhitelistChangeNudge` arms one one-shot per burst. The ETag makes a no-op sync a 304, so
+  over-nudging is cheap — but cheap is not a reason to leave it unbounded.
+- **Disarmed before the sync runs, not after**, so a change landing while a sync is in flight arms a
+  fresh one rather than being absorbed by a run that started before it happened. Absorbing it would
+  lose exactly the revocation the mechanism exists to deliver.
+- **Silence when the module is off.** The subscription is made in `enable()` and unwound by the
+  context on disable, so a guild with the whitelist module switched off receives the frame, finds
+  nothing subscribed, and it is written off with a debug line. There is no mirror to refresh and no
+  login decision being made; and because it is a notification, saying nothing costs the bot nothing.
+
+The nudge owns its `ScheduledFuture` rather than registering it through `ModuleContext`, for the same
+reason `HeimdallConsoleModule` owns its log tap: the context's tracking bag is unbounded and only
+emptied on disable, so a handle per nudge would accumulate one entry every couple of seconds for as
+long as the whitelist kept changing. `disable()` closing it is therefore load-bearing.
+
+**The id is not a correlation.** The bot puts one on every frame because v2's `WebSocketClient`
+dropped any frame lacking an `id` before dispatch. `TunnelDispatcher` consults the pending-request map
+*before* the subscription registry, so a notification's id takes the correlation path first — it
+misses silently (`PendingRequests.complete` returns `false` for an id nobody issued, and says nothing)
+and falls through to the subscriber. Nothing auto-replies at any layer.
+
+**How v2 reacts to this frame, since the bot may reach a v2 connection:** it is ignored. Both entry
+points end their `switch` in a `default` that logs at debug and does nothing else —
+`logger.debug("[WS] Unhandled message type: " + type)` on Velocity, wrapped in an explicit
+`configProvider.getBoolean("logging.debug", false)` test, and the same line on Paper after first
+offering the frame to the `HeimdallTunnel` SPI. `PaperLogger.debug` is itself gated on
+`logging.debug`, so on a default install a `whitelist_changed` frame delivered to a v2 plugin produces
+**no output at all** and no reply. The bot therefore does not have to filter to v3-only connections
+for correctness; it may still choose to, to avoid the wasted frame.
+
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 
 **New in 1d.**
