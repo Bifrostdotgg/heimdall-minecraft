@@ -1030,20 +1030,36 @@ no v2 install has ever had, found nothing, and the proxy booted with no credenti
 ordinary line *"no bootstrap.yml yet"*. Bukkit was right for a reason that does not generalise: its
 constant came from `plugin.yml`'s `name:`, which is what Bukkit actually uses.
 
-**The lesson is about the test, not the constant.** There *was* a migration test covering "a v2
-install next door", and a connected smoke row (`paper-migrate`) that stages a real v2 `config.yml` in
-a real sibling directory and asserts the whole flow end to end. Neither caught this, for the same
-reason: **the fixture and the constant came from one author's single wrong assumption, so the test
-validated the mistake.** The test created the directory the code was going to look in, and thereby
-proved the code could find a directory it had named itself. A name that is not ours to choose has to
-be checked against the thing that chose it — v2's source — not against a second copy of our guess.
-Hence the pinning tests quote the v2 declaration and the tag range it holds across, and the
-end-to-end test goes *through* `MigrationBoot.migrate` with the real `plugins/heimdall-whitelist/`
-layout rather than asserting one constant equals another.
+**The lesson is about the test, not the constant — and the precise diagnosis is worse than "a bad
+fixture".** It is tempting to say the fixture agreed with the constant and so validated the mistake.
+That is not what happened: **no test referenced either constant at all.** The migration tests
+exercised `V2Migration` directly, passing search directories they had built and named themselves
+(`root.resolve("HeimdallWhitelist")` — a string literal that happened to be right, and would have
+stayed green whatever `MigrationBoot` said). The one end-to-end row that *did* use the production
+path, `paper-migrate` in the connected smoke, ran on Bukkit only. So `V2_VELOCITY_DIRECTORY` had
+**zero** coverage — not weak coverage, none — and shipped on nothing but its author's reasoning about
+how Velocity derives directory names.
 
-There is a coverage asymmetry worth stating rather than hiding: the connected smoke matrix's flow
-rows are Bukkit-only (the proxy image in that matrix exposes no console), so the Velocity directory
-name is proven by unit test alone.
+Two things follow, and both are now in place:
+
+- **A name that is not ours to choose is checked against the thing that chose it.** `MigrationBootTest`
+  pins each constant with the v2 declaration and the tag range it holds across quoted in the comment,
+  and migrates end to end *through* `MigrationBoot.migrate` on the real `plugins/heimdall-whitelist/`
+  layout — so the constant is used, not compared against a second copy of the same guess.
+- **The smoke matrix has a `velocity-migrate` row.** Its absence was never a harness limitation: the
+  migrate assertions wait on log lines and then read the host file system, needing no console, and
+  the proxy branch already mounts its plugins directory read-write and stages files before boot. It
+  simply did not exist. `migrate` is the one mode whose *inputs* differ per platform — different
+  directory name and a different file format — so running it on one platform was always going to miss
+  half of it. The matrix guard that used to force every non-`configured` row onto Bukkit now applies
+  to `setup` alone, with the reason spelled out next to it.
+
+**One consequence of the fix, for anyone supporting an upgrade.** With the right directory name, a
+Velocity proxy that still has *both* jars in `plugins/` — the two declare different ids, so both
+load — will now have its live v2 `config.json` renamed to `config.json.v2-backup` on the first v3
+boot. That is the same non-destructive move Bukkit has always made (nothing is deleted, and rule
+three of "never destructive" still holds), but it is newly *reachable* on the proxy, and a v2 plugin
+still running beside v3 will not find its config on the boot after that. Remove the v2 jar.
 
 **And the silence was the other half of the cost.** `V2Migration.run`'s not-found branch is
 deliberately silent — a fresh install has no v2 config and does not need to be told so — but a
@@ -1055,6 +1071,14 @@ v2-looking directory found beside them, and what each of those holds. Matching i
 loose — case-insensitive, separators stripped, so `HeimdallWhitelist`, `heimdall-whitelist` and
 `heimdall_whitelist` all count — because the whole point is to catch a spelling the plugin did *not*
 expect. A check that only recognised the expected spelling would be the original bug again.
+
+The closing advice is branched, because the two near misses have opposite fixes: a candidate that was
+*not* searched means the directory name is wrong ("move the config into one of the directories
+searched"), while a candidate that *was* searched means the name is right and the file inside it is
+wrong ("check the file name"), and giving the second operator the first instruction is telling them
+to do what they have already done. The whole diagnostic is wrapped in a `catch (RuntimeException)`,
+because it walks directories nobody asked it to walk and `V2Migration.run` promises never to throw —
+a log line failing must not be what stops a server booting.
 
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 
