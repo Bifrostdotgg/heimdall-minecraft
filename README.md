@@ -4,10 +4,16 @@ A Minecraft plugin that integrates with the Heimdall Discord bot to provide dyna
 
 ## Supported Platforms
 
-- **Paper/Spigot 1.21.1+** - Backend server plugin
+- **Paper/Spigot 1.8.8+** - Backend server plugin
 - **Velocity 3.4.0+** - Proxy plugin for network-wide whitelist checking
+- **BungeeCord / Waterfall** - Proxy plugin, same role as Velocity, for networks on the other proxy
 
 The plugin can be used on either the backend servers, the proxy, or both depending on your network setup.
+
+A proxy is always the **gatekeeper**: it owns the login decision for everything behind it, and
+the backends behind it enforce everything that happens after. Both proxies do that job
+identically and answer the same `/hdp` command tree — pick whichever one your network already
+runs.
 
 ## Features
 
@@ -18,12 +24,15 @@ The plugin can be used on either the backend servers, the proxy, or both dependi
 - **Performance Optimized**: Response caching and async processing to minimize server impact
 - **Configurable Messages**: Customize all player-facing messages from the Heimdall dashboard — pushed to every connected server live, no config file editing or restart
 - **LuckPerms Integration**: Sync Discord roles to LuckPerms groups (Paper only)
-- **Multi-Platform Support**: Single JAR works on both Paper and Velocity
+- **Multi-Platform Support**: One JAR, three platforms — Paper/Spigot, Velocity and BungeeCord
 
 ## Requirements
 
-- **Paper/Spigot**: Java 17+, Paper 1.21.1+ or compatible fork
+- **Paper/Spigot**: Java 8+, Paper/Spigot 1.8.8+ or compatible fork
 - **Velocity**: Java 17+, Velocity 3.4.0+
+- **BungeeCord/Waterfall**: Java 8+ — whatever your proxy build itself requires, which is Java 17
+  for BungeeCord builds from 2025 onwards and Java 8 for older ones. Both are covered by the
+  boot-smoke matrix
 - Heimdall Discord Bot with API enabled
 - Network connectivity between your Minecraft server and bot API
 
@@ -31,7 +40,8 @@ The plugin can be used on either the backend servers, the proxy, or both dependi
 
 Download the latest `heimdall-whitelist-X.X.X.jar` from the
 [**Releases page**](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest).
-The same JAR works on both Paper and Velocity.
+The same JAR works on Paper, Velocity and BungeeCord: each platform reads its own descriptor out
+of the one file and loads only its own classes.
 
 ### Paper/Spigot Installation (fresh install)
 
@@ -50,6 +60,18 @@ The same JAR works on both Paper and Velocity.
 4. From the console (or in-game as an operator), run `/hdp setup <code>` — the proxy connects immediately, no restart needed
 5. As above, there is no config file to hand-edit; `bootstrap.yml` holds only the connection
 
+### BungeeCord / Waterfall Installation (fresh install)
+
+1. Download the latest `heimdall-whitelist-X.X.X.jar` from the [Releases page](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest)
+2. Place the JAR file in your proxy's `plugins/` folder and start the proxy
+3. On the Heimdall dashboard, open the guild's **Minecraft** page and mint a setup code for this proxy
+4. From the console (or in-game as an operator), run `/hdp setup <code>` — the proxy connects immediately, no restart needed
+5. As above, there is no config file to hand-edit; `plugins/Heimdall/bootstrap.yml` holds only the connection
+
+> Note the directory: BungeeCord names a plugin's data folder after the descriptor's **name**, so
+> it is `plugins/Heimdall/` here as it is on Paper — while Velocity names it after the plugin
+> **id** and uses `plugins/heimdall/`.
+
 ### Upgrading from v2
 
 Stop the server, drop in the new JAR in place of the old one, and start it back up — no config
@@ -65,6 +87,11 @@ migrates it automatically:
 - The old config file is renamed to `*.v2-backup` (`config.yml.v2-backup` / `config.json.v2-backup`),
   never deleted.
 - Until the server is claimed, it keeps running on v2-equivalent defaults.
+
+**There is nothing to upgrade from on BungeeCord.** v2 shipped a Bukkit build and a Velocity
+build and nothing else, so a BungeeCord proxy is always a fresh install — follow the section
+above instead. If you copy a v2 directory across from a backend hoping it will be picked up, the
+plugin says so on boot and tells you where to put the file.
 
 Finish the upgrade by running `/hd setup <code>` (`/hdp setup` on Velocity) with a code minted on the
 dashboard, same as a fresh install — this is what actually applies the imported settings. `/hwl` still
@@ -82,8 +109,10 @@ and every few hours. When a newer version is available:
 - Run `/hd update` (`/hdp update` on Velocity) to download the latest JAR:
   - **Paper**: it is placed in `plugins/update/` and applied automatically on the
     next server restart.
-  - **Velocity**: it is downloaded into the plugin's data folder; move it into the
-    proxy's `plugins/` directory (replacing the old JAR) and restart.
+  - **Velocity and BungeeCord**: the running JAR is replaced in place and picked up on the next
+    restart. Neither proxy has an `update/` staging folder, so on Windows — where an open JAR
+    cannot be replaced at all — it is downloaded into the plugin's data folder instead and the
+    console says to move it into `plugins/` yourself.
 
 `/hwl version` / `/hwl update` still work as the deprecated alias, forwarding to the same commands.
 
@@ -137,7 +166,7 @@ claimable there — pass it as the optional second argument, `/hd setup <code> <
 
 ### WebSocket Tunnel
 
-Both platforms keep a persistent 2-way WebSocket connection to the Heimdall bot (derived from
+Every platform keeps a persistent 2-way WebSocket connection to the Heimdall bot (derived from
 `endpoint`, no inbound ports needed). It is core to how v3 works, not an optional extra — it is how
 the dashboard's pushed configuration actually reaches the plugin, and it also carries
 Discord→Minecraft role-sync, the dashboard's live console, player list and status, and remote
@@ -147,7 +176,7 @@ built-in v2-equivalent defaults, for a server that has not been claimed yet).
 
 ## Commands
 
-### Player Commands (both platforms)
+### Player Commands (every platform)
 
 - `/linkdiscord` (alias `/link`) - request a code to link this Minecraft account to Discord
 - `/offend <player> <offense> [notes]` - record an offence against a player and apply the
@@ -156,9 +185,11 @@ built-in v2-equivalent defaults, for a server that has not been claimed yet).
 ### Admin Commands
 
 The admin tree is `/hd` (alias `/heimdall`) on Paper/Spigot backend servers, and `/hdp` (alias
-`/heimdallproxy`) on Velocity proxies — replace `/hd` with `/hdp` for everything below when running
-on a proxy. `/hwl` (alias `/heimdallwhitelist`) still works on both platforms as a **deprecated
-alias**: it forwards to the same tree and prints a one-time-per-start warning telling you to switch.
+`/heimdallproxy`) on **both** proxies, Velocity and BungeeCord — replace `/hd` with `/hdp` for
+everything below when running on a proxy. It is the same tree, registered through each
+platform's own command system, so a runbook does not have to know which proxy it is on.
+`/hwl` (alias `/heimdallwhitelist`) still works everywhere as a **deprecated alias**: it forwards
+to the same tree and prints a one-time-per-start warning telling you to switch.
 
 - `/hd setup <code> [endpoint]` - claim this server with a setup code minted on the dashboard;
   connects immediately, no restart
@@ -335,7 +366,7 @@ cd heimdall-minecraft
 ```
 
 The shipping JAR is `app/build/libs/heimdall-whitelist-X.X.X.jar`. It is a single
-shadow jar that runs on Velocity, Paper and Spigot 1.8.8+.
+shadow jar that runs on Velocity, BungeeCord, Paper and Spigot 1.8.8+.
 
 `./gradlew build` is the full gate, not just a compile: it builds every module at
 its own bytecode level, runs the unit tests, runs the ArchUnit conformance rules
@@ -344,7 +375,7 @@ too-new bytecode, unrelocated dependencies and mismatched plugin descriptors.
 
 The plugin version has a single source of truth: `version` in `gradle.properties`.
 The build generates `BuildConstants.VERSION` from it, substitutes it into
-`plugin.yml`, and the Velocity annotation processor writes it into
+`plugin.yml` and `bungee.yml`, and the Velocity annotation processor writes it into
 `velocity-plugin.json`. Release builds override it on the command line
 (`./gradlew build -Pversion=3.0.0`), which is what the tag-triggered release
 workflow does — so the tag, the jar name and every in-jar version reference cannot

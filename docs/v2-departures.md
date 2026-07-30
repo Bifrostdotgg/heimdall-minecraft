@@ -488,7 +488,9 @@ modern Paper only:
   every line the server writes.
 
 The appender is attached **eagerly at enable**, not lazily when the console module first asks, so
-the boot-smoke matrix exercises the attach on all six supported servers on every run.
+the boot-smoke matrix exercises the attach on all eight supported servers on every run —
+including the two BungeeCord rows, which exercise a different implementation entirely (D77)
+behind the same one-line assertion.
 
 ### D46 — one LuckPerms implementation, with both platforms' fixes
 
@@ -1219,6 +1221,171 @@ offering the frame to the `HeimdallTunnel` SPI. `PaperLogger.debug` is itself ga
 `logging.debug`, so on a default install a `whitelist_changed` frame delivered to a v2 plugin produces
 **no output at all** and no reply. The bot therefore does not have to filter to v3-only connections
 for correctness; it may still choose to, to avoid the wasted frame.
+
+### D74 — BungeeCord's API floor is a pinned release, chosen for what the code uses
+
+**New in phase 2.** v2 had no BungeeCord build at all, so there is nothing to depart from — what
+follows is the reasoning recorded so the next person does not re-litigate it.
+
+`:platform-bungee` compiles against **`net.md-5:bungeecord-api:1.16-R0.4`**, which is neither the
+latest nor an arbitrary old one. Three properties, in the order they decided it:
+
+1. **It is the oldest `bungeecord-api` release on Maven Central.** The published line starts at
+   `1.16-R0.1`; everything older exists only as a `-SNAPSHOT` on the sunset OSSRH host. Every other
+   platform API in this build is a snapshot for want of an alternative (`spigot-api`, `paper-api`,
+   and `velocity-brigadier` transitively) — this one need not be, and a release cannot be re-resolved
+   into something different on a cold CI runner.
+2. **It is Java 8 bytecode**, so `--release 8` can read it. That is still true of `1.21-R0.4` today;
+   it is the floor's job to keep being true when it stops being.
+3. **Every method this module calls is identical in `1.21-R0.4`.** `LoginEvent`, `AsyncEvent`'s
+   intents, `ProxyServer`, `PluginManager`, `ProxiedPlayer`, `TaskScheduler`, `ProxyConfig` and
+   `TextComponent.fromLegacyText` were compared with `javap` across both. The only differences in the
+   types used here, over five years, are `ProxyServer.unsafe()` and `LoginEvent`'s single-component
+   `setReason` — and neither is called.
+
+Compiling against the oldest thing that has what we need is what makes the runtime floor a property
+of **what the code uses** rather than of whatever happened to be current the day it was written. Two
+consequences show up in the code and are commented there: `TextComponent.fromLegacyText` and
+`LoginEvent.setCancelReason(BaseComponent...)` are both deprecated on modern BungeeCord in favour of
+single-component forms that arrived in the 1.20 line, and both are used anyway.
+Deprecated-but-present beats absent-on-half-the-fleet — the same trade `Log4jConsoleTap`'s
+four-argument `super` makes (D45).
+
+The boot-smoke matrix holds both ends to account: `bungee-2000` is the last era of BungeeCord
+compiled at release 8 and runs on a **Java 8** JRE, and `bungee-2085` is current BungeeCord, which is
+classfile 61 and moved its own floor to Java 17 after the API version pinned here.
+
+### D75 — the proxy's login gate defers, because BungeeCord's intents have no timeout
+
+**New in phase 2.**
+
+Every platform's login gate has to make a bounded network call to the bot. Where they run it differs,
+and BungeeCord's is the only one where getting it wrong hangs a player forever.
+
+| Platform | Event | Where the check runs |
+|---|---|---|
+| Bukkit | `AsyncPlayerPreLoginEvent` | on the connection's own thread — blocking there is the point of the event |
+| Velocity | `LoginEvent` | on an event-executor thread; blocking is permitted |
+| BungeeCord | `LoginEvent` | **on the connection's netty event loop** — blocking stalls every connection sharing it |
+
+So on BungeeCord the handler returns immediately and the decision runs on `heimdall-io`, bracketed by
+`event.registerIntent(plugin)` and `event.completeIntent(plugin)`. Two properties of `AsyncEvent`
+shape everything about how that is written:
+
+- **`registerIntent` must happen before the handler returns.** It `checkState`s that the event has not
+  fired, and the event fires as soon as the last handler returns with no intents outstanding.
+  Registering from the worker is a race that loses on an idle proxy.
+- **Nothing times out an intent.** `AsyncEvent` holds a latch, a callback and no clock whatsoever. An
+  intent that is never completed does not fail the login, or delay it, or log: that player's
+  connection sits in the login state until they give up, and no supervisor anywhere in BungeeCord will
+  notice.
+
+`completeIntent` is therefore reached on **every** path, exactly once, through an `AtomicBoolean`
+rather than through care: the allow path, the deny path, a pipeline that threw an `Error` past its own
+containment, and an executor that refused the task because the pools are shutting down. Exactly-once
+matters as much as at-least-once — `completeIntent` `checkState`s that an intent is outstanding, so a
+second call throws on the netty event loop for a connection that has already been let through.
+
+The eight tests in `BungeeLoginListenerTest` drive the real `LoginEvent` and call `postCall()` where
+BungeeCord's own `EventBus` calls it, so "the gate was released" is BungeeCord's latch reaching zero
+rather than an assertion the suite invented.
+
+`BungeeBootstrap.disable()` also unregisters the listeners explicitly, before stopping the runtime,
+rather than leaving it to the proxy: BungeeCord unregisters a disabling plugin's listeners only on its
+own shutdown path, and a login listener that outlived the pools would register an intent and then fail
+to submit the work that completes it. The listener handles that case, but not being registered at all
+is better than relying on it.
+
+### D76 — the proxy's text boundary is a plain call, because BungeeCord is not Adventure
+
+**New in phase 2.** The mirror image of D44, and worth recording precisely because it looks like the
+same problem and is not.
+
+Velocity's API is built on Adventure and Heimdall relocates its own copy, so the two `Component` types
+collide and `VelocityText` must reflect. BungeeCord's text API is
+`net.md_5.bungee.api.chat.BaseComponent`, which is not Adventure and matches no relocation pattern in
+`:app`'s shadow configuration. There is no collision: Heimdall's `Component` and BungeeCord's
+`BaseComponent` are two unrelated types, and converting between them is an ordinary method call.
+`BungeeText` is nine lines to `VelocityText`'s three hundred.
+
+The conversion is **legacy §-coded text** — `Msg.toLegacy` then `TextComponent.fromLegacyText` — which
+is the same round trip the Bukkit binding uses for its kick screen and the Velocity one uses across its
+reflective boundary, so a dashboard message renders identically on all three.
+
+JSON was the alternative and was rejected: serialise with Adventure's Gson serializer, parse with
+BungeeCord's `ComponentSerializer`. It preserves click and hover handlers, which nothing on any path
+this bridge serves has (a kick screen, a command reply, a relayed message). Against that it would mean
+shading `adventure-text-serializer-gson` for one platform, and pinning two JSON component *schemas*
+against each other across the decade of protocol versions a single BungeeCord speaks. Legacy text is
+the format both ends have always agreed on, which is the whole reason to use it.
+
+Hex colours ride along in the `§x§R§R§G§G§B§B` form `Msg` already emits — vanilla's own
+repeated-character encoding, which BungeeCord has parsed since 1.16 and which, as on 1.8.8, simply
+never appears unless a dashboard template used a hex colour.
+
+### D77 — the proxy's console tap is a JUL handler on the proxy's own logger
+
+**New in phase 2.**
+
+BungeeCord runs no log4j at any version, so the appender `Log4jConsoleTap` attaches would attach to
+nothing. The platform-free half of that class — the ANSI strip, the bounded queue, the drain executor,
+the re-entrancy guard, the dropped-consumer accounting and the attach-time self-test — moved into a
+`ConsoleTap` base, and each backend supplies only what genuinely differs.
+
+Two JUL-specific decisions, both of which fail silently if taken the other way:
+
+- **The attach point is the proxy's own logger, never the JUL root.** `BungeeLogger` is constructed
+  through `Logger`'s *protected* constructor, so it is not registered with the `LogManager` and has no
+  parent, and it calls `setUseParentHandlers(false)` besides. A handler on `Logger.getLogger("")`
+  attaches perfectly and captures nothing, which is indistinguishable from a quiet server. Every
+  plugin's logger, by contrast, ends its constructor with `setParent(plugin.getProxy().getLogger())` —
+  so one handler on the proxy logger sees the proxy's own lines and every plugin's. It is also why the
+  self-test probe is logged on that logger rather than on a `com.heimdall.consoletap` one the way the
+  log4j side does: a logger from `Logger.getLogger(name)` has the JUL root as its parent, so its
+  records would never arrive and the self-test would fail on a working tap.
+- **The level floor is the opposite comparison.** JUL's `intValue()` rises with severity and log4j's
+  falls. Copying the log4j form across inverts the filter: every `FINE` line ships and nothing else
+  does. Both ends are pinned in `JulConsoleTapTest`.
+
+`WARNING` and `SEVERE` are mapped to `WARN` and `ERROR` on the way out. The console feed carries a
+`level` string per line and the dashboard renders it, so a proxy sending `SEVERE` while every backend
+behind it sends `ERROR` would be one feature displaying two vocabularies.
+
+`ConsoleTap` also now states plainly what the re-entrancy guard cannot do. It is thread-local, and both
+Paper's async loggers and BungeeCord's `LogDispatcher` deliver on a thread of their own, so a consumer
+that logs is caught only in the synchronous case. The rule in `ConsoleBridge` — *a consumer must not
+log* — is the real protection; the guard is a second line of defence for the one case it can see. The
+previous wording implied more than the code delivers, which is the class of comment this codebase has
+had to correct twice.
+
+### D78 — there is no v2 migration on BungeeCord, and that is a constant rather than an omission
+
+**New in phase 2.**
+
+v2 shipped a Bukkit entry point and a Velocity entry point and nothing else, so no BungeeCord proxy in
+the world has a `plugins/HeimdallWhitelist/` or `plugins/heimdall-whitelist/` of its own. The boot
+still calls `MigrationBoot.migrate`, with `MigrationBoot.NO_V2_DIRECTORY` in place of a sibling
+directory name.
+
+Naming a directory anyway would be a guess presented as a fact in the one log line an operator reads
+when an upgrade appears to have lost their configuration. Skipping the call entirely would cost two
+things worth keeping:
+
+- the plugin's **own** data directory is still searched, which is the same rule the other two platforms
+  follow — *a config an operator has already dropped in by hand is the one they meant*;
+- `V2Migration`'s near-miss diagnostic still runs. An operator who copies `plugins/HeimdallWhitelist/`
+  across from a backend expecting it to be picked up is told where to put the file, instead of getting
+  a silent unconfigured boot — which is the whole of D70.
+
+Two tests pin the diagnostic **not** firing, and they are the ones worth having. The shaded jar is
+called `heimdall-whitelist-<version>.jar` and sits in `plugins/`, right beside the searched directory —
+and the near-miss test normalises hyphens and dots away, so its *name* matches "heimdall" +
+"whitelist" exactly. Only the `isDirectory()` check stops every proxy in the fleet being told on every
+boot that its own jar might be a misplaced v2 install, and nothing held that to account until now.
+
+`connected.sh` refuses a `bungee` row in `migrate` mode outright, for the same reason: it would assert
+against a fixture no operator has ever had, which is the mistake the `velocity-migrate` row exists to
+have corrected, made in the opposite direction.
 
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 
