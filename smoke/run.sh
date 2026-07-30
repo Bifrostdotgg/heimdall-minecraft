@@ -195,6 +195,11 @@ readonly SELFTEST_ERRORS=(
     # Nothing was actually wrong, and it still produced an ERROR naming Heimdall during shutdown —
     # which is exactly what this detector is for. Pinned so the fix cannot quietly regress.
     "2026-07-27 19:42:36,772 Log4j2-TF-1-AsyncLogger[AsyncContext@5552768b]-1 ERROR Attempted to append to non-started appender HeimdallConsoleTap-1"
+    # BungeeCord's ConciseFormatter, which brackets the level rather than putting it inside the
+    # timestamp's own brackets. A detector written against the Bukkit and Velocity shapes alone would
+    # not obviously fail on this — it happens to work — and "happens to work" is what a self-test is
+    # for on a matrix that has just grown a third log format.
+    "15:11:50 [SEVERE] [Heimdall] boom"
 )
 
 # Real lines from the captured logs of a PASSING run. Flagging any of these makes the check useless.
@@ -212,6 +217,12 @@ readonly SELFTEST_CLEAN=(
     # convert one misdiagnosis into another. explain_runner_kill owns these lines instead.
     'ERROR mc-server-runner  Failed to stop using rcon-cli  {"error": "exit status 1"}'
     "ERROR mc-server-runner  Took too long, so killing server process"
+    # Two real BungeeCord lines, copied out of smoke/.work/bungee-2085/server.log from a green run.
+    # Both name Heimdall and neither is a fault; the second is BungeeCord's own loader announcing the
+    # plugin, which is the Bungee twin of the Bukkit "Loading server plugin" line that the /hd check
+    # one level up already had to be careful about.
+    "15:11:50 [INFO] [Heimdall] module 'console' enabled"
+    "14:51:45 [INFO] Loaded plugin Heimdall version 3.0.0-SNAPSHOT by Bifrost"
 )
 
 expect_match() {
