@@ -290,6 +290,12 @@ final class BukkitBootstrap {
                 new BukkitSessionListener(
                         logger, runtime.playerSessions(), platform.playerDirectory()),
                 plugin);
+        // Deaths, on the Bukkit family only: neither proxy has a death event, so a backend is the
+        // only place the server's own death message exists at all. Departure D80.
+        Bukkit.getPluginManager().registerEvents(
+                new BukkitDeathListener(
+                        logger, runtime.playerSessions(), platform.playerDirectory()),
+                plugin);
     }
 
     /**
