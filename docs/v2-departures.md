@@ -1237,11 +1237,35 @@ latest nor an arbitrary old one. Three properties, in the order they decided it:
    into something different on a cold CI runner.
 2. **It is Java 8 bytecode**, so `--release 8` can read it. That is still true of `1.21-R0.4` today;
    it is the floor's job to keep being true when it stops being.
-3. **Every method this module calls is identical in `1.21-R0.4`.** `LoginEvent`, `AsyncEvent`'s
-   intents, `ProxyServer`, `PluginManager`, `ProxiedPlayer`, `TaskScheduler`, `ProxyConfig` and
-   `TextComponent.fromLegacyText` were compared with `javap` across both. The only differences in the
-   types used here, over five years, are `ProxyServer.unsafe()` and `LoginEvent`'s single-component
-   `setReason` — and neither is called.
+3. **Nothing that changed between it and `1.21-R0.4` can break this binding.** That is a weaker and
+   more honest claim than "the API is identical", which it is not: `javap` over every type this
+   module touches finds differences in eight of them. They fall into four kinds, and each kind is
+   harmless for a specific reason:
+
+   - **A superclass and constructor change on `PostLoginEvent`**, which went from `Event` to
+     `AsyncEvent<PostLoginEvent>` and gained two constructor parameters. This is the only structural
+     change in the set. `BungeeSessionListener` calls `getPlayer()`, which is declared on
+     `PostLoginEvent` itself in both versions, so the compiled `invokevirtual` resolves either way;
+     it never constructs the event, and BungeeCord's `EventBus` dispatches on the handler's declared
+     parameter type, which is unchanged. Being an `AsyncEvent` now also means the event can be
+     deferred — our handler registers no intent, so it never is.
+   - **Added abstract methods on interfaces we only ever call**: `PendingConnection` gained
+     `isTransferred`, `retrieveCookie` and `sendData`; `ProxiedPlayer` gained cookies, `transfer`,
+     `getClientBrand`, dialogs and server links. Adding an abstract method breaks *implementors*, and
+     nothing in `:platform-bungee` implements either interface. (The test does, through a
+     `java.lang.reflect.Proxy`, which by construction satisfies whatever the interface has at
+     runtime.)
+   - **Package-private and protected signature changes inside `BaseComponent`/`TextComponent`**,
+     where `toPlainText(StringBuilder)` and friends became `toPlainText(BaseComponent$StringVisitor)`.
+     Those are not callable from another package at all. The `static` helpers this codebase actually
+     uses — `TextComponent.fromLegacyText`, and `toPlainText`/`toLegacyText(BaseComponent...)` in the
+     tests — are byte-for-byte the same. (Several public setters appear in the diff as moved rather
+     than removed; they are present in both.)
+   - **Purely additive members**, called by nothing here: `ProxyServer.unsafe()`, `LoginEvent`'s
+     single-component `getReason`/`setReason`, `TextComponent.fromLegacy`/`fromArray`,
+     `BaseComponent`'s shadow-colour, style and reset accessors, and `PluginDescription`'s library
+     list. Two *constructors* also gained parameters — `PluginDescription` and `PluginManager` — and
+     neither type is ever constructed by this module.
 
 Compiling against the oldest thing that has what we need is what makes the runtime floor a property
 of **what the code uses** rather than of whatever happened to be current the day it was written. Two
@@ -1282,9 +1306,25 @@ shape everything about how that is written:
 
 `completeIntent` is therefore reached on **every** path, exactly once, through an `AtomicBoolean`
 rather than through care: the allow path, the deny path, a pipeline that threw an `Error` past its own
-containment, and an executor that refused the task because the pools are shutting down. Exactly-once
-matters as much as at-least-once — `completeIntent` `checkState`s that an intent is outstanding, so a
-second call throws on the netty event loop for a connection that has already been let through.
+containment, an executor that refused the task because the pools are shutting down, and an executor
+that *accepted* the task and then dropped it — `HeimdallExecutors.shutdown` waits five seconds and
+then calls `shutdownNow`, which discards anything still queued without running it. That last one is
+reachable only on a standalone plugin disable under load, and is why the listeners are unregistered
+first: by the time the pools stop, no new login can have entered the gate.
+
+Exactly-once matters as much as at-least-once — `completeIntent` `checkState`s that an intent is
+outstanding, so a second call throws on the netty event loop for a connection that has already been
+let through.
+
+**One hang is not ours to prevent, and it is worth writing down rather than implying it away.**
+`AsyncEvent.postCall()` reads `latch.get()` and *then* sets `fired`; `completeIntent` decrements the
+latch and only fires the callback if `fired` is already set. A completion that lands between those two
+statements sees `fired == false`, decrements the latch to zero, and calls nobody — while `postCall`,
+having already read a non-zero latch, also calls nobody. That is an upstream lost wakeup shared by
+every intent-using BungeeCord plugin and not fixable from this side. It is narrow: the synchronous
+paths above (a rejected executor, a missing uuid) complete before `postCall` runs at all, since they
+are still inside the handler, so only a decision that finishes on `heimdall-io` within that window can
+hit it.
 
 The nine tests in `BungeeLoginListenerTest` drive the real `LoginEvent` and call `postCall()` where
 BungeeCord's own `EventBus` calls it, so "the gate was released" is BungeeCord's latch reaching zero
@@ -1351,12 +1391,30 @@ Two JUL-specific decisions, both of which fail silently if taken the other way:
 `level` string per line and the dashboard renders it, so a proxy sending `SEVERE` while every backend
 behind it sends `ERROR` would be one feature displaying two vocabularies.
 
-`ConsoleTap` also now states plainly what the re-entrancy guard cannot do. It is thread-local, and both
-Paper's async loggers and BungeeCord's `LogDispatcher` deliver on a thread of their own, so a consumer
-that logs is caught only in the synchronous case. The rule in `ConsoleBridge` — *a consumer must not
-log* — is the real protection; the guard is a second line of defence for the one case it can see. The
-previous wording implied more than the code delivers, which is the class of comment this codebase has
-had to correct twice.
+**Most lines arrive synchronously, which is the opposite of what `BungeeLogger` suggests.** That
+class overrides `log(LogRecord)` to queue onto its own `LogDispatcher` thread — but `PluginLogger`
+prefixes the plugin name and then calls `super.log(record)`, the *JDK's* `Logger.log`, which walks
+`this` and its parents and calls `publish` on each logger's handlers itself. It never invokes the
+parent logger's own `log`, so the queueing override is bypassed for anything logged through a child.
+Every plugin's lines — the bulk of the feed, and Heimdall's own — therefore reach the handler on
+whatever thread emitted them, a netty event loop included; only records logged *directly* on the
+proxy logger, which is what BungeeCord's core does, ride the dispatcher.
+
+Two consequences, both recorded in `JulConsoleTap`:
+
+- capture is on a hot path and stays cheap — an `isEmpty()` check, one level comparison, a regex
+  replace, a queue add and at most one `execute`. The fan-out is on `heimdall-io` either way;
+- the re-entrancy guard **works** for the case that matters here. A Heimdall consumer that logs does
+  so from the drain thread through Heimdall's own plugin logger, and its record comes straight back
+  through `publish` on that same thread with the guard set, so it is dropped rather than fed back.
+
+`ConsoleTap` states the limitation that remains rather than a flattering version of it: the guard is
+thread-local, so it cannot see a line the backend hands to a thread of its own — Paper's async
+loggers for everything, and on BungeeCord the lines the proxy logs directly. The rule in
+`ConsoleBridge` — *a consumer must not log* — is the real protection; the guard is a second line of
+defence for the cases it can see. Both the original wording and its first correction claimed more
+than the code delivers, in opposite directions, which is why the mechanism is written out above
+rather than summarised.
 
 ### D78 — there is no v2 migration on BungeeCord, and that is a constant rather than an omission
 
