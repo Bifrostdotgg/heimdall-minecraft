@@ -44,6 +44,21 @@ public final class ConnectedServer {
 
     private final List<JsonObject> consoleLines = Collections.synchronizedList(new ArrayList<>());
 
+    /**
+     * Chat lines received via {@code bridge.chat}, and player events via {@code bridge.event}.
+     *
+     * <p>Captured so a test can assert on the wire shape the plugin actually produced — the whole
+     * value of this fixture is that a plugin proven against it behaves the same way against
+     * production, and a batching bug is only visible in the frame.
+     *
+     * <p>Held in memory, bounded, and <strong>never logged</strong>. The bridge's relay-only rule is
+     * the plugin's and the bot's, not this fixture's, but the stub's log lines are what CI archives
+     * — so they carry counts and kinds and no message body. See {@code StubWsServer#onMessage}.
+     */
+    private final List<JsonObject> bridgeChatLines = Collections.synchronizedList(new ArrayList<>());
+
+    private final List<JsonObject> bridgeEvents = Collections.synchronizedList(new ArrayList<>());
+
     ConnectedServer(String guildId, String serverId, WebSocket socket, long nowMs) {
         this.guildId = guildId;
         this.serverId = serverId;
@@ -118,9 +133,7 @@ public final class ConnectedServer {
 
     /** Console lines received via {@code console_line}, oldest first. */
     public List<JsonObject> consoleLines() {
-        synchronized (consoleLines) {
-            return List.copyOf(consoleLines);
-        }
+        return copyOf(consoleLines);
     }
 
     WebSocket socket() {
@@ -150,12 +163,40 @@ public final class ConnectedServer {
     }
 
     void addConsoleLine(JsonObject line) {
-        synchronized (consoleLines) {
-            consoleLines.add(line);
+        append(consoleLines, line);
+    }
+
+    /** Chat lines received via {@code bridge.chat}, oldest first. */
+    public List<JsonObject> bridgeChatLines() {
+        return copyOf(bridgeChatLines);
+    }
+
+    /** Player events received via {@code bridge.event}, oldest first. */
+    public List<JsonObject> bridgeEvents() {
+        return copyOf(bridgeEvents);
+    }
+
+    void addBridgeChatLine(JsonObject line) {
+        append(bridgeChatLines, line);
+    }
+
+    void addBridgeEvent(JsonObject event) {
+        append(bridgeEvents, event);
+    }
+
+    private static void append(List<JsonObject> into, JsonObject entry) {
+        synchronized (into) {
+            into.add(entry);
             // Bounded so a chatty server cannot grow the fixture without limit during a long soak.
-            if (consoleLines.size() > 2000) {
-                consoleLines.remove(0);
+            if (into.size() > 2000) {
+                into.remove(0);
             }
+        }
+    }
+
+    private static List<JsonObject> copyOf(List<JsonObject> from) {
+        synchronized (from) {
+            return List.copyOf(from);
         }
     }
 }

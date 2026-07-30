@@ -96,6 +96,22 @@ public final class StubBotConfig {
      */
     private final List<String> requestOnAck = new ArrayList<>();
 
+    /**
+     * Rendered Discord lines to push at a server the moment it acknowledges its config — once per
+     * server.
+     *
+     * <p>Empty by default, so nothing that existed before this flag behaves differently. It exists
+     * for the same caller as {@link #requestOnAck}: the connected smoke drives a real server in a
+     * container and cannot call {@code bot.ws().sendBridgeDiscord(...)} from a shell script.
+     *
+     * <p>Each entry is a <strong>finished</strong> legacy-§ string, because that is what the real
+     * bot sends — the template is resolved bot-side and the user's content inserted after
+     * formatting. Entries are separated by {@code |} rather than by a comma, which is the one place
+     * this differs from {@code requestOnAck}: a request type never contains a comma and a chat line
+     * very often does.
+     */
+    private final List<String> discordOnAck = new ArrayList<>();
+
     private long pingIntervalMs = 30_000L;
     private long livenessTimeoutMs = 90_000L;
 
@@ -171,6 +187,10 @@ public final class StubBotConfig {
                 case "verbose" -> StubLog.setVerbose(Boolean.parseBoolean(value.trim()));
                 case "registry_unreadable" -> config.registryUnreadable = Boolean.parseBoolean(value.trim());
                 case "request_on_ack" -> config.requestOnAck(List.of(value.split(",")));
+                // Split on `|`, not on a comma — see the field. `split` takes a regex, so the pipe
+                // is escaped; unescaped it is alternation between two empty branches and every
+                // character comes back as its own entry.
+                case "discord_on_ack" -> config.discordOnAck(List.of(value.split("\\|")));
                 case "foreign_servers" -> {
                     config.foreignServers.clear();
                     for (String id : value.split(",")) {
@@ -246,6 +266,11 @@ public final class StubBotConfig {
         modules.add("rolesync", rolesync);
         modules.add("offenses", moduleConfig(true, null));
         modules.add("console", moduleConfig(false, "not enabled by default — it streams every log line"));
+        // Enabled by default, and inert by default at the same time: the bot's own
+        // defaultModuleConfig special-cases the bridge to enabled-but-unmapped, because zero
+        // channel mappings means zero relay. Nothing here sets relayChat, so the plugin uses its
+        // role default — on for a backend, off for a proxy.
+        modules.add("bridge", moduleConfig(true, null));
         return modules;
     }
 
@@ -492,6 +517,30 @@ public final class StubBotConfig {
             for (String type : types) {
                 if (type != null && !type.trim().isEmpty()) {
                     requestOnAck.add(type.trim());
+                }
+            }
+        }
+        return this;
+    }
+
+    /** Rendered Discord lines to push once per server on {@code config.ack}. See the field. */
+    public List<String> discordOnAck() {
+        return Collections.unmodifiableList(discordOnAck);
+    }
+
+    /**
+     * Sets the on-ack {@code bridge.discord} lines. Blank entries are dropped.
+     *
+     * <p>Deliberately NOT trimmed, unlike {@link #requestOnAck}: a request type is an identifier and
+     * surrounding whitespace is a typo, whereas one of these is a rendered chat line where leading
+     * space may be exactly what the template produced.
+     */
+    public StubBotConfig discordOnAck(List<String> texts) {
+        discordOnAck.clear();
+        if (texts != null) {
+            for (String text : texts) {
+                if (text != null && !text.trim().isEmpty()) {
+                    discordOnAck.add(text);
                 }
             }
         }

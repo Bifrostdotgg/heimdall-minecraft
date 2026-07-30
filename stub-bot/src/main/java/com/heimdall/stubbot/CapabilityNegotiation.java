@@ -49,7 +49,7 @@ final class CapabilityNegotiation {
     /** The module ids a config document may contain. */
     static final List<String> MANAGED_MODULE_IDS =
             Collections.unmodifiableList(java.util.Arrays.asList(
-                    "whitelist", "rolesync", "console", "health"));
+                    "whitelist", "rolesync", "console", "health", "bridge"));
 
     /** Negotiated and acked, but never a key in a config document. */
     static final List<String> META_CAPABILITY_IDS =
@@ -61,6 +61,7 @@ final class CapabilityNegotiation {
         majors.put("rolesync", 1);
         majors.put("console", 1);
         majors.put("health", 1);
+        majors.put("bridge", 1);
         majors.put("modules", 1);
         majors.put("config", 1);
         SUPPORTED_MAJORS = Collections.unmodifiableMap(majors);

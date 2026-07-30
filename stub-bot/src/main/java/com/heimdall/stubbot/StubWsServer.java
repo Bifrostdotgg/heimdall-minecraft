@@ -82,6 +82,15 @@ public final class StubWsServer extends WebSocketServer {
     /** Servers the on-ack requests have already been fired at, as {@code guildId/serverId}. */
     private final Set<String> onAckAsked = ConcurrentHashMap.newKeySet();
 
+    /**
+     * Servers the on-ack {@code bridge.discord} has already been sent to.
+     *
+     * <p>A second set rather than a shared one, so the two hooks are independently once-per-server:
+     * a scenario that configures only one must not have its firing suppressed by the other having
+     * already run.
+     */
+    private final Set<String> onAckDiscordSent = ConcurrentHashMap.newKeySet();
+
     private volatile WsMessageListener messageListener;
     private final AtomicInteger configVersion;
 
@@ -289,6 +298,28 @@ public final class StubWsServer extends WebSocketServer {
                 }
                 return;
             }
+            case "bridge.chat" -> {
+                int lines = collect(payload, "lines", server::addBridgeChatLine);
+                // Count only, never content. The plugin's relay-only rule does not bind this
+                // fixture, but CI archives these logs, and a chat log assembled out of a test
+                // harness is still a chat log.
+                StubLog.info("bridge.chat from " + server.serverId() + ": " + lines + " line(s)");
+                return;
+            }
+            case "bridge.event" -> {
+                List<String> kinds = new ArrayList<>();
+                int events = collect(payload, "events", entry -> {
+                    server.addBridgeEvent(entry);
+                    kinds.add(entry.has("kind") && entry.get("kind").isJsonPrimitive()
+                            ? entry.get("kind").getAsString()
+                            : "?");
+                });
+                // The KINDS are metadata — join/leave/death — not content, and they are what makes
+                // this line worth asserting on: "3 events" cannot tell a death from three joins.
+                StubLog.info("bridge.event from " + server.serverId() + ": " + events
+                        + " event(s) " + kinds);
+                return;
+            }
             case "config.ack" -> {
                 // Also not a liveness signal, for consistency with identify: the v3 handshake is
                 // about configuration, and letting it double as a heartbeat would mean a client
@@ -299,6 +330,7 @@ public final class StubWsServer extends WebSocketServer {
                             + server.acknowledgedConfigVersion());
                 }
                 fireOnAckRequests(server);
+                fireOnAckDiscord(server);
                 return;
             }
             default -> {
@@ -487,6 +519,83 @@ public final class StubWsServer extends WebSocketServer {
                         StubLog.info(label + ": " + summarise(reply));
                     }, scheduler);
         }
+    }
+
+    /**
+     * Sends whatever {@code STUB_BOT_DISCORD_ON_ACK} names as a {@code bridge.discord}, once.
+     *
+     * <p>The mirror of {@link #fireOnAckRequests}, for the other direction and for the same reason:
+     * {@code bot.ws().sendBridgeDiscord(...)} is a Java hook, and the connected smoke drives a real
+     * server in a container with no way to reach into this JVM. Without it, "the bot pushes a
+     * rendered line and the plugin shows it to everybody" is provable only by unit tests — which is
+     * the same gap that let the {@code get_players} plumbing ship with nothing subscribed to it.
+     *
+     * <p>Fired on {@code config.ack} rather than on {@code identify}, so the bridge module is
+     * actually up by the time the frame lands. A module that is not yet enabled has no subscription
+     * and the frame is silently discarded, which would make the smoke's assertion flaky rather than
+     * false — the worse of the two.
+     */
+    private void fireOnAckDiscord(ConnectedServer server) {
+        List<String> texts = config.discordOnAck();
+        if (texts.isEmpty() || !onAckDiscordSent.add(server.guildId() + "/" + server.serverId())) {
+            return;
+        }
+        int delivered = sendBridgeDiscord(server.guildId(), server.serverId(), texts);
+        StubLog.info("on-ack bridge.discord -> " + server.serverId() + ": " + texts.size()
+                + " message(s), delivered=" + delivered);
+    }
+
+    /**
+     * Sends {@code bridge.discord} to one connected server.
+     *
+     * <p>Each text is a <strong>finished</strong> legacy-§ string, exactly as the real bot sends it:
+     * the template is resolved and the user's content inserted <em>after</em> formatting, bot-side,
+     * so the plugin renders with {@code Msg.legacy} and nothing a Discord user types can inject a
+     * colour code. Passing raw user text here would be modelling a bot that does not exist.
+     *
+     * <p>A notification: a fresh id, no reply expected. The id is minted anyway because v2's client
+     * dropped any frame without one before dispatch, so the bot puts one on everything it sends.
+     *
+     * @return 1 if it reached an open socket, 0 otherwise
+     */
+    public int sendBridgeDiscord(String guildId, String serverId, List<String> texts) {
+        ConnectedServer server = connected(guildId, serverId);
+        if (server == null || !server.socket().isOpen() || texts == null || texts.isEmpty()) {
+            return 0;
+        }
+        long now = System.currentTimeMillis();
+        JsonArray messages = new JsonArray();
+        for (String text : texts) {
+            JsonObject message = new JsonObject();
+            message.addProperty("text", text);
+            message.addProperty("ts", now);
+            messages.add(message);
+        }
+        JsonObject payload = new JsonObject();
+        payload.add("messages", messages);
+        send(server.socket(), newId(), "bridge.discord", payload);
+        return 1;
+    }
+
+    /**
+     * Records every object in an array field, and answers how many there were.
+     *
+     * <p>Shared by the two bridge frames so the bound, the object filter and the count cannot drift
+     * between them.
+     */
+    private static int collect(
+            JsonObject payload, String key, java.util.function.Consumer<JsonObject> sink) {
+        if (!payload.has(key) || !payload.get(key).isJsonArray()) {
+            return 0;
+        }
+        int seen = 0;
+        for (JsonElement entry : payload.getAsJsonArray(key)) {
+            if (entry.isJsonObject()) {
+                sink.accept(entry.getAsJsonObject());
+                seen++;
+            }
+        }
+        return seen;
     }
 
     /** A one-line description of a reply, chosen so a shell script can assert on it. */
