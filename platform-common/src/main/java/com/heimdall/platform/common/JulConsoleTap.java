@@ -41,12 +41,34 @@ import java.util.logging.Logger;
  * from {@code Logger.getLogger(name)} has the JUL root as its parent, so its records would never
  * arrive here and the self-test would fail on a perfectly good tap.
  *
- * <h2>Delivery is already off the calling thread, and the guard cannot see that</h2>
+ * <h2>Most lines arrive synchronously, on the thread that emitted them</h2>
  *
- * <p>{@code BungeeLogger.log(LogRecord)} queues onto its own {@code LogDispatcher} thread and the
- * handlers run there — so capture never costs the netty thread that emitted the line, and equally
- * the re-entrancy guard in {@link ConsoleTap} cannot catch a consumer that logs. That limitation is
- * general (Paper's async loggers have it too) and is stated in {@link ConsoleTap}'s own javadoc.
+ * <p>Which is the opposite of what {@code BungeeLogger}'s queueing {@code log(LogRecord)} override
+ * suggests, and worth spelling out because both consequences below follow from it.
+ *
+ * <p>{@code PluginLogger.log(LogRecord)} prefixes the plugin name and then calls
+ * {@code super.log(record)} — the <em>JDK's</em> {@link Logger#log(LogRecord)}, which walks
+ * {@code this} and then its parents and calls {@code publish} on each logger's handlers itself. It
+ * never invokes the parent logger's own {@code log} method, so {@code BungeeLogger}'s override is
+ * bypassed entirely for anything logged through a child. Every plugin's lines — the bulk of the
+ * feed, and Heimdall's own — therefore reach this handler on whatever thread emitted them, a netty
+ * event loop included. Only records logged <em>directly</em> on the proxy logger, which is what
+ * BungeeCord's own core does, go through {@code LogDispatcher} and arrive on its thread.
+ *
+ * <p>Two consequences:
+ *
+ * <ul>
+ *   <li><strong>Capture is on a hot path and has to stay cheap.</strong> It is: an
+ *       {@code isEmpty()} check, one level comparison, a regex replace, a queue add and at most one
+ *       {@code execute}. The fan-out to consumers is on {@code heimdall-io} either way, which is the
+ *       part that could actually cost something.
+ *   <li><strong>The re-entrancy guard works here, for the common case.</strong> A consumer that logs
+ *       does so from the drain thread, and its record comes straight back through {@code publish} on
+ *       that same thread with {@code DELIVERING} set — so it is dropped rather than fed back. The
+ *       hole {@link ConsoleTap} describes is real but narrower on this platform than the
+ *       {@code LogDispatcher} would suggest: it applies to lines logged directly on the proxy
+ *       logger, not to a plugin's.
+ * </ul>
  */
 public final class JulConsoleTap extends ConsoleTap {
 

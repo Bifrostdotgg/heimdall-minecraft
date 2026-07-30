@@ -57,16 +57,23 @@ import java.util.regex.Pattern;
  * <h2>The re-entrancy guard is thread-local, and that is weaker than it sounds</h2>
  *
  * <p>{@link #DELIVERING} is set on the thread running a consumer, so a consumer that logs
- * <em>synchronously</em> back into the same thread is caught. It cannot catch a backend that hands
- * log records to a thread of its own — Paper's async loggers, and BungeeCord's {@code LogDispatcher},
- * which is <strong>always</strong> asynchronous. On those, a consumer that logs produces a line that
- * arrives on the backend's thread with no guard set, and feeds itself forever.
+ * <em>synchronously</em> back into the same thread is caught — its line arrives at the sink on the
+ * drain thread with the guard set and is dropped. What it cannot catch is a backend that hands log
+ * records to a thread of its own, because the guard is then not set where the line arrives: Paper's
+ * async loggers do that for everything, and on BungeeCord {@code LogDispatcher} does it for the
+ * lines the proxy logs directly on its own logger. On those routes a consumer that logs feeds itself
+ * forever.
  *
- * <p>That is why {@link com.heimdall.core.platform.ConsoleBridge} states "a consumer must not log"
- * as a rule rather than a suggestion: the guard is a second line of defence for the one case it can
- * see, not the reason the rule exists. Said here plainly because the alternative is a comment that
- * claims a safety property the code does not have — which is the class of thing this codebase has
- * corrected twice already.
+ * <p>Which route a given line takes is the backend's business and is documented per implementation —
+ * {@link JulConsoleTap} explains why <em>plugin</em> lines on BungeeCord are the synchronous kind
+ * despite that dispatcher, which is the case that matters, since a Heimdall consumer logs through
+ * Heimdall's own plugin logger.
+ *
+ * <p>Either way {@link com.heimdall.core.platform.ConsoleBridge} states "a consumer must not log" as
+ * a rule rather than a suggestion: the guard is a second line of defence for the cases it can see,
+ * not the reason the rule exists. Said here plainly because the alternative is a comment that claims
+ * a safety property the code does not have — which is the class of thing this codebase has corrected
+ * twice already.
  */
 public abstract class ConsoleTap implements AutoCloseable {
 
