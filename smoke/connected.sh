@@ -189,9 +189,16 @@ READY_PATTERN='Done \([0-9.]+s\)'
 # those are different strings that shipped disagreeing. The Velocity migrate row below is the row
 # that would have caught it; it did not exist, which is the whole reason the wrong name reached
 # production. Its absence was never a harness limitation.
+# There is deliberately no bungee MIGRATE row, and its absence is a statement rather than a gap: v2
+# shipped a Bukkit build and a Velocity build and nothing else, so no BungeeCord proxy in the world
+# has a v2 config to find (departure D78). A migrate row here would be testing a fixture nobody has
+# ever had — which is precisely the mistake the velocity-migrate row's own comment warns about, in
+# the other direction. What the bungee row proves instead is the third entry point reaching a real
+# bot: a fourth plugin loader, an asynchronous login gate, and a console tap that is not log4j.
 ROWS=(
     "paper-1.21.8|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|configured"
     "velocity-3.5.1|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G|configured"
+    "bungee-2085|itzg/mc-proxy:2026.7.1-java21|BUNGEECORD|2085|bungee|1G|configured"
     "paper-setup|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|setup"
     "paper-migrate|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|migrate"
     "velocity-migrate|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G|migrate"
@@ -321,6 +328,12 @@ selftest() {
     check_match "${ENABLE_PATTERN}" \
         "[22:34:45 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT enabled — role gatekeeper, text bridge ok, console tap on" \
         yes "enable banner (velocity)" || failures=$((failures + 1))
+    # A third log shape again: BungeeCord's ConciseFormatter brackets the level and PluginLogger
+    # prefixes the plugin name, and the banner's middle clause differs because this platform has no
+    # reflective text bridge to report on.
+    check_match "${ENABLE_PATTERN}" \
+        "22:34:45 [INFO] [Heimdall] Heimdall v3.0.0-SNAPSHOT enabled — role gatekeeper, text via legacy components, console tap on" \
+        yes "enable banner (bungee)" || failures=$((failures + 1))
     check_match "${DISABLE_PATTERN}" \
         "[22:41:07 INFO]: [Heimdall] Heimdall v3.0.0-SNAPSHOT shutting down" \
         yes "disable banner" || failures=$((failures + 1))
@@ -426,11 +439,25 @@ selftest() {
                 || [ -z "${memory}" ] || [ -z "${mode}" ]; then
             fail "malformed row: ${row}"
             failures=$((failures + 1))
-        elif [ "${platform}" != "bukkit" ] && [ "${platform}" != "velocity" ]; then
-            # Every platform branch in this file is an if/else on these two strings, so a third
-            # value does not fail — it silently takes the velocity path, mounts the wrong
+        elif [ "${platform}" != "bukkit" ] && [ "${platform}" != "velocity" ] \
+                && [ "${platform}" != "bungee" ]; then
+            # Every platform branch in this file is a test against one of these three strings, so a
+            # fourth value does not fail — it silently takes the velocity path, mounts the wrong
             # directory, and reports a plugin that would not load.
             fail "row ${name} has unknown platform '${platform}'"
+            failures=$((failures + 1))
+        elif [ "${platform}" = "bungee" ] && ! [[ "${version}" =~ ^[0-9]+$ ]]; then
+            # A bungee row's VERSION field is a Jenkins build number, not a version string. Anything
+            # else resolves to no artifact — or, worse, silently falls back to the image's
+            # `lastStableBuild` default and stops testing what the row says it tests.
+            fail "row ${name} is a bungee row, so its VERSION must be a Jenkins build number, not '${version}'"
+            failures=$((failures + 1))
+        elif [ "${platform}" = "bungee" ] && [ "${mode}" = "migrate" ]; then
+            # v2 shipped a Bukkit build and a Velocity build and nothing else, so there is no v2
+            # BungeeCord install anywhere and no fixture that could honestly represent one. A row
+            # like this would assert against a file no operator has ever had — the same mistake the
+            # velocity-migrate row exists to have corrected, made in the opposite direction.
+            fail "row ${name} is mode 'migrate' on bungee, which v2 never shipped a build for (D78)"
             failures=$((failures + 1))
         elif [ "${mode}" != "configured" ] && [ "${mode}" != "setup" ] && [ "${mode}" != "migrate" ]; then
             # Same trap, one field along: an unknown mode would take the `configured` branch, write
@@ -853,12 +880,19 @@ row_body() {
             -v "$(host_path "${work}/data-plugins"):/data/plugins:rw"
         )
     else
-        # The proxy image runs as root and writes into its plugins directory, so one writable mount
-        # carries both the jar and the plugin's own data directory. Velocity's data directory is
-        # named after the plugin id: v3's is `heimdall`, and v2's was `heimdall-whitelist`.
+        # The proxy image chowns its own /server tree before dropping privileges, so one writable
+        # mount carries both the jar and the plugin's own data directory.
+        #
+        # WHERE that data directory is differs between the two proxies, and it is not a cosmetic
+        # difference: Velocity derives it from the plugin ID (`heimdall`), while BungeeCord derives it
+        # from the descriptor's NAME (`Heimdall`, matching the Bukkit family). Writing the bootstrap
+        # into the wrong one produces a proxy that boots perfectly and reports itself unconfigured,
+        # which is exactly the shape of departure D70.
+        local proxy_data_dir="heimdall"
+        [ "${platform}" = "bungee" ] && proxy_data_dir="Heimdall"
         case "${mode}" in
             configured)
-                if ! write_bootstrap "${work}/plugins/heimdall/bootstrap.yml"; then
+                if ! write_bootstrap "${work}/plugins/${proxy_data_dir}/bootstrap.yml"; then
                     kill "${stub_tail}" 2>/dev/null || true
                     return 1
                 fi
@@ -867,6 +901,9 @@ row_body() {
                 # No plugins/heimdall/ is created here on purpose: a proxy that has just had its
                 # jar swapped has never run v3, so its only Heimdall directory is v2's. The plugin
                 # has to make its own and find the config next door.
+                #
+                # Velocity only, and the self-test refuses a bungee migrate row: v2 had no BungeeCord
+                # build, so there is no v2 directory this fixture could honestly represent (D78).
                 if ! write_v2_config_json "${work}/plugins/heimdall-whitelist/config.json"; then
                     kill "${stub_tail}" 2>/dev/null || true
                     return 1
@@ -877,16 +914,24 @@ row_body() {
                 # against a console this image does not have. The self-test's row-shape guard
                 # already refuses that combination, but this branch should be safe on its own
                 # terms — a guard in a different function is not a precondition this one enforces.
-                fail "HARNESS: unhandled mode '${mode}' for velocity staging"
+                fail "HARNESS: unhandled mode '${mode}' for proxy staging"
                 kill "${stub_tail}" 2>/dev/null || true
                 return 1
                 ;;
         esac
         docker_args=(
             run -d --name "${server_container}" --network "${network}"
-            -e "TYPE=${type}" -e "VELOCITY_VERSION=${version}" -e "MEMORY=${memory}"
+            -e "TYPE=${type}" -e "MEMORY=${memory}"
             -v "$(host_path "${work}/plugins"):/server/plugins:rw"
         )
+        # One env var apart, and it is not a spelling difference: VELOCITY_VERSION selects a
+        # published release, BUNGEE_JOB_ID selects a CI build number the image turns into an
+        # artifact URL. Passing the wrong one is silent — the image falls back to lastStableBuild.
+        if [ "${platform}" = "bungee" ]; then
+            docker_args+=(-e "BUNGEE_JOB_ID=${version}")
+        else
+            docker_args+=(-e "VELOCITY_VERSION=${version}")
+        fi
     fi
 
     # The premise, asserted rather than assumed. If a previous run's cache survived, the two

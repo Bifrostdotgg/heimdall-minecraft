@@ -65,6 +65,10 @@ DISABLE_PATTERN='Heimdall v[0-9][^ ]* shutting down'
 # distinguishes a graceful stop from a SIGKILL, and our banner alone could in principle be logged by
 # a shutdown handler on a proxy that was then killed mid-teardown.
 VELOCITY_SHUTDOWN_PATTERN='Shutting down the proxy'
+# The same thing on BungeeCord, which says it differently. This is the LAST line
+# BungeeCord.independentThreadStop writes — after disabling plugins and closing its IO threads — so
+# reaching it also proves the teardown ran to completion rather than stopping part-way.
+BUNGEE_SHUTDOWN_PATTERN='Thank you and goodbye'
 # Part of the enable banner. Attaching a root log4j appender is the single most version-sensitive
 # thing the plugin does — the API that works on Minecraft 1.8.8's log4j 2.0-beta9 is not the one v2
 # used — and asserting it here is what turns "it compiled" into "it attached on all six servers".
@@ -81,7 +85,7 @@ CONSOLE_TAP_PATTERN='console tap on[[:space:]]*$'
 # self-test carries that exact shape, because the first version of this pattern passed the self-test
 # and failed every real row.
 COMMAND_PATTERN='Heimdall.*v[0-9]+\.[0-9]'
-# The server's own "I have finished starting" line. Both families print it.
+# The server's own "I have finished starting" line. The Bukkit family and Velocity print it.
 #
 # Waiting for this as well as for the plugin banner is not belt-and-braces. A plugin enables during
 # startup, several seconds before the server opens its RCON port, so stopping as soon as the banner
@@ -89,6 +93,12 @@ COMMAND_PATTERN='Heimdall.*v[0-9]+\.[0-9]'
 # refused, the fallback `stop` reaches a console not yet reading input, and the row dies a minute
 # later on "Took too long, so killing server process".
 READY_PATTERN='Done \([0-9.]+s\)'
+# BungeeCord has no "Done" line at all — it logs one line per bound listener from startListeners()
+# and nothing that announces the boot as finished. This is that line, and it is the right equivalent:
+# BungeeCord.start() enables plugins BEFORE it binds, so a bound listener means the whole of enable
+# has already happened. Note it arrives as a JUL parameterised message ("Listening on {0}"), which is
+# why the pattern stops at the words rather than trying to match an address.
+BUNGEE_READY_PATTERN='Listening on'
 
 # ── The matrix ───────────────────────────────────────────────────────────────────────────────
 #
@@ -129,6 +139,29 @@ ROWS=(
     # deployed. Both rows run in parallel on CI, so the pair costs nothing there.
     "velocity-3.4.0|itzg/mc-proxy:2026.7.1-java17|VELOCITY|3.4.0|velocity|1G"
     "velocity-3.5.1|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G"
+    # The other proxy. A fourth entry point, a fourth plugin loader, and — unlike Velocity — a
+    # platform whose own console is java.util.logging rather than log4j, so these rows are the only
+    # place JulConsoleTap is exercised on a real server.
+    #
+    # The VERSION field is a Jenkins BUILD NUMBER rather than a version string: BungeeCord publishes
+    # no releases, only ci.md-5.net builds, and itzg/mc-proxy turns BUNGEE_JOB_ID into the artifact
+    # URL. Old builds are retained indefinitely (1800 still resolves), so pinning one is as
+    # deterministic as pinning a version and strictly more so than the image's own `lastStableBuild`
+    # default, which is a moving target.
+    #
+    # Two rows, and the pair is doing more work here than the Velocity pair does:
+    #
+    #   2000 is the last era of BungeeCord compiled at release 8, and it runs on the java8 image.
+    #        This is the only row in the whole matrix that loads a PROXY entry point on a Java 8 JVM,
+    #        which is exactly the legacy 1.8-era network this platform was added for. It is also what
+    #        would catch a Bungee class accidentally compiled above release 8 — the Bukkit rows
+    #        cannot, because they never load these classes.
+    #   2085 is current, and is compiled at classfile 61: BungeeCord moved its own floor to Java 17
+    #        after the 1.21-R0.4 API this module compiles against. This row is what customers run,
+    #        and it is what proves an API pinned at 1.16-R0.4 still binds against a proxy five years
+    #        newer.
+    "bungee-2000|itzg/mc-proxy:2026.7.1-java8|BUNGEECORD|2000|bungee|1G"
+    "bungee-2085|itzg/mc-proxy:2026.7.1-java21|BUNGEECORD|2085|bungee|1G"
 )
 
 # ── Self-test ────────────────────────────────────────────────────────────────────────────────
@@ -203,6 +236,12 @@ selftest() {
     expect_match "${ENABLE_PATTERN}" \
         "[13:51:44 INFO] [heimdall]: Heimdall v3.0.0-SNAPSHOT enabled — role gatekeeper, text bridge ok, console tap on" \
         yes "enable banner (velocity)" || failures=$((failures + 1))
+    # BungeeCord's ConciseFormatter puts the level in brackets and PluginLogger prefixes the plugin
+    # name, so the line has a third shape again — and the banner's middle clause differs too, because
+    # this platform has no reflective text bridge to report on.
+    expect_match "${ENABLE_PATTERN}" \
+        "13:51:44 [INFO] [Heimdall] Heimdall v3.0.0-SNAPSHOT enabled — role gatekeeper, text via legacy components, console tap on" \
+        yes "enable banner (bungee)" || failures=$((failures + 1))
     # The near-miss that matters most here: a boot where the log4j appender could NOT attach still
     # logs a perfectly good enable banner, so ENABLE_PATTERN alone would pass on it.
     expect_match "${CONSOLE_TAP_PATTERN}" \
@@ -239,13 +278,30 @@ selftest() {
     expect_match "${VELOCITY_SHUTDOWN_PATTERN}" \
         "[13:51:47 INFO]: Shutting down the proxy..." \
         yes "velocity graceful shutdown" || failures=$((failures + 1))
-    # Both families print this, in different shapes.
+    expect_match "${BUNGEE_SHUTDOWN_PATTERN}" \
+        "13:51:47 [INFO] Thank you and goodbye" \
+        yes "bungee graceful shutdown" || failures=$((failures + 1))
+    # The near miss that matters for the Bungee pair: BungeeCord logs "Closing pending connections"
+    # at the START of its teardown and "Thank you and goodbye" at the very end, after the plugins
+    # have been disabled and the IO threads closed. A pattern anchored on the first would go green on
+    # a proxy that began shutting down and then died half-way through.
+    expect_match "${BUNGEE_SHUTDOWN_PATTERN}" \
+        "13:51:46 [INFO] Closing pending connections" \
+        no "bungee shutdown vs the line that only says it started" || failures=$((failures + 1))
+    # All three families print a ready line, in three different shapes — and BungeeCord's is not a
+    # "Done" line at all.
     expect_match "${READY_PATTERN}" '[13:48:25 INFO]: Done (4.541s)! For help, type "help" or "?"' \
         yes "ready line (bukkit)" || failures=$((failures + 1))
     expect_match "${READY_PATTERN}" "[13:51:44 INFO]: Done (0.56s)!" \
         yes "ready line (velocity)" || failures=$((failures + 1))
     expect_match "${READY_PATTERN}" "[13:48:20 INFO]: Preparing spawn area: 36%" \
         no "ready line vs mid-boot progress" || failures=$((failures + 1))
+    expect_match "${BUNGEE_READY_PATTERN}" "13:51:44 [INFO] Listening on /0.0.0.0:25577" \
+        yes "ready line (bungee)" || failures=$((failures + 1))
+    # And it must not be satisfied by the Bukkit/Velocity form, which is what a row that quietly took
+    # the wrong pattern would look like: green, instantly, on a log the proxy never wrote.
+    expect_match "${BUNGEE_READY_PATTERN}" "[13:51:44 INFO]: Done (0.56s)!" \
+        no "bungee ready line vs another platform's" || failures=$((failures + 1))
 
     # The two shapes mc-server-runner takes when the harness's stop failed and the server was
     # killed. These are exactly the lines from the red paper-1.8.8 CI runs, and matching them is
@@ -325,8 +381,19 @@ selftest() {
                 || [ -z "${memory}" ]; then
             fail "malformed row: ${row}"
             failures=$((failures + 1))
-        elif [ "${platform}" != "bukkit" ] && [ "${platform}" != "velocity" ]; then
+        elif [ "${platform}" != "bukkit" ] && [ "${platform}" != "velocity" ] \
+                && [ "${platform}" != "bungee" ]; then
+            # Every platform branch in this file is a test against one of these three strings, and a
+            # fourth value does not fail — it silently takes an else branch, mounts a directory the
+            # image does not use, and reports a plugin that would not load.
             fail "row ${name} has unknown platform '${platform}'"
+            failures=$((failures + 1))
+        elif [ "${platform}" = "bungee" ] && ! [[ "${version}" =~ ^[0-9]+$ ]]; then
+            # The Bungee rows' VERSION field is a Jenkins build number, not a version string. A
+            # value like "1.21" would be accepted by the image, resolve to no artifact, and fail as
+            # a download error many minutes into the run — or, worse, fall back to lastStableBuild
+            # and quietly stop testing what the row says it tests.
+            fail "row ${name} is a bungee row, so its VERSION must be a Jenkins build number, not '${version}'"
             failures=$((failures + 1))
         fi
     done
@@ -459,16 +526,26 @@ row_body() {
             -v "$(host_path "${work}/plugins"):/plugins:ro"
         )
     else
-        # mc-proxy has no staging-copy step, but it also runs as root, so a writable bind mount
-        # straight onto its plugins directory has none of the ownership problem the Bukkit rows
-        # have. Velocity does write in there (bStats), hence rw rather than ro.
+        # mc-proxy has no staging-copy step, but it also chowns its own /server tree before dropping
+        # privileges, so a writable bind mount straight onto its plugins directory has none of the
+        # ownership problem the Bukkit rows have. Both proxies write in there (bStats on Velocity,
+        # the plugin's own data directory on either), hence rw rather than ro.
+        #
+        # The two proxy families differ in exactly one env var, and it is not a spelling difference:
+        # VELOCITY_VERSION selects a published release, while BUNGEE_JOB_ID selects a CI build number
+        # that the image turns into an artifact URL. Passing the wrong one is silent — the image
+        # falls back to `lastStableBuild` and the row tests whatever shipped this morning.
         docker_args=(
             run -d --name "${container}"
             -e "TYPE=${type}"
-            -e "VELOCITY_VERSION=${version}"
             -e "MEMORY=${memory}"
             -v "$(host_path "${work}/plugins"):/server/plugins:rw"
         )
+        if [ "${platform}" = "bungee" ]; then
+            docker_args+=(-e "BUNGEE_JOB_ID=${version}")
+        else
+            docker_args+=(-e "VELOCITY_VERSION=${version}")
+        fi
     fi
 
     if ! docker "${docker_args[@]}" "${image}" >/dev/null; then
@@ -493,7 +570,7 @@ row_body() {
     # need a hash, and a share that reorders content without changing length is not a failure mode
     # any of these daemons has.)
     local mount_path="/plugins"
-    [ "${platform}" = "velocity" ] && mount_path="/server/plugins"
+    [ "${platform}" != "bukkit" ] && mount_path="/server/plugins"
     local jar_name host_size
     jar_name="$(basename "${jar}")"
     host_size="$(wc -c <"${jar}" | tr -d '[:space:]')"
@@ -543,7 +620,9 @@ row_body() {
 
     # The plugin enables DURING startup, before the server opens its RCON port. Stopping now would
     # race the rest of the boot, and losing that race does not fail cleanly — see READY_PATTERN.
-    if ! wait_for_pattern "${log_file}" "${READY_PATTERN}" "${BOOT_TIMEOUT}" \
+    local ready_pattern="${READY_PATTERN}"
+    [ "${platform}" = "bungee" ] && ready_pattern="${BUNGEE_READY_PATTERN}"
+    if ! wait_for_pattern "${log_file}" "${ready_pattern}" "${BOOT_TIMEOUT}" \
             "the server's own ready line"; then
         dump_log "${log_file}"
         return 1
@@ -659,7 +738,10 @@ row_body() {
             fi
         fi
     else
-        # Velocity has no RCON. SIGTERM runs its shutdown hook.
+        # Neither proxy has RCON in this image, and neither needs it: the run script `exec`s java as
+        # PID 1, so SIGTERM reaches the JVM directly and both proxies stop on a shutdown hook —
+        # Velocity's own, and BungeeCord's, which BungeeCord.start() installs and which runs the
+        # identical teardown path (plugins disabled, then "Thank you and goodbye") as `end` does.
         log "stopping via SIGTERM"
         docker stop -t "${STOP_TIMEOUT}" "${container}" >/dev/null
     fi
@@ -686,11 +768,13 @@ row_body() {
     # A harness that required one before the other would fail a perfectly good shutdown for a
     # reason nobody could act on.
     #
-    # Velocity only, and still worth checking now that the plugin has a banner of its own: the
+    # Proxies only, and still worth checking now that the plugin has a banner of its own: the
     # proxy's line is what distinguishes a graceful stop from a proxy killed part-way through
     # teardown. "No errors" would be weaker still — a SIGKILL logs nothing at all.
-    if [ "${platform}" = "velocity" ]; then
-        if ! wait_for_pattern "${log_file}" "${VELOCITY_SHUTDOWN_PATTERN}" 30 \
+    if [ "${platform}" != "bukkit" ]; then
+        local proxy_shutdown_pattern="${VELOCITY_SHUTDOWN_PATTERN}"
+        [ "${platform}" = "bungee" ] && proxy_shutdown_pattern="${BUNGEE_SHUTDOWN_PATTERN}"
+        if ! wait_for_pattern "${log_file}" "${proxy_shutdown_pattern}" 30 \
                 "the proxy's own shutdown line"; then
             # A runner-kill signature means the harness's stop never reached the proxy, which is
             # its failure and not the plugin's.

@@ -26,10 +26,10 @@ There are **two** scenarios, and they answer different questions.
 
 | Script | Question | Rows |
 | --- | --- | --- |
-| `run.sh` | Does the jar load, work and unload with **no bot anywhere**? | six, the whole supported range |
-| `connected.sh` | Pointed at a real bot, does the plugin **actually talk to it**? | five — one steady-state row per family, plus the three flow rows |
+| `run.sh` | Does the jar load, work and unload with **no bot anywhere**? | eight, the whole supported range |
+| `connected.sh` | Pointed at a real bot, does the plugin **actually talk to it**? | six — one steady-state row per platform, plus the three flow rows |
 
-Both are CI gates. `connected.sh`'s five rows run as their own job, and both self-tests run in the
+Both are CI gates. `connected.sh`'s rows run as their own job, and both self-tests run in the
 Docker-free job that gates the matrix.
 
 `connected.sh` is phase 1d's addition and is described in its own section below.
@@ -59,9 +59,27 @@ under Git Bash on Windows.
 | `paper-1.21.8` | `itzg/minecraft-server:2026.7.2-java21` | Paper 1.21.8 | 21 | Current. Catches a jar that only works on old servers. |
 | `velocity-3.4.0` | `itzg/mc-proxy:2026.7.1-java17` | Velocity 3.4.0 | 17 | The compile-target floor: the API version `:platform-velocity` is pinned to, on the Java level it targets. |
 | `velocity-3.5.1` | `itzg/mc-proxy:2026.7.1-java21` | Velocity 3.5.1 | 21 | Current Velocity — what customers actually run. |
+| `bungee-2000` | `itzg/mc-proxy:2026.7.1-java8` | BungeeCord build 2000 | 8 | The last era of BungeeCord compiled at release 8 — the only row anywhere that loads a **proxy** entry point on a Java 8 JVM. |
+| `bungee-2085` | `itzg/mc-proxy:2026.7.1-java21` | BungeeCord build 2085 | 21 | Current BungeeCord, which moved its own floor to Java 17 after the API version we compile against. |
 
-The proxy rows are where the one-jar design is really tested: they load the Java 17 classes while
-the Bukkit rows load the Java 8 ones, out of the same file.
+The proxy rows are where the one-jar design is really tested: they load the Velocity module's Java 17
+classes, or the Bungee module's Java 8 ones, while the Bukkit rows load a third set — all out of the
+same file, with three different descriptors deciding which.
+
+**Why the Bungee rows name a build number rather than a version.** BungeeCord publishes no releases,
+only `ci.md-5.net` builds, and `itzg/mc-proxy` turns `BUNGEE_JOB_ID` into the artifact URL. Old
+builds are retained indefinitely (1800 still resolves today), so a pinned number is as deterministic
+as a pinned version — and strictly better than the image's own `lastStableBuild` default, which is a
+moving target. `run.sh --selftest` refuses a bungee row whose VERSION field is not a bare number,
+because the failure mode of getting it wrong is silent: the image falls back to `lastStableBuild` and
+the row quietly stops testing what it says it tests.
+
+**Why two BungeeCord rows.** The same reason as the Velocity pair, doing more work. Build 2000 is
+Java 8 bytecode and runs on the `java8` image, which makes it the only row in the matrix that proves
+a proxy entry point loads on a Java 8 JVM — the legacy 1.8-era network this platform exists for, and
+the row that would catch a Bungee class accidentally compiled above release 8 (the Bukkit rows
+cannot: they never load these classes). Build 2085 is classfile 61 and is what customers run, so it
+is what proves an API pinned at `1.16-R0.4` still binds against a proxy five years newer.
 
 **Why two Velocity rows.** Velocity moved its own floor and the two ends now disagree. 3.4.0 is the
 version `:platform-velocity` compiles against and the last that runs on Java 17; 3.5.1 is compiled
@@ -86,19 +104,25 @@ bind mount there is owned by the host user, the server runs as uid 1000, and the
 into the container and hides this completely, which is exactly how the `paper-1.21.8` row passed on
 a dev machine and failed on CI. `itzg/minecraft-server` copies `/plugins` into a container-owned
 `/data/plugins` on start, so using the image's designed staging path fixes ownership for every row.
-The proxy rows keep a direct writable mount: `itzg/mc-proxy` runs as root, so it has no such
-problem, and Velocity does write in there (bStats).
+The proxy rows keep a direct writable mount: `itzg/mc-proxy` chowns its own `/server` tree before it
+drops privileges, so it has no such problem, and both proxies write in there (bStats on Velocity, the
+plugin's own data directory on either).
 
 ## What each row asserts
 
 1. The server starts and the plugin logs its enable banner, within `SMOKE_BOOT_TIMEOUT`.
-1a. The banner says `console tap on`. Attaching a root Log4j appender is the single most
-   version-sensitive thing the plugin does — the API that works on Minecraft 1.8.8's Log4j
+1a. The banner says `console tap on`. Attaching to a server's logging backend is the single most
+   version-sensitive thing the plugin does — the Log4j API that works on Minecraft 1.8.8's
    `2.0-beta9` is not the one v2 used, and the five-argument `AbstractAppender` constructor v2 called
-   did not exist until 2.11.2. The tap is attached eagerly at enable precisely so every row
-   exercises it, and a boot where it failed still logs a perfectly good enable banner — so this is a
-   separate assertion, not a substring of that one.
-2. The **server** then logs its own `Done (Xs)` line. A plugin enables *during* startup, seconds
+   did not exist until 2.11.2. The Bungee rows exercise a different implementation entirely
+   (`JulConsoleTap`, on a platform with no log4j at any version) through the same one-line assertion.
+   The tap is attached eagerly at enable precisely so every row exercises it, and a boot where it
+   failed still logs a perfectly good enable banner — so this is a separate assertion, not a
+   substring of that one.
+2. The **server** then logs its own ready line — `Done (Xs)` on the Bukkit family and on Velocity,
+   `Listening on …` on BungeeCord, which has no "Done" line at all and announces itself by binding a
+   listener instead (and does so *after* enabling plugins, so it means the same thing). A plugin
+   enables *during* startup, seconds
    before the server opens its RCON port, so stopping on the plugin banner alone races the rest of
    the boot — and losing that race does not fail cleanly: RCON is refused, the fallback SIGTERM
    reaches a server not yet reading stdin, and the row dies a minute later on "Took too long, so
@@ -125,9 +149,12 @@ problem, and Velocity does write in there (bStats).
 5. **Every** row logs the disable banner. The Velocity rows were boot-only until phase 1c — the
    scaffold registered no `ProxyShutdownEvent` listener, so it had no banner of its own and those
    rows could only prove the jar loaded and the proxy stopped, nothing about Heimdall unloading. It
-   has one now. The proxy's own `Shutting down the proxy` line is still asserted alongside ours,
-   because our banner alone would not distinguish a graceful stop from a proxy killed part-way
-   through teardown, and "no errors" is weaker still — a SIGKILL logs nothing at all.
+   has one now. The proxy's own shutdown line is still asserted alongside ours — `Shutting down the
+   proxy` on Velocity, `Thank you and goodbye` on BungeeCord — because our banner alone would not
+   distinguish a graceful stop from a proxy killed part-way through teardown, and "no errors" is
+   weaker still: a SIGKILL logs nothing at all. BungeeCord's is deliberately the *last* line its
+   teardown writes rather than the first (`Closing pending connections`), so reaching it also proves
+   the shutdown ran to completion.
 6. No error in the shutdown log is attributable to the plugin.
 
 Before any of the shutdown assertions run, the harness waits for the `docker logs -f` follower to
@@ -139,7 +166,7 @@ On failure the row prints the tail of the server log and the whole run exits non
 
 ### "Attributable to the plugin" is deliberately narrow
 
-A run across five server generations picks up plenty of noise that has nothing to do with us —
+A run across this many server generations picks up plenty of noise that has nothing to do with us —
 deprecation warnings, missing optional dependencies, Mojang telemetry that cannot reach the network,
 and on modern Paper a "legacy plugin" warning caused by our deliberate omission of `api-version`
 (declaring one makes 1.8.8 refuse to load the plugin at all). A check that failed on all of that
@@ -192,11 +219,11 @@ smoke/connected.sh --list
 smoke/connected.sh --selftest          # the assertions themselves; needs no Docker
 ```
 
-`run.sh` proves the jar survives six servers with nothing to talk to. This proves the other half.
+`run.sh` proves the jar survives eight servers with nothing to talk to. This proves the other half.
 Each row starts `:stub-bot` — the executable copy of the bot's wire contract — on a private network,
 boots a server that ends up pointed at it, and then asserts from **both ends**. How the server gets
 there is what the row's *mode* decides: a `bootstrap.yml` staged before boot, a setup code claimed
-over the console, or a v2 config migrated on the first boot (see [the modes](#five-rows-in-three-modes)).
+over the console, or a v2 config migrated on the first boot (see [the modes](#six-rows-in-three-modes)).
 
 | Asserted | Where the evidence is | Why it is worth a container |
 | --- | --- | --- |
@@ -255,21 +282,21 @@ the platform's own login listener, the kick screen, and chat cancellation — al
 client to be connected. That is departure D43's residual risk 2, and it waits on the headless-client
 work.
 
-### Five rows, in three modes
+### Six rows, in three modes
 
 > **`smoke/connected.sh --list` is the source of truth**, the same as for `run.sh` above. If the
 > `ROWS` array and this section disagree, the script wins.
 
-The wire does not vary by Minecraft version. What varies is class loading and the log4j tap, and
-`run.sh` already covers those on all six. One current server from each family is what proves the
-one-jar design still reaches a bot from both entry points.
+The wire does not vary by Minecraft version. What varies is class loading and the console tap, and
+`run.sh` already covers those on all eight. One current server from each **platform** is what proves
+the one-jar design still reaches a bot from all three entry points.
 
-Three of the five rows are not about the steady state at all, because two of the flows cannot be
+Three of the six rows are not about the steady state at all, because two of the flows cannot be
 exercised on a server that is already configured:
 
 | Mode | Rows | Starting state | What it proves |
 |---|---|---|---|
-| `configured` | `paper-1.21.8`, `velocity-3.5.1` | a `bootstrap.yml` exists | the steady state, plus the login probe |
+| `configured` | `paper-1.21.8`, `velocity-3.5.1`, `bungee-2085` | a `bootstrap.yml` exists | the steady state, plus the login probe on the Bukkit row |
 | `setup` | `paper-setup` | **nothing** — no `bootstrap.yml` at all | a setup code is claimed over the console and the tunnel comes up, negotiates v3 and enables modules **in the same boot**. That is departure D56, and it was impossible before phase 1e |
 | `migrate` | `paper-migrate`, `velocity-migrate` | a v2 config in the sibling directory v2 really used — `plugins/HeimdallWhitelist/config.yml` on Bukkit, `plugins/heimdall-whitelist/config.json` on Velocity | the migration finds it next door, writes a `bootstrap.yml`, connects on the **legacy** guild key, keeps the original as `*.v2-backup`, and hands the translated settings to the dashboard once |
 
@@ -278,6 +305,19 @@ server, which needs RCON, and the Paper image in this matrix exposes it while th
 not. The code under test is the same on both — the admin tree is one platform-free class registered
 through each platform's own `CommandRegistrar` — so what a Velocity setup row would prove is the
 registrar binding, which the configured Velocity row already exercises by answering `/hdp` at all.
+The same applies to the BungeeCord row.
+
+**There is deliberately no `bungee-migrate` row**, and its absence is a statement rather than a gap.
+v2 shipped a Bukkit build and a Velocity build and nothing else, so no BungeeCord proxy has ever had
+a v2 config to find (departure D78) — a migrate row here would assert against a fixture no operator
+has ever had, which is the same mistake the `velocity-migrate` row exists to have corrected, made in
+the opposite direction. `connected.sh --selftest` refuses that combination outright.
+
+**Where the bootstrap goes differs between the two proxies**, and it is not cosmetic: Velocity
+derives a plugin's data directory from its **id** (`plugins/heimdall/`) and BungeeCord from its
+descriptor's **name** (`plugins/Heimdall/`, matching the Bukkit family). Writing it into the wrong
+one produces a proxy that boots perfectly and reports itself unconfigured — exactly the shape of
+departure D70.
 
 **`migrate` runs on both, and that is not decoration.** This is the one mode whose *inputs* differ
 per platform: v2 named its data directory after its `plugin.yml` `name:` on Bukkit and after its
