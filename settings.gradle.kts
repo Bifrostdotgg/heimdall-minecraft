@@ -12,6 +12,7 @@ include(
     "module-rolesync",
     "module-offenses",
     "module-console",
+    "module-bridge",
     "conformance",
     "app",
     // Test fixture, not a shipped module: a small HTTP+WS server that speaks the

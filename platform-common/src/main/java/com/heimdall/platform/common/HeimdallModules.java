@@ -2,6 +2,7 @@ package com.heimdall.platform.common;
 
 import com.heimdall.core.admin.AdminContext;
 import com.heimdall.core.wiring.HeimdallRuntime;
+import com.heimdall.module.bridge.HeimdallBridgeModule;
 import com.heimdall.module.console.HeimdallConsoleModule;
 import com.heimdall.module.offenses.HeimdallOffensesModule;
 import com.heimdall.module.rolesync.HeimdallRoleSyncModule;
@@ -79,6 +80,10 @@ public final class HeimdallModules {
         runtime.modules().register(roleSync);
         runtime.modules().register(offenses);
         runtime.modules().register(new HeimdallConsoleModule());
+        // The Discord chat bridge. Registered like every other module and eligible on every role —
+        // whether an instance relays its own chat is its `relayChat` setting rather than an
+        // eligibility rule, so a proxy is registered here exactly as a backend is. Departure D79.
+        runtime.modules().register(new HeimdallBridgeModule());
 
         // The modules themselves implement the admin interfaces. A separate adapter object would
         // only be a place for the two to disagree about whether a module is running.

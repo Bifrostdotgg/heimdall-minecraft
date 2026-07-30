@@ -24,6 +24,7 @@ dependencies {
     implementation(project(":module-rolesync"))
     implementation(project(":module-offenses"))
     implementation(project(":module-console"))
+    implementation(project(":module-bridge"))
 }
 
 tasks.processResources {

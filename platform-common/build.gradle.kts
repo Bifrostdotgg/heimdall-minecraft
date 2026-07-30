@@ -18,6 +18,7 @@ dependencies {
     implementation(project(":module-rolesync"))
     implementation(project(":module-offenses"))
     implementation(project(":module-console"))
+    implementation(project(":module-bridge"))
 
     // Both optional at runtime, both reached only after a guarded probe, neither shipped.
     //
