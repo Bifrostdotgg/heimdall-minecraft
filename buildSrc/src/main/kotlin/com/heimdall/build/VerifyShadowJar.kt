@@ -102,6 +102,16 @@ abstract class VerifyShadowJar : DefaultTask() {
     @get:Input
     abstract val expectedVelocityPluginId: Property<String>
 
+    /**
+     * The entry point `bungee.yml` must name.
+     *
+     * Checked because BungeeCord reads `bungee.yml` in preference to `plugin.yml`, so a `main:` that
+     * still pointed at the Bukkit entry point would load on Paper, load on Velocity, and die on
+     * every proxy with a NoClassDefFoundError for a class the jar deliberately does not ship.
+     */
+    @get:Input
+    abstract val expectedBungeeMain: Property<String>
+
     @TaskAction
     fun verify() {
         val jar = jarFile.get().asFile
@@ -126,6 +136,7 @@ abstract class VerifyShadowJar : DefaultTask() {
             checkExemptModuleStillDiffers(zip, problems)
             checkPluginYml(zip, problems)
             checkVelocityPluginJson(zip, problems)
+            checkBungeeYml(zip, problems)
 
             logger.lifecycle(
                 "verifyShadowJar: ${entries.size} entries, ${classes.size} classes in ${jar.name}",
@@ -255,6 +266,39 @@ abstract class VerifyShadowJar : DefaultTask() {
         }
         if (!json.contains("\"version\":\"${expectedVersion.get()}\"")) {
             problems += "velocity-plugin.json version does not match the Gradle version"
+        }
+    }
+
+    /**
+     * The proxy descriptor BungeeCord actually reads.
+     *
+     * The `main:` check is the one that matters and it is the reason this function exists rather
+     * than being folded into [checkPluginYml]: BungeeCord prefers `bungee.yml` and falls back to
+     * `plugin.yml`, so the two files are not interchangeable and a jar carrying the wrong `main`
+     * here is one that loads perfectly on both other platforms.
+     *
+     * The `@token@` scan is the same one plugin.yml gets, and for the same reason: both are filtered
+     * by `processResources`, and an unsubstituted version reaches the proxy as the literal string
+     * `@version@` — which BungeeCord reports in `/plugins` and the updater would then compare
+     * against a real one.
+     */
+    private fun checkBungeeYml(zip: ZipFile, problems: MutableList<String>) {
+        val bungeeYml = textOf(zip, "bungee.yml")
+        if (bungeeYml == null) {
+            problems += "bungee.yml is missing, so its contents could not be checked"
+            return
+        }
+        if (!bungeeYml.contains(Regex("(?m)^\\s*main:\\s*${Regex.escape(expectedBungeeMain.get())}\\s*$"))) {
+            problems += "bungee.yml does not declare main: ${expectedBungeeMain.get()} — a proxy " +
+                "reads this file in preference to plugin.yml, so the wrong entry point here is a " +
+                "NoClassDefFoundError on every BungeeCord install and nowhere else"
+        }
+        if (!bungeeYml.contains("version: ${expectedVersion.get()}")) {
+            problems += "bungee.yml did not get the Gradle version substituted into it"
+        }
+        val unsubstituted = Regex("@[A-Za-z_][A-Za-z0-9_.]*@").find(bungeeYml)
+        if (unsubstituted != null) {
+            problems += "bungee.yml still contains an unsubstituted token: ${unsubstituted.value}"
         }
     }
 

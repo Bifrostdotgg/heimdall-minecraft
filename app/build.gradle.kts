@@ -19,6 +19,7 @@ dependencies {
     implementation(project(":platform-bukkit"))
     implementation(project(":platform-bukkit-paper"))
     implementation(project(":platform-velocity"))
+    implementation(project(":platform-bungee"))
     implementation(project(":module-whitelist"))
     implementation(project(":module-rolesync"))
     implementation(project(":module-offenses"))
@@ -28,10 +29,14 @@ dependencies {
 tasks.processResources {
     val pluginVersion = project.version.toString()
     inputs.property("version", pluginVersion)
-    // Never inherit the platform default charset here — plugin.yml is UTF-8 and a
-    // Windows/Latin-1 build box would otherwise silently mangle it.
+    // Never inherit the platform default charset here — the descriptors are UTF-8
+    // and a Windows/Latin-1 build box would otherwise silently mangle them.
     filteringCharset = "UTF-8"
-    filesMatching("plugin.yml") {
+    // Both hand-written descriptors. velocity-plugin.json is absent from this list
+    // because it is not hand-written at all: Velocity's annotation processor emits
+    // it from @Plugin into :platform-velocity's class output, with the version
+    // already inlined from BuildConstants.
+    filesMatching(listOf("plugin.yml", "bungee.yml")) {
         // ReplaceTokens, not `expand()`: expand() runs the file through Groovy's
         // SimpleTemplateEngine, so the first `$` anyone writes in plugin.yml — in a
         // description, a permission message, anything — fails the build with a
@@ -94,8 +99,10 @@ val verifyShadowJar by tasks.registering(VerifyShadowJar::class) {
         listOf(
             "plugin.yml",
             "velocity-plugin.json",
+            "bungee.yml",
             "com/heimdall/platform/bukkit/HeimdallBukkitPlugin.class",
             "com/heimdall/platform/velocity/HeimdallVelocityPlugin.class",
+            "com/heimdall/platform/bungee/HeimdallBungeePlugin.class",
         ),
     )
     requiredRelocations.set(
@@ -121,6 +128,10 @@ val verifyShadowJar by tasks.registering(VerifyShadowJar::class) {
 
     expectedVersion.set(project.version.toString())
     expectedVelocityPluginId.set("heimdall")
+    // BungeeCord reads bungee.yml in preference to plugin.yml, so a `main` that
+    // pointed at the Bukkit entry point would produce a NoClassDefFoundError for
+    // JavaPlugin on every proxy — from a jar that passes every other check here.
+    expectedBungeeMain.set("com.heimdall.platform.bungee.HeimdallBungeePlugin")
 
     // Cheap enough to always run, and a stale pass here is worse than useless.
     outputs.upToDateWhen { false }

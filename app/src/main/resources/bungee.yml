@@ -1,0 +1,35 @@
+# BungeeCord's plugin descriptor.
+#
+# This file is the whole reason one jar can serve three platforms. BungeeCord's
+# PluginManager.detectPlugins looks for `bungee.yml` and falls back to
+# `plugin.yml` only if it is absent — so without this file a proxy would read
+# the Bukkit descriptor next to it, try to load
+# com.heimdall.platform.bukkit.HeimdallBukkitPlugin, and fail on a
+# NoClassDefFoundError for org.bukkit.plugin.java.JavaPlugin. With it, the proxy
+# never sees the Bukkit descriptor and a Bukkit server never looks for this one.
+#
+# `name` is load-bearing beyond identification: BungeeCord derives a plugin's
+# data folder from it (`new File(getPluginsFolder(), getDescription().getName())`),
+# so this is what makes the proxy's configuration live in plugins/Heimdall/ —
+# the same directory name the Bukkit family uses, and deliberately NOT Velocity's
+# lower-case plugins/heimdall/, which comes from that platform's plugin *id*.
+name: Heimdall
+main: com.heimdall.platform.bungee.HeimdallBungeePlugin
+version: @version@
+author: Bifrost
+description: Discord-to-Minecraft whitelist, role sync, punishments and console relay
+
+# No `depends` or `softDepends`, deliberately.
+#
+# The optional integrations — LuckPerms, Floodgate — are resolved lazily and
+# re-resolved while absent (see BungeeIntegrations), precisely so that load order
+# cannot decide whether role sync works for the lifetime of a boot. Declaring a
+# softDepend would reorder BungeeCord's enable sequence to no benefit, and
+# declaring a hard depend would stop Heimdall loading at all on a proxy that does
+# not have them.
+
+# No `commands:` block, because BungeeCord has no such thing: commands are
+# objects registered at runtime through PluginManager.registerCommand, which is
+# what BungeeCommandRegistrar does. That is the Velocity property rather than the
+# Bukkit one — a module that is switched off really does remove its verb here,
+# instead of leaving a name bound that answers "this feature is disabled".
