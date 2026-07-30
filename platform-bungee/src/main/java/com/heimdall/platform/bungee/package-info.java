@@ -5,9 +5,9 @@
  * the same jar ever links these classes.
  *
  * <p>Structurally it is the Velocity binding: the role is always
- * {@link com.heimdall.core.config.ServerRole#GATEKEEPER}, there is no chat listener because a proxy
- * cannot cancel signed chat, and the admin verb is {@code /hdp}. What differs is entirely BungeeCord's
- * own shape, and it is four things:
+ * {@link com.heimdall.core.config.ServerRole#GATEKEEPER}, the chat listener observes and never
+ * cancels because a proxy cannot cancel signed chat (departure D81), and the admin verb is
+ * {@code /hdp}. What differs is entirely BungeeCord's own shape, and it is four things:
  *
  * <ul>
  *   <li><strong>The login gate is asynchronous by contract, not by convenience.</strong> Velocity's

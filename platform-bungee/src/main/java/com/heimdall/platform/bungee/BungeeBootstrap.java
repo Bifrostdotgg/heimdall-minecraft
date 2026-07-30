@@ -261,8 +261,12 @@ final class BungeeBootstrap {
                         executors.io()));
         proxy.getPluginManager().registerListener(
                 plugin, new BungeeSessionListener(logger, runtime.playerSessions(), text));
-        // No chat listener, deliberately: a proxy cannot cancel signed chat, so interception belongs
-        // to the backend servers. See BungeeLoginListener for the whole reasoning.
+        // Chat, OBSERVED. A proxy still cannot cancel signed chat, so interception remains the
+        // backends' — this listener reads and touches nothing, which is what makes a proxy-origin
+        // Discord relay possible. It is inert unless the bridge module's relayChat setting is on,
+        // and that defaults to false on a gatekeeper. See BungeeChatListener, departure D81.
+        proxy.getPluginManager().registerListener(
+                plugin, new BungeeChatListener(logger, runtime.chatPipeline()));
     }
 
     /**
