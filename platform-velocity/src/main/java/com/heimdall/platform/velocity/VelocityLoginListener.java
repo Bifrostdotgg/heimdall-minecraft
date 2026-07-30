@@ -30,13 +30,20 @@ import java.net.InetSocketAddress;
  * disconnect message instead of Heimdall's. Refusing without an explanation is bad; admitting
  * somebody because a text library did not load would be a security hole.
  *
- * <h2>There is no chat listener here, deliberately</h2>
+ * <h2>Chat is observed here, and still never intercepted</h2>
  *
  * <p>A proxy cannot cancel signed chat — since 1.19 the client signs its messages and the backend
  * validates them, so a proxy that dropped one produces a client-side kick for "chat validation
- * failure" rather than a moderated message. Chat interception belongs to the backend servers, which
- * is exactly why the role system exists: the gatekeeper owns login, the enforcers own everything
- * that happens after it.
+ * failure" rather than a moderated message. Chat <strong>interception</strong> therefore belongs to
+ * the backend servers, which is exactly why the role system exists: the gatekeeper owns login, the
+ * enforcers own everything that happens after it.
+ *
+ * <p>Through phase 1 this section said "there is no chat listener here", because nothing needed one
+ * and the cheapest way to guarantee no cancellation was to have nothing listening.
+ * {@link VelocityChatListener} arrived in phase 3 for the Discord relay: it reads chat and touches
+ * nothing, which lets a network relay from the proxy instead of from every backend. The prohibition
+ * is unchanged, and that class is where it is now written down — cancelling is still forbidden;
+ * observing never was. Departure D81.
  */
 final class VelocityLoginListener {
 

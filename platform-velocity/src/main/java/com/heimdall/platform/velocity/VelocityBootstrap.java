@@ -31,8 +31,9 @@ import java.util.Collections;
  * twice, and they had drifted — the Velocity one had fixes the Paper one never got.
  *
  * <p>What is genuinely different here is short enough to list: the role is always
- * {@link ServerRole#GATEKEEPER} unless configured otherwise, there is no chat listener (a proxy
- * cannot cancel signed chat), and text has to cross a shading boundary — see {@link VelocityText}.
+ * {@link ServerRole#GATEKEEPER} unless configured otherwise, the chat listener observes and never
+ * cancels (a proxy cannot cancel signed chat), and text has to cross a shading boundary — see
+ * {@link VelocityText}.
  */
 final class VelocityBootstrap {
 
@@ -239,8 +240,12 @@ final class VelocityBootstrap {
         // each of the obvious alternatives is wrong.
         proxy.getEventManager().register(
                 plugin, new VelocitySessionListener(logger, runtime.playerSessions(), text));
-        // No chat listener, deliberately: a proxy cannot cancel signed chat, so interception belongs
-        // to the backend servers. See VelocityLoginListener for the whole reasoning.
+        // Chat, OBSERVED. A proxy still cannot cancel signed chat, so interception remains the
+        // backends' — this listener reads and touches nothing, which is what makes a proxy-origin
+        // Discord relay possible. It is inert unless the bridge module's relayChat setting is on,
+        // and that defaults to false on a gatekeeper. See VelocityChatListener, departure D81.
+        proxy.getEventManager().register(
+                plugin, new VelocityChatListener(logger, runtime.chatPipeline()));
     }
 
     /**
