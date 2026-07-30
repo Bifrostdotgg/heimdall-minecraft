@@ -23,7 +23,7 @@ runs.
 - **Fallback System**: If the API is unavailable, configurable fallback modes (allow, deny, or whitelist-only)
 - **Performance Optimized**: Response caching and async processing to minimize server impact
 - **Configurable Messages**: Customize all player-facing messages from the Heimdall dashboard — pushed to every connected server live, no config file editing or restart
-- **LuckPerms Integration**: Sync Discord roles to LuckPerms groups (Paper only)
+- **LuckPerms Integration**: Sync Discord roles to LuckPerms groups, on backends and on either proxy — `net.luckperms:api` is the same artifact everywhere, so there is one implementation rather than one per platform
 - **Multi-Platform Support**: One JAR, three platforms — Paper/Spigot, Velocity and BungeeCord
 
 ## Requirements
