@@ -308,6 +308,39 @@ class JulConsoleTapTest {
         }
 
         @Test
+        @DisplayName("two attaches in one JVM use different probe markers")
+        void probeMarkersAreDistinctPerAttach() {
+            // The reload case the nonce exists for, and the one it did not cover: the marker used to
+            // be read rather than incremented, so every attach in a process used the same string —
+            // and a probe line a previous instance left in a queue could then satisfy the next
+            // attach on a capture path that no longer worked.
+            Collector first = new Collector();
+            inlineTap();
+            tap.addTap(first);
+            assertTrue(tap.attach());
+
+            // close() clears the taps as well as detaching, so a fresh collector is needed.
+            tap.close();
+            Collector second = new Collector();
+            tap.addTap(second);
+            assertTrue(tap.attach());
+
+            assertFalse(markerFrom(first).equals(markerFrom(second)),
+                    "both attaches used " + markerFrom(first) + ", so the second proved nothing a "
+                            + "leftover queue entry could not have proved for it");
+        }
+
+        /** The probe line the tap logged through the target during one attach. */
+        private String markerFrom(Collector collector) {
+            for (String message : collector.messages()) {
+                if (message.startsWith("console tap self-test ")) {
+                    return message;
+                }
+            }
+            throw new AssertionError("no probe line was captured: " + collector.messages());
+        }
+
+        @Test
         @DisplayName("a plugin logger's lines arrive too — that is the whole reason for this attach point")
         void childLoggerLinesArrive() {
             // The finding this class is built on: BungeeCord's proxy logger has no parent and does

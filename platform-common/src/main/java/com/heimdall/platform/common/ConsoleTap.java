@@ -110,7 +110,15 @@ public abstract class ConsoleTap implements AutoCloseable {
     /** How long the probe waits to come back around. See {@link #captureWorks()}. */
     private static final long SELF_TEST_TIMEOUT_MS = 2000L;
 
-    /** Makes each probe line unique, so a stale one cannot satisfy a later attach. */
+    /**
+     * Makes each probe line unique, so a stale one cannot satisfy a later attach.
+     *
+     * <p>Seeded from the clock and <strong>incremented per attach</strong>. Both halves are needed
+     * and it previously had only the first: the seed keeps two JVMs apart, and the increment keeps
+     * two attaches within one JVM apart — which is the case that matters, because that is a
+     * {@code /reload}, and the queue it would be satisfied from is the one the previous instance
+     * left behind.
+     */
     private static final AtomicLong SELF_TEST_NONCE = new AtomicLong(System.nanoTime());
 
     /** Set while a consumer is running, so a consumer that logs does not feed itself. */
@@ -261,7 +269,10 @@ public abstract class ConsoleTap implements AutoCloseable {
      * a pool too busy to run one task in two seconds at boot is a tap that would drop lines anyway.
      */
     private boolean captureWorks() {
-        final String marker = "console tap self-test " + Long.toHexString(SELF_TEST_NONCE.get());
+        // incrementAndGet, not get: see the field. Reading it left every attach in one JVM using the
+        // same marker, which is exactly the reload case the nonce exists for.
+        final String marker =
+                "console tap self-test " + Long.toHexString(SELF_TEST_NONCE.incrementAndGet());
         final CountDownLatch received = new CountDownLatch(1);
         Registration probe = addTap(new Consumer<LogLine>() {
             @Override
