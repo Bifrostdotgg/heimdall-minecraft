@@ -1463,9 +1463,16 @@ guarantee and keeps it the same way:
 
 - **One holding point, and it is bounded.** A `FrameBatcher` queue per frame family — 500 items,
   drop-oldest, drained every second, discarded if there is no bot to send it to. No mirror, no file,
-  no cache. `HeimdallBridgeModuleTest` re-runs `PipelineTest`'s own reflection assertion over this
-  module: nothing may hand a queued item back out, not directly, not in a collection, not in an
-  `Optional`.
+  no cache. `HeimdallBridgeModuleTest` carries `PipelineTest`'s reflection assertion forward in two
+  forms, and the split is the interesting part. On `HeimdallBridgeModule` it matches the *whole
+  generic return type* against the two value types, so `List<ChatLine>` and `Optional<ChatLine>` are
+  caught as readily as a bare one. On `FrameBatcher` it is an **allow-list** — `void`, `boolean` and
+  the integral counters, nothing else — because a name match cannot police that class at all: its
+  queue is a `ConcurrentLinkedQueue<T>`, so the accessor the rule forbids has a return type that
+  prints as `T` or `java.util.List<T>` and names no value type anywhere. That is precisely the one
+  class the rule is about, so it gets the formulation that cannot be outrun by a return type nobody
+  thought of; a future method that legitimately needs to return something else fails the build and
+  has to be justified in review.
 - **No log line carries a message body.** Counts and lengths only — including on the drop,
   disconnect and teardown paths, which is where such a rule is normally lost, and including the
   proxy listeners' error branches, which name the sender and not the sentence. One test floods the

@@ -725,24 +725,61 @@ class HeimdallBridgeModuleTest {
 
     @Test
     @DisplayName("the module exposes no way to read a queued message back")
-    void noAccessorHandsAMessageBack() {
+    void theModuleHandsNoMessageBack() {
         // The same executable claim ChatPipeline makes about itself, one layer out: if a getLast, a
-        // history or a drain-to-list ever appears here, this fails. Return types are checked, so a
-        // List<ChatLine> or an Optional<ChatLine> is caught as readily as a bare one.
+        // history or a drain-to-list ever appears here, this fails. The whole generic return type is
+        // matched, so List<ChatLine> and Optional<ChatLine> are caught as readily as a bare one —
+        // their erasures are List and Optional, which a check on the raw return type would wave
+        // straight through.
+        //
+        // Naming the two value types works HERE and would not work on FrameBatcher: see the next
+        // test.
         java.util.List<String> accessors = new java.util.ArrayList<String>();
-        for (Class<?> type : new Class<?>[] {HeimdallBridgeModule.class, FrameBatcher.class}) {
-            for (java.lang.reflect.Method method : type.getDeclaredMethods()) {
-                if (method.isSynthetic()) {
-                    continue;
-                }
-                String returned = method.getGenericReturnType().toString();
-                if (returned.contains("ChatLine") || returned.contains("SessionEvent")) {
-                    accessors.add(type.getSimpleName() + "." + method.getName());
-                }
+        for (java.lang.reflect.Method method : HeimdallBridgeModule.class.getDeclaredMethods()) {
+            if (method.isSynthetic()) {
+                continue;
+            }
+            String returned = method.getGenericReturnType().toString();
+            if (returned.contains("ChatLine") || returned.contains("SessionEvent")) {
+                accessors.add("HeimdallBridgeModule." + method.getName());
             }
         }
         assertEquals(Collections.<String>emptyList(), accessors,
-                "the bounded queue is the only holding point, and nothing may hand an item back "
-                        + "out of it — not directly, not in a collection, not in an Optional");
+                "the bounded queue is the only holding point, and nothing on the module may hand an "
+                        + "item back out of it");
+    }
+
+    @Test
+    @DisplayName("FrameBatcher returns nothing but void, boolean and int — an allow-list, not a "
+            + "name match")
+    void theBatcherHandsNothingBack() {
+        // FrameBatcher is the class that actually HOLDS chat, and it is the one a name-matching
+        // guard cannot police: its queue is a ConcurrentLinkedQueue<T>, so the forbidden accessor
+        // — `T peek()`, `List<T> drain()` — has a return type that prints as "T" and
+        // "java.util.List<T>". Neither contains the string "ChatLine", so the check above would
+        // pass on precisely the one class the rule is about.
+        //
+        // So this is an ALLOW-LIST rather than a deny-list, which is the only formulation that
+        // cannot be outrun by a return type nobody thought of. Everything this class legitimately
+        // answers is a primitive: how many are queued, and whether a flush sent anything. A future
+        // method that genuinely needs to return something else fails here and has to say why in a
+        // review — which is the whole point, and is the same trade ChatPipeline's own guard makes.
+        java.util.Set<Class<?>> allowed = new java.util.HashSet<Class<?>>(
+                java.util.Arrays.asList(void.class, boolean.class, int.class, long.class));
+
+        java.util.List<String> offenders = new java.util.ArrayList<String>();
+        for (java.lang.reflect.Method method : FrameBatcher.class.getDeclaredMethods()) {
+            if (method.isSynthetic()) {
+                continue;
+            }
+            if (!allowed.contains(method.getReturnType())) {
+                offenders.add("FrameBatcher." + method.getName() + " -> "
+                        + method.getGenericReturnType());
+            }
+        }
+        assertEquals(Collections.<String>emptyList(), offenders,
+                "FrameBatcher's queue is the single place a chat line rests, and nothing here may "
+                        + "return anything that could carry one out — including behind a type "
+                        + "variable, which is exactly what a name-matching guard cannot see");
     }
 }
