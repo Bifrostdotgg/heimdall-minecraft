@@ -24,6 +24,7 @@ runs.
 - **Performance Optimized**: Response caching and async processing to minimize server impact
 - **Configurable Messages**: Customize all player-facing messages from the Heimdall dashboard — pushed to every connected server live, no config file editing or restart
 - **LuckPerms Integration**: Sync Discord roles to LuckPerms groups, on backends and on either proxy — `net.luckperms:api` is the same artifact everywhere, so there is one implementation rather than one per platform
+- **Discord Chat Bridge**: Relay in-game chat, joins, leaves and deaths into mapped Discord channels and Discord messages back in-game — nothing is ever stored, and the plugin never edits what a player typed
 - **Multi-Platform Support**: One JAR, three platforms — Paper/Spigot, Velocity and BungeeCord
 
 ## Requirements
@@ -163,6 +164,34 @@ the very request that would otherwise fetch the dashboard's config, so the dashb
 `endpoint` is the field whitelabel instances care about: most installs talk to the public
 `https://api.bifrost.gg`, but a whitelabel instance has its own URL, and its setup codes are only
 claimable there — pass it as the optional second argument, `/hd setup <code> <endpoint>`.
+
+### Modules
+
+Every feature is a module that can be switched on and off from the dashboard's **Minecraft** page
+while the server is running — no restart, no file edit. `/hd modules` lists this build's set and
+each one's current state; `/hd enable`/`/hd disable` are a **local** override that wins over the
+dashboard until cleared (see [Admin Commands](#admin-commands)).
+
+| Module | What it does | Runs on | Default |
+| --- | --- | --- | --- |
+| `whitelist` | The login gate, the local whitelist mirror and `/linkdiscord`. On a proxied network the gatekeeper owns the decision; a backend re-check is the `enforceOnBackend` setting | every role | on |
+| `rolesync` | Applies the bot's Discord-role snapshots to a player's LuckPerms groups | every role | on |
+| `offenses` | `/offend` and the escalation tiers the dashboard defines | every role | on |
+| `console` | Streams the server console to the dashboard and runs commands from it | every role | off — it streams every log line |
+| `bridge` | Relays Minecraft chat and join/leave/death into Discord, and mapped Discord channels back in-game | every role | on, and inert until channels are mapped |
+| `health` | The TPS/memory/player-count snapshots that ride the heartbeat | every role | on |
+
+Two notes worth having before you turn something on:
+
+- **The chat bridge stores nothing.** Chat passes through memory and is gone — there is no history,
+  no buffer beyond a small bounded relay queue, and no log line anywhere carries a message. It also
+  never edits what a player typed: the text goes to the bot exactly as it was sent, and all
+  formatting is the dashboard's template.
+- **Who relays is a per-server choice.** By default each *backend* relays its own chat and the proxy
+  relays none, so a network running the plugin everywhere does not send every line twice. A network
+  that only runs the plugin on its proxy can flip that in the dashboard — the proxies observe chat
+  and never block it, so relaying from the gatekeeper is safe. Deaths are the exception: no proxy
+  has a death event, so those only ever come from backends.
 
 ### WebSocket Tunnel
 

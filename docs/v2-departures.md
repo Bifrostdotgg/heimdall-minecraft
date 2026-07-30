@@ -1445,6 +1445,185 @@ boot that its own jar might be a misplaced v2 install, and nothing held that to 
 against a fixture no operator has ever had, which is the mistake the `velocity-migrate` row exists to
 have corrected, made in the opposite direction.
 
+### D79 — the Discord chat bridge is a module, and relay-only is its shape rather than its policy
+
+**New in 3.1.**
+
+**v2:** no chat bridge at all. Chat relay was DiscordSRV's job, and a network that wanted both ran
+both plugins.
+**v3:** `:module-bridge`, declaring `bridge@1`, shipped in the same jar and toggled from the
+dashboard like every other module.
+
+The interesting part is not that it exists — it is that **chat is relayed and never stored**, and
+that promise is kept by the shape of the code rather than by anybody remembering it. Core had
+already done the hard half: a `ChatObserver` is read-only *by type*, `ChatPipeline` holds no buffer
+and no history, and a reflection test in `PipelineTest` fails the build if any method there ever
+returns a message the pipeline has already seen. This module is the first thing downstream of that
+guarantee and keeps it the same way:
+
+- **One holding point, and it is bounded.** A `FrameBatcher` queue per frame family — 500 items,
+  drop-oldest, drained every second, discarded if there is no bot to send it to. No mirror, no file,
+  no cache. `HeimdallBridgeModuleTest` re-runs `PipelineTest`'s own reflection assertion over this
+  module: nothing may hand a queued item back out, not directly, not in a collection, not in an
+  `Optional`.
+- **No log line carries a message body.** Counts and lengths only — including on the drop,
+  disconnect and teardown paths, which is where such a rule is normally lost, and including the
+  proxy listeners' error branches, which name the sender and not the sentence. One test floods the
+  module, disconnects it, reconnects it and disables it, then asserts a known string never appeared
+  in the log.
+- **Drain-and-discard, on purpose.** `flush` always drains, and only then decides whether to send.
+  The alternative grows a queue without bound while the bot is down. The cost lands more softly here
+  than for the console: chat produced while Discord is unreachable *already happened in the game*,
+  in front of the people it was addressed to, and replaying five minutes of it in a burst on
+  reconnect would be worse than losing it.
+
+**The batching is the console module's, transcribed rather than reinvented** — 1 s flush, per-flush
+batch cap of 200, hard queue cap, tunnel snapshotted into a local before use so a concurrent
+`disable()` cannot hand a running flush a half-torn reference. Those numbers have run in production
+since v2's `ConsoleStreamer`. It is a shared class because the bridge needs the machinery twice, and
+two hand-written copies are two places for a bound to drift — a drifted bound being invisible until
+an out-of-memory hours later.
+
+**`relayChat` is a setting, not an eligibility rule**, which is the same call the whitelist module
+made with `enforceOnBackend`. `roles()` is empty, so a proxy is registered exactly as a backend is;
+only the *default* depends on the role — on for `STANDALONE` and `ENFORCER`, off for `GATEKEEPER`.
+That is the sanctioned topology (each backend relays its own chat, the proxy relays nothing, so
+nothing is relayed twice), and an owner who wants proxy-origin relay flips the booleans in the
+dashboard. A `roles()` exclusion would have marked the module `INELIGIBLE` on a proxy with no
+dashboard toggle able to bring it back.
+
+**The observer is registered from the config listener, not once at `enable()`.** A settings change
+does not re-enable a module — `ModuleManager` reconciles on the `enabled` flag, which is exactly why
+`ModuleContext.settings()` is documented as a live read. A module that decided at enable would be
+stuck on whatever `relayChat` said at that moment, and the dashboard toggle would appear dead until
+somebody switched the whole module off and on. `reconcileChatObserver()` is idempotent and runs on
+both paths.
+
+Only the **outbound chat** half is gated. `bridge.discord` is delivered whenever the module is
+enabled: a proxy that relays no chat is still a perfectly good place to show players what was said
+in Discord, and gating both directions on one boolean would silently lose the inbound one.
+
+### D80 — a death is its own notification, and it is a fact only backends have
+
+**New in 3.1.**
+
+**v2:** nothing. v2 had no session events at all.
+**v3:** `PlayerSessionEvents` gains `death(player, deathMessage, timestampMs)` and
+`PlayerDeathListener`, beside the existing join and quit.
+
+**Why a second interface rather than a third verb on `PlayerSessionListener`.** Join and quit share
+one interface because every consumer does the same thing with a different number — the whitelist
+mirror slides an entry by its join window or its leave window. A death carries something neither of
+them has: the server's own death message. Folding it in would mean either dropping that string or
+handing every join listener a parameter that is always `null`. One extra interface is the smaller
+change.
+
+The *machinery* is still shared, and that is the point of the refactor that came with it: the
+subscription type is now generic, so the deactivate-then-unlist rule, the `Throwable` containment
+and the report-only-the-first-failure loop are written once for all three. A fourth notification is a
+list and a dispatch call, not a second copy of the careful part.
+
+**`MONITOR` on Bukkit is load-bearing here in a way it is not for a join.** `PlayerDeathEvent`
+carries a *mutable* death message and every death-message plugin rewrites it below `MONITOR`, so
+reading any earlier would relay the vanilla sentence on a server that had deliberately replaced it.
+`BukkitDeathListenerTest` rewrites the message before dispatch and asserts the rewritten one is what
+crosses.
+
+**`null` is a real answer and is passed through as one.** `getDeathMessage()` is genuinely nullable —
+a suppressing plugin, `/gamerule showDeathMessages false` — and a server that chose not to announce
+a death chose that. The bridge omits `detail` from the frame entirely in that case rather than
+sending an empty string, because "there was no death message" and "the death message was empty" are
+different answers on the wire.
+
+**There is no proxy counterpart, and that is a constant rather than a gap.** Neither Velocity nor
+BungeeCord has a death event: a proxy never sees the game state that produces one. The backends
+behind it run the same jar and report their own deaths, which is where the message is authoritative
+anyway. A network running the plugin only on its proxy therefore gets chat and join/leave and no
+deaths — a property of the deployment, stated in the module's javadoc, not something to compensate
+for with a guess.
+
+### D81 — the proxies observe chat, and still never cancel it
+
+**New in 3.1. This reverses a phase-1 decision, and the reasoning that produced it is unchanged.**
+
+**Phase 1:** `:platform-velocity` and `:platform-bungee` registered **no chat listener at all**, and
+said so in three places each — the bootstrap's wiring method, the login listener's javadoc, and the
+package javadoc. A proxy cannot cancel signed chat: since 1.19.1 the client signs its messages and
+the backend validates them, so a proxy that dropped or edited one produces a client-side "chat
+validation failure" disconnect rather than a moderated message, with nothing in any log pointing at
+the plugin that did it.
+**Phase 3:** both proxies register an **observe-only** chat listener.
+
+Nothing about the prohibition changed. What changed is the question: *cancelling* signed chat is
+forbidden, *reading* it never was, and a Discord relay only reads. Proxy-origin relay is worth
+having — it works for a network that does not run the plugin on every backend — so the listeners
+exist, they call no mutator, and the never-touch property is asserted on the **event's own state
+after dispatch** rather than on "we did not call the setter". The second is a claim about the code;
+only the first is a claim about the behaviour.
+
+Both listeners deliberately go through the same `dispatchWithObservers` the Bukkit listener uses,
+and **discard the verdict**. A proxy-only entry point straight to the observers would be a second
+way into the pipeline, and the property that makes relay safe — "observers run only for messages
+that were allowed" — would then hold on one platform and not the other. The one thing that would be
+wrong is acting on the verdict by cancelling, so each suite has a test that registers a denying
+interceptor and asserts the event is *still* untouched. That test is what stops somebody
+"finishing" the listener later.
+
+Two things are BungeeCord's alone, and are why its listener is not a transcription of Velocity's:
+
+1. **`ChatEvent` fires in both directions.** It is a `TargetedEvent`, fired from `UpstreamBridge`
+   when a player talks and again from `DownstreamBridge` when a server talks to a player. Relaying
+   the second would ship every server message to Discord — *including this plugin's own
+   Discord→Minecraft deliveries*, which is a loop rather than noise. Only a `ProxiedPlayer` sender
+   is chat.
+2. **Commands are excluded via `isCommand()`/`isProxyCommand()`**, not by testing for a leading
+   slash, so a BungeeCord release that changes what counts as a command cannot quietly change what
+   gets published. `/login hunter2` reaching a Discord channel is the failure being avoided.
+
+**The listeners ship inert.** Registering one starts nothing: the bridge module's `relayChat`
+defaults to `false` on `GATEKEEPER`, so on a stock proxy the pipeline has no observer attached and
+the dispatch reaches nobody. Proxy-origin relay is an explicit per-network choice made in the
+dashboard.
+
+**Residual risk, open and named** (the same class as D43's second): observation of signed chat is
+believed safe on both proxies because only cancellation and modification break the client's
+validation — but that is asserted from API semantics, not demonstrated. The smoke matrix boots
+servers, it does not join them, so no chat has ever been *observed* on a 1.21 client by any test
+here either. The thirdplace test with proxy-origin enabled is the verification, and until it runs
+the listeners' default-off is what keeps the risk bounded.
+
+### D82 — player text crosses the wire verbatim; the bot owns every byte of rendering
+
+**New in 3.1.**
+
+**v2:** not applicable — no relay existed.
+**v3:** `bridge.chat` carries exactly the string `ChatMessage.message()` held. Not trimmed, not
+normalised, not colour-stripped, not truncated, not escaped.
+
+`ChatMessage` already promised this of itself ("not trimmed and not normalised: a relay that
+silently edits what a player typed is worse than one that does not relay at all"), and this entry
+extends the promise to the wire, because the temptation to tidy up is greatest at exactly the point
+where the text leaves the plugin.
+
+The argument is not aesthetic. **Anything the plugin does to the text is a rule the operator cannot
+see, cannot configure, and cannot change without a plugin release across their whole fleet.** The
+bot renders — it resolves the dashboard's MiniMessage template, inserts the player's content *after*
+formatting so it can never inject a colour code, applies the per-mapping filters, and coalesces for
+the webhook rate limit. Every one of those is tunable without shipping a jar. A plugin-side `trim()`
+is not, and it would silently disagree with the preview the dashboard showed.
+
+The same rule runs in the other direction, for a different reason. `bridge.discord` carries a
+**finished** legacy-§ string, so the plugin renders it with `Msg.legacy` rather than `Msg.plain`:
+the user content in it was inserted after formatting, bot-side, which is what makes parsing § safe
+there and would make it a colour-code injection anywhere else. It also keeps MiniMessage out of the
+jar entirely — core's `Msg` deliberately has no parser — and keeps templates editable without a
+release.
+
+`HeimdallBridgeModuleTest` pins it with a line that is leading-space, trailing-space, `§`-coded,
+`&`-coded and internally double-spaced all at once, because every one of those is something a
+well-meaning relay might normalise. Adding `.trim()` to the observer fails exactly that test and
+nothing else.
+
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 
 **New in 1d.**
