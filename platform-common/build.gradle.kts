@@ -25,11 +25,15 @@ dependencies {
     // Velocity — which is why the LuckPerms bridge can be written once here instead of twice.
     compileOnly(libs.luckperms.api)
 
-    // log4j-core is the SERVER's logging backend on both families (Mojang has bundled log4j2 since
-    // 1.7, and Velocity uses it directly), so it is always on the classpath at runtime and never
-    // needs shipping. The version compiled against is NOT the version that will be there: Minecraft
-    // 1.8.8 carries 2.0-beta9. See Log4jConsoleTap for which API surface is safe across that range
-    // and why the timestamp does not come from the LogEvent.
+    // log4j-core is the SERVER's logging backend on the Bukkit family and on Velocity (Mojang has
+    // bundled log4j2 since 1.7, and Velocity uses it directly), so on those it is always on the
+    // classpath at runtime and never needs shipping. The version compiled against is NOT the version
+    // that will be there: Minecraft 1.8.8 carries 2.0-beta9. See Log4jConsoleTap for which API
+    // surface is safe across that range and why the timestamp does not come from the LogEvent.
+    //
+    // BungeeCord runs java.util.logging and no log4j at all, which is why JulConsoleTap exists
+    // beside it — and why compileOnly is the right scope in a way it would not be if this were a
+    // universal assumption: a proxy with no log4j never loads the log4j half.
     compileOnly(libs.log4j.core)
 
     testImplementation(testFixtures(project(":core")))
