@@ -74,33 +74,49 @@ final class BungeeChatListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onChat(ChatEvent event) {
-        if (event.isCancelled()) {
-            return;
-        }
-        if (event.isCommand() || event.isProxyCommand()) {
-            // A relay that published `/login hunter2` would be publishing passwords.
-            return;
-        }
-        Connection sender = event.getSender();
-        if (!(sender instanceof ProxiedPlayer)) {
-            // The downstream half of this event: a server talking to a player. See the class
-            // javadoc — relaying it would include this plugin's own Discord deliveries.
-            return;
-        }
-        ProxiedPlayer player = (ProxiedPlayer) sender;
+        // Captured as the handler goes, so the catch below can name the player when one is known
+        // and stay quiet about it when one is not. Reading it again down there would re-enter the
+        // very API that just failed — and on this platform the likeliest thing to have failed IS
+        // an event accessor.
+        String senderName = null;
         try {
+            // Every event accessor is INSIDE the guard, not before it. The catch exists for a
+            // NoSuchMethodError from an API that moved between BungeeCord releases, and
+            // `isProxyCommand()` is the named candidate: this module compiles against the 1.16-R0.4
+            // FLOOR (departure D74), so it is exactly the kind of method a version below that
+            // would not have. A call sitting outside the try is a call the guard does not cover,
+            // which is the opposite of what it was written for — and a listener that threw an
+            // Error out of BungeeCord's dispatcher for every chat message would be a proxy-wide
+            // fault caused by a feature nobody had switched on.
+            if (event.isCancelled()) {
+                return;
+            }
+            if (event.isCommand() || event.isProxyCommand()) {
+                // A relay that published `/login hunter2` would be publishing passwords.
+                return;
+            }
+            Connection sender = event.getSender();
+            if (!(sender instanceof ProxiedPlayer)) {
+                // The downstream half of this event: a server talking to a player. See the class
+                // javadoc — relaying it would include this plugin's own Discord deliveries.
+                return;
+            }
+            ProxiedPlayer player = (ProxiedPlayer) sender;
+            senderName = player.getName();
             // The verdict is deliberately discarded — this listener has no right to act on one.
             pipeline.dispatchWithObservers(
-                    ChatMessage.of(player.getUniqueId(), player.getName(), event.getMessage()));
+                    ChatMessage.of(player.getUniqueId(), senderName, event.getMessage()));
         } catch (Throwable broken) {
             // Throwable, not RuntimeException: a NoSuchMethodError from an API that moved between
             // BungeeCord releases would otherwise reach the proxy's event machinery. Fail open —
             // which here literally means "the message is delivered untouched", because this class
-            // never touches it in the first place.
+            // never touches it in the first place, so there is no half-applied state to report.
             //
             // The message body is NOT logged. Chat content reaching a log file is exactly the
-            // storage the bridge promises not to do; the sender's name is enough to find the cause.
-            logger.error("the chat pipeline threw for " + player.getName()
+            // storage the bridge promises not to do; the sender's name, where it is known, is
+            // enough to find the cause.
+            logger.error("the chat pipeline threw"
+                    + (senderName == null ? "" : " for " + senderName)
                     + "; the message itself was not affected", broken);
         }
     }

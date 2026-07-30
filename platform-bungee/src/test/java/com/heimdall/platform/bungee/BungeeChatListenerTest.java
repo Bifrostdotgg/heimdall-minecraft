@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.pipeline.ChatMessage;
 import com.heimdall.core.pipeline.ChatObserver;
@@ -185,5 +186,43 @@ class BungeeChatListenerTest {
                 .onChat(new ChatEvent(mock(Connection.class), steve(), "who said that"));
 
         assertTrue(relayed.isEmpty());
+    }
+
+    /**
+     * An {@code Error} out of the event's OWN accessors — the failure the {@code Throwable} catch
+     * exists for, and the one that used to sail past it.
+     *
+     * <p>{@code isProxyCommand()} is the realistic candidate: this module compiles against the
+     * 1.16-R0.4 <em>floor</em> (departure D74), so it is exactly the sort of method a proxy below
+     * that would not have. A guard is worthless if the call that fails sits outside it — and a
+     * listener throwing an {@code Error} out of BungeeCord's dispatcher on every chat message would
+     * be a proxy-wide fault produced by a feature nobody had switched on.
+     *
+     * <p>There is deliberately no Velocity twin: {@code PlayerChatEvent} is {@code final}, so this
+     * case cannot be constructed there. That listener is the same shape and carries the same
+     * reasoning in its javadoc.
+     */
+    @Test
+    @DisplayName("an Error from the event's own accessor is contained, and the catch does not "
+            + "re-enter it")
+    void aThrowingAccessorIsContained() {
+        ChatEvent broken = new ChatEvent(steve(), mock(Server.class), "hello everyone") {
+            @Override
+            public boolean isProxyCommand() {
+                throw new NoSuchMethodError("net.md_5.bungee.api.event.ChatEvent.isProxyCommand()");
+            }
+        };
+
+        // Escaping at all is the failure. Escaping a SECOND time out of the catch — because the
+        // handler read the player's name back out of an event that has just proved unreliable — is
+        // the same failure wearing a bug fix's clothes, which is why the name is captured on the
+        // way through rather than re-read.
+        listeningWithAnObserver().onChat(broken);
+
+        assertTrue(relayed.isEmpty());
+        assertTrue(logger.logged(LogLevel.SEVERE, "the chat pipeline threw"),
+                "the failure has to be attributable: " + logger.records());
+        assertFalse(logger.records().toString().contains("hello everyone"),
+                "and it still must not put the message in a log file");
     }
 }
