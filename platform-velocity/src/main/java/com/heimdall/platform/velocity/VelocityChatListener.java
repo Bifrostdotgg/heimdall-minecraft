@@ -76,27 +76,40 @@ public final class VelocityChatListener {
 
     @Subscribe(order = PostOrder.LAST)
     public void onChat(PlayerChatEvent event) {
-        Player sender = event.getPlayer();
-        if (sender == null) {
-            return;
-        }
-        if (!event.getResult().isAllowed()) {
-            // Somebody else already refused it. See the class javadoc.
-            return;
-        }
+        // Captured as the handler goes, so the catch below can name the player when one is known
+        // and stay quiet about it when one is not. Reading it again down there would re-enter the
+        // very API that just failed — and on this platform the likeliest thing to have failed IS
+        // an event accessor.
+        String senderName = null;
         try {
+            // Every event accessor is INSIDE the guard, not before it. The catch exists for a
+            // NoSuchMethodError from an API that moved between Velocity releases, and
+            // `getResult()` is one of the named candidates — it answers a nested type whose setter
+            // Velocity has already deprecated. A call sitting outside the try is a call the guard
+            // does not cover, which is the opposite of what it was written for.
+            Player sender = event.getPlayer();
+            if (sender == null) {
+                return;
+            }
+            if (!event.getResult().isAllowed()) {
+                // Somebody else already refused it. See the class javadoc.
+                return;
+            }
+            senderName = sender.getUsername();
             // The verdict is deliberately discarded — this listener has no right to act on one.
             pipeline.dispatchWithObservers(
-                    ChatMessage.of(sender.getUniqueId(), sender.getUsername(), event.getMessage()));
+                    ChatMessage.of(sender.getUniqueId(), senderName, event.getMessage()));
         } catch (Throwable broken) {
             // Throwable, not RuntimeException: a NoSuchMethodError from an API that moved between
             // Velocity releases would otherwise reach the proxy's event machinery. Fail open — and
             // "open" here literally means "the message is delivered untouched", because this class
-            // never touches it in the first place.
+            // never touches it in the first place, so there is no half-applied state to report.
             //
             // The message body is NOT logged. Chat content reaching a log file is exactly the
-            // storage the bridge promises not to do; the sender's name is enough to find the cause.
-            logger.error("the chat pipeline threw for " + sender.getUsername()
+            // storage the bridge promises not to do; the sender's name, where it is known, is
+            // enough to find the cause.
+            logger.error("the chat pipeline threw"
+                    + (senderName == null ? "" : " for " + senderName)
                     + "; the message itself was not affected", broken);
         }
     }
