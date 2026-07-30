@@ -598,6 +598,55 @@ class HeimdallBridgeModuleTest {
         }
 
         @Test
+        @DisplayName("an oversized frame is capped, and the drop is reported by count")
+        void anOversizedFrameIsCapped() {
+            // Defence in depth rather than a threat model — the peer is the guild's own bot, and it
+            // coalesces before it sends. The bound is here because this is the one loop whose work
+            // is multiplicative (messages × players, each a main-thread task on Bukkit), and
+            // because every OTHER path in this module states and tests a bound: an unbounded one in
+            // the middle of them is a sentence a future reader believes rather than code.
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            enable();
+
+            String[] texts = new String[HeimdallBridgeModule.MAX_INBOUND_MESSAGES + 25];
+            for (int i = 0; i < texts.length; i++) {
+                texts[i] = "line " + i;
+            }
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, messages(texts));
+
+            assertEquals(HeimdallBridgeModule.MAX_INBOUND_MESSAGES, steve.messageText().size(),
+                    "the whole frame would be messages × players main-thread tasks from one socket "
+                            + "read");
+            assertEquals("line 0", steve.messageText().get(0));
+            assertEquals("line " + (HeimdallBridgeModule.MAX_INBOUND_MESSAGES - 1),
+                    steve.messageText().get(HeimdallBridgeModule.MAX_INBOUND_MESSAGES - 1),
+                    "the first N are kept, not an arbitrary window: the bot sent them in order");
+            assertTrue(logger.records().toString().contains("dropping 25"),
+                    "a silent cap is indistinguishable from a quiet channel: " + logger.records());
+            assertFalse(logger.records().toString().contains("line 60"),
+                    "and the report is a COUNT — it must not name the messages it dropped");
+        }
+
+        @Test
+        @DisplayName("a frame exactly at the cap is relayed whole, with no warning")
+        void aFrameAtTheCapIsNotTruncated() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            enable();
+
+            String[] texts = new String[HeimdallBridgeModule.MAX_INBOUND_MESSAGES];
+            for (int i = 0; i < texts.length; i++) {
+                texts[i] = "line " + i;
+            }
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, messages(texts));
+
+            assertEquals(HeimdallBridgeModule.MAX_INBOUND_MESSAGES, steve.messageText().size());
+            assertFalse(logger.records().toString().contains("dropping"),
+                    "an off-by-one here would warn on every ordinary busy frame");
+        }
+
+        @Test
         @DisplayName("with nobody online it is a no-op, not a failure")
         void nobodyOnlineIsFine() {
             setUp(ServerRole.STANDALONE, null);

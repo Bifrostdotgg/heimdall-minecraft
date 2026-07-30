@@ -123,6 +123,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /** Items shipped per flush, per family. The console module's {@code MAX_BATCH}. */
     static final int MAX_BATCH = 200;
 
+    /**
+     * Messages relayed in-game from a single {@code bridge.discord} frame; the rest are dropped.
+     *
+     * <p>Smaller than the outbound caps on purpose, because this is the only loop here whose work is
+     * multiplicative — messages × online players, each send a main-thread task on Bukkit — and
+     * because the bot coalesces before sending, so a frame anywhere near this size already means
+     * something upstream is wrong. See {@link #deliverToPlayers}.
+     */
+    static final int MAX_INBOUND_MESSAGES = 50;
+
     /** How often {@link #flush} runs. The console module's cadence, and the design's. */
     private static final long FLUSH_PERIOD_MS = 1000L;
 
@@ -360,6 +370,30 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      *
      * <p>There is no broadcast primitive on {@code PlayerDirectory}, and that is fine: iterating
      * {@code onlinePlayers()} is what a broadcast would do anyway.
+     *
+     * <h2>Bounded at {@value #MAX_INBOUND_MESSAGES} per frame</h2>
+     *
+     * <p><strong>Defence in depth, and consistency, rather than a threat model.</strong> The peer on
+     * the other end of this socket is the guild's own bot — it authenticated with the server's HMAC
+     * key and it coalesces before it sends — so nothing is expected to arrive that needs capping.
+     * The bound exists anyway for two reasons.
+     *
+     * <p>The first is cost shape. This is the one loop in the module whose work is
+     * <em>multiplicative</em>: messages × online players, and on the Bukkit family every
+     * {@code sendMessage} is a task hopped onto the main server thread. A frame that arrived with a
+     * few thousand entries would put a few thousand × everyone-online tasks on the tick loop from
+     * one socket read, which is a stall rather than an error — the hardest kind of incident to
+     * attribute afterwards.
+     *
+     * <p>The second is that every other path here states and tests a bound (500 queued, 200 per
+     * frame, drop-oldest), and an unbounded one in the middle of them is the sentence a future
+     * reader believes rather than the code. A bug in the bot's coalescer is a likelier source of a
+     * ten-thousand-entry frame than malice is, and a bound that only holds while the peer is
+     * healthy is not a bound.
+     *
+     * <p>The overflow is dropped rather than deferred — there is no queue on this side, and a
+     * relay's value is entirely in being current — and it emits one count-only line so silence is
+     * never mistaken for quiet.
      */
     private void deliverToPlayers(Payload payload) {
         ModuleContext ctx = context;
@@ -369,6 +403,14 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         List<Payload> messages = payload.children("messages");
         if (messages.isEmpty()) {
             return;
+        }
+        if (messages.size() > MAX_INBOUND_MESSAGES) {
+            // Counts only, never content — the same rule as everywhere else in this class.
+            final int dropped = messages.size() - MAX_INBOUND_MESSAGES;
+            ctx.logger().warn("a bridge.discord frame carried " + messages.size()
+                    + " messages; relaying the first " + MAX_INBOUND_MESSAGES + " and dropping "
+                    + dropped + ". The bot coalesces before sending, so this frame is a bot-side "
+                    + "problem rather than a busy server.");
         }
 
         Collection<PlayerHandle> online;
@@ -383,7 +425,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
 
         int rendered = 0;
+        int considered = 0;
         for (Payload message : messages) {
+            if (considered++ >= MAX_INBOUND_MESSAGES) {
+                break;
+            }
             String text = message.string("text", "");
             if (text.isEmpty()) {
                 continue;
