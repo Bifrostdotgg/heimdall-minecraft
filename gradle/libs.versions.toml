@@ -42,12 +42,14 @@ velocity-api = "3.4.0"
 #   2. Every class it publishes is major-52 bytecode, so it can be read at
 #      `--release 8`. That is still true of 1.21-R0.4, but it is the floor's job to
 #      keep being true when it stops being.
-#   3. Every method :platform-bungee calls is identical in 1.21-R0.4 — LoginEvent,
-#      AsyncEvent's intents, ProxyServer, PluginManager, ProxiedPlayer, TaskScheduler
-#      and TextComponent.fromLegacyText were all compared with javap. BungeeCord's API
-#      is exceptionally stable: across those five years the only differences in the
-#      types used here are ProxyServer.unsafe() and LoginEvent's single-component
-#      setReason(), neither of which is called.
+#   3. Nothing that changed between it and 1.21-R0.4 can break this binding — which is a
+#      weaker and more honest claim than "the API is identical", because it is not.
+#      javap over every type :platform-bungee touches finds differences in eight of them,
+#      and each is one of: a superclass/constructor change on PostLoginEvent (whose only
+#      called method is declared on the class itself in both), abstract methods added to
+#      interfaces this module only ever calls, package-private signature changes inside
+#      BaseComponent that no other package can reach, or purely additive members nothing
+#      here calls. Departure D74 lists them one by one.
 #
 # It is a real release, so unlike spigot-api, paper-api and velocity-brigadier this one
 # needs no snapshot repository and cannot be re-resolved into something different.

@@ -38,6 +38,16 @@ import net.md_5.bungee.event.EventHandler;
  * <p>Both handlers are total. BungeeCord logs a plugin whose listener throws and carries on, which
  * would leave the whitelist mirror silently missing extensions with the cause a long way from the
  * symptom.
+ *
+ * <h2>{@code PostLoginEvent} changed shape, and it does not matter here</h2>
+ *
+ * <p>It is the one type in this binding whose <em>declaration</em> moved between the API version
+ * compiled against and current BungeeCord: a plain {@code Event} in 1.16, an
+ * {@code AsyncEvent<PostLoginEvent>} now, with a wider constructor. Nothing here is affected —
+ * {@code getPlayer()} is declared on the class itself in both, so the compiled call resolves either
+ * way; the event is never constructed; and BungeeCord dispatches on the handler's declared parameter
+ * type. It does mean the event can now be deferred with an intent the way {@code LoginEvent} is.
+ * This handler registers none, so it never is. See departure D74.
  */
 final class BungeeSessionListener implements Listener {
 
