@@ -59,7 +59,7 @@ under Git Bash on Windows.
 | `paper-1.21.8` | `itzg/minecraft-server:2026.7.2-java21` | Paper 1.21.8 | 21 | Current. Catches a jar that only works on old servers. |
 | `velocity-3.4.0` | `itzg/mc-proxy:2026.7.1-java17` | Velocity 3.4.0 | 17 | The compile-target floor: the API version `:platform-velocity` is pinned to, on the Java level it targets. |
 | `velocity-3.5.1` | `itzg/mc-proxy:2026.7.1-java21` | Velocity 3.5.1 | 21 | Current Velocity — what customers actually run. |
-| `bungee-2000` | `itzg/mc-proxy:2026.7.1-java8` | BungeeCord build 2000 | 8 | The last era of BungeeCord compiled at release 8 — the only row anywhere that loads a **proxy** entry point on a Java 8 JVM. |
+| `bungee-2000` | `itzg/mc-proxy:2025.9.0-java8` | BungeeCord build 2000 | 8 | The last era of BungeeCord compiled at release 8 — the only row anywhere that loads a **proxy** entry point on a Java 8 JVM. |
 | `bungee-2085` | `itzg/mc-proxy:2026.7.1-java21` | BungeeCord build 2085 | 21 | Current BungeeCord, which moved its own floor to Java 17 after the API version we compile against. |
 
 The proxy rows are where the one-jar design is really tested: they load the Velocity module's Java 17
@@ -73,6 +73,12 @@ as a pinned version — and strictly better than the image's own `lastStableBuil
 moving target. `run.sh --selftest` refuses a bungee row whose VERSION field is not a bare number,
 because the failure mode of getting it wrong is silent: the image falls back to `lastStableBuild` and
 the row quietly stops testing what it says it tests.
+
+**Why the Java 8 Bungee row pins an older image than everything else.** `itzg/mc-proxy:2026.7.1-java8`
+is published and does not work: its own bundled `mc-image-helper` is compiled at classfile 61, so the
+entrypoint dies with `UnsupportedClassVersionError` before it has resolved which proxy to download.
+`2025.9.0-java8` is the newest tag verified to boot BungeeCord on a Java 8 JRE, and it is pinned like
+every other image here.
 
 **Why two BungeeCord rows.** The same reason as the Velocity pair, doing more work. Build 2000 is
 Java 8 bytecode and runs on the `java8` image, which makes it the only row in the matrix that proves

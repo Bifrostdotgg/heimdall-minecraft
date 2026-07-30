@@ -160,7 +160,14 @@ ROWS=(
     #        after the 1.21-R0.4 API this module compiles against. This row is what customers run,
     #        and it is what proves an API pinned at 1.16-R0.4 still binds against a proxy five years
     #        newer.
-    "bungee-2000|itzg/mc-proxy:2026.7.1-java8|BUNGEECORD|2000|bungee|1G"
+    #
+    # The Java 8 row is pinned to an OLDER image than everything else here, and deliberately so:
+    # itzg/mc-proxy:2026.7.1-java8 cannot start at all. Its own bundled mc-image-helper is compiled
+    # at classfile 61, so the entrypoint dies with UnsupportedClassVersionError before it has even
+    # resolved which proxy to download — the `-java8` tag is published but no longer functional.
+    # 2025.9.0-java8 is the newest tag verified to boot BungeeCord on a Java 8 JRE. Pinned, like every
+    # other image here, so what it tests cannot change underneath us.
+    "bungee-2000|itzg/mc-proxy:2025.9.0-java8|BUNGEECORD|2000|bungee|1G"
     "bungee-2085|itzg/mc-proxy:2026.7.1-java21|BUNGEECORD|2085|bungee|1G"
 )
 
