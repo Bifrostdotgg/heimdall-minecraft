@@ -86,6 +86,35 @@ STUB_CONFIG_ACKED_PATTERN="config acked by ${STUB_SERVER_ID} at version"
 # Console streaming, end to end: the module batched lines off the server's own log4j tap and the
 # stub received the frame. Only visible with STUB_BOT_VERBOSE=true, which this harness sets.
 STUB_CONSOLE_PATTERN='ws recv console_line'
+
+# ── The chat bridge ──────────────────────────────────────────────────────────
+#
+# THE HALF THIS HARNESS CANNOT REACH, stated rather than faked. Everything the bridge relays OUT —
+# chat, join, leave, death — needs a player, and there is no headless client here (the same gap D43
+# names for chat cancellation, and the reason `/hd test` exists for the login path). There is no
+# console verb that injects chat either, and adding one would mean shipping a test hook in the
+# production jar to make a smoke row green: that trade is refused. Those paths are covered by the
+# module's own unit tests, which drive the REAL ChatPipeline and the REAL PlayerSessionEvents
+# through the REAL ModuleManager, and by stub-bot's BridgeFramesTest for the wire shape.
+#
+# What IS reachable from here is asserted, and it is the half that broke last time: the capability
+# has to be negotiated, and the bot->plugin direction has to have a live subscriber. Those two are
+# exactly what `get_players` shipped without.
+#
+# bridge@1 negotiated. Separate from STUB_IDENTIFIED_PATTERN so a failure says which capability is
+# missing rather than "the identify looked wrong".
+STUB_BRIDGE_CAPABILITY_PATTERN="identified: server=${STUB_SERVER_ID} .* capabilities=\\[.*bridge@1"
+# The stub pushed a rendered line and the plugin's bridge module HANDLED it. `0 online player(s)` is
+# the expected audience — this harness has no client — and it is still a real assertion, for the
+# same reason `0 players` is on the roster row: a plugin with no subscription logs nothing at all.
+# The `[1-9]` on the message count is the other half: `relayed 0 discord message(s)` is what a
+# handler that ran and understood nothing would print.
+BRIDGE_DELIVERED_PATTERN='\[bridge\] relayed [1-9][0-9]* discord message\(s\) to [0-9]+ online player\(s\)'
+# What the stub is told to push. Deliberately ASCII: the § codes are what the real bot sends, but
+# the plugin logs no content, so a § here would prove nothing at this end and would put a non-ASCII
+# byte through `docker run -e` on three host platforms for it.
+STUB_DISCORD_ON_ACK='[Discord] smoke: bridge reachable'
+STUB_DISCORD_SENT_PATTERN="on-ack bridge.discord -> ${STUB_SERVER_ID}: [0-9]+ message\\(s\\), delivered=1"
 # The whitelist sync really crossed the wire, as a signed request the stub accepted. The plugin's
 # own "Mirror reconcile" line proves it processed a response; only the stub can prove it asked.
 STUB_SYNC_PATTERN="GET /api/guilds/${STUB_GUILD}/minecraft/whitelist/sync"
@@ -293,6 +322,51 @@ selftest() {
     check_match "${STUB_ROSTER_PATTERN}" \
         "[stub-bot 22:41:07.883] on-ack get_players -> ${STUB_SERVER_ID}: 0 players" \
         yes "the plugin answered the bot's get_players" || failures=$((failures + 1))
+
+    # ── The chat bridge ──────────────────────────────────────────────────────
+    check_match "${STUB_BRIDGE_CAPABILITY_PATTERN}" \
+        "[stub-bot 18:58:29.744] identified: server=${STUB_SERVER_ID} name=survival protocol=3 registered=true capabilities=[health@1, whitelist@1, rolesync@1, console@1, bridge@1]" \
+        yes "bridge: the capability was declared" || failures=$((failures + 1))
+    # The near-miss that matters: every other capability present and this one absent is exactly what
+    # a build that forgot to register the module looks like, and the identify line still looks fine.
+    check_match "${STUB_BRIDGE_CAPABILITY_PATTERN}" \
+        "[stub-bot 18:58:29.744] identified: server=${STUB_SERVER_ID} name=survival protocol=3 registered=true capabilities=[health@1, whitelist@1, rolesync@1, console@1]" \
+        no "bridge: a declared capability vs a build that shipped without the module" \
+        || failures=$((failures + 1))
+    # And a major bump must not satisfy it: bridge@2 against a bot that speaks major 1 is DROPPED,
+    # so a row that accepted the string would be green on a plugin receiving no bridge config at all.
+    check_match "${STUB_BRIDGE_CAPABILITY_PATTERN}" \
+        "[stub-bot] identified: server=${STUB_SERVER_ID} name=Survival protocol=3 registered=true capabilities=[whitelist@1, bridge@2]" \
+        no "bridge: bridge@1 vs an unnegotiable bridge@2" || failures=$((failures + 1))
+
+    check_match "${STUB_DISCORD_SENT_PATTERN}" \
+        "[stub-bot 18:58:30.257] on-ack bridge.discord -> ${STUB_SERVER_ID}: 1 message(s), delivered=1" \
+        yes "bridge: the stub pushed a Discord line" || failures=$((failures + 1))
+    # delivered=0 means the socket had already gone. The plugin-side assertion below would then be
+    # asserting against a frame that was never sent, which is a harness failure wearing a plugin's
+    # clothes.
+    check_match "${STUB_DISCORD_SENT_PATTERN}" \
+        "[stub-bot 18:58:30.257] on-ack bridge.discord -> ${STUB_SERVER_ID}: 1 message(s), delivered=0" \
+        no "bridge: a delivered push vs one that reached no socket" || failures=$((failures + 1))
+
+    # The [DEBUG] marker is in the sample because it is in the real line — the module logs this at
+    # debug, and every configured row's bootstrap.yml sets `debug: true`. A row run without it would
+    # produce no line at all, which is a harness problem the pattern cannot distinguish from a
+    # missing subscriber, so it is worth seeing here.
+    check_match "${BRIDGE_DELIVERED_PATTERN}" \
+        "[18:58:30 INFO]: [Heimdall] [DEBUG] [bridge] relayed 1 discord message(s) to 0 online player(s)" \
+        yes "bridge: the plugin rendered and fanned out an inbound line" || failures=$((failures + 1))
+    # THE near-miss. A handler that ran but skipped every message — an empty text, a payload shape it
+    # did not understand — prints exactly this, and it is the difference between "the subscription
+    # works" and "the subscription exists".
+    check_match "${BRIDGE_DELIVERED_PATTERN}" \
+        "[18:58:30 INFO]: [Heimdall] [DEBUG] [bridge] relayed 0 discord message(s) to 0 online player(s)" \
+        no "bridge: a relayed message vs a handler that understood none" || failures=$((failures + 1))
+    # And another module's line must not satisfy it. Both the console and the bridge are batching
+    # relays, and the prefix is the only thing in the line that says which one spoke.
+    check_match "${BRIDGE_DELIVERED_PATTERN}" \
+        "[18:58:30 INFO]: [Heimdall] [DEBUG] [console] relayed 1 discord message(s) to 0 online player(s)" \
+        no "bridge: the bridge module's line vs another module's" || failures=$((failures + 1))
     # THE near-miss, and the only one that matters here: with no handler subscribed the plugin
     # replies nothing at all and the stub logs a timeout instead. A pattern that matched this would
     # be green on exactly the build this row exists to fail.
@@ -809,8 +883,9 @@ row_body() {
             -e "STUB_BOT_GUILD_ID=${STUB_GUILD}" \
             -e "STUB_BOT_API_KEY=${STUB_SECRET}" \
             -e STUB_BOT_VERBOSE=true \
-            -e 'STUB_BOT_MODULES={"whitelist":{"enabled":true},"rolesync":{"enabled":true},"offenses":{"enabled":true},"console":{"enabled":true}}' \
+            -e 'STUB_BOT_MODULES={"whitelist":{"enabled":true},"rolesync":{"enabled":true},"offenses":{"enabled":true},"console":{"enabled":true},"bridge":{"enabled":true}}' \
             -e "STUB_BOT_REQUEST_ON_ACK=${STUB_ON_ACK_REQUESTS}" \
+            -e "STUB_BOT_DISCORD_ON_ACK=${STUB_DISCORD_ON_ACK}" \
             ${stub_env[@]+"${stub_env[@]}"} \
             eclipse-temurin:21-jre /opt/stub-bot/bin/stub-bot >/dev/null; then
         fail "HARNESS: could not start the stub bot"
@@ -1093,6 +1168,8 @@ assert_row() {
     fi
     pass "the bot's on-demand get_players was answered"
 
+    assert_bridge || return 1
+
     # Waited for last rather than first: a server that is still generating its spawn area has not
     # finished booting, and stopping it there loses the shutdown race.
     if [ "${platform}" = "bukkit" ]; then
@@ -1100,6 +1177,50 @@ assert_row() {
             || return 1
         assert_login_probe || return 1
     fi
+    return 0
+}
+
+# The chat bridge, as far as a harness with no client can take it.
+#
+# Run on ALL THREE configured rows, and the Velocity one is not a formality: the bridge module is
+# eligible on every role, so a proxy negotiates bridge@1 and delivers bridge.discord exactly as a
+# backend does. What differs on a proxy is only relayChat, which defaults OFF there — and that
+# default is precisely why the OUTBOUND direction cannot be asserted here even in principle on that
+# row.
+#
+# The outbound half is unreachable on every row for a simpler reason: it needs a player. Chat, join,
+# leave and death all do, and there is no headless client in this harness. That gap is NOT papered
+# over with a console verb that injects fake chat — shipping a test hook in the production jar to
+# turn a row green is the kind of trade that makes a suite worthless. It is covered instead by
+# HeimdallBridgeModuleTest, which drives the real ChatPipeline and the real PlayerSessionEvents
+# through the real ModuleManager, and by stub-bot's BridgeFramesTest for the wire shape. When the
+# headless client D43 has been waiting for arrives, this is the function it plugs into.
+# shellcheck disable=SC2317
+assert_bridge() {
+    if ! wait_for_pattern "${stub_log}" "${STUB_BRIDGE_CAPABILITY_PATTERN}" 30 \
+            "the bridge capability to be declared"; then
+        fail "the plugin connected without bridge@1, so the bot would never send it a Discord line"
+        fail "— the module is missing from this build, or ineligible on this role"
+        return 1
+    fi
+    pass "bridge@1 negotiated"
+
+    if ! wait_for_pattern "${stub_log}" "${STUB_DISCORD_SENT_PATTERN}" 60 \
+            "the stub to push a rendered Discord line"; then
+        fail "HARNESS: the on-ack bridge.discord never went out, so the assertion below would be"
+        fail "about a frame that was never sent"
+        return 1
+    fi
+
+    if ! wait_for_pattern "${server_log}" "${BRIDGE_DELIVERED_PATTERN}" 60 \
+            "the plugin to render and fan out the inbound line"; then
+        fail "the frame crossed the wire and nothing handled it. That is the failure get_players"
+        fail "shipped with — a complete delivery path with nothing subscribed to the request — and"
+        fail "in this direction it is silent at both ends: the bot sends a notification and waits"
+        fail "for no reply, so only the plugin's own line can prove a subscriber existed."
+        return 1
+    fi
+    pass "an inbound Discord line was rendered and fanned out (0 players — no client in this harness)"
     return 0
 }
 

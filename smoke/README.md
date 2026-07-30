@@ -239,6 +239,8 @@ over the console, or a v2 config migrated on the first boot (see [the modes](#si
 | The whitelist mirror pre-warms | plugin log | a signed `GET whitelist/sync` round trip, reconciled into a real file on a real disk |
 | Console lines reach the bot | stub log | the log4j tap, the module's batching and the tunnel, end to end |
 | The bot's `get_players` is **answered** | stub log | the one assertion pointing the *other* way down the tunnel — see below |
+| `bridge@1` is negotiated | stub log | a build that shipped without the bridge module produces an identify line that otherwise looks perfectly healthy |
+| An inbound Discord line is **rendered and fanned out** | plugin log | the second assertion pointing the other way, and the only one available for it — see below |
 | It still unloads cleanly | plugin log | with a live tunnel, which `run.sh` never has |
 
 **The `get_players` row is new, and it exists because every other row above it stayed green on a
@@ -260,6 +262,36 @@ no config had arrived, and no config could arrive because the bot narrows its pu
 capability. A fresh install could never have been configured, and every later boot would have been
 in the same state. Nothing in 434 unit tests could see it — it needed real modules and a real bot in
 one process, which is exactly what this scenario is.
+
+### The chat bridge, and the half of it a harness with no client cannot reach
+
+Two of the rows above are the bridge's, and they are the two that are reachable. `bridge@1` has to be
+negotiated — a build that forgot to register the module, or one where it turned out ineligible on a
+role, produces an identify line that is otherwise indistinguishable from a healthy one — and
+`STUB_BOT_DISCORD_ON_ACK` makes the stub push a rendered `bridge.discord` once the server has acked
+its config, which the plugin must log as `relayed 1 discord message(s) to 0 online player(s)`.
+
+That second one is the direction that has no other witness. Unlike `get_players`, `bridge.discord` is
+a **notification**: the bot sends it and waits for no reply, so nothing on the stub's side can tell a
+plugin that handled it from a plugin with no subscription at all. Only the plugin's own line can, and
+the `[1-9]` in the pattern is doing real work — a handler that ran and understood nothing prints
+`relayed 0`. The audience is zero because there is no client here, which is the same shape of
+assertion as `0 players` on the roster row: what is being distinguished is handled-at-all.
+
+**The outbound direction is not asserted here, on any row, and is not faked.** Chat, joins, leaves
+and deaths all need a player, and there is no headless client in this harness. There is also no
+console verb that injects chat — and adding one would mean shipping a test hook in the production jar
+to make a row green, which is a worse outcome than an honest gap. Those paths are covered by
+`HeimdallBridgeModuleTest`, which drives the real `ChatPipeline` and the real `PlayerSessionEvents`
+through the real `ModuleManager` (including the drop-oldest bound, drain-and-discard while
+disconnected, and the verbatim-text rule), and by `stub-bot`'s `BridgeFramesTest` for the wire shape
+in both directions. When the headless client D43 has been waiting for arrives, `assert_bridge` is the
+function it plugs into.
+
+The proxy rows run the bridge assertions too, and that is not a formality: the module is eligible on
+every role, so a proxy negotiates `bridge@1` and delivers `bridge.discord` exactly as a backend does.
+What differs there is only `relayChat`, which defaults **off** on a gatekeeper — which is a second,
+independent reason the outbound direction could not be asserted on that row even with a client.
 
 ### The login gate, without a login
 
