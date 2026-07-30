@@ -79,6 +79,25 @@ public final class MigrationBoot {
      */
     public static final String V2_VELOCITY_DIRECTORY = "heimdall-whitelist";
 
+    /**
+     * What a platform passes when v2 never had a build for it — BungeeCord.
+     *
+     * <p>v2 shipped exactly two entry points, Bukkit and Velocity, so no BungeeCord proxy has ever
+     * had a {@code plugins/HeimdallWhitelist/} or {@code plugins/heimdall-whitelist/} of its own.
+     * There is no sibling directory to name, and naming one anyway would be worse than useless: it
+     * would be a guess presented as a fact in the one log line an operator reads when an upgrade
+     * appears to have lost their configuration.
+     *
+     * <p>The plugin's <em>own</em> data directory is still searched, which is deliberate and is the
+     * same rule the other two platforms follow — "a config an operator has already dropped into the
+     * v3 directory by hand is the one they meant". So a v2 config copied across from a backend
+     * server still migrates, and one left in a directory that merely looks like v2's still produces
+     * {@link com.heimdall.core.migrate.V2Migration}'s near-miss line telling the operator where to
+     * put it (departure D70). What is skipped is only the guess about where v2 <em>would</em> have
+     * kept it.
+     */
+    public static final String NO_V2_DIRECTORY = "";
+
     /** How often the deferred import re-checks whether the bot can be asked. */
     private static final long IMPORT_RETRY_MS = 10_000L;
 
@@ -95,7 +114,9 @@ public final class MigrationBoot {
      * bootstrap into an immutable object. Running it afterwards would write a file nothing re-reads.
      *
      * @param dataDirectory this plugin's own data directory
-     * @param v2DirectoryName what v2's directory is called on this platform — see the constants
+     * @param v2DirectoryName what v2's directory is called on this platform — see the constants;
+     *     {@link #NO_V2_DIRECTORY} for a platform v2 never shipped a build for, which searches this
+     *     plugin's own directory and nothing beside it
      * @return what happened; safe to call on every boot, since an existing {@code bootstrap.yml}
      *     short-circuits it
      */
@@ -104,7 +125,7 @@ public final class MigrationBoot {
         List<Path> searchDirectories = new ArrayList<Path>();
         searchDirectories.add(dataDirectory);
         Path parent = dataDirectory.getParent();
-        if (parent != null) {
+        if (parent != null && !Strings.isBlank(v2DirectoryName)) {
             searchDirectories.add(parent.resolve(v2DirectoryName));
         }
         return new V2Migration(logger).run(searchDirectories, store);

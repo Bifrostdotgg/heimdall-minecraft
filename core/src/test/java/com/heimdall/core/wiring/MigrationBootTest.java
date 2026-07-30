@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
+import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.migrate.MigrationResult;
 import com.heimdall.core.migrate.V2Migration;
@@ -18,10 +19,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * Where the boot half looks for a v2 install, which is a pair of string constants and nothing else.
+ * Where the boot half looks for a v2 install, which is two string constants and one deliberate
+ * absence.
  *
  * <p>These names are not ours to choose: each platform derives a plugin's directory from something
- * v2 declared, so the only correct value is v2's own declaration copied out. They are pinned here
+ * v2 declared, so the only correct value is v2's own declaration copied out — and on BungeeCord,
+ * where v2 never shipped a build at all, the only correct value is no directory. They are pinned here
  * because a wrong one fails in the single way nothing catches — a v2 → v3 upgrade quietly boots as
  * an unconfigured server, which is indistinguishable from a fresh install unless somebody is looking
  * at the filesystem. That is exactly how {@code heimdallwhitelist} shipped (departure D70).
@@ -150,5 +153,85 @@ class MigrationBootTest {
         assertEquals(MigrationResult.Status.MIGRATED, result.status());
         assertEquals(v2Directory.resolve("config.yml"), result.source());
         assertTrue(store.exists());
+    }
+
+    @Test
+    @DisplayName("a platform v2 never shipped on searches its own directory and nothing beside it")
+    void noV2DirectorySearchesOnlyItsOwn(@TempDir Path plugins) throws IOException {
+        // BungeeCord. v2 had exactly two entry points, Bukkit and Velocity, so no Bungee proxy has
+        // ever had a v2 directory — but a plugins/ folder full of OTHER plugins' directories is
+        // ordinary, and one of them being called something v2-ish must not make this go looking.
+        Path v3Directory = Files.createDirectories(plugins.resolve("Heimdall"));
+        Path other = Files.createDirectories(plugins.resolve("HeimdallWhitelist"));
+        Files.write(other.resolve("config.yml"), V2_CONFIG_YML.getBytes(StandardCharsets.UTF_8));
+
+        BootstrapStore store = new BootstrapStore(logger, v3Directory.resolve("bootstrap.yml"));
+        MigrationResult result = MigrationBoot.migrate(
+                logger, store, v3Directory, MigrationBoot.NO_V2_DIRECTORY);
+
+        assertEquals(MigrationResult.Status.NOT_FOUND, result.status(),
+                "the sibling directory was not in the search list, so nothing there is v2's");
+        assertFalse(store.exists());
+        assertTrue(Files.isRegularFile(other.resolve("config.yml")),
+                "and a file in a directory this platform does not own is not touched");
+    }
+
+    @Test
+    @DisplayName("...and a config dropped into its own directory by hand still migrates")
+    void noV2DirectoryStillMigratesItsOwn(@TempDir Path plugins) throws IOException {
+        // The reason the own-directory half is kept rather than skipping the migration outright: an
+        // operator standing a proxy up beside their backends can copy a v2 config in, and the rule
+        // on every platform is that a file they placed themselves is the one they meant.
+        Path v3Directory = Files.createDirectories(plugins.resolve("Heimdall"));
+        Files.write(v3Directory.resolve("config.yml"), V2_CONFIG_YML.getBytes(StandardCharsets.UTF_8));
+
+        BootstrapStore store = new BootstrapStore(logger, v3Directory.resolve("bootstrap.yml"));
+        MigrationResult result = MigrationBoot.migrate(
+                logger, store, v3Directory, MigrationBoot.NO_V2_DIRECTORY);
+
+        assertEquals(MigrationResult.Status.MIGRATED, result.status());
+        assertEquals(v3Directory.resolve("config.yml"), result.source());
+        assertTrue(store.exists());
+    }
+
+    @Test
+    @DisplayName("the near-miss diagnostic does not fire on an ordinary proxy plugins/ folder")
+    void nearMissStaysQuietForAShippedJar(@TempDir Path plugins) throws IOException {
+        // The shaded jar is called heimdall-whitelist-<version>.jar and it sits in plugins/, right
+        // beside the directory being searched — and V2Migration's near-miss test normalises away
+        // hyphens and dots, so its NAME matches "heimdall" + "whitelist" exactly. What stops it
+        // being reported is the isDirectory() check, and this is what holds that to account: every
+        // Bungee proxy in the fleet would otherwise be told on every boot that its own jar might be
+        // a v2 install whose config is in the wrong place.
+        Path v3Directory = Files.createDirectories(plugins.resolve("Heimdall"));
+        Files.write(plugins.resolve("heimdall-whitelist-3.0.0.jar"), new byte[] {0x50, 0x4B, 3, 4});
+
+        BootstrapStore store = new BootstrapStore(logger, v3Directory.resolve("bootstrap.yml"));
+        MigrationResult result = MigrationBoot.migrate(
+                logger, store, v3Directory, MigrationBoot.NO_V2_DIRECTORY);
+
+        assertEquals(MigrationResult.Status.NOT_FOUND, result.status());
+        assertFalse(logger.logged(LogLevel.INFO, "looks like a v2 install"),
+                "a fresh install must boot silently; the near-miss line is for an upgrade that "
+                        + "went wrong: " + logger.records());
+    }
+
+    @Test
+    @DisplayName("but a real v2-looking DIRECTORY beside it still gets the near-miss line")
+    void nearMissStillFiresForADirectory(@TempDir Path plugins) throws IOException {
+        // The other side of the same coin, and the reason NO_V2_DIRECTORY keeps calling migrate()
+        // rather than skipping it: an operator who copies plugins/HeimdallWhitelist/ across from a
+        // backend gets told where to put the file, instead of a silent unconfigured boot.
+        Path v3Directory = Files.createDirectories(plugins.resolve("Heimdall"));
+        Files.createDirectories(plugins.resolve("HeimdallWhitelist"));
+
+        BootstrapStore store = new BootstrapStore(logger, v3Directory.resolve("bootstrap.yml"));
+        MigrationResult result = MigrationBoot.migrate(
+                logger, store, v3Directory, MigrationBoot.NO_V2_DIRECTORY);
+
+        assertEquals(MigrationResult.Status.NOT_FOUND, result.status());
+        assertTrue(logger.logged(LogLevel.INFO, "looks like a v2 install"),
+                "the diagnostic is the only thing standing between an operator and a boot that "
+                        + "looks exactly like a fresh install: " + logger.records());
     }
 }
