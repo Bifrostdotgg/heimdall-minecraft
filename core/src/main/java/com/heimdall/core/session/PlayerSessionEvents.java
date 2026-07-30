@@ -11,7 +11,8 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Where a platform adapter reports that a player joined or left, and where modules hear about it.
+ * Where a platform adapter reports that a player joined, left or died, and where modules hear about
+ * it.
  *
  * <h2>Why this is not a pipeline and not a facade method</h2>
  *
@@ -22,14 +23,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * something — and every platform would then have to implement a listener registry as well as a set
  * of accessors.
  *
+ * <h2>Three things, two interfaces</h2>
+ *
+ * <p>Join and quit share {@link PlayerSessionListener}; death has {@link PlayerDeathListener} of its
+ * own, because it carries the server's death message and the other two carry nothing. The
+ * <em>machinery</em> is shared regardless — one {@code Subscription} type, one deactivate-then-unlist
+ * rule, one containment policy — so a fourth notification is a list and a dispatch call rather than
+ * a second copy of the hard part (departure D80).
+ *
  * <h2>Handlers never run on the event thread</h2>
  *
- * <p>{@link #join} and {@link #quit} hand off to {@code heimdall-io} and return immediately. On
- * Bukkit, {@code PlayerJoinEvent} is on the main server thread: a listener that wrote a mirror
- * entry, or worse made a network call, would put that on the tick loop for every join. On Velocity
- * the event thread is one of the proxy's own, with the same argument one step removed.
+ * <p>{@link #join}, {@link #quit} and {@link #death} hand off to {@code heimdall-io} and return
+ * immediately. On Bukkit, {@code PlayerJoinEvent} and {@code PlayerDeathEvent} are on the main
+ * server thread: a listener that wrote a mirror entry, or worse made a network call, would put that
+ * on the tick loop for every join and every death. On Velocity the event thread is one of the
+ * proxy's own, with the same argument one step removed.
  *
- * <p>The consequence to know when writing a listener: <strong>join and quit are not ordered
+ * <p>The consequence to know when writing a listener: <strong>the notifications are not ordered
  * relative to each other</strong> once they are off the event thread, and a quit for a player who
  * reconnected immediately can in principle land after the second join. That is why the timestamp is
  * carried on the event rather than read by the listener.
@@ -66,10 +76,12 @@ public final class PlayerSessionEvents {
     private final HeimdallLogger logger;
     private final Executor executor;
 
-    private final CopyOnWriteArrayList<Subscription> joinListeners =
-            new CopyOnWriteArrayList<Subscription>();
-    private final CopyOnWriteArrayList<Subscription> quitListeners =
-            new CopyOnWriteArrayList<Subscription>();
+    private final CopyOnWriteArrayList<Subscription<PlayerSessionListener>> joinListeners =
+            new CopyOnWriteArrayList<Subscription<PlayerSessionListener>>();
+    private final CopyOnWriteArrayList<Subscription<PlayerSessionListener>> quitListeners =
+            new CopyOnWriteArrayList<Subscription<PlayerSessionListener>>();
+    private final CopyOnWriteArrayList<Subscription<PlayerDeathListener>> deathListeners =
+            new CopyOnWriteArrayList<Subscription<PlayerDeathListener>>();
 
     /**
      * @param executor where listeners run; {@code heimdall-io} in production. A same-thread executor
@@ -96,12 +108,22 @@ public final class PlayerSessionEvents {
     }
 
     /**
+     * Subscribes to deaths.
+     *
+     * <p>Never fires on a proxy: neither Velocity nor BungeeCord has a death event, because a proxy
+     * does not see the game state that produces one. See {@link PlayerDeathListener}.
+     */
+    public Registration onDeath(PlayerDeathListener listener) {
+        return register(deathListeners, listener);
+    }
+
+    /**
      * Reports a join. Called by the platform adapter, on the platform's event thread.
      *
      * <p>Returns as soon as the hand-off is queued. Never throws.
      */
     public void join(PlayerHandle player, long timestampMs) {
-        dispatch("join", joinListeners, player, timestampMs);
+        dispatchSession("join", joinListeners, player, timestampMs);
     }
 
     /**
@@ -111,7 +133,34 @@ public final class PlayerSessionEvents {
      * that by doing nothing, so a listener does not have to check.
      */
     public void quit(PlayerHandle player, long timestampMs) {
-        dispatch("quit", quitListeners, player, timestampMs);
+        dispatchSession("quit", quitListeners, player, timestampMs);
+    }
+
+    /**
+     * Reports a death. Called by the platform adapter, on the platform's event thread.
+     *
+     * <p>Returns as soon as the hand-off is queued. Never throws.
+     *
+     * @param deathMessage the server's own message, or {@code null} when it suppressed one. Passed
+     *     through untouched — see {@link PlayerDeathListener}
+     */
+    public void death(final PlayerHandle player, final String deathMessage, final long timestampMs) {
+        if (player == null || deathListeners.isEmpty()) {
+            return;
+        }
+        final List<Subscription<PlayerDeathListener>> snapshot =
+                new ArrayList<Subscription<PlayerDeathListener>>(deathListeners);
+        handOff("death", player, new Runnable() {
+            @Override
+            public void run() {
+                deliver("death", snapshot, player, new Delivery<PlayerDeathListener>() {
+                    @Override
+                    public void deliver(PlayerDeathListener listener) {
+                        listener.onPlayerDeath(player, deathMessage, timestampMs);
+                    }
+                });
+            }
+        });
     }
 
     /** How many join listeners are registered. For tests and diagnostics. */
@@ -124,14 +173,19 @@ public final class PlayerSessionEvents {
         return quitListeners.size();
     }
 
+    /** How many death listeners are registered. For tests and diagnostics. */
+    public int deathListenerCount() {
+        return deathListeners.size();
+    }
+
     // ── Internals ────────────────────────────────────────────────────────────
 
-    private Registration register(
-            final CopyOnWriteArrayList<Subscription> into, final PlayerSessionListener listener) {
+    private <L> Registration register(
+            final CopyOnWriteArrayList<Subscription<L>> into, final L listener) {
         if (listener == null) {
             throw new IllegalArgumentException("listener is required");
         }
-        final Subscription subscription = new Subscription(listener);
+        final Subscription<L> subscription = new Subscription<L>(listener);
         into.add(subscription);
         return Registration.once(new Runnable() {
             @Override
@@ -145,9 +199,9 @@ public final class PlayerSessionEvents {
         });
     }
 
-    private void dispatch(
+    private void dispatchSession(
             final String what,
-            final List<Subscription> listeners,
+            final List<Subscription<PlayerSessionListener>> listeners,
             final PlayerHandle player,
             final long timestampMs) {
         if (player == null || listeners.isEmpty()) {
@@ -156,14 +210,25 @@ public final class PlayerSessionEvents {
         // Snapshotted on the event thread rather than inside the task: the list is copy-on-write, so
         // either would be safe to iterate, but taking the view here means a listener registered
         // between the event and the hand-off does not see an event from before it existed.
-        final List<Subscription> snapshot = new ArrayList<Subscription>(listeners);
+        final List<Subscription<PlayerSessionListener>> snapshot =
+                new ArrayList<Subscription<PlayerSessionListener>>(listeners);
+        handOff(what, player, new Runnable() {
+            @Override
+            public void run() {
+                deliver(what, snapshot, player, new Delivery<PlayerSessionListener>() {
+                    @Override
+                    public void deliver(PlayerSessionListener listener) {
+                        listener.onPlayerSession(player, timestampMs);
+                    }
+                });
+            }
+        });
+    }
+
+    /** Queues one delivery task, containing everything the executor can do to refuse it. */
+    private void handOff(final String what, final PlayerHandle player, Runnable task) {
         try {
-            executor.execute(new Runnable() {
-                @Override
-                public void run() {
-                    deliver(what, snapshot, player, timestampMs);
-                }
-            });
+            executor.execute(task);
         } catch (RejectedExecutionException shuttingDown) {
             logger.debug(() -> "dropping a player " + what + " notification: the pools are "
                     + "shutting down");
@@ -174,10 +239,10 @@ public final class PlayerSessionEvents {
         }
     }
 
-    private void deliver(
-            String what, List<Subscription> snapshot, PlayerHandle player, long timestampMs) {
+    private <L> void deliver(
+            String what, List<Subscription<L>> snapshot, PlayerHandle player, Delivery<L> delivery) {
         boolean reported = false;
-        for (Subscription subscription : snapshot) {
+        for (Subscription<L> subscription : snapshot) {
             // Re-checked here, inside the executor, and not only when the snapshot was taken. This
             // is the line that stops a disabled module's listener running against collaborators it
             // has already closed. See the class javadoc.
@@ -185,7 +250,7 @@ public final class PlayerSessionEvents {
                 continue;
             }
             try {
-                subscription.listener.onPlayerSession(player, timestampMs);
+                delivery.deliver(subscription.listener);
             } catch (Throwable broken) {
                 // Throwable, not RuntimeException. What is worth being careful about here is a
                 // NoSuchMethodError or NoClassDefFoundError from a listener that reached an API
@@ -204,17 +269,29 @@ public final class PlayerSessionEvents {
     }
 
     /**
+     * How one listener is invoked, so the containment loop above is written once.
+     *
+     * <p>The two listener interfaces take different arguments, and the interesting part —
+     * re-checking the active flag, containing a {@code Throwable}, reporting only the first failure
+     * — is identical for both. Without this the death dispatch would be a second copy of that loop,
+     * which is exactly where the two would drift.
+     */
+    private interface Delivery<L> {
+        void deliver(L listener);
+    }
+
+    /**
      * One listener and whether it is still live.
      *
      * <p>Identity-compared, so two modules registering the same lambda stay independent — the same
      * reason {@code SubscriptionRegistry} wraps its handlers rather than storing them bare.
      */
-    private static final class Subscription {
+    private static final class Subscription<L> {
 
-        private final PlayerSessionListener listener;
+        private final L listener;
         private final AtomicBoolean active = new AtomicBoolean(true);
 
-        Subscription(PlayerSessionListener listener) {
+        Subscription(L listener) {
             this.listener = listener;
         }
     }

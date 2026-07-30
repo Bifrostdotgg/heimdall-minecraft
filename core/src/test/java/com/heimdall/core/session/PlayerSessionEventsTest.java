@@ -251,10 +251,105 @@ class PlayerSessionEventsTest {
 
         events.join(null, 1L);
         events.quit(null, 1L);
+        events.death(null, "Steve fell from a high place", 1L);
 
         assertTrue(joins.isEmpty());
         assertThrows(IllegalArgumentException.class, () -> events.onJoin(null));
         assertThrows(IllegalArgumentException.class, () -> events.onQuit(null));
+        assertThrows(IllegalArgumentException.class, () -> events.onDeath(null));
         assertThrows(IllegalArgumentException.class, () -> new PlayerSessionEvents(logger, null));
+    }
+
+    // ── Death (D80) ──────────────────────────────────────────────────────────
+
+    private static PlayerDeathListener deathsInto(final List<String> sink) {
+        return new PlayerDeathListener() {
+            @Override
+            public void onPlayerDeath(PlayerHandle player, String deathMessage, long timestampMs) {
+                sink.add(player.name() + "@" + timestampMs + ":" + deathMessage);
+            }
+        };
+    }
+
+    @Test
+    @DisplayName("a death carries the server's own message, verbatim, and its own timestamp")
+    void deathCarriesTheServersMessage() {
+        PlayerSessionEvents events = new PlayerSessionEvents(logger, INLINE);
+        List<String> deaths = new ArrayList<String>();
+        events.onDeath(deathsInto(deaths));
+
+        events.death(FakePlayer.named("Steve"), "Steve was slain by Alex", 4321L);
+
+        assertEquals(
+                java.util.Collections.singletonList("Steve@4321:Steve was slain by Alex"), deaths,
+                "the death message is the server's sentence; a relay that reworded it would be "
+                        + "attributing something to the server that the server did not write");
+    }
+
+    @Test
+    @DisplayName("a suppressed death message arrives as null rather than as an invented sentence")
+    void aSuppressedMessageStaysAbsent() {
+        PlayerSessionEvents events = new PlayerSessionEvents(logger, INLINE);
+        List<String> deaths = new ArrayList<String>();
+        events.onDeath(deathsInto(deaths));
+
+        // Bukkit's PlayerDeathEvent.getDeathMessage() is genuinely nullable — a plugin that clears
+        // it, or a gamerule that switched death messages off, produces exactly this.
+        events.death(FakePlayer.named("Steve"), null, 1L);
+
+        assertEquals(java.util.Collections.singletonList("Steve@1:null"), deaths);
+    }
+
+    @Test
+    @DisplayName("death listeners are separate from join and quit ones")
+    void deathIsItsOwnChannel() {
+        PlayerSessionEvents events = new PlayerSessionEvents(logger, INLINE);
+        List<String> sessions = new ArrayList<String>();
+        List<String> deaths = new ArrayList<String>();
+        events.onJoin(collectingInto(sessions));
+        events.onQuit(collectingInto(sessions));
+        events.onDeath(deathsInto(deaths));
+
+        events.death(FakePlayer.named("Steve"), "Steve drowned", 1L);
+
+        assertTrue(sessions.isEmpty(), "a death is not a join and it is not a quit");
+        assertEquals(1, deaths.size());
+        assertEquals(1, events.deathListenerCount());
+    }
+
+    @Test
+    @DisplayName("a broken death listener is contained exactly like a session one")
+    void aBrokenDeathListenerIsContained() {
+        PlayerSessionEvents events = new PlayerSessionEvents(logger, INLINE);
+        List<String> reached = new ArrayList<String>();
+        events.onDeath(new PlayerDeathListener() {
+            @Override
+            public void onPlayerDeath(PlayerHandle player, String deathMessage, long timestampMs) {
+                throw new NoSuchMethodError("org.bukkit.Something.gone()");
+            }
+        });
+        events.onDeath(deathsInto(reached));
+
+        events.death(FakePlayer.named("Steve"), "Steve burned to death", 1L);
+
+        assertEquals(1, reached.size(),
+                "the containment loop is shared with join and quit, so this must behave identically");
+        assertTrue(logger.logged(LogLevel.SEVERE, "death listener failed"), logger.records().toString());
+    }
+
+    @Test
+    @DisplayName("closing a death registration stops it, queued task or not")
+    void deathRegistrationIsUndone() {
+        PlayerSessionEvents events = new PlayerSessionEvents(logger, INLINE);
+        List<String> deaths = new ArrayList<String>();
+        Registration handle = events.onDeath(deathsInto(deaths));
+
+        events.death(FakePlayer.named("Steve"), "Steve fell out of the world", 1L);
+        handle.close();
+        handle.close();
+        events.death(FakePlayer.named("Alex"), "Alex was shot by Skeleton", 2L);
+
+        assertEquals(1, deaths.size());
+        assertEquals(0, events.deathListenerCount());
     }
 }

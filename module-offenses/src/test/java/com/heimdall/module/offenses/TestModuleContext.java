@@ -15,6 +15,7 @@ import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
+import com.heimdall.core.session.PlayerDeathListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.util.Registration;
@@ -175,6 +176,11 @@ final class TestModuleContext implements ModuleContext {
     @Override
     public Registration onPlayerQuit(PlayerSessionListener listener) {
         throw unused("onPlayerQuit");
+    }
+
+    @Override
+    public Registration onPlayerDeath(PlayerDeathListener listener) {
+        throw unused("onPlayerDeath");
     }
 
     @Override

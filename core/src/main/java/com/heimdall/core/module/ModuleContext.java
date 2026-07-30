@@ -14,6 +14,7 @@ import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
+import com.heimdall.core.session.PlayerDeathListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.util.Registration;
@@ -132,6 +133,18 @@ public interface ModuleContext {
      * that by doing nothing.
      */
     Registration onPlayerQuit(PlayerSessionListener listener);
+
+    /**
+     * Called when a player dies, on {@code heimdall-io}, carrying the server's own death message.
+     *
+     * <p>Its own interface rather than a third {@link PlayerSessionListener} verb because it carries
+     * a string the other two do not — see {@link com.heimdall.core.session.PlayerDeathListener}.
+     *
+     * <p><strong>Never fires on a proxy.</strong> Neither Velocity nor BungeeCord has a death event,
+     * so a module that relays deaths relays the ones its backends report and nothing on the
+     * gatekeeper. That is a fact about the platforms, not a gap to compensate for.
+     */
+    Registration onPlayerDeath(PlayerDeathListener listener);
 
     // ── Commands ─────────────────────────────────────────────────────────────
 

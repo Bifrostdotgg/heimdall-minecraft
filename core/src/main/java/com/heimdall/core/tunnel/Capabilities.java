@@ -29,6 +29,15 @@ public final class Capabilities {
     /** Periodic TPS/memory/player-count snapshots on the heartbeat. */
     public static final String HEALTH = "health@1";
 
+    /**
+     * The Discord chat bridge: batched {@code bridge.chat} and {@code bridge.event} out, rendered
+     * {@code bridge.discord} in.
+     *
+     * <p>Relay only. Nothing behind this capability stores a message, on either side of the wire —
+     * see {@link com.heimdall.core.pipeline.ChatPipeline} and departure D79.
+     */
+    public static final String BRIDGE = "bridge@1";
+
     /** The module framework itself: this client can enable and disable modules at runtime. */
     public static final String MODULES = "modules@1";
 
