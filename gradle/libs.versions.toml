@@ -29,6 +29,29 @@ paper-api = "1.16.5-R0.1-SNAPSHOT"
 # 3.4.0-SNAPSHOT. (It still pulls velocity-brigadier:1.0.0-SNAPSHOT
 # transitively, which upstream has never released — also compileOnly.)
 velocity-api = "3.4.0"
+# The API FLOOR for BungeeCord, not the latest — see departure D74.
+#
+# Three properties made this the choice, in order:
+#
+#   1. It is the oldest bungeecord-api RELEASE on Maven Central (the published line
+#      starts at 1.16-R0.1; everything older exists only as a -SNAPSHOT on the sunset
+#      OSSRH host, which is not something this build should depend on). Compiling
+#      against the oldest thing that has what we need makes the runtime floor a
+#      property of what the code USES rather than of whatever happened to be current
+#      the day it was written.
+#   2. Every class it publishes is major-52 bytecode, so it can be read at
+#      `--release 8`. That is still true of 1.21-R0.4, but it is the floor's job to
+#      keep being true when it stops being.
+#   3. Every method :platform-bungee calls is identical in 1.21-R0.4 — LoginEvent,
+#      AsyncEvent's intents, ProxyServer, PluginManager, ProxiedPlayer, TaskScheduler
+#      and TextComponent.fromLegacyText were all compared with javap. BungeeCord's API
+#      is exceptionally stable: across those five years the only differences in the
+#      types used here are ProxyServer.unsafe() and LoginEvent's single-component
+#      setReason(), neither of which is called.
+#
+# It is a real release, so unlike spigot-api, paper-api and velocity-brigadier this one
+# needs no snapshot repository and cannot be re-resolved into something different.
+bungeecord-api = "1.16-R0.4"
 
 # Optional integrations. compileOnly everywhere, like the platform APIs: LuckPerms is a plugin the
 # server may or may not have, and log4j-core is the server's OWN logging backend (bundled with
@@ -75,6 +98,7 @@ adventure-text-serializer-legacy = { module = "net.kyori:adventure-text-serializ
 spigot-api = { module = "org.spigotmc:spigot-api", version.ref = "spigot-api" }
 paper-api = { module = "com.destroystokyo.paper:paper-api", version.ref = "paper-api" }
 velocity-api = { module = "com.velocitypowered:velocity-api", version.ref = "velocity-api" }
+bungeecord-api = { module = "net.md-5:bungeecord-api", version.ref = "bungeecord-api" }
 
 luckperms-api = { module = "net.luckperms:api", version.ref = "luckperms-api" }
 log4j-core = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }

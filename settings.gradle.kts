@@ -7,6 +7,7 @@ include(
     "platform-bukkit",
     "platform-bukkit-paper",
     "platform-velocity",
+    "platform-bungee",
     "module-whitelist",
     "module-rolesync",
     "module-offenses",
