@@ -42,9 +42,21 @@ import net.md_5.bungee.event.EventPriority;
  * </ul>
  *
  * <p>Which is why every path below completes exactly once, through an {@link AtomicBoolean} rather
- * than through care: the deny path, the allow path, a pipeline that threw, an executor that refused
- * the task because the pools are shutting down, and a worker that threw before reaching its own
- * {@code finally}. Departure D75.
+ * than through care: the deny path, the allow path, a pipeline that threw, and an executor that
+ * refused the task because the pools are shutting down. Departure D75.
+ *
+ * <p>Both halves of that are load-bearing, and neither is theoretical:
+ *
+ * <ul>
+ *   <li><strong>At least once.</strong> The worker's {@code finally} makes the release independent of
+ *       what {@link #decide} does. {@code decide} contains everything today; the {@code finally} is
+ *       what stops a later edit to it turning into a connection nobody can join through.
+ *   <li><strong>At most once.</strong> {@code completeIntent} {@code checkState}s that an intent is
+ *       outstanding, so a second call throws — on the netty event loop, from inside BungeeCord's own
+ *       event dispatch, for a connection that has already been let through. An {@link Executor} that
+ *       runs the task and <em>then</em> reports it rejected is exactly that shape, and it is not a
+ *       shape a caller can rule out about somebody else's pool.
+ * </ul>
  *
  * <h2>{@code EventPriority.LOW}, matching the Bukkit binding</h2>
  *

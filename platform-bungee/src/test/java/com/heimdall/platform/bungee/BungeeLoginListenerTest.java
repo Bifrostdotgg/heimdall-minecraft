@@ -271,6 +271,33 @@ class BungeeLoginListenerTest {
     }
 
     @Test
+    @DisplayName("an executor that runs the task and then reports it rejected releases the gate once")
+    void theGateIsReleasedAtMostOnce() {
+        // The at-most-once half of the contract, which the AtomicBoolean is the whole of.
+        // completeIntent checkStates that an intent is outstanding, so a second call throws — on the
+        // netty event loop, inside BungeeCord's own dispatch, for a connection already let through.
+        // An executor that runs the task and THEN throws is that shape, and it is not something a
+        // caller can rule out about somebody else's pool.
+        record(Verdict.allow());
+        Gate gate = new Gate();
+        Executor ranItAnyway = new Executor() {
+            @Override
+            public void execute(Runnable command) {
+                command.run();
+                throw new RejectedExecutionException("reported after running it");
+            }
+        };
+
+        LoginEvent event = drive(listenerOn(ranItAnyway), gate, connection(PLAYER, "Steve"));
+
+        assertFalse(event.isCancelled());
+        assertEquals(1, gate.releases(), "the gate must be released exactly once");
+        assertFalse(logger.logged(LogLevel.SEVERE, "could not release the login gate"),
+                "a second completeIntent throws inside BungeeCord's event dispatch: "
+                        + logger.records());
+    }
+
+    @Test
     @DisplayName("a connection another plugin already refused is left entirely alone")
     void alreadyCancelledIsSkipped() {
         // No intent is registered at all on this path, which is what the single release below

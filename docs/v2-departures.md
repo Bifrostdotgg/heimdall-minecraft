@@ -1286,7 +1286,7 @@ containment, and an executor that refused the task because the pools are shuttin
 matters as much as at-least-once — `completeIntent` `checkState`s that an intent is outstanding, so a
 second call throws on the netty event loop for a connection that has already been let through.
 
-The eight tests in `BungeeLoginListenerTest` drive the real `LoginEvent` and call `postCall()` where
+The nine tests in `BungeeLoginListenerTest` drive the real `LoginEvent` and call `postCall()` where
 BungeeCord's own `EventBus` calls it, so "the gate was released" is BungeeCord's latch reaching zero
 rather than an assertion the suite invented.
 
