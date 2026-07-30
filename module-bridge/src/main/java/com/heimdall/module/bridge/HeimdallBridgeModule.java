@@ -151,8 +151,24 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * The chat observer's handle, held so {@link #reconcileChatObserver} can take it back when
      * {@code relayChat} is turned off without the module being disabled. {@link Registration#NONE}
      * means "not observing".
+     *
+     * <p>Guarded by {@link #observerLock} for writes, and volatile so {@link #isObservingChat} can
+     * read it without taking the lock.
      */
     private volatile Registration chatObserver = Registration.NONE;
+
+    /**
+     * Serialises the check-then-act in {@link #reconcileChatObserver}.
+     *
+     * <p>Two threads really can be in there at once: {@link #enable} runs on whichever thread drives
+     * module reconciliation, and the config listener fires on the socket's reading thread. Without
+     * this, two calls could both observe {@link Registration#NONE} and both register — leaving a
+     * doubled observer that relays every line twice and a handle nothing will ever close.
+     *
+     * <p>A dedicated lock rather than {@code synchronized} on the module, so it cannot ever contend
+     * with something the manager holds.
+     */
+    private final Object observerLock = new Object();
 
     @Override
     public String id() {
@@ -237,9 +253,14 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     public void disable() {
         // Stop new lines arriving before discarding what is buffered, not the other way around —
         // otherwise a message could land in a queue this method has already decided is empty.
-        chatObserver.close();
-        chatObserver = Registration.NONE;
-        context = null;
+        //
+        // Under the same lock as reconcileChatObserver, so a config push landing mid-teardown
+        // cannot re-register an observer this method has just closed.
+        synchronized (observerLock) {
+            chatObserver.close();
+            chatObserver = Registration.NONE;
+            context = null;
+        }
         tunnel = null;
         chat.clear();
         events.clear();
@@ -254,32 +275,34 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * for why deciding once at enable would leave the dashboard toggle apparently dead.
      */
     private void reconcileChatObserver() {
-        boolean wanted = relayChat();
-        if (wanted && chatObserver == Registration.NONE) {
-            ModuleContext ctx = context;
-            if (ctx == null) {
-                return;
-            }
-            chatObserver = ctx.observeChat(new ChatObserver() {
-                @Override
-                public void onChat(ChatMessage message) {
-                    // Verbatim. Not trimmed, not normalised, not formatted — the bot renders, and
-                    // a relay that silently edited what a player typed is worse than one that does
-                    // not relay at all.
-                    chat.enqueue(new ChatLine(
-                            message.senderUuid(),
-                            message.senderName(),
-                            message.message(),
-                            System.currentTimeMillis()));
+        synchronized (observerLock) {
+            boolean wanted = relayChat();
+            if (wanted && chatObserver == Registration.NONE) {
+                ModuleContext ctx = context;
+                if (ctx == null) {
+                    return;
                 }
-            });
-        } else if (!wanted && chatObserver != Registration.NONE) {
-            chatObserver.close();
-            chatObserver = Registration.NONE;
-            // What is already queued is left to the next flush rather than dropped: it is chat that
-            // was legitimately observed while relay was on, and one more second of it is not a
-            // policy violation. Turning relay off stops NEW messages being taken, which is what the
-            // setting means.
+                chatObserver = ctx.observeChat(new ChatObserver() {
+                    @Override
+                    public void onChat(ChatMessage message) {
+                        // Verbatim. Not trimmed, not normalised, not formatted — the bot renders,
+                        // and a relay that silently edited what a player typed is worse than one
+                        // that does not relay at all.
+                        chat.enqueue(new ChatLine(
+                                message.senderUuid(),
+                                message.senderName(),
+                                message.message(),
+                                System.currentTimeMillis()));
+                    }
+                });
+            } else if (!wanted && chatObserver != Registration.NONE) {
+                chatObserver.close();
+                chatObserver = Registration.NONE;
+                // What is already queued is left to the next flush rather than dropped: it is chat
+                // that was legitimately observed while relay was on, and one more second of it is
+                // not a policy violation. Turning relay off stops NEW messages being taken, which
+                // is what the setting means.
+            }
         }
     }
 
