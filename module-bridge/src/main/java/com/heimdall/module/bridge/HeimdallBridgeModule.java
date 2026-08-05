@@ -68,13 +68,21 @@ import net.kyori.adventure.text.Component;
  * express that at all.
  *
  * <p><strong>Its default is a flat {@code true} on every role, which is deliberately not
- * {@code relayChat}'s role-derived shape.</strong> The two settings are gating materially different
- * risks. Chat has no dedupe anywhere: a proxy and its backends both relaying means every line
- * genuinely appears twice in Discord, so the default has to encode a topology to be correct out of
- * the box. Session events do not have that problem — the bot collapses duplicate join/leave/death
- * for the same player, so any set of origins is already safe and the setting is about explicit
- * <em>control</em> rather than correctness. A default of {@code true} everywhere is therefore both
- * the safe answer and, exactly, today's behaviour: no existing deployment changes when this ships.
+ * {@code relayChat}'s role-derived shape.</strong> The reason is upgrade continuity, and it carries
+ * the default on its own: before this setting existed every enabled instance relayed its events, so
+ * {@code true} everywhere is exactly today's behaviour and nobody's Discord goes quiet on upgrade.
+ * {@code relayChat} could not be defaulted that way — chat is deduped nowhere, so a proxy relaying
+ * alongside its backends puts every line into Discord twice, and its default has to encode a
+ * topology to be correct at all.
+ *
+ * <p>The bot does collapse duplicate join/leave/death, but that is a <strong>best-effort defensive
+ * drop rather than a guarantee</strong>, and it is not what makes this default safe. Its own
+ * documentation calls it "a defensive drop, not the mechanism": it matches on a ~1 s timestamp
+ * bucket, so two instances whose clocks differ by more than that leak a duplicate — as do a
+ * uuid-carrying and a name-only observer of the same event, and an offline-mode backend behind an
+ * online-mode proxy, whose UUIDs genuinely disagree. Several origins therefore degrade to a
+ * <em>rare</em> duplicate rather than a guaranteed double: enough that this setting need not encode
+ * a topology the way {@code relayChat}'s default does, not enough to call safe.
  *
  * <p>Only the <strong>outbound</strong> halves are gated. {@code bridge.discord} is delivered
  * whenever the module is enabled: a proxy that relays nothing outbound is still a perfectly good
@@ -169,14 +177,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * method taking one would imply it might. Two reasons it is {@code true} everywhere:
      *
      * <ul>
-     *   <li><strong>The bot dedupes session events.</strong> Duplicate join/leave/death for one
-     *       player collapse bot-side, so a proxy and its backends all relaying is already harmless —
-     *       unlike chat, which has no dedupe and really would appear twice. The setting is therefore
-     *       about an owner choosing which instance is the origin, not about keeping the default
-     *       correct.
-     *   <li><strong>It keeps today's behaviour exactly.</strong> Before this setting existed the
-     *       three enqueues were unconditional whenever the module was enabled, so any other default
-     *       would silently stop relaying events for every deployment that upgrades.
+     *   <li><strong>It keeps today's behaviour exactly</strong>, and this is the reason that carries
+     *       it. Before this setting existed the three enqueues were unconditional whenever the
+     *       module was enabled, so any other default would silently stop relaying events for every
+     *       deployment that upgrades.
+     *   <li><strong>Duplicate events degrade rather than double.</strong> The bot drops duplicate
+     *       join/leave/death defensively, which is why this default need not encode a topology the
+     *       way {@code relayChat}'s must — chat is deduped nowhere and really would appear twice.
+     *       But it is best-effort, not a guarantee: it matches within a ~1 s timestamp bucket and
+     *       leaks past clock skew, a uuid-vs-name key mismatch, or an offline-mode backend behind
+     *       an online-mode proxy. Multiple origins mean a rare duplicate, not a safe configuration.
      * </ul>
      */
     static final boolean DEFAULT_RELAY_EVENTS = true;
@@ -297,7 +307,9 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         });
 
         // All three go through relayEvent, so the relayEvents gate is ONE decision rather than three
-        // that have to agree — a fourth kind added later is gated by construction.
+        // that have to agree. A fourth kind added later is gated as long as it is routed the same
+        // way — a convention this file keeps, not something the types enforce: `events` is still an
+        // ordinary field any method here could enqueue onto directly.
         context.onPlayerJoin(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {

@@ -193,11 +193,15 @@ Two notes worth having before you turn something on:
     plugin everywhere does not send every line twice. A network that only runs the plugin on its
     proxy can flip that — the proxies observe chat and never block it, so relaying from the
     gatekeeper is safe.
-  - `relayEvents` covers joins, leaves and deaths, and defaults to **on everywhere**. It needs no
-    per-role default the way chat does: duplicate join/leave/death for the same player are collapsed
-    before they reach Discord, so several servers relaying is harmless rather than doubled. Turn it
-    off where you do not want a particular server announcing sessions — "the proxy announces joins,
-    the backends only relay chat" is the usual reason.
+  - `relayEvents` covers joins, leaves and deaths, and defaults to **on everywhere** — which is what
+    every server already did before the setting existed, so upgrading changes nothing. It needs no
+    per-role default the way chat does, because duplicate join/leave/death are dropped before they
+    reach Discord on a best-effort basis: several servers relaying usually shows once, rather than
+    always twice the way chat would. That drop is a backstop and not a guarantee — servers whose
+    clocks disagree can still let a duplicate through — so **turn it on for exactly the servers you
+    want announcing sessions** rather than leaving it on everywhere and relying on the backstop.
+    "The proxy announces joins, the backends only relay chat" is the usual shape. If you map each
+    server to its own channel, this is also what decides *which* channel a join appears in.
   - Deaths are the exception to any proxy-origin plan: no proxy has a death event, so those only
     ever come from backends.
   - Both take effect the moment you save — no restart, and no switching the module off and on.

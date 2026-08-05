@@ -1644,16 +1644,34 @@ announces joins, the backends only relay chat", which is a topology owners ask f
 **Its default is `true` on every role, and that asymmetry with `relayChat` is the entry.** `relayChat`
 defaults off on `GATEKEEPER` because it has to: chat is deduped nowhere, so a proxy relaying as well
 as its backends genuinely puts every line into Discord twice, and the default has to encode a
-topology to be correct out of the box. Session events have no such problem — **the bot collapses
-duplicate join/leave/death for the same player**, so every combination of origins is already safe.
-That makes `relayEvents` a control rather than a correctness default, and a control's right default
-is the one that changes nothing: before it existed every enabled instance relayed its events, and
-after it ships every instance that has not been told otherwise still does. Nobody's Discord goes
-quiet on upgrade.
+topology to be correct out of the box.
 
-It is therefore a `DEFAULT_RELAY_EVENTS` constant rather than a `defaultRelayEvents(ServerRole)`
-sitting next to `defaultRelayChat(ServerRole)`. The role does not enter into it, and a method that
-took one would imply it might.
+**What decides `relayEvents`' default is upgrade continuity, and that reason carries it alone.**
+Before the setting existed every enabled instance relayed its events; a flat `true` is exactly that
+behaviour, so nobody's Discord goes quiet on upgrade. Any other default would silently stop relaying
+for every deployment that takes the update.
+
+The bot's duplicate drop is a **supporting** fact and must not be written down as more than it is.
+It is why this default does not *also* have to encode a topology — but `dedupe.ts` describes itself
+as "a defensive drop, not the mechanism", and it leaks in at least three documented ways: it matches
+within a **~1 s timestamp bucket**, so instances whose clocks differ by more than that both get
+through; a uuid-carrying observer and a name-only one build different keys; and an offline-mode
+backend behind an online-mode proxy mints its own UUIDs, so the two observers genuinely disagree
+about who the player is. Multiple origins therefore degrade to a **rare duplicate rather than a
+guaranteed double**. That is a good reason not to need a role-derived default; it is not a licence to
+call several origins safe, and earlier drafts of this entry did exactly that.
+
+**Under per-server channel mappings the setting is load-bearing rather than merely tidy**, which is
+the case that makes it more than ergonomics. `router.ts` filters mappings by the originating server
+*before* it consults the deduper, so an event reaches only the channels mapped to the instance that
+emitted it. With per-server mappings and two instances both relaying, the dedupe is keyed per
+**guild** — so whichever frame lands first wins and suppresses its twin, and *which channel the join
+appears in* becomes a race between a proxy and its backend. `relayEvents` is how an owner makes that
+deterministic: name the origin, and the event lands in that server's channel every time.
+
+It is a `DEFAULT_RELAY_EVENTS` constant rather than a `defaultRelayEvents(ServerRole)` sitting next
+to `defaultRelayChat(ServerRole)`. The role does not enter into it, and a method that took one would
+imply it might.
 
 **The gate is at the enqueue, not in a reconcile — and that is a different mechanism for the same
 requirement.** D79's liveness rule is unchanged and non-negotiable: a settings change does not
@@ -1681,7 +1699,10 @@ checked rather than assumed, because "gate the listener" and "gate the enqueue" 
 a listener has a second consumer.
 
 All three kinds go through one `relayEvent(...)` choke point rather than three copies of the check,
-so a fourth notification kind added later is gated by construction. `HeimdallBridgeModuleTest` pins
+so a fourth notification kind added later is gated provided it is routed the same way. That is a
+convention the file keeps and says it keeps, not a structural guarantee — the `events` batcher is an
+ordinary field any method in the class could enqueue onto directly, and nothing fails a build if one
+does. `HeimdallBridgeModuleTest` pins
 the default on for all three roles, all three kinds stopping together, deaths specifically, a live
 toggle off-and-back-on across version-bumped pushes, and independence from `relayChat` in both
 directions.

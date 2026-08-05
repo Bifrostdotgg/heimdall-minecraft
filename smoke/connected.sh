@@ -1186,8 +1186,10 @@ assert_row() {
 # eligible on every role, so a proxy negotiates bridge@1 and delivers bridge.discord exactly as a
 # backend does. What differs on a proxy is only relayChat, which defaults OFF there — and that
 # default is precisely why the OUTBOUND direction cannot be asserted here even in principle on that
-# row. relayEvents, the events half, does NOT differ by role: it defaults on everywhere, since
-# duplicate session events are collapsed bot-side and so need no per-role default to be correct.
+# row. relayEvents, the events half, does NOT differ by role: it defaults on everywhere, since that
+# is what every instance did before the setting existed. Duplicate session events are also dropped
+# bot-side, but best-effort only — enough that this default need not encode a topology, not enough
+# to call several origins safe.
 #
 # The outbound half is unreachable on every row for a simpler reason: it needs a player. Chat, join,
 # leave and death all do, and there is no headless client in this harness. That gap is NOT papered

@@ -301,9 +301,10 @@ class HeimdallBridgeModuleTest {
         @DisplayName("defaults ON for EVERY role — including the gatekeeper, unlike relayChat")
         void defaultsOnForEveryRole() {
             // The default is flat rather than role-derived, and that is the whole difference from
-            // relayChat. The bot dedupes session events, so several origins are already harmless;
-            // chat has no dedupe, so ITS default has to encode a topology to be correct. A flat
-            // true is also exactly the pre-setting behaviour, so nothing changes on upgrade.
+            // relayChat. It is upgrade continuity that carries it: every enabled instance relayed
+            // its events before this setting existed, so a flat true changes nothing. (The bot's
+            // duplicate drop is a best-effort backstop, not what makes this safe — it is why the
+            // default need not encode a topology the way relayChat's must, no more than that.)
             for (ServerRole role : new ServerRole[] {
                     ServerRole.STANDALONE, ServerRole.ENFORCER, ServerRole.GATEKEEPER }) {
                 tearDown();
@@ -314,9 +315,8 @@ class HeimdallBridgeModuleTest {
                 module.flush();
 
                 assertEquals(java.util.Arrays.asList("join", "death", "leave"), relayedEventKinds(),
-                        "relayEvents must default ON for " + role + "; the setting is explicit "
-                                + "origin control, not a correctness default like relayChat's");
-                assertTrue(HeimdallBridgeModule.DEFAULT_RELAY_EVENTS);
+                        "relayEvents must default ON for " + role + "; anything else would silently "
+                                + "stop relaying events for every deployment that upgrades");
             }
         }
 
