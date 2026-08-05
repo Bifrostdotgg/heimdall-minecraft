@@ -1506,9 +1506,10 @@ stuck on whatever `relayChat` said at that moment, and the dashboard toggle woul
 somebody switched the whole module off and on. `reconcileChatObserver()` is idempotent and runs on
 both paths.
 
-Only the **outbound chat** half is gated. `bridge.discord` is delivered whenever the module is
-enabled: a proxy that relays no chat is still a perfectly good place to show players what was said
-in Discord, and gating both directions on one boolean would silently lose the inbound one.
+Only the **outbound** halves are gated (`relayEvents` is the second — D83). `bridge.discord` is
+delivered whenever the module is enabled: a proxy that relays nothing outbound is still a perfectly
+good place to show players what was said in Discord, and gating both directions on one boolean would
+silently lose the inbound one.
 
 ### D80 — a death is its own notification, and it is a fact only backends have
 
@@ -1630,6 +1631,60 @@ release.
 `&`-coded and internally double-spaced all at once, because every one of those is something a
 well-meaning relay might normalise. Adding `.trim()` to the observer fails exactly that test and
 nothing else.
+
+### D83 — `relayEvents` is the events half of the same choice, and its default is flat
+
+**New in 3.1.**
+
+**Before:** `relayChat` gated the chat half, and the three session enqueues — join, leave, death —
+ran **unconditionally** whenever the module was enabled. There was no way to say "the proxy
+announces joins, the backends only relay chat", which is a topology owners ask for.
+**Now:** a flat per-server `relayEvents` boolean beside `relayChat`, gating all three kinds.
+
+**Its default is `true` on every role, and that asymmetry with `relayChat` is the entry.** `relayChat`
+defaults off on `GATEKEEPER` because it has to: chat is deduped nowhere, so a proxy relaying as well
+as its backends genuinely puts every line into Discord twice, and the default has to encode a
+topology to be correct out of the box. Session events have no such problem — **the bot collapses
+duplicate join/leave/death for the same player**, so every combination of origins is already safe.
+That makes `relayEvents` a control rather than a correctness default, and a control's right default
+is the one that changes nothing: before it existed every enabled instance relayed its events, and
+after it ships every instance that has not been told otherwise still does. Nobody's Discord goes
+quiet on upgrade.
+
+It is therefore a `DEFAULT_RELAY_EVENTS` constant rather than a `defaultRelayEvents(ServerRole)`
+sitting next to `defaultRelayChat(ServerRole)`. The role does not enter into it, and a method that
+took one would imply it might.
+
+**The gate is at the enqueue, not in a reconcile — and that is a different mechanism for the same
+requirement.** D79's liveness rule is unchanged and non-negotiable: a settings change does not
+re-enable a module, so a dashboard flip has to take effect on a live `config.push`. `relayChat` buys
+that with `reconcileChatObserver()`, which registers and unregisters the observer under
+`observerLock`. Copying that three times — join, quit and death are three separate registrations —
+would triple a check-then-act whose race already had to be fixed once, to buy nothing.
+
+Reading `ModuleContext.settings()` at the enqueue satisfies the same requirement **by construction**:
+`settings()` is documented as a live read, so there is no cached state to go stale, nothing to
+reconcile, and no window in which a setting and a registration disagree. The cost is one volatile
+read and a map lookup per event, against session events that arrive at human rates rather than
+chat's hundreds a second. Cost is not what decides it, but it is what leaves the simple option open.
+
+Chat is deliberately **not** moved to match, and that is not an inconsistency left lying around. An
+unregistered `ChatObserver` is a *structural* statement — the pipeline cannot hand this module a
+message it never subscribed to — and that is worth a registration lifecycle for the one thing here
+carrying player-authored text. A join is the player's own name and a timestamp; there is no
+equivalent property to buy, so there is nothing to pay for.
+
+The three registrations gated here are also **the bridge's own and feed nothing else**. The whitelist
+module slides its mirror on separate `onPlayerJoin`/`onPlayerQuit` registrations made from its own
+`ModuleContext`, so declining to enqueue a relay frame cannot affect mirror extension. That was
+checked rather than assumed, because "gate the listener" and "gate the enqueue" differ precisely when
+a listener has a second consumer.
+
+All three kinds go through one `relayEvent(...)` choke point rather than three copies of the check,
+so a fourth notification kind added later is gated by construction. `HeimdallBridgeModuleTest` pins
+the default on for all three roles, all three kinds stopping together, deaths specifically, a live
+toggle off-and-back-on across version-bumped pushes, and independence from `relayChat` in both
+directions.
 
 ### D57 — a mirror's window and ceiling are fixed when it is opened
 

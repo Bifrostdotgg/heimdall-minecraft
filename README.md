@@ -187,11 +187,20 @@ Two notes worth having before you turn something on:
   no buffer beyond a small bounded relay queue, and no log line anywhere carries a message. It also
   never edits what a player typed: the text goes to the bot exactly as it was sent, and all
   formatting is the dashboard's template.
-- **Who relays is a per-server choice.** By default each *backend* relays its own chat and the proxy
-  relays none, so a network running the plugin everywhere does not send every line twice. A network
-  that only runs the plugin on its proxy can flip that in the dashboard — the proxies observe chat
-  and never block it, so relaying from the gatekeeper is safe. Deaths are the exception: no proxy
-  has a death event, so those only ever come from backends.
+- **Who relays is a per-server choice**, and chat and player events are chosen separately —
+  `relayChat` and `relayEvents`, both per server in the dashboard.
+  - `relayChat` defaults to **on for each backend and off for the proxy**, so a network running the
+    plugin everywhere does not send every line twice. A network that only runs the plugin on its
+    proxy can flip that — the proxies observe chat and never block it, so relaying from the
+    gatekeeper is safe.
+  - `relayEvents` covers joins, leaves and deaths, and defaults to **on everywhere**. It needs no
+    per-role default the way chat does: duplicate join/leave/death for the same player are collapsed
+    before they reach Discord, so several servers relaying is harmless rather than doubled. Turn it
+    off where you do not want a particular server announcing sessions — "the proxy announces joins,
+    the backends only relay chat" is the usual reason.
+  - Deaths are the exception to any proxy-origin plan: no proxy has a death event, so those only
+    ever come from backends.
+  - Both take effect the moment you save — no restart, and no switching the module off and on.
 
 ### WebSocket Tunnel
 

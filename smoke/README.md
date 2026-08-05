@@ -292,6 +292,9 @@ The proxy rows run the bridge assertions too, and that is not a formality: the m
 every role, so a proxy negotiates `bridge@1` and delivers `bridge.discord` exactly as a backend does.
 What differs there is only `relayChat`, which defaults **off** on a gatekeeper — which is a second,
 independent reason the outbound direction could not be asserted on that row even with a client.
+`relayEvents`, the events half, does **not** differ by role: it defaults on everywhere, because
+duplicate session events are collapsed before they reach Discord and so need no per-role default to
+be correct. It is not a mirror of `relayChat` and should not be read as one.
 
 ### The login gate, without a login
 
