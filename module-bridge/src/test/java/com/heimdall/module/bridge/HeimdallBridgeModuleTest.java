@@ -143,6 +143,35 @@ class HeimdallBridgeModuleTest {
         return Payload.builder().put(HeimdallBridgeModule.SETTING_RELAY_CHAT, value).build();
     }
 
+    private static Payload relayEvents(boolean value) {
+        return Payload.builder().put(HeimdallBridgeModule.SETTING_RELAY_EVENTS, value).build();
+    }
+
+    private static Payload relaySettings(boolean chat, boolean events) {
+        return Payload.builder()
+                .put(HeimdallBridgeModule.SETTING_RELAY_CHAT, chat)
+                .put(HeimdallBridgeModule.SETTING_RELAY_EVENTS, events)
+                .build();
+    }
+
+    /** One of each kind, which is what "all three are gated" has to be asserted against. */
+    private void allThreeKinds() {
+        sessions.join(FakePlayer.named("Steve"), 1000L);
+        sessions.death(FakePlayer.named("Steve"), "Steve fell from a high place", 1500L);
+        sessions.quit(FakePlayer.named("Steve"), 2000L);
+    }
+
+    /** The event kinds that reached the wire across every {@code bridge.event} frame sent. */
+    private List<String> relayedEventKinds() {
+        List<String> kinds = new java.util.ArrayList<String>();
+        for (RecordingTunnelBus.Sent sent : tunnel.sent(HeimdallBridgeModule.FRAME_EVENT)) {
+            for (Payload event : sent.payload().children("events")) {
+                kinds.add(event.string("kind", ""));
+            }
+        }
+        return kinds;
+    }
+
     // ── Identity ─────────────────────────────────────────────────────────────
 
     @Test
@@ -259,6 +288,137 @@ class HeimdallBridgeModuleTest {
             List<Payload> lines = tunnel.sent(HeimdallBridgeModule.FRAME_CHAT)
                     .get(0).payload().children("lines");
             assertEquals(1, lines.size(), "a doubled observer would have queued this line twice");
+        }
+    }
+
+    // ── relayEvents ──────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("relayEvents")
+    class RelayEventsSetting {
+
+        @Test
+        @DisplayName("defaults ON for EVERY role — including the gatekeeper, unlike relayChat")
+        void defaultsOnForEveryRole() {
+            // The default is flat rather than role-derived, and that is the whole difference from
+            // relayChat. The bot dedupes session events, so several origins are already harmless;
+            // chat has no dedupe, so ITS default has to encode a topology to be correct. A flat
+            // true is also exactly the pre-setting behaviour, so nothing changes on upgrade.
+            for (ServerRole role : new ServerRole[] {
+                    ServerRole.STANDALONE, ServerRole.ENFORCER, ServerRole.GATEKEEPER }) {
+                tearDown();
+                setUp(role, null);
+                enable();
+
+                allThreeKinds();
+                module.flush();
+
+                assertEquals(java.util.Arrays.asList("join", "death", "leave"), relayedEventKinds(),
+                        "relayEvents must default ON for " + role + "; the setting is explicit "
+                                + "origin control, not a correctness default like relayChat's");
+                assertTrue(HeimdallBridgeModule.DEFAULT_RELAY_EVENTS);
+            }
+        }
+
+        @Test
+        @DisplayName("turning it off stops joins, leaves AND deaths — all three, not just one")
+        void offStopsAllThreeKinds() {
+            // Asserting all three is the point: the gate is one choke point precisely so it cannot
+            // be applied to two kinds and forgotten on the third.
+            setUp(ServerRole.STANDALONE, relayEvents(false));
+            enable();
+
+            allThreeKinds();
+            module.flush();
+
+            assertTrue(tunnel.sent(HeimdallBridgeModule.FRAME_EVENT).isEmpty(),
+                    "an instance told it is not the event origin must send nothing at all: "
+                            + relayedEventKinds());
+            assertEquals(0, module.queuedEventCount(),
+                    "and nothing may sit in the queue waiting for the setting to come back either");
+        }
+
+        @Test
+        @DisplayName("a death is gated like the rest — the premium-relevant kind is not special")
+        void deathsAreGatedToo() {
+            setUp(ServerRole.STANDALONE, relayEvents(false));
+            enable();
+
+            sessions.death(FakePlayer.named("Steve"), "Steve was slain by a zombie", 1L);
+            module.flush();
+
+            assertTrue(tunnel.sent(HeimdallBridgeModule.FRAME_EVENT).isEmpty(),
+                    "a death carries the server's own message and is the kind an owner is most "
+                            + "likely to want from exactly one origin; it gets no exemption");
+            assertFalse(logger.records().toString().contains("slain by a zombie"),
+                    "and declining to relay it must not be the moment it lands in a log: "
+                            + logger.records());
+        }
+
+        @Test
+        @DisplayName("flipping the setting takes effect without disabling the module")
+        void theToggleIsLive() {
+            // The D79 failure this pins, for the events half: a settings change does NOT re-enable a
+            // module, so a gate that read the setting once in enable() would be stuck on whatever it
+            // said then and the dashboard toggle would look broken until somebody power-cycled the
+            // module. applySettings bumps the config version on every call, so these are real
+            // pushes rather than no-ops RemoteConfig would drop as already-seen.
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            allThreeKinds();
+            module.flush();
+            assertEquals(3, relayedEventKinds().size(), "the default is on");
+
+            applySettings(relayEvents(false));
+            tunnel.clearSent();
+
+            allThreeKinds();
+            module.flush();
+            assertTrue(tunnel.sent(HeimdallBridgeModule.FRAME_EVENT).isEmpty(),
+                    "turning relay off must not need a module restart");
+
+            applySettings(relayEvents(true));
+
+            allThreeKinds();
+            module.flush();
+            assertEquals(java.util.Arrays.asList("join", "death", "leave"), relayedEventKinds(),
+                    "and turning it back on must resume without one either — a one-way toggle is "
+                            + "the same bug in the other direction");
+        }
+
+        @Test
+        @DisplayName("it is independent of relayChat in both directions")
+        void theTwoSettingsDoNotImplyEachOther() {
+            // Events off, chat on: the "backends relay chat, the proxy announces sessions" topology
+            // the setting exists to make expressible.
+            setUp(ServerRole.STANDALONE, relaySettings(true, false));
+            enable();
+            assertTrue(module.isObservingChat());
+
+            say("Steve", "still relayed");
+            allThreeKinds();
+            module.flush();
+
+            assertEquals(1, tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).size(),
+                    "gating events must not touch chat");
+            assertTrue(tunnel.sent(HeimdallBridgeModule.FRAME_EVENT).isEmpty());
+
+            // And the other way round, which is the case that already shipped: a gatekeeper
+            // relaying no chat is still the only thing that sees a network-wide join.
+            tearDown();
+            // A different role, so the rig gets its own remote-config cache path rather than
+            // reusing the first half's.
+            setUp(ServerRole.ENFORCER, relaySettings(false, true));
+            enable();
+            assertFalse(module.isObservingChat());
+
+            say("Steve", "not relayed");
+            allThreeKinds();
+            module.flush();
+
+            assertTrue(tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).isEmpty());
+            assertEquals(3, relayedEventKinds().size(), "gating chat must not touch events");
         }
     }
 
@@ -407,7 +567,8 @@ class HeimdallBridgeModuleTest {
 
             assertEquals(1, tunnel.sent(HeimdallBridgeModule.FRAME_EVENT).size(),
                     "a proxy that relays no chat is still the only thing that sees a network-wide "
-                            + "join");
+                            + "join; the events half has its own setting, relayEvents, which "
+                            + "defaults on for every role");
         }
     }
 

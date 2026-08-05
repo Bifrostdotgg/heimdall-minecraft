@@ -47,7 +47,7 @@ import net.kyori.adventure.text.Component;
  *       released to change it. Departure D79.
  * </ul>
  *
- * <h2>{@code relayChat}: a setting, not an eligibility rule</h2>
+ * <h2>{@code relayChat} and {@code relayEvents}: settings, not eligibility rules</h2>
  *
  * <p>{@link #roles()} is empty — any role — for the same reason the whitelist module's is. Whether a
  * given instance should be the one relaying its network's chat is a per-deployment answer, and a
@@ -61,10 +61,25 @@ import net.kyori.adventure.text.Component;
  * twice on a network where the plugin is installed everywhere. An owner who wants proxy-origin
  * relay instead flips the booleans in the dashboard, in both directions.
  *
- * <p>Only the <strong>outbound chat</strong> half is gated. {@code bridge.discord} is delivered
- * whenever the module is enabled: a proxy that relays no chat is still a perfectly good place to
- * show players what was said in Discord, and a network that turned relay off would otherwise
- * silently lose the inbound direction too.
+ * <p>{@code relayEvents} is the same kind of setting for the join/leave/death half, and it exists
+ * for the same reason: which instance <em>announces</em> a network's sessions is a per-deployment
+ * answer ("the proxy announces joins, the backends only relay chat"), and before it existed the
+ * three enqueues below ran unconditionally whenever the module was enabled, so there was no way to
+ * express that at all.
+ *
+ * <p><strong>Its default is a flat {@code true} on every role, which is deliberately not
+ * {@code relayChat}'s role-derived shape.</strong> The two settings are gating materially different
+ * risks. Chat has no dedupe anywhere: a proxy and its backends both relaying means every line
+ * genuinely appears twice in Discord, so the default has to encode a topology to be correct out of
+ * the box. Session events do not have that problem — the bot collapses duplicate join/leave/death
+ * for the same player, so any set of origins is already safe and the setting is about explicit
+ * <em>control</em> rather than correctness. A default of {@code true} everywhere is therefore both
+ * the safe answer and, exactly, today's behaviour: no existing deployment changes when this ships.
+ *
+ * <p>Only the <strong>outbound</strong> halves are gated. {@code bridge.discord} is delivered
+ * whenever the module is enabled: a proxy that relays nothing outbound is still a perfectly good
+ * place to show players what was said in Discord, and a network that turned relay off would
+ * otherwise silently lose the inbound direction too.
  *
  * <h2>Why the observer is registered from a config listener rather than once at enable</h2>
  *
@@ -78,6 +93,38 @@ import net.kyori.adventure.text.Component;
  * {@link ModuleContext#onConfigChanged}, and it is idempotent: it registers when the setting says
  * yes and it has no registration, and closes when the setting says no and it has one. The handle it
  * holds is also tracked by the context, so a module disabled mid-flip is unwound either way.
+ *
+ * <h2>Why {@code relayEvents} is gated at the enqueue instead, and not the same way</h2>
+ *
+ * <p>The requirement is identical — a dashboard flip has to take effect on a live {@code config.push}
+ * without the module being switched off and on — but the mechanism is not, and the difference is
+ * worth stating because the obvious move is to copy {@link #reconcileChatObserver()} three times.
+ *
+ * <p>{@link #relayEvents()} is read at the enqueue, on every event. That satisfies the liveness
+ * requirement <strong>by construction</strong> rather than by a mechanism that has to be kept
+ * correct: {@link ModuleContext#settings()} is documented as a live read, so there is no cached
+ * state that could go stale and therefore nothing to reconcile. There is no registration lifecycle
+ * here at all — no handle, no idempotency to preserve, no window in which a setting and a
+ * registration disagree.
+ *
+ * <p>That is the whole argument for it. The registration approach would need three handles (join,
+ * quit and death are three separate registrations), three branches under {@link #observerLock}, and
+ * a check-then-act on each — which is precisely the shape whose race had to be fixed once already,
+ * multiplied by three, to buy nothing. The cost of the alternative is one volatile read and a map
+ * lookup per event, and session events arrive at human rates: a busy server produces a few a second,
+ * against chat's hundreds. Cost is not what decides this, but it is what makes the simple option
+ * available.
+ *
+ * <p>Chat is not moved to match, and that is not inconsistency. An unregistered {@code ChatObserver}
+ * is a <em>structural</em> statement — the pipeline cannot hand this module a message it has not
+ * subscribed to — and that is worth a lifecycle for the one thing here carrying player-authored text
+ * (see the relay-only section above). A join is the player's own name and a timestamp, so there is
+ * no equivalent property to buy.
+ *
+ * <p><strong>These are the only three session registrations the bridge makes, and they feed nothing
+ * else.</strong> The whitelist module's mirror slides on its <em>own</em> {@code onPlayerJoin} /
+ * {@code onPlayerQuit} registrations, made from its own {@code ModuleContext}, so declining to
+ * enqueue here cannot affect it. Skipping the enqueue is genuinely local to the relay.
  *
  * <h2>Threading</h2>
  *
@@ -104,6 +151,35 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * <p>Default depends on the role — see {@link #defaultRelayChat(ServerRole)}.
      */
     static final String SETTING_RELAY_CHAT = "relayChat";
+
+    /**
+     * Whether this instance relays its own join/leave/death. Flat boolean, per-server,
+     * dashboard-owned.
+     *
+     * <p>Defaults to {@code true} on every role — see {@link #DEFAULT_RELAY_EVENTS} for why that is
+     * not {@code relayChat}'s role-derived default.
+     */
+    static final String SETTING_RELAY_EVENTS = "relayEvents";
+
+    /**
+     * The default for {@code relayEvents}, on every role.
+     *
+     * <p>A constant rather than a {@code defaultRelayEvents(ServerRole)} alongside
+     * {@link #defaultRelayChat(ServerRole)}, because the role genuinely does not enter into it and a
+     * method taking one would imply it might. Two reasons it is {@code true} everywhere:
+     *
+     * <ul>
+     *   <li><strong>The bot dedupes session events.</strong> Duplicate join/leave/death for one
+     *       player collapse bot-side, so a proxy and its backends all relaying is already harmless —
+     *       unlike chat, which has no dedupe and really would appear twice. The setting is therefore
+     *       about an owner choosing which instance is the origin, not about keeping the default
+     *       correct.
+     *   <li><strong>It keeps today's behaviour exactly.</strong> Before this setting existed the
+     *       three enqueues were unconditional whenever the module was enabled, so any other default
+     *       would silently stop relaying events for every deployment that upgrades.
+     * </ul>
+     */
+    static final boolean DEFAULT_RELAY_EVENTS = true;
 
     /** Batched chat, plugin → bot. */
     static final String FRAME_CHAT = "bridge.chat";
@@ -220,16 +296,18 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             }
         });
 
+        // All three go through relayEvent, so the relayEvents gate is ONE decision rather than three
+        // that have to agree — a fourth kind added later is gated by construction.
         context.onPlayerJoin(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
-                events.enqueue(SessionEvent.of("join", player, null, timestampMs));
+                relayEvent("join", player, null, timestampMs);
             }
         });
         context.onPlayerQuit(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
-                events.enqueue(SessionEvent.of("leave", player, null, timestampMs));
+                relayEvent("leave", player, null, timestampMs);
             }
         });
         // Never fires on a proxy — neither Velocity nor BungeeCord has a death event. The backends
@@ -237,7 +315,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         context.onPlayerDeath(new PlayerDeathListener() {
             @Override
             public void onPlayerDeath(PlayerHandle player, String deathMessage, long timestampMs) {
-                events.enqueue(SessionEvent.of("death", player, deathMessage, timestampMs));
+                relayEvent("death", player, deathMessage, timestampMs);
             }
         });
 
@@ -328,6 +406,47 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             return false;
         }
         return ctx.settings().bool(SETTING_RELAY_CHAT, defaultRelayChat(ctx.platform().role()));
+    }
+
+    /**
+     * Queues one session event, unless {@code relayEvents} says this instance is not the origin.
+     *
+     * <p>The single choke point for all three kinds — see the class javadoc for why the gate is
+     * here, at the enqueue, rather than in a reconcile that registers and unregisters the three
+     * listeners the way {@link #reconcileChatObserver()} does for chat.
+     *
+     * <p>The setting is read per event, which is what makes a dashboard flip take effect on a live
+     * {@code config.push} with no module restart and nothing to reconcile. Session events arrive at
+     * human rates, so a volatile read and a map lookup each is not a cost worth designing around.
+     *
+     * <p>What is already queued when the setting goes off is left to the next flush rather than
+     * dropped, exactly as {@link #reconcileChatObserver} leaves observed chat: those events happened
+     * while this instance was legitimately the origin. Turning it off stops NEW events being taken,
+     * which is what the setting means.
+     */
+    private void relayEvent(String kind, PlayerHandle player, String detail, long timestampMs) {
+        if (!relayEvents()) {
+            return;
+        }
+        events.enqueue(SessionEvent.of(kind, player, detail, timestampMs));
+    }
+
+    /**
+     * Whether this instance relays its own join/leave/death, read live on every use.
+     *
+     * <p>Never cached in a field, for the same reason {@link #relayChat()} is not: {@link
+     * ModuleContext#settings()} is documented as a live read precisely because a settings change
+     * does not re-enable the module.
+     */
+    private boolean relayEvents() {
+        ModuleContext ctx = context;
+        if (ctx == null) {
+            // Disabled, or mid-teardown. The listeners are unregistered by then, so this is the belt
+            // rather than the braces — but a "disabled" module queueing an event would be the same
+            // failure the tracked-registration design exists to prevent.
+            return false;
+        }
+        return ctx.settings().bool(SETTING_RELAY_EVENTS, DEFAULT_RELAY_EVENTS);
     }
 
     /**
