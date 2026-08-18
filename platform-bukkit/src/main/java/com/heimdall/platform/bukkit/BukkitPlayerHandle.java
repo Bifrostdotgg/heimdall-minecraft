@@ -1,8 +1,8 @@
 package com.heimdall.platform.bukkit;
 
 import com.heimdall.core.platform.PlayerHandle;
+import com.heimdall.core.platform.SchedulerBridge;
 import java.util.UUID;
-import java.util.concurrent.Executor;
 import net.kyori.adventure.text.Component;
 import org.bukkit.entity.Player;
 
@@ -10,10 +10,11 @@ import org.bukkit.entity.Player;
  * One online player, wrapped so platform-free code can act on them.
  *
  * <p><strong>The thread hop lives here, not at the call site.</strong> Almost nothing in the Bukkit
- * API may be touched off the main thread, and a role sync arriving over the tunnel lands on
- * {@code heimdall-io}. Putting the hop in the handle means a module that kicks a player is correct
- * by construction; putting it at the call site means it is correct until somebody adds a second
- * call site.
+ * API may be touched off the thread that owns the player, and a role sync arriving over the tunnel
+ * lands on {@code heimdall-io}. The hop is {@link SchedulerBridge#runOnEntityThread} rather than
+ * "the main thread": on Folia those are different, and a kick scheduled globally is the wrong
+ * region the moment the player is anywhere else. Putting the hop in the handle means a module that
+ * kicks a player is correct by construction.
  *
  * <p>{@link #uuid()} and {@link #name()} are snapshotted at construction and are safe from any
  * thread without a hop — they are the two things a caller most often wants for a log line, and
@@ -28,14 +29,14 @@ final class BukkitPlayerHandle implements PlayerHandle {
     private final Player player;
     private final UUID uuid;
     private final String name;
-    private final Executor mainThread;
+    private final SchedulerBridge scheduler;
     private final BukkitMessenger messenger;
 
-    BukkitPlayerHandle(Player player, Executor mainThread, BukkitMessenger messenger) {
+    BukkitPlayerHandle(Player player, SchedulerBridge scheduler, BukkitMessenger messenger) {
         this.player = player;
         this.uuid = player.getUniqueId();
         this.name = player.getName();
-        this.mainThread = mainThread;
+        this.scheduler = scheduler;
         this.messenger = messenger;
     }
 
@@ -51,7 +52,7 @@ final class BukkitPlayerHandle implements PlayerHandle {
 
     @Override
     public void kick(final Component reason) {
-        mainThread.execute(new Runnable() {
+        scheduler.runOnEntityThread(this, new Runnable() {
             @Override
             public void run() {
                 messenger.kick(player, reason);
@@ -64,7 +65,7 @@ final class BukkitPlayerHandle implements PlayerHandle {
         // Sending is one of the few things Bukkit tolerates asynchronously, but the Adventure
         // platform may reflect into the connection to do it, so this takes the same route as
         // everything else rather than relying on an undocumented tolerance.
-        mainThread.execute(new Runnable() {
+        scheduler.runOnEntityThread(this, new Runnable() {
             @Override
             public void run() {
                 if (player.isOnline()) {

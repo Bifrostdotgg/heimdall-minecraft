@@ -29,7 +29,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
 
     private final ServerRole role;
     private final Path dataDirectory;
-    private final BukkitMainThread mainThread;
+    private final ServerThread mainThread;
     private final BukkitMessenger messenger;
     private final BukkitPlayerDirectory players;
     private final Log4jConsoleTap consoleTap;
@@ -54,7 +54,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
             Plugin plugin, HeimdallLogger logger, ServerRole role, HeimdallExecutors executors) {
         this.role = role;
         this.dataDirectory = plugin.getDataFolder().toPath();
-        this.mainThread = new BukkitMainThread(plugin, logger);
+        this.mainThread = createServerThread(plugin, logger);
         this.messenger = new BukkitMessenger(plugin, logger);
         BukkitPlayerDirectory builtPlayers = null;
         Log4jConsoleTap builtTap = null;
@@ -71,6 +71,23 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
             closeQuietly(messenger);
             throw halfBuilt;
         }
+    }
+
+    /**
+     * Region schedulers when the methods exist, Bukkit's scheduler otherwise.
+     *
+     * <p>Selected by capability, not by brand: Canvas and other Folia forks have the methods and
+     * fail a "are you Folia?" check, which is the same trap {@code BukkitAdapters} documents for
+     * Paper's tick API.
+     */
+    private static ServerThread createServerThread(Plugin plugin, HeimdallLogger logger) {
+        FoliaMainThread folia = FoliaMainThread.tryCreate(plugin, logger);
+        if (folia != null) {
+            logger.debug(() -> "scheduler: " + folia.describe());
+            return folia;
+        }
+        logger.debug("scheduler: bukkit main thread");
+        return new BukkitMainThread(plugin, logger);
     }
 
     private static void closeQuietly(AutoCloseable closeable) {
@@ -122,6 +139,16 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     @Override
     public Path dataDirectory() {
         return dataDirectory;
+    }
+
+    /**
+     * Which scheduler this process bound — {@code bukkit} or {@code folia}.
+     *
+     * <p>On the enable banner so an operator looking at a Folia boot can see the region hop was
+     * selected, rather than having to infer it from the absence of a crash.
+     */
+    String schedulerKind() {
+        return mainThread.describe();
     }
 
     @Override

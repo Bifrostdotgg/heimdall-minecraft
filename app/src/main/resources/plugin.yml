@@ -9,6 +9,12 @@ description: Discord-to-Minecraft whitelist, role sync, punishments and console 
 # plugin on 1.8.8, which is a supported target. Modern Paper logs a "legacy
 # plugin" warning as a result — accepted, and cheaper than dropping the floor.
 
+# Folia (and Folia forks such as Canvas) refuse to load a plugin that does not
+# set this. The flag is not the support — :platform-bukkit hops through
+# SchedulerBridge onto GlobalRegionScheduler / EntityScheduler when those
+# methods exist. On servers that lack them, BukkitMainThread is unchanged.
+folia-supported: true
+
 # Every command a module can claim has to be declared here.
 #
 # Bukkit fixes a command's existence and its aliases at load time. The command map

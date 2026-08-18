@@ -10,7 +10,6 @@ import com.heimdall.core.platform.PlayerHandle;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.UUID;
-import java.util.concurrent.Executor;
 import org.bukkit.entity.Player;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -25,14 +24,8 @@ import org.junit.jupiter.api.Test;
  */
 class BukkitPlayerDirectoryDescribeTest {
 
-    private static final Executor INLINE = new Executor() {
-        @Override
-        public void execute(Runnable command) {
-            command.run();
-        }
-    };
-
-    private final BukkitPlayerDirectory directory = new BukkitPlayerDirectory(INLINE, null);
+    private final BukkitPlayerDirectory directory =
+            new BukkitPlayerDirectory(InlineScheduler.INSTANCE, null);
 
     private PlayerHandle handleFor(InetSocketAddress address) {
         Player player = mock(Player.class);

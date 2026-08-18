@@ -3,6 +3,7 @@ package com.heimdall.platform.bukkit;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.PlayerHandle;
+import com.heimdall.core.platform.SchedulerBridge;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -11,7 +12,6 @@ import java.util.ConcurrentModificationException;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.Executor;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
@@ -74,12 +74,12 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
         Collection<? extends Player> onlinePlayers();
     }
 
-    private final Executor mainThread;
+    private final SchedulerBridge scheduler;
     private final BukkitMessenger messenger;
     private final RosterSource roster;
 
-    BukkitPlayerDirectory(Executor mainThread, BukkitMessenger messenger) {
-        this(mainThread, messenger, new RosterSource() {
+    BukkitPlayerDirectory(SchedulerBridge scheduler, BukkitMessenger messenger) {
+        this(scheduler, messenger, new RosterSource() {
             @Override
             public Collection<? extends Player> onlinePlayers() {
                 return Bukkit.getOnlinePlayers();
@@ -88,8 +88,8 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
     }
 
     /** For the tests that need to drive a roster that mutates underneath a reader. */
-    BukkitPlayerDirectory(Executor mainThread, BukkitMessenger messenger, RosterSource roster) {
-        this.mainThread = mainThread;
+    BukkitPlayerDirectory(SchedulerBridge scheduler, BukkitMessenger messenger, RosterSource roster) {
+        this.scheduler = scheduler;
         this.messenger = messenger;
         this.roster = roster;
     }
@@ -178,7 +178,7 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
         List<PlayerHandle> handles = new ArrayList<PlayerHandle>(online.size());
         for (Player player : online) {
             if (player != null) {
-                handles.add(new BukkitPlayerHandle(player, mainThread, messenger));
+                handles.add(new BukkitPlayerHandle(player, scheduler, messenger));
             }
         }
         return Collections.unmodifiableList(handles);
@@ -226,12 +226,12 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
      * one server generation is exactly the kind of difference nobody finds.
      */
     PlayerHandle wrap(Player player) {
-        return new BukkitPlayerHandle(player, mainThread, messenger);
+        return new BukkitPlayerHandle(player, scheduler, messenger);
     }
 
     private Optional<PlayerHandle> lookedUp(Player player) {
         return player == null || !player.isOnline()
                 ? Optional.<PlayerHandle>empty()
-                : Optional.<PlayerHandle>of(new BukkitPlayerHandle(player, mainThread, messenger));
+                : Optional.<PlayerHandle>of(new BukkitPlayerHandle(player, scheduler, messenger));
     }
 }

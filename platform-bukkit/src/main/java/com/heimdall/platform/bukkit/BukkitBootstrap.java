@@ -174,7 +174,8 @@ final class BukkitBootstrap {
         MigrationBoot.scheduleImport(logger, runtime, migration);
 
         logger.info("Heimdall v" + BuildConstants.VERSION + " enabled — role " + role.wireName()
-                + ", ticks via " + ticks.describe() + ", console tap " + (tapped ? "on" : "off"));
+                + ", ticks via " + ticks.describe() + ", scheduler " + platform.schedulerKind()
+                + ", console tap " + (tapped ? "on" : "off"));
     }
 
     /**

@@ -11,7 +11,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
 import java.util.UUID;
-import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.bukkit.entity.Player;
 import org.junit.jupiter.api.DisplayName;
@@ -37,13 +36,6 @@ import org.junit.jupiter.api.Test;
  * through a running server.
  */
 class BukkitPlayerDirectoryRosterTest {
-
-    private static final Executor INLINE = new Executor() {
-        @Override
-        public void execute(Runnable command) {
-            command.run();
-        }
-    };
 
     /** A view that throws on its first {@code attemptsToFail} reads, then yields one player. */
     private static final class RacingRoster implements BukkitPlayerDirectory.RosterSource {
@@ -71,7 +63,7 @@ class BukkitPlayerDirectoryRosterTest {
     }
 
     private static BukkitPlayerDirectory directoryOver(BukkitPlayerDirectory.RosterSource roster) {
-        return new BukkitPlayerDirectory(INLINE, null, roster);
+        return new BukkitPlayerDirectory(InlineScheduler.INSTANCE, null, roster);
     }
 
     @Test

@@ -12,7 +12,8 @@ import com.heimdall.core.log.HeimdallLogger;
  * <p>That distinction is not pedantry. Paper 1.12.2 answers yes to "are you Paper" and has none of
  * the API a 1.16-era check would then reach for; Purpur, Pufferfish and Folia answer no to a
  * brand check while having every method involved. Both mistakes fail at runtime, on a customer's
- * server, with a {@code NoSuchMethodError} that names a class nobody has heard of.
+ * server, with a {@code NoSuchMethodError} that names a class nobody has heard of. Region
+ * schedulers are the same question: {@link FoliaSupport} asks for the methods, never the brand.
  *
  * <p>Every probe is a {@link Class#forName} or a reflective lookup wrapped in {@code catch
  * Throwable}, and every failure resolves to a working degraded implementation rather than to an

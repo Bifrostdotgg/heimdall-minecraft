@@ -12,10 +12,10 @@ import org.bukkit.scheduler.BukkitTask;
 /**
  * Getting onto the server's main thread, and back off it.
  *
- * <p>Implements both {@link Executor} — which is what {@code PlatformFacade.mainThread()} promises
- * and what a module hands to {@code TunnelBus.subscribe} — and {@link SchedulerBridge}, because on
- * a non-regionised server they are the same thread and pretending otherwise would mean two classes
- * doing one thing.
+ * <p>Implements {@link ServerThread} — both {@link Executor} (what {@code PlatformFacade.mainThread()}
+ * promises) and {@link SchedulerBridge} — because on a non-regionised server they are the same
+ * thread and pretending otherwise would mean two classes doing one thing. A server that has Folia's
+ * region schedulers gets {@link FoliaMainThread} instead; this class is never constructed there.
  *
  * <h2>Already on the main thread means run now</h2>
  *
@@ -33,7 +33,7 @@ import org.bukkit.scheduler.BukkitTask;
  * stopping, so inline is the closest thing to the main thread still on offer, and dropping the task
  * silently is how a mirror ends up unflushed.
  */
-final class BukkitMainThread implements Executor, SchedulerBridge {
+final class BukkitMainThread implements ServerThread {
 
     /** One tick, in milliseconds. Bukkit's scheduler counts ticks, callers count time. */
     private static final long MS_PER_TICK = 50L;
@@ -44,6 +44,11 @@ final class BukkitMainThread implements Executor, SchedulerBridge {
     BukkitMainThread(Plugin plugin, HeimdallLogger logger) {
         this.plugin = plugin;
         this.logger = logger;
+    }
+
+    @Override
+    public String describe() {
+        return "bukkit";
     }
 
     @Override
@@ -67,8 +72,8 @@ final class BukkitMainThread implements Executor, SchedulerBridge {
     @Override
     public void runOnEntityThread(PlayerHandle player, Runnable task) {
         // On the Bukkit family every entity is owned by the one main thread, so this is the same
-        // hop. The signature names the owner rather than the thread precisely so a future Folia
-        // adapter is a change here and nowhere else.
+        // hop. The signature names the owner rather than the thread so {@link FoliaMainThread} can
+        // be a change of implementation rather than an audit of every call site.
         execute(task);
     }
 

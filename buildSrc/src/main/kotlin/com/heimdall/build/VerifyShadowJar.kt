@@ -246,6 +246,10 @@ abstract class VerifyShadowJar : DefaultTask() {
         if (pluginYml.contains(Regex("(?m)^\\s*api-version:"))) {
             problems += "plugin.yml declares api-version, which stops 1.8.8 loading the plugin"
         }
+        if (!pluginYml.contains(Regex("(?m)^\\s*folia-supported:\\s*true\\s*$"))) {
+            problems += "plugin.yml does not declare folia-supported: true — Folia and Canvas " +
+                "refuse to load the plugin without it"
+        }
         // Matches the token shape rather than a bare '@' so an email address or a
         // future `${...}` in a description does not become a false failure.
         val unsubstituted = Regex("@[A-Za-z_][A-Za-z0-9_.]*@").find(pluginYml)

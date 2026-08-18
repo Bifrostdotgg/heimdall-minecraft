@@ -5,6 +5,7 @@ A Minecraft plugin that integrates with the Heimdall Discord bot to provide dyna
 ## Supported Platforms
 
 - **Paper/Spigot 1.8.8+** - Backend server plugin
+- **Folia / Canvas** - Same backend jar; region schedulers are used when the server has them
 - **Velocity 3.4.0+** - Proxy plugin for network-wide whitelist checking
 - **BungeeCord / Waterfall** - Proxy plugin, same role as Velocity, for networks on the other proxy
 
@@ -25,11 +26,13 @@ runs.
 - **Configurable Messages**: Customize all player-facing messages from the Heimdall dashboard — pushed to every connected server live, no config file editing or restart
 - **LuckPerms Integration**: Sync Discord roles to LuckPerms groups, on backends and on either proxy — `net.luckperms:api` is the same artifact everywhere, so there is one implementation rather than one per platform
 - **Discord Chat Bridge**: Relay in-game chat, joins, leaves and deaths into mapped Discord channels and Discord messages back in-game — nothing is ever stored, and the plugin never edits what a player typed
-- **Multi-Platform Support**: One JAR, three platforms — Paper/Spigot, Velocity and BungeeCord
+- **Multi-Platform Support**: One JAR — Paper/Spigot, Folia/Canvas, Velocity and BungeeCord
 
 ## Requirements
 
 - **Paper/Spigot**: Java 8+, Paper/Spigot 1.8.8+ or compatible fork
+- **Folia / Canvas**: whatever the server itself requires (Java 21 for current Folia); the plugin
+  jar stays Java 8 and selects region schedulers at runtime
 - **Velocity**: Java 17+, Velocity 3.4.0+
 - **BungeeCord/Waterfall**: Java 8+ — whatever your proxy build itself requires, which is Java 17
   for BungeeCord builds from 2025 onwards and Java 8 for older ones. Both are covered by the
@@ -41,8 +44,8 @@ runs.
 
 Download the latest `heimdall-whitelist-X.X.X.jar` from the
 [**Releases page**](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest).
-The same JAR works on Paper, Velocity and BungeeCord: each platform reads its own descriptor out
-of the one file and loads only its own classes.
+The same JAR works on Paper, Folia/Canvas, Velocity and BungeeCord: each platform reads its own
+descriptor out of the one file and loads only its own classes.
 
 ### Paper/Spigot Installation (fresh install)
 
@@ -408,7 +411,7 @@ cd heimdall-minecraft
 ```
 
 The shipping JAR is `app/build/libs/heimdall-whitelist-X.X.X.jar`. It is a single
-shadow jar that runs on Velocity, BungeeCord, Paper and Spigot 1.8.8+.
+shadow jar that runs on Velocity, BungeeCord, Paper, Folia/Canvas and Spigot 1.8.8+.
 
 `./gradlew build` is the full gate, not just a compile: it builds every module at
 its own bytecode level, runs the unit tests, runs the ArchUnit conformance rules
