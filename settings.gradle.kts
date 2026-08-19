@@ -11,6 +11,7 @@ include(
     "module-whitelist",
     "module-rolesync",
     "module-offenses",
+    "module-punishments",
     "module-console",
     "module-bridge",
     "conformance",

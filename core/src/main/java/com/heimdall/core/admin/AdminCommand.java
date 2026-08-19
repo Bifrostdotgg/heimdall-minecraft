@@ -93,6 +93,11 @@ public final class AdminCommand {
                 new WhitelistSubcommands.Test(),
                 new WhitelistSubcommands.Cache(),
                 new PunishmentSubcommands.Offense(),
+                new PunishmentSubcommands.Ban(),
+                new PunishmentSubcommands.Mute(),
+                new PunishmentSubcommands.Kick(),
+                new PunishmentSubcommands.Warn(),
+                new PunishmentSubcommands.Unban(),
                 new UpdateSubcommands.Version(),
                 new UpdateSubcommands.Update(),
                 new RuntimeSubcommands.Debug());

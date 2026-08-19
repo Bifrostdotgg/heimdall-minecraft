@@ -220,6 +220,17 @@ final class OffendCommand implements CommandHandler, CommandCompleter {
         return uuid == null ? null : uuid.toString();
     }
 
+    private static boolean nativeReplaceActive() {
+        try {
+            Class<?> module = Class.forName("com.heimdall.module.punishments.HeimdallPunishmentsModule");
+            Object instance = module.getField("INSTANCE").get(null);
+            if (instance == null) return false;
+            return Boolean.TRUE.equals(module.getMethod("isReplaceMode").invoke(instance));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private void reportSuccess(CommandSource source, String targetName, OffenseResult result) {
         // v2's four lines, unchanged: an operator reading this in chat should not have to relearn it.
         source.sendMessage(Msg.legacy("§aOffense recorded for §f" + targetName + "§a:"));
@@ -228,9 +239,12 @@ final class OffendCommand implements CommandHandler, CommandCompleter {
                 + " §7(tier " + result.tierApplied() + ")"));
         source.sendMessage(Msg.legacy("§7Total points: §f" + result.totalPoints()));
 
+        if (nativeReplaceActive()) {
+            source.sendMessage(Msg.legacy("§7Applied as a native punishment (" + result.action() + ")."));
+            return;
+        }
         final String command = result.command();
         if (Strings.isBlank(command)) {
-            // A tier may legitimately record points and punish nothing.
             logger.debug(() -> "no punishment command for the tier applied to " + targetName);
             return;
         }

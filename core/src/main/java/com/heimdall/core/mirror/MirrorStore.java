@@ -371,6 +371,14 @@ public final class MirrorStore<T> implements AutoCloseable {
     }
 
     /** Empties the mirror, ETag included — the next fetch must be a full one. */
+    /** Drops one key. Used when a punishment is revoked. */
+    public void evict(String key) {
+        if (key == null) return;
+        if (entries.remove(key) != null) {
+            file.markDirty();
+        }
+    }
+
     public void clear() {
         entries.clear();
         lastEtag = null;

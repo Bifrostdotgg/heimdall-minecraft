@@ -100,4 +100,66 @@ final class PunishmentSubcommands {
             }
         }
     }
+
+    static final class Ban implements AdminSubcommand {
+        public String name() { return "ban"; }
+        public String usage() { return "<player> [duration] [reason]"; }
+        public String description() { return "ban a player (native punishments)"; }
+        public void run(CommandSource source, List<String> args, AdminContext context) {
+            delegate(source, "ban", args);
+        }
+    }
+
+    static final class Mute implements AdminSubcommand {
+        public String name() { return "mute"; }
+        public String usage() { return "<player> [duration] [reason]"; }
+        public String description() { return "mute a player (native punishments)"; }
+        public void run(CommandSource source, List<String> args, AdminContext context) {
+            delegate(source, "mute", args);
+        }
+    }
+
+    static final class Kick implements AdminSubcommand {
+        public String name() { return "kick"; }
+        public String usage() { return "<player> [reason]"; }
+        public String description() { return "kick a player (native punishments)"; }
+        public void run(CommandSource source, List<String> args, AdminContext context) {
+            delegate(source, "kick", args);
+        }
+    }
+
+    static final class Warn implements AdminSubcommand {
+        public String name() { return "warn"; }
+        public String usage() { return "<player> [reason]"; }
+        public String description() { return "warn a player (native punishments)"; }
+        public void run(CommandSource source, List<String> args, AdminContext context) {
+            delegate(source, "warn", args);
+        }
+    }
+
+    static final class Unban implements AdminSubcommand {
+        public String name() { return "unban"; }
+        public String usage() { return "<player>"; }
+        public String description() { return "revoke a ban"; }
+        public void run(CommandSource source, List<String> args, AdminContext context) {
+            delegate(source, "unban", args);
+        }
+    }
+
+    private static void delegate(CommandSource source, String type, List<String> args) {
+        try {
+            Class<?> module = Class.forName("com.heimdall.module.punishments.HeimdallPunishmentsModule");
+            Object instance = module.getField("INSTANCE").get(null);
+            if (instance == null) {
+                source.sendMessage(Msg.legacy("§eThe punishments module is not running."));
+                return;
+            }
+            module.getDeclaredMethod("onStaffCommand", CommandSource.class, String.class, List.class)
+                    .invoke(instance, source, type, args);
+        } catch (ClassNotFoundException e) {
+            source.sendMessage(Msg.legacy("§ePunishments are not in this build."));
+        } catch (Exception e) {
+            source.sendMessage(Msg.legacy("§cCould not issue the punishment: " + e.getMessage()));
+        }
+    }
 }

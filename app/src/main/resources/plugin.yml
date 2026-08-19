@@ -63,6 +63,42 @@ commands:
     description: Record an offence against a player and apply the escalation tier
     usage: /<command> <player> <offense> [notes]
     permission: heimdall.offend
+  ban:
+    description: Ban a player
+    usage: /<command> <player> [duration] [reason]
+    permission: heimdall.punishments.ban
+  tempban:
+    description: Temporarily ban a player
+    usage: /<command> <player> <duration> [reason]
+    permission: heimdall.punishments.ban
+  ipban:
+    description: IP-ban a player
+    usage: /<command> <player> [duration] [reason]
+    permission: heimdall.punishments.ipban
+  unban:
+    description: Revoke a ban
+    usage: /<command> <player>
+    permission: heimdall.punishments.unban
+  mute:
+    description: Mute a player
+    usage: /<command> <player> [duration] [reason]
+    permission: heimdall.punishments.mute
+  tempmute:
+    description: Temporarily mute a player
+    usage: /<command> <player> <duration> [reason]
+    permission: heimdall.punishments.mute
+  unmute:
+    description: Revoke a mute
+    usage: /<command> <player>
+    permission: heimdall.punishments.unban
+  warn:
+    description: Warn a player
+    usage: /<command> <player> [reason]
+    permission: heimdall.punishments.warn
+  kick:
+    description: Kick a player
+    usage: /<command> <player> [reason]
+    permission: heimdall.punishments.kick
 
 permissions:
   heimdall.admin:
@@ -78,6 +114,31 @@ permissions:
     default: true
   heimdall.offend:
     description: Record offences against players
+    default: op
+  heimdall.punishments.ban:
+    description: Ban players with Heimdall
+    default: op
+  heimdall.punishments.ipban:
+    description: IP-ban players with Heimdall
+    default: op
+  heimdall.punishments.mute:
+    description: Mute players with Heimdall
+    default: op
+  heimdall.punishments.unban:
+    description: Revoke Heimdall bans and mutes
+    default: op
+  heimdall.punishments.warn:
+    description: Warn players with Heimdall
+    default: op
+  heimdall.punishments.kick:
+    description: Kick players with Heimdall
+    default: op
+  heimdall.punishments.history:
+    description: View Heimdall punishment history
+    default: op
+  heimdall.punishments.dupeip:
+    description: Look up accounts sharing an IP
+    default: op
     default: op
   heimdall.bypass:
     # Note that this does NOT bypass the whitelist itself. Permissions are not
