@@ -5,6 +5,7 @@ import com.heimdall.core.wiring.HeimdallRuntime;
 import com.heimdall.module.bridge.HeimdallBridgeModule;
 import com.heimdall.module.console.HeimdallConsoleModule;
 import com.heimdall.module.offenses.HeimdallOffensesModule;
+import com.heimdall.module.punishments.HeimdallPunishmentsModule;
 import com.heimdall.module.rolesync.HeimdallRoleSyncModule;
 import com.heimdall.module.whitelist.HeimdallWhitelistModule;
 
@@ -79,6 +80,7 @@ public final class HeimdallModules {
         runtime.modules().register(whitelist);
         runtime.modules().register(roleSync);
         runtime.modules().register(offenses);
+        runtime.modules().register(new HeimdallPunishmentsModule());
         runtime.modules().register(new HeimdallConsoleModule());
         // The Discord chat bridge. Registered like every other module and eligible on every role —
         // whether an instance relays its own chat is its `relayChat` setting rather than an

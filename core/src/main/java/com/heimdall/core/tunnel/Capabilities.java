@@ -38,6 +38,9 @@ public final class Capabilities {
      */
     public static final String BRIDGE = "bridge@1";
 
+    /** Native punishments: punish.apply / punish.revoke and the local mirror. */
+    public static final String PUNISHMENTS = "punishments@1";
+
     /** The module framework itself: this client can enable and disable modules at runtime. */
     public static final String MODULES = "modules@1";
 

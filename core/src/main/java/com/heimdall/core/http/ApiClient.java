@@ -260,6 +260,65 @@ public final class ApiClient {
         });
     }
 
+    public CompletableFuture<JsonObject> issuePunishment(
+            String type, String uuid, String name, String reason, Integer durationMinutes,
+            boolean silent, String issuerUuid, String issuerName) {
+        JsonObject body = new JsonObject();
+        body.addProperty("type", type);
+        if (uuid != null) body.addProperty("targetUuid", uuid);
+        if (name != null) body.addProperty("targetName", name);
+        body.addProperty("reason", reason == null ? "" : reason);
+        if (durationMinutes != null) body.addProperty("durationMinutes", durationMinutes);
+        body.addProperty("silent", silent);
+        body.addProperty("source", "command");
+        if (issuerUuid != null) body.addProperty("issuedByUuid", issuerUuid);
+        if (issuerName != null) body.addProperty("issuedByName", issuerName);
+        return issuePunishment(body);
+    }
+
+    public CompletableFuture<JsonObject> issuePunishment(JsonObject body) {
+        if (body == null) throw new IllegalArgumentException("body is required");
+        return async(() -> {
+            ApiSettings current = settings;
+            RawResponse response = requests.execute(current,
+                    HttpCall.post(guildPath(current, "punishments"), body.toString(), current.timeoutMs()));
+            return Envelopes.unwrapObject(response.status(), response.body());
+        });
+    }
+
+    public CompletableFuture<JsonObject> revokePunishment(String id, JsonObject body) {
+        if (Strings.isBlank(id)) throw new IllegalArgumentException("id is required");
+        return async(() -> {
+            ApiSettings current = settings;
+            String json = body == null ? "{}" : body.toString();
+            RawResponse response = requests.execute(current,
+                    HttpCall.post(guildPath(current, "punishments/" + id + "/revoke"), json, current.timeoutMs()));
+            return Envelopes.unwrapObject(response.status(), response.body());
+        });
+    }
+
+    public CompletableFuture<JsonObject> importPunishments(JsonObject body) {
+        return async(() -> {
+            ApiSettings current = settings;
+            RawResponse response = requests.execute(current,
+                    HttpCall.post(guildPath(current, "punishments/import"),
+                            body == null ? "{}" : body.toString(), current.timeoutMs()));
+            return Envelopes.unwrapObject(response.status(), response.body());
+        });
+    }
+
+    public CompletableFuture<RawResponse> punishmentSync(String etag) {
+        return async(() -> {
+            ApiSettings current = settings;
+            HttpCall call = HttpCall.get(guildPath(current, "punishments/sync"),
+                    current.whitelistSyncTimeoutMs());
+            if (Strings.isNotBlank(etag)) {
+                call = call.withHeader("If-None-Match", etag);
+            }
+            return requests.execute(current, call);
+        });
+    }
+
     /**
      * {@code GET whitelist/sync} — the full whitelist, or a 304 saying it has not changed.
      *

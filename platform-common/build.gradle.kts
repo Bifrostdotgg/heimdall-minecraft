@@ -17,6 +17,7 @@ dependencies {
     implementation(project(":module-whitelist"))
     implementation(project(":module-rolesync"))
     implementation(project(":module-offenses"))
+    implementation(project(":module-punishments"))
     implementation(project(":module-console"))
     implementation(project(":module-bridge"))
 
