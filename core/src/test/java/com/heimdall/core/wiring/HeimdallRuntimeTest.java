@@ -513,7 +513,12 @@ class HeimdallRuntimeTest {
             assertTrue(runtime.modules().capabilities().contains("health@1"),
                     "identify must declare health@1 on a jar that has never been configured: "
                             + runtime.modules().capabilities());
+            assertTrue(runtime.modules().capabilities().contains("status@1"),
+                    "identify must declare status@1 on a default jar so a bot that knows it can "
+                            + "show MOTD cards: " + runtime.modules().capabilities());
             assertTrue(runtime.modules().registeredIds().contains("health"));
+            assertFalse(runtime.modules().registeredIds().contains("status"),
+                    "status@1 is a second capability of health, not a managed module");
 
             runtime.close();
         }
@@ -583,6 +588,7 @@ class HeimdallRuntimeTest {
 
             // Still declared throughout: the capability describes the build, not the state.
             assertTrue(runtime.modules().capabilities().contains("health@1"));
+            assertTrue(runtime.modules().capabilities().contains("status@1"));
 
             runtime.close();
         }

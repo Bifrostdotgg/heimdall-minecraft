@@ -6,10 +6,15 @@ import com.heimdall.core.json.Payload;
  * Supplies the periodic health snapshot sent on the heartbeat tick.
  *
  * <p>The shape the bot stores is {@code {tps, mspt, onlinePlayers, maxPlayers, usedMemMb,
- * maxMemMb}}, all optional — a proxy has no TPS, and an old Bukkit has no MSPT. Every field being
- * optional is why this returns a {@link Payload} rather than a typed record: a platform that can
- * only answer half the questions should send half the fields, not zeroes that the dashboard would
- * then chart as a server running at 0 TPS.
+ * maxMemMb, motdClean, motdRaw, iconPngBase64}}. Tick and memory fields stay optional — a proxy
+ * has no TPS, and an old Bukkit has no MSPT — which is why this returns a {@link Payload} rather
+ * than a typed record: a platform that can only answer half the questions should send half the
+ * fields, not zeroes that the dashboard would then chart as a server running at 0 TPS.
+ *
+ * <p>{@code motdClean} is always present (empty when unread). {@code motdRaw} is optional.
+ * {@code iconPngBase64} is omitted or JSON null when the favicon is missing or larger than 64 KiB
+ * decoded. Player <em>counts</em> belong here; player <em>names</em> stay on {@code get_players} /
+ * {@code player_list}.
  *
  * <p><strong>Health doubles as a liveness signal.</strong> The bot's sweep refreshes a connection's
  * last-seen on {@code pong} <em>and</em> on {@code health}, so a heartbeat that carries health is
