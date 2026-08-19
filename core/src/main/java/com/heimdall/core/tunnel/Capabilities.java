@@ -30,6 +30,15 @@ public final class Capabilities {
     public static final String HEALTH = "health@1";
 
     /**
+     * MOTD and favicon on each {@code health} payload.
+     *
+     * <p>Not a separately togglable module. {@code HealthModule} advertises this alongside
+     * {@link #HEALTH}; disabling health stops the frames, including these fields. Old bots that
+     * only know {@code health@1} keep getting counts and ignore the extra keys.
+     */
+    public static final String STATUS = "status@1";
+
+    /**
      * The Discord chat bridge: batched {@code bridge.chat} and {@code bridge.event} out, rendered
      * {@code bridge.discord} in.
      *

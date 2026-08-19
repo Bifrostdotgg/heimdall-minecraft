@@ -40,9 +40,11 @@ final class CapabilityNegotiation {
     /**
      * The modules the bot has configuration for, and the single major it speaks for each.
      *
-     * <p>{@code modules} and {@code config} are here too — they are negotiated and acknowledged like
+     * <p>{@code modules} and {@code config} are here too - they are negotiated and acknowledged like
      * any other capability. What makes them different is downstream: they never appear as keys in a
-     * config document, so nothing is ever pushed for them.
+     * config document, so nothing is ever pushed for them. {@code status} is the same shape: the
+     * plugin advertises {@code status@1} on the health module, the bot accepts it, and no config
+     * document has a {@code status} key.
      */
     private static final Map<String, Integer> SUPPORTED_MAJORS;
 
@@ -61,6 +63,7 @@ final class CapabilityNegotiation {
         majors.put("rolesync", 1);
         majors.put("console", 1);
         majors.put("health", 1);
+        majors.put("status", 1);
         majors.put("bridge", 1);
         majors.put("modules", 1);
         majors.put("config", 1);

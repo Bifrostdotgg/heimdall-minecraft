@@ -4,6 +4,7 @@ import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.tunnel.Capabilities;
 import com.heimdall.core.tunnel.TunnelClient;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Set;
 
 /**
@@ -34,7 +35,9 @@ import java.util.Set;
  *
  * <p>It runs under <strong>every</strong> role. A proxy has no TPS, but it has memory and a player
  * count, and {@code HealthSnapshotSource} is built so a platform that can answer half the questions
- * sends half the fields.
+ * sends half the fields. The same frames also carry MOTD and favicon under {@code status@1}: that
+ * is a second capability of this module, not a dashboard toggle of its own. Disable health and
+ * those fields stop with the rest of the snapshot.
  *
  * <p>Registered by {@code HeimdallRuntime} itself rather than by {@code HeimdallModules} — it is
  * core's own module, and core must not depend on the feature modules.
@@ -53,6 +56,15 @@ public final class HealthModule implements HeimdallModule {
     /** The module id, which is also its key in the remote-config document. */
     public static final String ID = "health";
 
+    private static final Set<String> CAPABILITIES;
+
+    static {
+        Set<String> caps = new LinkedHashSet<String>();
+        caps.add(Capabilities.HEALTH);
+        caps.add(Capabilities.STATUS);
+        CAPABILITIES = Collections.unmodifiableSet(caps);
+    }
+
     private final TunnelClient tunnel;
 
     public HealthModule(TunnelClient tunnel) {
@@ -69,7 +81,7 @@ public final class HealthModule implements HeimdallModule {
 
     @Override
     public Set<String> capabilities() {
-        return Collections.singleton(Capabilities.HEALTH);
+        return CAPABILITIES;
     }
 
     @Override

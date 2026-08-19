@@ -6,8 +6,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.json.Payload;
 import com.heimdall.platform.bukkit.adapter.TickSource;
+import com.heimdall.platform.common.StatusHealth;
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.Base64;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * What a health snapshot says when it cannot measure something.
@@ -89,5 +96,87 @@ class BukkitHealthSourceTest {
         Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot();
         assertFalse(snapshot.has("onlinePlayers"));
         assertFalse(snapshot.has("maxPlayers"));
+    }
+
+    @Test
+    @DisplayName("without a server the MOTD is empty and the icon is missing")
+    void withoutAServerStatusFieldsDegrade() {
+        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot();
+        assertEquals("", snapshot.string("motdClean", "missing"));
+        assertFalse(snapshot.has("motdRaw"));
+        assertFalse(snapshot.has("iconPngBase64"));
+        assertTrue(snapshot.has("usedMemMb"));
+        assertFalse(snapshot.has("tps"));
+    }
+
+    @Test
+    @DisplayName("a stubbed MOTD and favicon appear on the snapshot")
+    void stubbedMotdAndFaviconAppear(@TempDir File dir) throws IOException {
+        File icon = new File(dir, "server-icon.png");
+        byte[] png = "bukkit-icon".getBytes(StandardCharsets.US_ASCII);
+        Files.write(icon.toPath(), png);
+
+        Payload snapshot = new BukkitHealthSource(ticks(20.0, 4.21), new BukkitHealthSource.MotdFaviconSource() {
+            @Override
+            public String motd() {
+                return "\u00A7cHello \u00A7aWorld";
+            }
+
+            @Override
+            public File iconFile() {
+                return icon;
+            }
+        }).snapshot();
+
+        assertEquals("Hello World", snapshot.string("motdClean", ""));
+        assertEquals("\u00A7cHello \u00A7aWorld", snapshot.string("motdRaw", ""));
+        assertEquals(Base64.getEncoder().encodeToString(png), snapshot.string("iconPngBase64", ""));
+        assertFalse(snapshot.string("iconPngBase64", "data:").startsWith("data:"));
+        assertEquals(20.0, snapshot.doubleValue("tps", -1.0), 0.0001);
+        assertEquals(4.21, snapshot.doubleValue("mspt", -1.0), 0.0001);
+        assertTrue(snapshot.has("usedMemMb"));
+        assertTrue(snapshot.has("maxMemMb"));
+    }
+
+    @Test
+    @DisplayName("an unreadable stub MOTD still sends motdClean empty")
+    void unreadMotdIsEmptyString() {
+        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE, new BukkitHealthSource.MotdFaviconSource() {
+            @Override
+            public String motd() {
+                throw new IllegalStateException("not ready");
+            }
+
+            @Override
+            public File iconFile() {
+                throw new IllegalStateException("not ready");
+            }
+        }).snapshot();
+
+        assertEquals("", snapshot.string("motdClean", "missing"));
+        assertFalse(snapshot.has("iconPngBase64"));
+        assertTrue(snapshot.has("usedMemMb"));
+    }
+
+    @Test
+    @DisplayName("an oversized stub favicon is dropped")
+    void oversizedFaviconIsDropped(@TempDir File dir) throws IOException {
+        File icon = new File(dir, "server-icon.png");
+        Files.write(icon.toPath(), new byte[StatusHealth.MAX_ICON_BYTES + 1]);
+
+        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE, new BukkitHealthSource.MotdFaviconSource() {
+            @Override
+            public String motd() {
+                return "ok";
+            }
+
+            @Override
+            public File iconFile() {
+                return icon;
+            }
+        }).snapshot();
+
+        assertEquals("ok", snapshot.string("motdClean", ""));
+        assertFalse(snapshot.has("iconPngBase64"));
     }
 }
