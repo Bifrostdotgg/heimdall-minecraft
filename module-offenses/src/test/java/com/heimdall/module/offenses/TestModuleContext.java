@@ -9,6 +9,7 @@ import com.heimdall.core.mirror.MirrorPolicy;
 import com.heimdall.core.mirror.MirrorStore;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.pipeline.ChatMessage;
+import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.ChatObserver;
 import com.heimdall.core.pipeline.Interceptor;
 import com.heimdall.core.pipeline.LoginAttempt;
@@ -161,6 +162,11 @@ final class TestModuleContext implements ModuleContext {
     @Override
     public Registration interceptChat(Interceptor<ChatMessage> interceptor, int priority) {
         throw unused("interceptChat");
+    }
+
+    @Override
+    public Registration interceptCommand(Interceptor<CommandAttempt> interceptor, int priority) {
+        throw unused("interceptCommand");
     }
 
     @Override

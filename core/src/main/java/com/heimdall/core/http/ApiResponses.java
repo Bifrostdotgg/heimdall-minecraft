@@ -11,6 +11,7 @@ import com.heimdall.core.http.model.LinkCodeResult;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.http.model.PluginRelease;
+import com.heimdall.core.http.model.ResolvedName;
 import com.heimdall.core.http.model.RoleSyncDirective;
 import com.heimdall.core.http.model.WhitelistSyncEntry;
 import com.heimdall.core.http.model.WhitelistSyncResult;
@@ -139,6 +140,11 @@ final class ApiResponses {
                     .build();
         }
         return LinkCodeResult.code(string(data, "code"));
+    }
+
+    static ResolvedName resolvedName(RawResponse response) {
+        JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
+        return ResolvedName.of(string(data, "uuid"), string(data, "username"), string(data, "source"));
     }
 
     static List<OffenseType> offenseTypes(RawResponse response) {

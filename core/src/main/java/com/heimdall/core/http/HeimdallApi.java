@@ -8,6 +8,7 @@ import com.heimdall.core.http.model.OffenseReport;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.http.model.PluginRelease;
+import com.heimdall.core.http.model.ResolvedName;
 import com.heimdall.core.http.model.WhitelistSyncResult;
 import com.heimdall.core.json.Payload;
 import java.util.List;
@@ -149,6 +150,11 @@ public final class HeimdallApi {
     /** {@code POST request-link-code} — mint a Discord linking code. */
     public CompletableFuture<LinkCodeResult> requestLinkCode(final String username, final String uuid) {
         return gated(() -> client.requestLinkCode(username, uuid));
+    }
+
+    /** {@code GET players/resolve} — UUID for an offline Java name. Does not invent one. */
+    public CompletableFuture<ResolvedName> resolveName(final String name) {
+        return gated(() -> client.resolveName(name));
     }
 
     /** {@code GET offense-types} — the configured offense categories. */
