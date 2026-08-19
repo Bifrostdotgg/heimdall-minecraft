@@ -197,6 +197,7 @@ final class StubHttpApi {
                     }
                 }
                 case "POST offend" -> handleOffend(exchange, guildId, body);
+                case "GET players/resolve" -> handleResolve(exchange, guildId);
                 case "GET plugin/latest" -> {
                     if (guildIsConfigured(exchange, guildId)) {
                         sendEnvelope(exchange, 200, config.pluginLatest());
@@ -560,6 +561,62 @@ final class StubHttpApi {
         }
 
         sendEnvelope(exchange, 200, data);
+    }
+
+    /**
+     * {@code GET /players/resolve} — UUID for an offline Java name.
+     *
+     * <p>{@code OfflineSteve} is the canned never-online player. {@code DeniedAlex} is also
+     * resolvable so a test can offend them after they have left. A Floodgate-prefixed name is
+     * {@code BEDROCK_UNRESOLVABLE}. Anything else is {@code NOT_FOUND}.
+     */
+    private void handleResolve(HttpExchange exchange, String guildId) throws IOException {
+        if (!guildIsConfigured(exchange, guildId)) {
+            return;
+        }
+        String name = queryParam(exchange.getRequestURI().getRawQuery(), "name");
+        if (name.startsWith(".")) {
+            sendError(exchange, 404, "BEDROCK_UNRESOLVABLE",
+                    "Cannot resolve '" + name + "' to a UUID. Unknown Bedrock names are not looked up.");
+            return;
+        }
+        if ("OfflineSteve".equalsIgnoreCase(name)) {
+            JsonObject data = new JsonObject();
+            data.addProperty("uuid", "33333333-3333-3333-3333-333333333333");
+            data.addProperty("username", "OfflineSteve");
+            data.addProperty("source", "minecraft_player");
+            sendEnvelope(exchange, 200, data);
+            return;
+        }
+        if ("DeniedAlex".equalsIgnoreCase(name)) {
+            JsonObject data = new JsonObject();
+            data.addProperty("uuid", "22222222-2222-2222-2222-222222222222");
+            data.addProperty("username", "DeniedAlex");
+            data.addProperty("source", "minecraft_player");
+            sendEnvelope(exchange, 200, data);
+            return;
+        }
+        sendError(exchange, 404, "NOT_FOUND", "No Java account named '" + name + "'.");
+    }
+
+    private static String queryParam(String rawQuery, String key) {
+        if (rawQuery == null || rawQuery.isEmpty()) {
+            return "";
+        }
+        for (String part : rawQuery.split("&")) {
+            int eq = part.indexOf('=');
+            String k = eq < 0 ? part : part.substring(0, eq);
+            if (!key.equals(k)) {
+                continue;
+            }
+            String v = eq < 0 ? "" : part.substring(eq + 1);
+            try {
+                return java.net.URLDecoder.decode(v, "UTF-8");
+            } catch (java.io.UnsupportedEncodingException e) {
+                return v;
+            }
+        }
+        return "";
     }
 
     /**

@@ -8,6 +8,7 @@ import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.mirror.MirrorPolicy;
 import com.heimdall.core.mirror.MirrorStore;
 import com.heimdall.core.pipeline.ChatMessage;
+import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.ChatObserver;
 import com.heimdall.core.pipeline.Interceptor;
 import com.heimdall.core.pipeline.LoginAttempt;
@@ -106,6 +107,13 @@ public interface ModuleContext {
 
     /** Registers a chat check. Lower priority runs earlier. */
     Registration interceptChat(Interceptor<ChatMessage> interceptor, int priority);
+
+    /**
+     * Registers a command check. Lower priority runs earlier.
+     *
+     * <p>Only the Bukkit family dispatches this pipeline. Proxies never cancel player commands.
+     */
+    Registration interceptCommand(Interceptor<CommandAttempt> interceptor, int priority);
 
     /**
      * Registers a read-only chat observer — what a Discord relay is.

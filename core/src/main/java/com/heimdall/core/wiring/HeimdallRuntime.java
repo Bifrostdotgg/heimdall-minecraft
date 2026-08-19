@@ -13,6 +13,7 @@ import com.heimdall.core.module.HealthModule;
 import com.heimdall.core.module.ModuleEnvironment;
 import com.heimdall.core.module.ModuleManager;
 import com.heimdall.core.pipeline.ChatPipeline;
+import com.heimdall.core.pipeline.CommandPipeline;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.ConfigDocument;
@@ -128,6 +129,7 @@ public final class HeimdallRuntime implements AutoCloseable {
     private final RemoteConfig remoteConfig;
     private final LoginPipeline loginPipeline;
     private final ChatPipeline chatPipeline;
+    private final CommandPipeline commandPipeline;
     private final PlayerSessionEvents playerSessions;
     private final ModuleManager modules;
 
@@ -183,6 +185,7 @@ public final class HeimdallRuntime implements AutoCloseable {
                 : builder.executors;
         this.loginPipeline = new LoginPipeline(logger);
         this.chatPipeline = new ChatPipeline(logger);
+        this.commandPipeline = new CommandPipeline(logger);
 
         Path cachePath = platform.dataDirectory().resolve("config-cache.json");
         this.remoteConfig = new RemoteConfig(logger, cachePath, builtInDefaults());
@@ -206,6 +209,7 @@ public final class HeimdallRuntime implements AutoCloseable {
                 .remoteConfig(remoteConfig)
                 .loginPipeline(loginPipeline)
                 .chatPipeline(chatPipeline)
+                .commandPipeline(commandPipeline)
                 .platform(platform)
                 .playerSessions(playerSessions)
                 .build());
@@ -746,6 +750,10 @@ public final class HeimdallRuntime implements AutoCloseable {
 
     public ChatPipeline chatPipeline() {
         return chatPipeline;
+    }
+
+    public CommandPipeline commandPipeline() {
+        return commandPipeline;
     }
 
     /**

@@ -11,10 +11,13 @@ import com.heimdall.core.http.model.OffenseReport;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.http.model.PluginRelease;
+import com.heimdall.core.http.model.ResolvedName;
 import com.heimdall.core.http.model.WhitelistSyncResult;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.util.Strings;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
@@ -205,6 +208,25 @@ public final class ApiClient {
 
             return ApiResponses.linkCode(requests.execute(current,
                     HttpCall.post(guildPath(current, "request-link-code"), body.toString(),
+                            current.timeoutMs())));
+        });
+    }
+
+    /** {@code GET players/resolve} — UUID for an offline or never-seen-this-session Java name. */
+    public CompletableFuture<ResolvedName> resolveName(String name) {
+        if (Strings.isBlank(name)) {
+            throw new IllegalArgumentException("a name is required");
+        }
+        return async(() -> {
+            ApiSettings current = settings;
+            String encoded;
+            try {
+                encoded = URLEncoder.encode(name.trim(), StandardCharsets.UTF_8.name());
+            } catch (java.io.UnsupportedEncodingException e) {
+                throw new IllegalStateException(e);
+            }
+            return ApiResponses.resolvedName(requests.execute(current,
+                    HttpCall.get(guildPath(current, "players/resolve?name=" + encoded),
                             current.timeoutMs())));
         });
     }

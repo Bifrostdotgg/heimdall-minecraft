@@ -9,6 +9,7 @@ import com.heimdall.core.log.PrefixedLogger;
 import com.heimdall.core.mirror.MirrorPolicy;
 import com.heimdall.core.mirror.MirrorStore;
 import com.heimdall.core.pipeline.ChatMessage;
+import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.ChatObserver;
 import com.heimdall.core.pipeline.Interceptor;
 import com.heimdall.core.pipeline.LoginAttempt;
@@ -116,6 +117,12 @@ final class ModuleContextImpl implements ModuleContext {
     public Registration interceptChat(Interceptor<ChatMessage> interceptor, int priority) {
         return registrations.track(
                 environment.chatPipeline().register(interceptor, priority, moduleId));
+    }
+
+    @Override
+    public Registration interceptCommand(Interceptor<CommandAttempt> interceptor, int priority) {
+        return registrations.track(
+                environment.commandPipeline().register(interceptor, priority, moduleId));
     }
 
     @Override
