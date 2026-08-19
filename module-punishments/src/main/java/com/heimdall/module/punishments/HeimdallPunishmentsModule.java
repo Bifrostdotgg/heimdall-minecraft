@@ -87,6 +87,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         }
         context.tunnel().subscribe("punish.apply", applyHandler());
         context.tunnel().subscribe("punish.revoke", revokeHandler());
+        context.tunnel().subscribe("punish.import", importHandler());
         context.scheduleRepeating(new Runnable() {
             @Override
             public void run() {
@@ -318,6 +319,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                 }
                 mirror.record(keyFor(p), p);
                 kickIfBanned(p.targetUuid, p);
+            }
+        };
+    }
+
+    private TunnelMessageHandler importHandler() {
+        return new TunnelMessageHandler() {
+            @Override
+            public void onMessage(Envelope envelope) {
+                ModuleContext ctx = HeimdallPunishmentsModule.this.context;
+                if (ctx == null) return;
+                LiteBansSupport.importNow(ctx);
             }
         };
     }

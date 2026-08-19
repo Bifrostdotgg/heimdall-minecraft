@@ -11,6 +11,7 @@ import com.heimdall.core.http.model.OffenseReport;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.http.model.PluginRelease;
+import com.heimdall.core.http.model.PunishmentImportRow;
 import com.heimdall.core.http.model.ResolvedName;
 import com.heimdall.core.http.model.WhitelistSyncResult;
 import com.heimdall.core.json.Payload;
@@ -295,6 +296,31 @@ public final class ApiClient {
                     HttpCall.post(guildPath(current, "punishments/" + id + "/revoke"), json, current.timeoutMs()));
             return Envelopes.unwrapObject(response.status(), response.body());
         });
+    }
+
+    public CompletableFuture<JsonObject> importPunishmentRows(java.util.List<PunishmentImportRow> rows) {
+        JsonArray array = new JsonArray();
+        if (rows != null) {
+            for (PunishmentImportRow row : rows) {
+                if (row == null || row.type == null) continue;
+                JsonObject o = new JsonObject();
+                o.addProperty("type", row.type);
+                if (row.targetUuid != null) o.addProperty("targetUuid", row.targetUuid);
+                if (row.targetName != null) o.addProperty("targetName", row.targetName);
+                if (row.ip != null) o.addProperty("ip", row.ip);
+                if (row.reason != null) o.addProperty("reason", row.reason);
+                if (row.durationMinutes != null) o.addProperty("durationMinutes", row.durationMinutes);
+                o.addProperty("silent", row.silent);
+                if (row.issuedByName != null) o.addProperty("issuedByName", row.issuedByName);
+                if (row.issuedAtMillis > 0) o.addProperty("issuedAt", row.issuedAtMillis);
+                o.addProperty("importProvider", "litebans");
+                if (row.importProviderId != null) o.addProperty("importProviderId", row.importProviderId);
+                array.add(o);
+            }
+        }
+        JsonObject body = new JsonObject();
+        body.add("rows", array);
+        return importPunishments(body);
     }
 
     public CompletableFuture<JsonObject> importPunishments(JsonObject body) {

@@ -8,6 +8,7 @@ import com.heimdall.core.http.model.OffenseReport;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.http.model.PluginRelease;
+import com.heimdall.core.http.model.PunishmentImportRow;
 import com.heimdall.core.http.model.ResolvedName;
 import com.heimdall.core.http.model.WhitelistSyncResult;
 import com.google.gson.JsonObject;
@@ -188,6 +189,15 @@ public final class HeimdallApi {
 
     public CompletableFuture<JsonObject> revokePunishment(final String id, final JsonObject body) {
         return gated(() -> client.revokePunishment(id, body));
+    }
+
+    public CompletableFuture<Boolean> importPunishmentRows(final java.util.List<PunishmentImportRow> rows) {
+        return gated(() -> client.importPunishmentRows(rows).thenApply(new java.util.function.Function<JsonObject, Boolean>() {
+            @Override
+            public Boolean apply(JsonObject ignored) {
+                return Boolean.TRUE;
+            }
+        }));
     }
 
     public CompletableFuture<JsonObject> importPunishments(final JsonObject body) {
