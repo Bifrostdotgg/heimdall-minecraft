@@ -6,6 +6,7 @@ import com.heimdall.core.http.ApiSettings;
 import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.pipeline.ChatPipeline;
+import com.heimdall.core.pipeline.CommandPipeline;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.RemoteConfig;
@@ -31,6 +32,7 @@ public final class ModuleEnvironment {
     private final RemoteConfig remoteConfig;
     private final LoginPipeline loginPipeline;
     private final ChatPipeline chatPipeline;
+    private final CommandPipeline commandPipeline;
     private final PlatformFacade platform;
     private final PlayerSessionEvents playerSessions;
 
@@ -58,6 +60,9 @@ public final class ModuleEnvironment {
         this.remoteConfig = builder.remoteConfig;
         this.loginPipeline = builder.loginPipeline;
         this.chatPipeline = builder.chatPipeline;
+        this.commandPipeline = builder.commandPipeline == null
+                ? new CommandPipeline(builder.logger)
+                : builder.commandPipeline;
         this.platform = builder.platform;
         // Defaulted rather than required. Every caller that has one passes it; a test assembling a
         // partial environment should not have to build a dispatcher it will never push an event
@@ -114,6 +119,10 @@ public final class ModuleEnvironment {
         return chatPipeline;
     }
 
+    public CommandPipeline commandPipeline() {
+        return commandPipeline;
+    }
+
     public PlatformFacade platform() {
         return platform;
     }
@@ -138,6 +147,7 @@ public final class ModuleEnvironment {
         private RemoteConfig remoteConfig;
         private LoginPipeline loginPipeline;
         private ChatPipeline chatPipeline;
+        private CommandPipeline commandPipeline;
         private PlatformFacade platform;
         private PlayerSessionEvents playerSessions;
 
@@ -177,6 +187,11 @@ public final class ModuleEnvironment {
 
         public Builder chatPipeline(ChatPipeline value) {
             this.chatPipeline = value;
+            return this;
+        }
+
+        public Builder commandPipeline(CommandPipeline value) {
+            this.commandPipeline = value;
             return this;
         }
 

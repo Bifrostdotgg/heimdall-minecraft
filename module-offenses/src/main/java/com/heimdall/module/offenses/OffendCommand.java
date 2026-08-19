@@ -5,8 +5,10 @@ import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.http.HeimdallApi;
+import com.heimdall.core.http.ApiError;
 import com.heimdall.core.http.model.OffenseReport;
 import com.heimdall.core.http.model.OffenseResult;
+import com.heimdall.core.http.model.ResolvedName;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.ConsoleBridge;
 import com.heimdall.core.platform.PlayerDirectory;
@@ -41,18 +43,11 @@ import java.util.UUID;
  * PlayerDirectory.byName} matches case-insensitively, so {@code /offend steve xray} against
  * {@code Steve} would otherwise record the username in whatever casing the operator happened to use.
  *
- * <h2>An offline target is refused, on every platform</h2>
+ * <h2>Offline targets go through the bot</h2>
  *
- * <p>{@link PlayerDirectory} is deliberately online-only — "resolve this name to a UUID" has a
- * different answer on every platform, the wrong answer is silent, and the bot already knows the
- * mapping. v2's Bukkit path reached past that with {@code getOfflinePlayerIfCached}; v2's proxy path
- * refused outright, because a Velocity proxy has no such cache to reach into. v3 applies the proxy
- * behaviour everywhere rather than being right on one platform and differently right on the other.
- *
- * <p>That is a deliberate, stated gap and not an oversight: offending a player who has logged out is
- * a real workflow. Closing it properly means asking the bot to resolve the name — it holds the
- * link records and its answer is the same on every platform — which is a new endpoint, so it is
- * phase 1e/1f work rather than a {@code PlayerDirectory} extension invented here.
+ * <p>{@link PlayerDirectory} is still online-only. An offline name is resolved with
+ * {@code GET /players/resolve}: MinecraftPlayer first, then Mojang for Java names. Unknown Bedrock
+ * names without a stored row are refused. The plugin never invents a UUID (#797).
  *
  * <h2>Threading</h2>
  *
@@ -131,26 +126,43 @@ final class OffendCommand implements CommandHandler, CommandCompleter {
         }
 
         String requested = args.get(0);
-        PlayerHandle target = players.byName(requested).orElse(null);
-        if (target == null) {
-            source.sendMessage(Msg.legacy("§cCould not resolve §f" + requested
-                    + "§c — they must be online to receive an offense."));
+        String notes = args.size() > 2 ? join(args.subList(2, args.size())) : null;
+        String slug = args.get(1);
+
+        PlayerHandle online = players.byName(requested).orElse(null);
+        if (online != null) {
+            // The handle's own casing, not the operator's. See the class javadoc.
+            submitOffense(source, online.uuid().toString(), online.name(), slug, notes);
             return;
         }
 
-        // The handle's own casing, not the operator's. See the class javadoc.
-        String targetName = target.name();
-        String notes = args.size() > 2 ? join(args.subList(2, args.size())) : null;
+        source.sendMessage(Msg.legacy("§eResolving §f" + requested + "§e..."));
+        final String recordedSlug = slug;
+        final String recordedNotes = notes;
+        final String recordedRequested = requested;
+        api.resolveName(requested).whenComplete((resolved, failure) -> {
+            try {
+                if (failure != null) {
+                    reportResolveFailure(source, recordedRequested, failure);
+                    return;
+                }
+                submitOffense(source, resolved.uuid(), resolved.username(), recordedSlug, recordedNotes);
+            } catch (RuntimeException e) {
+                logger.error("could not tell " + source.name()
+                        + " what happened resolving /offend for " + recordedRequested, e);
+            }
+        });
+    }
 
+    private void submitOffense(
+            CommandSource source, String uuid, String targetName, String slug, String notes) {
         OffenseReport report;
         try {
-            report = OffenseReport.builder(target.uuid().toString(), targetName, args.get(1))
+            report = OffenseReport.builder(uuid, targetName, slug)
                     .issuedBy(issuerUuid(source), source.name())
                     .notes(notes)
                     .build();
         } catch (IllegalArgumentException e) {
-            // The only way here is a blank slug — `/offend Steve "  "`. The usage line is a better
-            // answer than the builder's own message, which names a field the operator never typed.
             source.sendMessage(Msg.legacy("§cUsage: §f" + USAGE));
             return;
         }
@@ -168,13 +180,31 @@ final class OffendCommand implements CommandHandler, CommandCompleter {
                     reportSuccess(source, recordedName, result);
                 }
             } catch (RuntimeException e) {
-                // A sender that disconnected mid-request, or a platform that threw on send. The
-                // infraction is already recorded either way; losing the acknowledgement must not
-                // surface as an uncaught exception on heimdall-io.
                 logger.error("could not tell " + source.name()
                         + " what happened to their /offend for " + recordedName, e);
             }
         });
+    }
+
+    private void reportResolveFailure(CommandSource source, String requested, Throwable failure) {
+        String described = Failures.describe(failure);
+        if (failure instanceof ApiError) {
+            ApiError error = (ApiError) failure;
+            if ("BEDROCK_UNRESOLVABLE".equals(error.code())) {
+                source.sendMessage(Msg.legacy("§cCould not resolve §f" + requested
+                        + "§c — unknown Bedrock names have to have joined this guild first."));
+                logger.warn("resolving '" + requested + "' for /offend failed: " + described);
+                return;
+            }
+            if ("NOT_FOUND".equals(error.code()) || error.httpStatus() == 404) {
+                source.sendMessage(Msg.legacy("§cCould not resolve §f" + requested
+                        + "§c — no Java account by that name, and they are not in this guild."));
+                logger.warn("resolving '" + requested + "' for /offend failed: " + described);
+                return;
+            }
+        }
+        source.sendMessage(Msg.legacy("§cCould not resolve §f" + requested + "§c: §f" + described));
+        logger.warn("resolving '" + requested + "' for /offend failed: " + described);
     }
 
     /**

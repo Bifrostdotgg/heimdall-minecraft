@@ -1,5 +1,5 @@
 /**
- * Interceptor chains over the two events Heimdall gates: logins and chat.
+ * Interceptor chains over the events Heimdall gates: logins, chat, and commands.
  *
  * <p>One engine, two instances. A check registers with a priority, the chain runs in ascending
  * order on the calling thread, and the first denial wins. Abstain is a real third answer rather than

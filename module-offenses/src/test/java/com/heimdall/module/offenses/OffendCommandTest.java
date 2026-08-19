@@ -223,6 +223,14 @@ class OffendCommandTest {
             awaitTold(console, "Offense recorded for " + TARGET_NAME);
             awaitDispatchCount(1);
         }
+
+        @Test
+        @DisplayName("an offline Java player is resolved through the bot")
+        void offlinePlayerIsResolved() {
+            assertTrue(run(staff, "OfflineSteve", "xray"));
+            awaitTold(staff, "Offense recorded for OfflineSteve");
+            awaitDispatchCount(1);
+        }
     }
 
     // ── Everything that must not reach the bot ───────────────────────────────
@@ -232,18 +240,14 @@ class OffendCommandTest {
     class Refusals {
 
         @Test
-        @DisplayName("an offline target is refused without an API call")
-        void offlineTargetIsRefused() {
+        @DisplayName("an unknown offline name is refused after resolve")
+        void unknownOfflineTargetIsRefused() {
             assertTrue(run(staff, "GhostGary", "xray"));
 
-            assertTrue(staff.wasTold("Could not resolve GhostGary"), staff.messageText().toString());
-            assertFalse(staff.wasTold("Recording offense"),
-                    "that line is printed immediately before the request, so its absence is the "
-                            + "proof no request was made");
+            awaitTold(staff, "Could not resolve GhostGary");
+            assertFalse(staff.wasTold("Recording offense"), staff.messageText().toString());
             assertEquals(Collections.<String>emptyList(), platform.dispatchedCommands());
 
-            // The stronger proof: the next real offense is still a first offense. Had the refused
-            // one reached the bot, the running total for this type would already be 1.
             staff.clearMessages();
             assertTrue(run(staff, TARGET_NAME, "xray"));
             awaitTold(staff, "Total points: 1");
