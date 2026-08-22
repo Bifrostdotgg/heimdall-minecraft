@@ -148,6 +148,7 @@ tokenId: "..." # public identifier for the guild API token
 token: "..." # the signing secret — never share this
 serverId: "..." # this server's identity within the guild
 role: "auto" # auto | standalone | gatekeeper | enforcer — see ServerRole
+identityCheck: "auto" # auto | strict | off - what to do if this file turns up on another machine
 debug: false # verbose logging; toggle live with /hd debug on|off
 timeoutMs: 5000 # per-attempt login timeout
 retries: 3 # total login attempts, including the first
@@ -156,13 +157,29 @@ updatesCheckEnabled: true # self-updater — see "Keeping the plugin updated"
 updatesNotifyAdmins: true
 updatesCheckIntervalHours: 12
 disabledModules: "" # space-separated local module overrides — see /hd disable
+instanceFingerprint: "..." # which machine these credentials were bound to; written by the plugin
 guildIdCache: "..." # cache of the last resolved guild; written by the plugin, not a setting
 ```
 
-`token`, `tokenId`, `serverId` and `guildIdCache` are written by `/hd setup` and by the plugin
-itself — don't hand-edit them. The login-timing fields (`timeoutMs`/`retries`/`retryDelayMs`) and
+`token`, `tokenId`, `serverId`, `instanceFingerprint` and `guildIdCache` are written by `/hd setup`
+and by the plugin itself; don't hand-edit them. The login-timing fields (`timeoutMs`/`retries`/`retryDelayMs`) and
 the update knobs are the ones you might reasonably tune by hand; they stay local because they shape
 the very request that would otherwise fetch the dashboard's config, so the dashboard can't own them.
+
+`identityCheck` decides what happens when a `bootstrap.yml` is found on a machine other than the
+one it was bound to, which is what a copied server directory or a restored backup looks like. Two
+servers sharing one `serverId` both connect, and the bot keeps only the newest socket, so they evict
+each other for as long as they are both up.
+
+- `auto` (default) - refuse to connect when the server is on a game panel and its panel id has
+  changed, since that really is a different server. Otherwise warn on every boot and connect anyway,
+  because a container that gets recreated legitimately has a new host name.
+- `strict` - refuse to connect on any mismatch.
+- `off` - never compare.
+
+The check runs before the tunnel is dialled, which is why it lives here rather than on the
+dashboard: the connection it decides about is the one that would have fetched the setting. See
+`/hd identity` for what to do about a mismatch.
 
 `endpoint` is the field whitelabel instances care about: most installs talk to the public
 `https://api.bifrost.gg`, but a whitelabel instance has its own URL, and its setup codes are only
@@ -241,6 +258,13 @@ to the same tree and prints a one-time-per-start warning telling you to switch.
 - `/hd status` - version, role, serverId, endpoint, guild, tunnel state, per-module state, whitelist
   mirror stats, console tap health and update availability
 - `/hd reload` - re-read `bootstrap.yml` and reconnect the tunnel in place
+- `/hd identity` - show which machine this server's credentials are bound to, this machine's
+  fingerprint, and the `identityCheck` policy
+- `/hd identity adopt` - bind the credentials to this machine. The answer to "I moved this server"
+- `/hd identity reset confirm` - clear the token, `serverId`, binding and the cached dashboard
+  configuration, keeping the endpoint and the other local settings, so this copy can be set up
+  again with a fresh code. The answer to "I copied this server". Without `confirm` it only says
+  what it would do
 - `/hd modules` - list this build's modules and each one's state
 - `/hd enable [module]` / `/hd disable [module]` - a **local** override, persisted in
   `bootstrap.yml`, that switches a module off/on even while the bot is unreachable and wins over
@@ -311,6 +335,22 @@ to the same tree and prints a one-time-per-start warning telling you to switch.
 - Ensure Discord integration is properly configured
 - Check that the bot has necessary permissions in Discord
 - Verify the server ID matches between plugin and bot
+
+**"identity mismatch" in the console, or `/hd status` says `identity: MISMATCH`**
+
+This `bootstrap.yml` was bound to a different machine than the one reading it. Almost always a
+server directory that was copied, or a backup restored next to the original. Both copies claim the
+same `serverId`, and the bot keeps only the newest connection, so they take it in turns to be
+online.
+
+- If you **moved** this server (new host, new panel, same server): `/hd identity adopt`.
+- If this is a **copy** and the original is still running: `/hd identity reset confirm` on the copy,
+  then claim a fresh code for it with `/hd setup <code>`.
+
+Run `/hd identity` to see both fingerprints before deciding. On the default `identityCheck: auto`
+the plugin only refuses to connect when it can prove the machine changed (a game panel's server id);
+otherwise it warns every fifteen minutes and connects anyway, so a mismatch you have not dealt with
+is a warning rather than an outage. Set `identityCheck: strict` if you would rather it refused.
 
 **Plugin not working after restart**
 

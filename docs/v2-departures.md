@@ -1755,6 +1755,86 @@ v2's split meant the punishment plugin re-checked *the moderator's* permissions,
 landed or did not depending on who reported it — while the bot recorded the infraction either way.
 An infraction with no punishment attached to it, silently, for some staff and not others.
 
+### D84 - the persisted identity is bound to the instance that wrote it
+
+**New in 3.1.**
+
+**Before:** `bootstrap.yml` held a `serverId` and nothing else about where it lived. Copy the
+directory, or restore a backup onto a second box, and both servers dialled the tunnel with the same
+`serverId`. The bot is last-wins per `serverId`, so the two evicted each other in a loop: whichever
+reconnected most recently owned the link, and every command, whitelist push and chat relay went to
+whichever one that happened to be. Nothing in the plugin, the console or `/hd status` said so. Two
+Purpur servers ran like that for hours before anyone worked out why the bridge kept moving.
+
+**Now:** the file also records **which instance it was set up on**, and the plugin checks that
+against the instance it is booting on before it dials.
+
+`InstanceFingerprint` is two tiers, and the tier is the whole reason the policy has a middle setting:
+
+- **`panel:<uuid>`** - the `P_SERVER_UUID` environment variable that Pterodactyl, Pelican and their
+  forks set per server. It is issued by the panel, it is unique, and it follows the *server* rather
+  than the disk. A panel fingerprint that does not match is a copy, with no useful ambiguity left in
+  it.
+- **`host:<hostname>|<realpath>`** - the fallback, from `/etc/hostname` (then `HOSTNAME`, then
+  `COMPUTERNAME`, then `unknown-host`) and the resolved absolute path of the plugin's data
+  directory. That pair is not authoritative: a container that gets a fresh hostname on every
+  restart, a bind mount that moves, or a rename of the server directory all change it without
+  anything being copied. There is deliberately **no DNS lookup** at the end of that list:
+  `InetAddress.getLocalHost()` blocks on the resolver, this runs on the thread enabling the plugin,
+  and a box with a broken resolver would hold the whole server's boot open to learn a name that is
+  about to be called `unknown-host` anyway. `unknown-host` costs nothing that matters, because the
+  path half still tells two copies on one box apart.
+
+So the check has three settings and its default is deliberately not the strict one:
+
+| `identityCheck` | mismatch on a `panel:` fingerprint | mismatch on a `host:` fingerprint |
+|---|---|---|
+| `auto` (default) | refuse to dial, warn every 15 minutes | dial anyway, warn every 15 minutes |
+| `strict` | refuse to dial | refuse to dial |
+| `off` | no check at all | no check at all |
+
+**`auto` is a statement about evidence, not a compromise.** A wrong panel uuid is proof; refusing on
+it costs a copied server a `/hd identity reset` it needed to run anyway. A wrong host string is a
+guess, and a plugin that will not connect because someone renamed a directory is a worse failure than
+the one being prevented - the operator did not do anything wrong, the tunnel is down, and the console
+line blames a rename. The advisory case still warns on the same 15-minute cadence, so the evidence is
+in front of whoever goes looking, and `strict` is one line away for anyone who would rather have the
+refusal.
+
+**The check cannot live on the dashboard, and that is why a second knob exists in a file whose stated
+job is to hold as little as possible.** Everything else configurable moved server-side precisely so
+`bootstrap.yml` stays four lines. This one runs *before* the tunnel is dialled, to decide whether to
+dial it; a value fetched over that tunnel is not available to the decision that gates it. The
+fingerprint has the same shape of reason: it is what the local file claims about itself, so it
+belongs in the local file.
+
+**The guard is pure and the runtime owns every side effect.** `IdentityGuard.evaluate` takes the
+config and the current fingerprint and returns a `Decision` - one of `NOT_SET_UP`, `DISABLED`,
+`ADOPTED`, `BOUND`, `MISMATCH_BLOCKED`, `MISMATCH_ADVISORY` - with no logging, no file write and no
+scheduler. `HeimdallRuntime` does the writing, the warning and the refusal to dial, under the same
+`reconfigureLock` that `reload` and `applySetup` take, so the decision cannot interleave with a
+reconfigure.
+
+**An existing install upgrades silently, and that is the `ADOPTED` state.** A file written before 3.1
+has neither key, so it loads as `identityCheck: auto` with an empty fingerprint, takes the `ADOPTED`
+branch on its first configured boot, writes the current fingerprint back best-effort and connects
+exactly as before. A failed write is a warning and not a refusal: the in-memory config carries the
+fingerprint for that run, and the adopt is retried next boot. Nobody has to know the feature shipped
+until the day it saves them.
+
+**The two remedies are `/hd identity adopt` and `/hd identity reset confirm`, and they are different
+answers to the same warning.** A server that *moved* is still the same server: `adopt` rebinds the
+existing `serverId` to the new instance and dials. A server that is a *copy* must not keep the
+`serverId` at all: `reset confirm` clears `tokenId`, `token`, `serverId`, the cached guild and the
+fingerprint, keeps the endpoint and the role, and leaves the install ready for a fresh `/hd setup`
+with its own code. The warning names both, because the plugin cannot tell which happened and the
+operator always can.
+
+**The digest, not the value, goes over the wire.** The handshake's `ServerIdentity.extra` carries
+`instanceFingerprint` as a SHA-256 hex digest, so the bot can tell two instances apart, and see that
+a `serverId` it already knows is now being presented by a different one, without ever being told a
+hostname or a filesystem path.
+
 ---
 
 ## Structure
