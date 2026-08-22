@@ -7,6 +7,7 @@ import com.heimdall.core.http.ApiClient;
 import com.heimdall.core.http.BedrockIdentityProvider;
 import com.heimdall.core.http.ClaimClient;
 import com.heimdall.core.http.HeimdallApi;
+import com.heimdall.core.identity.InstanceFingerprint;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.module.HealthModule;
@@ -22,6 +23,7 @@ import com.heimdall.core.remoteconfig.RemoteConfig;
 import com.heimdall.core.session.PlayerSessionEvents;
 import com.heimdall.core.tunnel.HealthSnapshotSource;
 import com.heimdall.core.tunnel.IdentitySource;
+import com.heimdall.core.tunnel.ServerIdentity;
 import com.heimdall.core.tunnel.TunnelClient;
 import com.heimdall.core.tunnel.TunnelSettings;
 import com.heimdall.core.util.Registration;
@@ -35,6 +37,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Everything the plugin is, assembled once, in an order that has to be right.
@@ -152,6 +157,34 @@ public final class HeimdallRuntime implements AutoCloseable {
      */
     private volatile GuildDiscovery guildDiscovery;
 
+    /**
+     * Which machine this process is, worked out once at construction.
+     *
+     * <p>Not re-derived per check: nothing in it can change while the JVM is up, and a value that
+     * moved under a running server would turn the guard into a source of flapping rather than a
+     * defence against it.
+     */
+    private final InstanceFingerprint fingerprint;
+
+    /**
+     * The last identity decision. Volatile because a status command on a server thread reads what
+     * {@link #start()} or a reload wrote.
+     */
+    private volatile IdentityGuard.Decision identity;
+
+    /** The repeating mismatch warning, or {@code null} when there is nothing to complain about. */
+    private volatile ScheduledFuture<?> identityWarning;
+
+    /**
+     * The root command this build registered: {@code hd} on the Bukkit family, {@code hdp} on the
+     * proxies.
+     *
+     * <p>Held here only so the runtime's own console lines can name a command the operator actually
+     * has. Everything a subcommand prints uses {@code AdminContext#label()} instead, which is the
+     * same string arriving by the shorter route.
+     */
+    private final String commandLabel;
+
     /** Everything {@link #start()} registered, closed in reverse on the way out. */
     private final List<Registration> registrations = new ArrayList<Registration>();
 
@@ -170,7 +203,18 @@ public final class HeimdallRuntime implements AutoCloseable {
         this.logger = builder.logger;
         this.platform = builder.platform;
         this.bootstrapStore = builder.bootstrapStore;
-        this.identitySource = builder.identitySource;
+        this.commandLabel = Strings.isBlank(builder.commandLabel)
+                ? "hd" : builder.commandLabel.trim();
+        this.fingerprint = builder.instanceFingerprint == null
+                ? InstanceFingerprint.detect(System.getenv(), builder.platform.dataDirectory())
+                : builder.instanceFingerprint;
+        // Wrapped rather than replaced, so the handshake carries the fingerprint's digest without
+        // three platform identity sources having to know the check exists. A platform that supplied
+        // no source still supplies none: "unknown server software" is a state the status command
+        // reports, and inventing an identity here would hide it.
+        this.identitySource = builder.identitySource == null
+                ? null
+                : new FingerprintedIdentity(builder.identitySource, fingerprint.digest());
         this.bootstrap = bootstrapStore.load();
         // Explicit beats cached beats nothing. The cached value is what a restart during a bot
         // outage runs on — see BootstrapConfig#guildId — and is overwritten by whatever `identify`
@@ -225,6 +269,11 @@ public final class HeimdallRuntime implements AutoCloseable {
         // each module a bus backed by the client, and the client asks the manager what to declare.
         // See CapabilitySource.
         tunnel.setCapabilitySource(modules);
+
+        // Decided here so a status command asked before start() gets an answer rather than null.
+        // Deliberately without the side effects: nothing is written and nothing is logged until
+        // start() runs the same evaluation through applyIdentityGuard().
+        this.identity = IdentityGuard.evaluate(bootstrap, fingerprint);
     }
 
     /**
@@ -284,7 +333,7 @@ public final class HeimdallRuntime implements AutoCloseable {
     private TunnelClient buildTunnel(Builder builder) {
         return TunnelClient.builder(logger, executors)
                 .settings(tunnelSettings(bootstrap, guildId))
-                .identitySource(builder.identitySource)
+                .identitySource(identitySource)
                 .healthSource(builder.healthSource)
                 .configPushHandler(remoteConfig)
                 .build();
@@ -333,8 +382,14 @@ public final class HeimdallRuntime implements AutoCloseable {
         modules.setLocallyDisabled(parseModuleIds(bootstrap.disabledModules()));
 
         if (!bootstrap.isConfigured()) {
-            logger.info("not set up yet — run /hd setup <code> to connect this server to Discord "
-                    + "(see " + bootstrapStore.file() + ")");
+            logger.info("not set up yet: run /" + commandLabel + " setup <code> to connect this "
+                    + "server to Discord (see " + bootstrapStore.file() + ")");
+            return;
+        }
+        // Before dial(), because the whole point is to not dial. A blocked server keeps its
+        // commands, its modules and its local whitelist: it just stays off the tunnel that its twin
+        // is already on.
+        if (applyIdentityGuard().blocksTunnel()) {
             return;
         }
         dial();
@@ -403,13 +458,20 @@ public final class HeimdallRuntime implements AutoCloseable {
         if (closed) {
             throw new IllegalStateException("this runtime has been shut down");
         }
-        bootstrapStore.save(updated);
-        this.bootstrap = updated;
-        this.guildId = updated.guildId();
-        logger.setDebugEnabled(updated.debug());
+        // Setup binds. These credentials are new, so whatever machine is claiming them is the one
+        // they belong to, and a server that was blocked a moment ago is unblocked by having been set
+        // up again here rather than by anything else having to notice.
+        BootstrapConfig bound =
+                updated.toBuilder().instanceFingerprint(fingerprint.value()).build();
+        bootstrapStore.save(bound);
+        this.bootstrap = bound;
+        this.guildId = bound.guildId();
+        logger.setDebugEnabled(bound.debug());
+        this.identity = IdentityGuard.evaluate(bound, fingerprint);
+        cancelIdentityWarning();
 
-        apiClient.reconfigure(ApiSettingsFactory.fromBootstrap(updated, guildId).build());
-        tunnel.applySettings(tunnelSettings(updated, guildId));
+        apiClient.reconfigure(ApiSettingsFactory.fromBootstrap(bound, guildId).build());
+        tunnel.applySettings(tunnelSettings(bound, guildId));
 
         // A resolved or closed discovery cannot be restarted, and the token has just changed, so
         // whatever the old one concluded is about a credential this server no longer uses.
@@ -554,11 +616,40 @@ public final class HeimdallRuntime implements AutoCloseable {
         modules.setLocallyDisabled(parseModuleIds(onDisk.disabledModules()));
 
         if (!onDisk.isConfigured()) {
+            cancelIdentityWarning();
+            this.identity = IdentityGuard.evaluate(onDisk, fingerprint);
             return "re-read " + bootstrapStore.file() + "; this server is still not set up";
         }
 
+        // Re-decided on every reload, in both directions: an operator who fixes the file gets their
+        // tunnel back below without a restart, and one who edits identityCheck to strict on a
+        // mismatched server loses it here.
+        boolean wasBlocked = identity != null && identity.blocksTunnel();
+        IdentityGuard.Decision decision = applyIdentityGuard();
+        if (decision.blocksTunnel()) {
+            // Down BEFORE the settings are applied below. A tunnel that was already up has to come
+            // down anyway, and doing it first is what stops applySettings finding a live socket and
+            // reconnecting it onto the very credentials this decision has just refused.
+            tunnel.disconnect();
+        }
+
+        // Applied whatever the decision was. These two calls dial nothing on their own on a
+        // blocked reload: both objects are re-pointed in place, and the tunnel only reconnects
+        // here if it finds a live socket, which the disconnect above has just torn down.
+        // Returning before them left the file consumed but unapplied, so a later `identity adopt`
+        // dialled with the token from before the edit and nothing said why.
         apiClient.reconfigure(ApiSettingsFactory.fromBootstrap(onDisk, guildId).build());
         tunnel.applySettings(tunnelSettings(onDisk, guildId));
+
+        if (decision.blocksTunnel()) {
+            // Again, because a connect that was already in flight can publish its socket between
+            // the disconnect above and applySettings, which then schedules a fresh reconnect that
+            // no staleness check would refuse.
+            tunnel.disconnect();
+            return "re-read " + bootstrapStore.file() + "; identity mismatch, so the tunnel is "
+                    + "stopped. Run /" + commandLabel + " identity to see both fingerprints and how "
+                    + "to fix it.";
+        }
 
         if (credentialsChanged) {
             GuildDiscovery previous = guildDiscovery;
@@ -571,6 +662,15 @@ public final class HeimdallRuntime implements AutoCloseable {
             return "re-read " + bootstrapStore.file()
                     + "; credentials changed, so the guild is being resolved again";
         }
+        if (wasBlocked) {
+            // The block was total: start() returned before dial(), so on this boot discovery has
+            // never been started and the tunnel has never been dialled. None of the branches below
+            // would notice - a resolved-looking discovery reports nothing to do, and a cached guild
+            // makes the discovery callback a no-op - so the server would sit there, unblocked and
+            // still disconnected, until somebody restarted it.
+            dial();
+            return "re-read " + bootstrapStore.file() + "; the identity now matches, connecting";
+        }
         GuildDiscovery discovery = guildDiscovery;
         if (discovery != null && !discovery.isResolved()) {
             // Still discovering. Reconnecting on a guild we do not have would only log a refusal.
@@ -579,6 +679,243 @@ public final class HeimdallRuntime implements AutoCloseable {
         }
         tunnel.reconnect(guildId);
         return "re-read configuration and reconnected the tunnel";
+    }
+
+    // ── Instance identity ────────────────────────────────────────────────────
+
+    /**
+     * Re-decides the identity question and does whatever the answer requires.
+     *
+     * <p>The side-effecting half of {@link IdentityGuard}: it records a first fingerprint, logs a
+     * mismatch, arms or cancels the repeating warning, and reports back so the caller can decide
+     * whether to dial. Callers already holding {@link #reconfigureLock} are fine, the lock is
+     * reentrant.
+     *
+     * @return the decision, whose {@link IdentityGuard.Decision#blocksTunnel()} the caller must obey
+     */
+    private IdentityGuard.Decision applyIdentityGuard() {
+        synchronized (reconfigureLock) {
+            IdentityGuard.Decision decision = IdentityGuard.evaluate(bootstrap, fingerprint);
+            this.identity = decision;
+            switch (decision.state()) {
+                case ADOPTED:
+                    bindFingerprint();
+                    logger.info("bound server identity " + shortServerId(bootstrap.serverId())
+                            + " to this instance: " + fingerprint.value());
+                    // Re-decided from what was just recorded. ADOPTED describes the moment, not the
+                    // state: leaving it in place made `/hd identity` report "bound to this instance
+                    // just now" with an empty recorded value for the rest of the boot, and made
+                    // `adopt` offer to do work that was already done.
+                    decision = IdentityGuard.evaluate(bootstrap, fingerprint);
+                    this.identity = decision;
+                    break;
+                case DISABLED:
+                    logger.debug(() -> "identity check is off; connecting without comparing "
+                            + "this instance (" + fingerprint.value() + ") with the recorded one");
+                    break;
+                case MISMATCH_BLOCKED:
+                case MISMATCH_ADVISORY:
+                    logger.warn(decision.warning(commandLabel));
+                    armIdentityWarning();
+                    return decision;
+                default:
+                    logger.debug(() -> "this instance matches the identity in "
+                            + bootstrapStore.file() + ": " + fingerprint.value());
+                    break;
+            }
+            cancelIdentityWarning();
+            return decision;
+        }
+    }
+
+    /**
+     * Records the current fingerprint, best-effort.
+     *
+     * <p>Persisting is allowed to fail. A read-only data directory costs one adopt line per boot,
+     * the same trade {@link #adoptGuildLocked} makes for the guild cache, and refusing to connect
+     * over it would turn a permissions problem into an outage. The in-memory config is updated
+     * either way, so the rest of this boot behaves as bound.
+     */
+    private void bindFingerprint() {
+        BootstrapConfig updated =
+                bootstrap.toBuilder().instanceFingerprint(fingerprint.value()).build();
+        try {
+            bootstrapStore.save(updated);
+        } catch (IOException | RuntimeException notPersisted) {
+            logger.warn("could not record this instance in " + bootstrapStore.file()
+                    + "; the identity check will bind again on the next boot: " + notPersisted);
+        }
+        this.bootstrap = updated;
+    }
+
+    /**
+     * Binds these credentials to this machine, on an operator's say-so, and dials if that unblocked
+     * anything.
+     *
+     * <p>What {@code /hd identity adopt} calls. The answer to "I moved this server". It is not the
+     * answer to "I copied this server", and the command says so before it runs.
+     *
+     * @return the decision after adopting, which is
+     *     {@link IdentityGuard.State#BOUND} unless the check is off
+     * @throws IOException if {@code bootstrap.yml} could not be written, in which case nothing has
+     *     changed on disk and the old binding still stands
+     */
+    public IdentityGuard.Decision adoptInstanceIdentity() throws IOException {
+        synchronized (reconfigureLock) {
+            if (closed) {
+                throw new IllegalStateException("this runtime has been shut down");
+            }
+            boolean wasBlocked = identity != null && identity.blocksTunnel();
+            BootstrapConfig updated =
+                    bootstrap.toBuilder().instanceFingerprint(fingerprint.value()).build();
+            bootstrapStore.save(updated);
+            this.bootstrap = updated;
+            logger.info("bound server identity " + shortServerId(updated.serverId())
+                    + " to this instance: " + fingerprint.value());
+
+            IdentityGuard.Decision decision = IdentityGuard.evaluate(updated, fingerprint);
+            this.identity = decision;
+            cancelIdentityWarning();
+            if (wasBlocked && !decision.blocksTunnel() && updated.isConfigured() && started) {
+                dial();
+            }
+            return decision;
+        }
+    }
+
+    /**
+     * Throws these credentials away: token, server id, cached guild and binding.
+     *
+     * <p>What {@code /hd identity reset confirm} calls, and the answer to "this directory is a copy
+     * of another server". The endpoint, the role, the debug flag and the operational knobs are
+     * kept, because they are settings rather than identity and retyping them is nobody's idea of a
+     * remedy.
+     *
+     * <p>The tunnel is disconnected rather than shut down: this server is expected to be set up
+     * again in the next minute, and {@link TunnelClient#shutdown()} latches for good.
+     *
+     * @throws IOException if {@code bootstrap.yml} could not be written, in which case nothing has
+     *     changed and this server is still using the credentials it had
+     */
+    public void resetIdentity() throws IOException {
+        synchronized (reconfigureLock) {
+            if (closed) {
+                throw new IllegalStateException("this runtime has been shut down");
+            }
+            if (!bootstrap.isConfigured()) {
+                // Nothing to clear. Writing the file anyway would create a bootstrap.yml on a server
+                // that has never had one, and warning that credentials were cleared would be a
+                // sentence about something that did not happen.
+                logger.debug("nothing to reset: this server is not set up");
+                return;
+            }
+            BootstrapConfig cleared = bootstrap.toBuilder()
+                    .tokenId("")
+                    .token("")
+                    .serverId("")
+                    .guildId("")
+                    .instanceFingerprint("")
+                    .build();
+            bootstrapStore.save(cleared);
+            this.bootstrap = cleared;
+            this.guildId = "";
+
+            GuildDiscovery previous = guildDiscovery;
+            if (previous != null) {
+                previous.close();
+            }
+            this.guildDiscovery = null;
+
+            // Re-pointed at the empty config so nothing that already holds one of these keeps using
+            // the token that was just given up. ApiClient and TunnelClient both tolerate settings
+            // they cannot connect with, which is the same state a fresh install is in.
+            apiClient.reconfigure(ApiSettingsFactory.fromBootstrap(cleared, "").build());
+            tunnel.applySettings(tunnelSettings(cleared, ""));
+            tunnel.disconnect();
+
+            // The cache is the PREVIOUS guild's answer. Left in place, a server claimed by a
+            // different guild runs on it until that guild's first push arrives, and reads it back
+            // off disk on every restart in between - which is the copied-directory failure again,
+            // one layer down.
+            remoteConfig.clearCache();
+
+            cancelIdentityWarning();
+            this.identity = IdentityGuard.evaluate(cleared, fingerprint);
+            logger.warn("this server's credentials have been cleared from " + bootstrapStore.file()
+                    + "; it is no longer connected to Discord. Run /" + commandLabel
+                    + " setup <code> to claim a new one.");
+        }
+    }
+
+    /**
+     * Arms the repeating mismatch warning, if it is not already armed.
+     *
+     * <p>On the shared scheduler rather than a pool of its own: one warning every fifteen minutes
+     * does not justify a thread, and the ArchUnit rules would rightly refuse an anonymous one.
+     */
+    private void armIdentityWarning() {
+        ScheduledFuture<?> armed = identityWarning;
+        if (armed != null && !armed.isCancelled() && !armed.isDone()) {
+            return;
+        }
+        try {
+            identityWarning = executors.scheduler().scheduleWithFixedDelay(new Runnable() {
+                @Override
+                public void run() {
+                    repeatIdentityWarning();
+                }
+            }, IdentityGuard.WARN_INTERVAL_MS, IdentityGuard.WARN_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException shuttingDown) {
+            logger.debug("not repeating the identity warning: the scheduler is shutting down");
+        }
+    }
+
+    /**
+     * One repeat, on the scheduler thread.
+     *
+     * <p>The decision is read off the volatile field without the lock, because the only thing this
+     * does with a still-mismatched one is log it, and logging holds no lock the reconfigure path
+     * could be waiting on. The lock is taken only to cancel, since every other arm and cancel is
+     * made under it: without that a repeat deciding "there is nothing to warn about any more"
+     * could cancel a task some other thread had armed a microsecond earlier, and the mismatch
+     * would go quiet while still being true. Safe to block for the cancel - nothing that holds the
+     * lock waits on this pool.
+     */
+    private void repeatIdentityWarning() {
+        IdentityGuard.Decision decision = identity;
+        if (closed || decision == null || !decision.isMismatch()) {
+            synchronized (reconfigureLock) {
+                cancelIdentityWarning();
+            }
+            return;
+        }
+        logger.warn(decision.warning(commandLabel));
+    }
+
+    /**
+     * Cancels the repeat, if the one in the field is still the one this call is about.
+     *
+     * <p>The compare-and-clear matters for {@link #close()}, which deliberately runs without the
+     * lock: clearing the field unconditionally would let a shutdown racing a re-arm cancel the new
+     * task and leave the field naming nothing.
+     */
+    private void cancelIdentityWarning() {
+        ScheduledFuture<?> armed = identityWarning;
+        if (armed == null) {
+            return;
+        }
+        armed.cancel(false);
+        if (identityWarning == armed) {
+            identityWarning = null;
+        }
+    }
+
+    /** Enough of a server id to recognise in a log line, without wrapping it. */
+    private static String shortServerId(String serverId) {
+        if (serverId == null || serverId.isEmpty()) {
+            return "<unset>";
+        }
+        return serverId.length() <= 12 ? serverId : serverId.substring(0, 12) + "...";
     }
 
     /**
@@ -594,7 +931,9 @@ public final class HeimdallRuntime implements AutoCloseable {
      * <p>Persisting is best-effort. A read-only data directory costs one {@code identify} per boot,
      * which is a great deal better than refusing to connect.
      */
-    private void adoptGuild(String resolved) {
+    // Package-private rather than private: the guard's test drives this directly, because the only
+    // production caller is a callback on a thread a unit test cannot schedule deterministically.
+    void adoptGuild(String resolved) {
         synchronized (reconfigureLock) {
             adoptGuildLocked(resolved);
         }
@@ -630,6 +969,17 @@ public final class HeimdallRuntime implements AutoCloseable {
         if (closed) {
             return;
         }
+        IdentityGuard.Decision decision = identity;
+        if (decision != null && decision.blocksTunnel()) {
+            // The answer is recorded above, because it is true and the next boot should not have to
+            // ask again. Acting on it is what is refused: discovery runs on its own thread, so a
+            // reload that blocks the tunnel while an answer is in flight would otherwise be undone
+            // a second later by a callback that never heard about it.
+            logger.warn("resolved guild " + resolved + ", but this instance is blocked by the "
+                    + "identity check, so the tunnel stays down. Run /" + commandLabel
+                    + " identity.");
+            return;
+        }
         // reconnect() rather than connect(): it accepts the guild, cancels anything the backoff has
         // armed, and works whether or not a socket exists — including the case where this is a
         // correction and a socket is already open on the wrong guild. See TunnelClient#reconnect.
@@ -648,6 +998,8 @@ public final class HeimdallRuntime implements AutoCloseable {
             return;
         }
         closed = true;
+
+        cancelIdentityWarning();
 
         final GuildDiscovery discovery = guildDiscovery;
         if (discovery != null) {
@@ -723,6 +1075,15 @@ public final class HeimdallRuntime implements AutoCloseable {
     /** Whether {@code bootstrap.yml} carries enough to talk to the bot at all. */
     public boolean isConfigured() {
         return bootstrap.isConfigured();
+    }
+
+    /**
+     * The platform's primary command verb, {@code hd} on a server and {@code hdp} on a proxy.
+     * Every message this runtime writes that names a command reads it from here, so a proxy
+     * never tells an operator to run a command that does not exist there.
+     */
+    public String commandLabel() {
+        return commandLabel;
     }
 
     /** What is on disk now. Replaced wholesale by {@link #applySetup}; never mutated. */
@@ -811,6 +1172,12 @@ public final class HeimdallRuntime implements AutoCloseable {
         if (!isConfigured()) {
             return "not set up — no bootstrap.yml yet";
         }
+        IdentityGuard.Decision decision = identity;
+        if (decision != null && decision.blocksTunnel()) {
+            return "identity mismatch: these credentials were bound to \"" + decision.recorded()
+                    + "\" but this server is \"" + decision.current() + "\", so the tunnel was not "
+                    + "started. Run /" + commandLabel + " identity.";
+        }
         GuildDiscovery discovery = guildDiscovery;
         if (discovery != null && !discovery.isResolved()) {
             String provisional = Strings.isBlank(guildId)
@@ -827,9 +1194,28 @@ public final class HeimdallRuntime implements AutoCloseable {
                     return "asking the bot which guild this token belongs to" + provisional;
             }
         }
-        return tunnel.isConnected()
+        String connection = tunnel.isConnected()
                 ? "connected to guild " + guildId
                 : "guild " + guildId + " resolved; the tunnel is not connected";
+        if (decision != null && decision.isMismatch()) {
+            return connection + " (identity mismatch, warning only: run /" + commandLabel
+                    + " identity)";
+        }
+        return connection;
+    }
+
+    /** This machine's fingerprint. Fixed for the life of the process. */
+    public InstanceFingerprint instanceFingerprint() {
+        return fingerprint;
+    }
+
+    /**
+     * The last identity decision: what state this install is in, and the two values behind it.
+     *
+     * <p>Never {@code null} - the constructor makes one before anything can ask.
+     */
+    public IdentityGuard.Decision identity() {
+        return identity;
     }
 
     /** Live from construction, so a platform can register its modules before {@link #start()}. */
@@ -873,6 +1259,41 @@ public final class HeimdallRuntime implements AutoCloseable {
         return tunnel;
     }
 
+    /**
+     * The platform's identity, plus this instance's fingerprint digest.
+     *
+     * <p>The digest rather than the value: the bot only ever needs to compare two of them, and the
+     * readable form contains a host name and a path that nothing outside this server needs to know.
+     * It rides in {@code extra} rather than as a named field so the three platform identity sources
+     * do not each have to grow the same line.
+     */
+    private static final class FingerprintedIdentity implements IdentitySource {
+
+        private static final String EXTRA_KEY = "instanceFingerprint";
+
+        private final IdentitySource delegate;
+        private final String digest;
+
+        FingerprintedIdentity(IdentitySource delegate, String digest) {
+            this.delegate = delegate;
+            this.digest = digest;
+        }
+
+        @Override
+        public ServerIdentity identity() {
+            ServerIdentity identity = delegate.identity();
+            if (identity == null) {
+                return null;
+            }
+            return identity.toBuilder()
+                    .extra(Payload.builder()
+                            .putAll(identity.extra())
+                            .put(EXTRA_KEY, digest)
+                            .build())
+                    .build();
+        }
+    }
+
     /** The mutable writer. Only the logger, the platform and the bootstrap store are required. */
     public static final class Builder {
 
@@ -883,6 +1304,8 @@ public final class HeimdallRuntime implements AutoCloseable {
         private HeimdallExecutors executors;
         private String guildId = "";
         private IdentitySource identitySource;
+        private InstanceFingerprint instanceFingerprint;
+        private String commandLabel = "hd";
         private HealthSnapshotSource healthSource;
         private BedrockIdentityProvider bedrockIdentityProvider;
 
@@ -930,6 +1353,29 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         public Builder identitySource(IdentitySource value) {
             this.identitySource = value;
+            return this;
+        }
+
+        /**
+         * This machine's fingerprint.
+         *
+         * <p>Left unset, the runtime works it out from the environment and the data directory. It
+         * is injectable so a test can decide what "this machine" is, rather than the machine the
+         * test happens to run on deciding for it.
+         */
+        public Builder instanceFingerprint(InstanceFingerprint value) {
+            this.instanceFingerprint = value;
+            return this;
+        }
+
+        /**
+         * The root command this platform registers, without a slash: {@code hd} or {@code hdp}.
+         *
+         * <p>Only the runtime's own console lines use it. Left unset it is {@code hd}, which is
+         * right for every backend and wrong for a proxy, so the proxy entry points set it.
+         */
+        public Builder commandLabel(String value) {
+            this.commandLabel = value;
             return this;
         }
 

@@ -108,6 +108,28 @@ public final class RemoteConfig implements ConfigPushHandler, ProtocolModeListen
         }
     }
 
+    /**
+     * Throws the cached document away and drops back to the built-in defaults.
+     *
+     * <p>What {@code /hd identity reset confirm} calls. Everything in the cache was pushed by the
+     * guild whose token has just been given up, so a server that is about to be claimed by a
+     * different guild would otherwise run on the old one's settings until the first push arrives,
+     * and read them back off disk on every restart until then.
+     *
+     * <p>Listeners are told, because "back to defaults" is a real configuration change: a module
+     * the old guild had switched on has to stop, and the swap is what stops it. The per-connection
+     * version floor is reset too, so the next guild's version 1 is not refused for being older than
+     * the last one's version 12.
+     */
+    public void clearCache() {
+        synchronized (writeLock) {
+            cache.delete();
+            acceptedPushThisSession = false;
+            swap(ConfigDocument.empty());
+        }
+        logger.info("cleared the cached remote config; running on the built-in defaults");
+    }
+
     // ── Reads ────────────────────────────────────────────────────────────────
 
     /** The document in force: defaults overlaid by the live or cached configuration. */

@@ -10,6 +10,7 @@ import com.heimdall.core.tunnel.ServerIdentity;
 import com.heimdall.core.tunnel.TunnelClient;
 import com.heimdall.core.util.Strings;
 import com.heimdall.core.wiring.HeimdallRuntime;
+import com.heimdall.core.wiring.IdentityGuard;
 import java.util.List;
 import java.util.Set;
 
@@ -70,6 +71,7 @@ final class StatusSubcommand implements AdminSubcommand {
         // whitelabel support conversation asks.
         source.sendMessage(Msg.legacy("§7endpoint: §f" + orNone(bootstrap.endpoint())));
         source.sendMessage(Msg.legacy("§7bot: §f" + runtime.connectionStatus()));
+        source.sendMessage(Msg.legacy("§7identity: §f" + describeIdentity(runtime, context)));
         source.sendMessage(Msg.legacy("§7api: §f" + runtime.api().describe()
                 + "   §7guild: §f" + orNone(runtime.guildId())));
         source.sendMessage(Msg.legacy("§7tunnel: §f" + describeTunnel(tunnel)));
@@ -81,6 +83,20 @@ final class StatusSubcommand implements AdminSubcommand {
             source.sendMessage(Msg.legacy("§7locally disabled: §e" + runtime.locallyDisabledModules()
                     + " §8(/" + context.label() + " enable <module> to restore)"));
         }
+    }
+
+    /**
+     * One line on whether these credentials belong to this machine.
+     *
+     * <p>Short by design: the interesting case has four values behind it and its own verb, and a
+     * status screen that printed all of them would bury the eleven other lines.
+     */
+    private static String describeIdentity(HeimdallRuntime runtime, AdminContext context) {
+        IdentityGuard.Decision decision = runtime.identity();
+        if (!decision.isMismatch()) {
+            return decision.summary();
+        }
+        return decision.summary() + " §8(/" + context.label() + " identity)";
     }
 
     /**

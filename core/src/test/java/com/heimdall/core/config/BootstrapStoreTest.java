@@ -66,6 +66,8 @@ class BootstrapStoreTest {
                 .updatesNotifyAdmins(false)
                 .updatesCheckIntervalHours(6)
                 .disabledModules("whitelist rolesync")
+                .identityCheck(IdentityCheckPolicy.STRICT)
+                .instanceFingerprint("panel:9f0b1a2c-dead-beef")
                 .build();
 
         store.save(config);
@@ -120,6 +122,8 @@ class BootstrapStoreTest {
                 + "token: shhh\n"
                 + "serverId: creative\n"
                 + "role: gatekeeper\n"
+                + "identityCheck: strict\n"
+                + "instanceFingerprint: 'host:box-a|/srv/mc/plugins/heimdall'\n"
                 + "debug: true\n");
 
         BootstrapConfig config = storeIn(dir).load();
@@ -129,6 +133,8 @@ class BootstrapStoreTest {
         assertEquals("shhh", config.token());
         assertEquals("creative", config.serverId());
         assertEquals(ServerRole.GATEKEEPER, config.role());
+        assertEquals(IdentityCheckPolicy.STRICT, config.identityCheck());
+        assertEquals("host:box-a|/srv/mc/plugins/heimdall", config.instanceFingerprint());
         assertTrue(config.debug());
         assertTrue(config.isConfigured());
     }
@@ -256,6 +262,51 @@ class BootstrapStoreTest {
         assertEquals(1, logger.at(LogLevel.WARN).size());
         assertTrue(logger.at(LogLevel.WARN).get(0).message.contains("overlord"),
                 "the warning has to quote the value the operator actually typed");
+    }
+
+    @Test
+    @DisplayName("a file written before the identity check existed loads with the defaults")
+    void legacyFileHasNoIdentityKeys(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: https://bot.example\n"
+                + "tokenId: tok_abc\n"
+                + "token: shhh\n"
+                + "serverId: survival\n");
+
+        BootstrapConfig config = storeIn(dir).load();
+
+        assertEquals(IdentityCheckPolicy.AUTO, config.identityCheck());
+        assertEquals("", config.instanceFingerprint(),
+                "a blank fingerprint is what makes the first boot after an upgrade adopt silently");
+        assertTrue(logger.at(LogLevel.WARN).isEmpty(), "an upgrade must not warn about nothing");
+    }
+
+    @Test
+    @DisplayName("an unknown identityCheck warns once and falls back to auto")
+    void unknownIdentityCheckWarnsAndFallsBackToAuto(@TempDir Path dir) throws IOException {
+        write(dir, "identityCheck: paranoid\n");
+
+        assertEquals(IdentityCheckPolicy.AUTO, storeIn(dir).load().identityCheck());
+        assertEquals(1, logger.at(LogLevel.WARN).size());
+        assertTrue(logger.at(LogLevel.WARN).get(0).message.contains("paranoid"),
+                "the warning has to quote the value the operator actually typed");
+    }
+
+    @Test
+    @DisplayName("the plugin-written keys are saved below the operator-facing ones")
+    void identityKeysAreWritten(@TempDir Path dir) throws IOException {
+        storeIn(dir).save(BootstrapConfig.builder()
+                .endpoint("https://bot.example")
+                .token("shhh")
+                .instanceFingerprint("host:box-a|/srv/mc/plugins/heimdall")
+                .build());
+
+        String written = read(dir);
+        assertTrue(written.contains("identityCheck: auto"), written);
+        assertTrue(written.contains("instanceFingerprint:"), written);
+        assertTrue(written.indexOf("identityCheck") < written.indexOf("timeoutMs"),
+                "identityCheck belongs with the other things an operator sets:\n" + written);
+        assertTrue(written.indexOf("instanceFingerprint") > written.indexOf("disabledModules"),
+                "the plugin-written appendix goes last:\n" + written);
     }
 
     @Test

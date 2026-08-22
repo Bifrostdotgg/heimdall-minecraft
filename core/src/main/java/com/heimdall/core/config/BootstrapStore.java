@@ -52,6 +52,10 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
  * {@link #KEY_GUILD_ID_CACHE} rather than something an operator might take for a setting — the name
  * says what it is, on disk, without needing a comment that would not survive anyway.
  *
+ * <p>{@link #KEY_INSTANCE_FINGERPRINT} is the second key the plugin writes for itself, and gets the
+ * same treatment: the README says it is plugin-written and not to be hand-edited, because a comment
+ * saying so in the file would not survive the next save.
+ *
  * <p>Unknown keys <em>are</em> preserved (departure D19); only the comments around them are not.
  */
 public final class BootstrapStore {
@@ -61,6 +65,7 @@ public final class BootstrapStore {
     private static final String KEY_TOKEN = "token";
     private static final String KEY_SERVER_ID = "serverId";
     private static final String KEY_ROLE = "role";
+    private static final String KEY_IDENTITY_CHECK = "identityCheck";
     private static final String KEY_DEBUG = "debug";
     private static final String KEY_TIMEOUT_MS = "timeoutMs";
     private static final String KEY_RETRIES = "retries";
@@ -87,6 +92,16 @@ public final class BootstrapStore {
     private static final String KEY_GUILD_ID_CACHE = "guildIdCache";
 
     /**
+     * Which instance these credentials were bound to.
+     *
+     * <p>The other key the plugin writes on its own initiative. It is recorded the first time a
+     * configured install boots and compared on every boot after that, so that a copied server
+     * directory is noticed instead of quietly joining the tunnel under the original's
+     * {@code serverId}. See {@code com.heimdall.core.identity.InstanceFingerprint}.
+     */
+    private static final String KEY_INSTANCE_FINGERPRINT = "instanceFingerprint";
+
+    /**
      * What the same cache was called before it was renamed.
      *
      * <p>Read, never written. 1d shipped the key as {@code guildId} for exactly as long as it took a
@@ -100,10 +115,10 @@ public final class BootstrapStore {
 
     /** Every key this version knows how to interpret. Anything else is passed through untouched. */
     private static final Set<String> KNOWN_KEYS = new HashSet<String>(Arrays.asList(
-            KEY_ENDPOINT, KEY_TOKEN_ID, KEY_TOKEN, KEY_SERVER_ID, KEY_ROLE, KEY_DEBUG,
-            KEY_TIMEOUT_MS, KEY_RETRIES, KEY_RETRY_DELAY_MS,
+            KEY_ENDPOINT, KEY_TOKEN_ID, KEY_TOKEN, KEY_SERVER_ID, KEY_ROLE, KEY_IDENTITY_CHECK,
+            KEY_DEBUG, KEY_TIMEOUT_MS, KEY_RETRIES, KEY_RETRY_DELAY_MS,
             KEY_UPDATES_CHECK, KEY_UPDATES_NOTIFY, KEY_UPDATES_INTERVAL, KEY_DISABLED_MODULES,
-            KEY_GUILD_ID_CACHE, LEGACY_KEY_GUILD_ID));
+            KEY_INSTANCE_FINGERPRINT, KEY_GUILD_ID_CACHE, LEGACY_KEY_GUILD_ID));
 
     private final HeimdallLogger logger;
     private final Path file;
@@ -162,6 +177,8 @@ public final class BootstrapStore {
                 builder.serverId(asString(value));
             } else if (KEY_ROLE.equals(key)) {
                 builder.role(parseRole(asString(value)));
+            } else if (KEY_IDENTITY_CHECK.equals(key)) {
+                builder.identityCheck(parseIdentityCheck(asString(value)));
             } else if (KEY_DEBUG.equals(key)) {
                 builder.debug(asBoolean(value));
             } else if (KEY_TIMEOUT_MS.equals(key)) {
@@ -179,6 +196,8 @@ public final class BootstrapStore {
                         asLong(value, BootstrapConfig.DEFAULT_UPDATE_INTERVAL_HOURS));
             } else if (KEY_DISABLED_MODULES.equals(key)) {
                 builder.disabledModules(asString(value));
+            } else if (KEY_INSTANCE_FINGERPRINT.equals(key)) {
+                builder.instanceFingerprint(asString(value));
             } else if (KEY_GUILD_ID_CACHE.equals(key)) {
                 builder.guildId(asString(value));
             } else if (LEGACY_KEY_GUILD_ID.equals(key) && !raw.containsKey(KEY_GUILD_ID_CACHE)) {
@@ -215,6 +234,7 @@ public final class BootstrapStore {
         document.put(KEY_TOKEN, config.token());
         document.put(KEY_SERVER_ID, config.serverId());
         document.put(KEY_ROLE, config.role().wireName());
+        document.put(KEY_IDENTITY_CHECK, config.identityCheck().wireName());
         document.put(KEY_DEBUG, Boolean.valueOf(config.debug()));
         // Written unconditionally rather than only-when-non-default. A file that omits them reads
         // the defaults back (load() fills any missing key), but writing them makes bootstrap.yml a
@@ -228,10 +248,12 @@ public final class BootstrapStore {
         document.put(KEY_UPDATES_NOTIFY, Boolean.valueOf(config.updatesNotifyAdmins()));
         document.put(KEY_UPDATES_INTERVAL, Long.valueOf(config.updatesCheckIntervalHours()));
         document.put(KEY_DISABLED_MODULES, config.disabledModules());
-        // Written last of the known keys so it reads as what it is: an appendix the plugin
-        // maintains, below the fields the operator was actually asked for. The legacy spelling is
+        // The last two known keys are the appendix the plugin maintains for itself: which instance
+        // these credentials were bound to, and the guild the token last resolved to. They sit below
+        // the fields the operator was actually asked for. The legacy guildId spelling is
         // deliberately not written back, so a file rewritten by this version ends up with one key
         // rather than two saying the same thing.
+        document.put(KEY_INSTANCE_FINGERPRINT, config.instanceFingerprint());
         document.put(KEY_GUILD_ID_CACHE, config.guildId());
         document.putAll(unknownKeys());
 
@@ -324,6 +346,18 @@ public final class BootstrapStore {
                         + ServerRole.AUTO.wireName() + "'");
             }
             return ServerRole.AUTO;
+        }
+        return parsed;
+    }
+
+    private IdentityCheckPolicy parseIdentityCheck(String raw) {
+        IdentityCheckPolicy parsed = IdentityCheckPolicy.parse(raw, null);
+        if (parsed == null) {
+            if (Strings.isNotBlank(raw)) {
+                logger.warn("Unknown identityCheck '" + raw + "' in " + file + ", falling back to '"
+                        + IdentityCheckPolicy.AUTO.wireName() + "'");
+            }
+            return IdentityCheckPolicy.AUTO;
         }
         return parsed;
     }

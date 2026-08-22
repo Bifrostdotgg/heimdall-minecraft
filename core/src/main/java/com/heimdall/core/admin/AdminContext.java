@@ -43,7 +43,8 @@ public final class AdminContext {
         this.runtime = builder.runtime;
         this.role = builder.role == null ? ServerRole.AUTO : builder.role;
         this.pluginVersion = builder.pluginVersion == null ? "" : builder.pluginVersion;
-        this.label = builder.label == null || builder.label.isEmpty() ? "hd" : builder.label;
+        this.label = builder.label == null || builder.label.isEmpty()
+                ? this.runtime.commandLabel() : builder.label;
         this.whitelist = builder.whitelist == null ? WhitelistAdmin.NONE : builder.whitelist;
         this.offenses = builder.offenses == null ? OffenseAdmin.NONE : builder.offenses;
         this.updates = builder.updates == null ? UpdateAdmin.NONE : builder.updates;
@@ -140,7 +141,11 @@ public final class AdminContext {
             return this;
         }
 
-        /** The platform's primary verb, {@code hd} or {@code hdp}. Defaults to {@code hd}. */
+        /**
+         * The platform's primary verb, {@code hd} or {@code hdp}. Left unset, the runtime's own
+         * {@link HeimdallRuntime#commandLabel()} is used, which is where every other message
+         * gets it from, so the two cannot drift.
+         */
         public Builder label(String value) {
             this.label = value;
             return this;

@@ -65,6 +65,17 @@ public final class BootstrapConfig {
     private final ServerRole role;
     private final boolean debug;
 
+    /**
+     * How hard to argue when {@link #instanceFingerprint()} does not match the running machine.
+     *
+     * <p><strong>Why this is not a dashboard setting.</strong> The comparison happens before the
+     * tunnel is dialled, and its whole purpose is to decide whether dialling is safe. A policy the
+     * dashboard owned could only be fetched by the connection the policy is there to prevent, and
+     * the failure it guards against is precisely two servers sharing one identity, so the value
+     * fetched would be the other server's. It has to be readable from disk before the first packet.
+     */
+    private final IdentityCheckPolicy identityCheck;
+
     private final int timeoutMs;
     private final int retries;
     private final int retryDelayMs;
@@ -88,6 +99,17 @@ public final class BootstrapConfig {
      */
     private final String guildId;
 
+    /**
+     * The instance fingerprint this install's credentials were bound to, or {@code ""} if they have
+     * not been bound yet.
+     *
+     * <p><strong>Written by the plugin, not by an operator.</strong> It is recorded the first time a
+     * configured install boots, and rewritten by {@code /hd identity adopt} and {@code /hd setup}.
+     * Its only job is to notice that {@code bootstrap.yml} has been copied to a second server, which
+     * would otherwise put two processes on the tunnel claiming the same {@code serverId}.
+     */
+    private final String instanceFingerprint;
+
     private BootstrapConfig(Builder builder) {
         this.endpoint = stripTrailingSlash(Strings.trimToEmpty(builder.endpoint));
         this.tokenId = Strings.trimToEmpty(builder.tokenId);
@@ -95,6 +117,8 @@ public final class BootstrapConfig {
         this.serverId = Strings.trimToEmpty(builder.serverId);
         this.role = builder.role == null ? ServerRole.AUTO : builder.role;
         this.debug = builder.debug;
+        this.identityCheck =
+                builder.identityCheck == null ? IdentityCheckPolicy.AUTO : builder.identityCheck;
         this.timeoutMs = builder.timeoutMs;
         this.retries = builder.retries;
         this.retryDelayMs = builder.retryDelayMs;
@@ -103,6 +127,7 @@ public final class BootstrapConfig {
         this.updatesCheckIntervalHours = builder.updatesCheckIntervalHours;
         this.disabledModules = Strings.trimToEmpty(builder.disabledModules);
         this.guildId = Strings.trimToEmpty(builder.guildId);
+        this.instanceFingerprint = Strings.trimToEmpty(builder.instanceFingerprint);
     }
 
     /** An empty, not-configured bootstrap: what a server with no {@code bootstrap.yml} has. */
@@ -123,6 +148,7 @@ public final class BootstrapConfig {
                 .token(token)
                 .serverId(serverId)
                 .role(role)
+                .identityCheck(identityCheck)
                 .debug(debug)
                 .timeoutMs(timeoutMs)
                 .retries(retries)
@@ -131,6 +157,7 @@ public final class BootstrapConfig {
                 .updatesNotifyAdmins(updatesNotifyAdmins)
                 .updatesCheckIntervalHours(updatesCheckIntervalHours)
                 .disabledModules(disabledModules)
+                .instanceFingerprint(instanceFingerprint)
                 .guildId(guildId);
     }
 
@@ -163,6 +190,14 @@ public final class BootstrapConfig {
     /** What this instance does in the network. Never {@code null}; defaults to {@link ServerRole#AUTO}. */
     public ServerRole role() {
         return role;
+    }
+
+    /**
+     * How to react to an instance fingerprint mismatch. Never {@code null}; defaults to
+     * {@link IdentityCheckPolicy#AUTO}.
+     */
+    public IdentityCheckPolicy identityCheck() {
+        return identityCheck;
     }
 
     /** Whether debug logging starts on. The one diagnostic knob that has to be local. */
@@ -224,6 +259,18 @@ public final class BootstrapConfig {
     }
 
     /**
+     * The fingerprint of the instance these credentials were bound to, or {@code ""} if none has
+     * been recorded yet.
+     *
+     * <p>Blank is the normal state for an install that predates the check, and means "adopt this
+     * machine on the next boot". Not a secret: it is a host name and a path, or a panel uuid, in a
+     * file that already holds the token.
+     */
+    public String instanceFingerprint() {
+        return instanceFingerprint;
+    }
+
+    /**
      * Whether this config carries enough to talk to the bot at all.
      *
      * <p>{@code false} means the setup flow has not run: no endpoint, or no token. It is not
@@ -263,6 +310,8 @@ public final class BootstrapConfig {
                 && updatesNotifyAdmins == that.updatesNotifyAdmins
                 && updatesCheckIntervalHours == that.updatesCheckIntervalHours
                 && role == that.role
+                && identityCheck == that.identityCheck
+                && instanceFingerprint.equals(that.instanceFingerprint)
                 && endpoint.equals(that.endpoint)
                 && tokenId.equals(that.tokenId)
                 && token.equals(that.token)
@@ -277,6 +326,8 @@ public final class BootstrapConfig {
         result = 31 * result + token.hashCode();
         result = 31 * result + serverId.hashCode();
         result = 31 * result + role.hashCode();
+        result = 31 * result + identityCheck.hashCode();
+        result = 31 * result + instanceFingerprint.hashCode();
         result = 31 * result + (debug ? 1 : 0);
         result = 31 * result + timeoutMs;
         result = 31 * result + retries;
@@ -297,7 +348,9 @@ public final class BootstrapConfig {
                 + "', token=" + (token.isEmpty() ? "<unset>" : "<redacted>")
                 + ", serverId='" + serverId
                 + "', role=" + role.wireName()
-                + ", guildId='" + guildId
+                + ", identityCheck=" + identityCheck.wireName()
+                + ", instanceFingerprint='" + instanceFingerprint
+                + "', guildId='" + guildId
                 + "', debug=" + debug
                 + ", timeoutMs=" + timeoutMs
                 + ", retries=" + retries
@@ -322,6 +375,7 @@ public final class BootstrapConfig {
         private String token = "";
         private String serverId = "";
         private ServerRole role = ServerRole.AUTO;
+        private IdentityCheckPolicy identityCheck = IdentityCheckPolicy.AUTO;
         private boolean debug;
         private int timeoutMs = DEFAULT_TIMEOUT_MS;
         private int retries = DEFAULT_RETRIES;
@@ -331,6 +385,7 @@ public final class BootstrapConfig {
         private long updatesCheckIntervalHours = DEFAULT_UPDATE_INTERVAL_HOURS;
         private String disabledModules = "";
         private String guildId = "";
+        private String instanceFingerprint = "";
 
         private Builder() {
         }
@@ -358,6 +413,12 @@ public final class BootstrapConfig {
         /** {@code null} is accepted and means {@link ServerRole#AUTO}. */
         public Builder role(ServerRole value) {
             this.role = value;
+            return this;
+        }
+
+        /** {@code null} is accepted and means {@link IdentityCheckPolicy#AUTO}. */
+        public Builder identityCheck(IdentityCheckPolicy value) {
+            this.identityCheck = value;
             return this;
         }
 
@@ -405,6 +466,12 @@ public final class BootstrapConfig {
         /** The resolved guild, cached from {@code identify}. Not an operator-facing setting. */
         public Builder guildId(String value) {
             this.guildId = value;
+            return this;
+        }
+
+        /** The instance this config is bound to. Written by the plugin, not by an operator. */
+        public Builder instanceFingerprint(String value) {
+            this.instanceFingerprint = value;
             return this;
         }
 

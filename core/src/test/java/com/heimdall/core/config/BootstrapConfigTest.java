@@ -18,6 +18,8 @@ class BootstrapConfigTest {
                 .token("s3cr3t")
                 .serverId("survival")
                 .role(ServerRole.GATEKEEPER)
+                .identityCheck(IdentityCheckPolicy.STRICT)
+                .instanceFingerprint("panel:9f0b1a2c")
                 .debug(true)
                 .build();
     }
@@ -31,6 +33,9 @@ class BootstrapConfigTest {
         assertEquals("", config.token());
         assertEquals("", config.serverId());
         assertEquals(ServerRole.AUTO, config.role());
+        assertEquals(IdentityCheckPolicy.AUTO, config.identityCheck());
+        assertEquals("", config.instanceFingerprint(),
+                "an install that has never been bound adopts the machine it next boots on");
         assertFalse(config.debug());
         assertFalse(config.isConfigured());
     }
@@ -67,6 +72,31 @@ class BootstrapConfigTest {
     }
 
     @Test
+    void nullIdentityCheckMeansAuto() {
+        assertEquals(IdentityCheckPolicy.AUTO,
+                BootstrapConfig.builder().identityCheck(null).build().identityCheck());
+    }
+
+    @Test
+    @DisplayName("toString prints the fingerprint, which is not a secret")
+    void toStringShowsTheFingerprint() {
+        String rendered = configured().toString();
+
+        assertTrue(rendered.contains("panel:9f0b1a2c"), rendered);
+        assertTrue(rendered.contains("strict"), rendered);
+    }
+
+    @Test
+    void identityCheckParsingToleratesConfigSpellings() {
+        assertEquals(IdentityCheckPolicy.STRICT,
+                IdentityCheckPolicy.parse("strict", IdentityCheckPolicy.AUTO));
+        assertEquals(IdentityCheckPolicy.OFF, IdentityCheckPolicy.parse("  OFF ", IdentityCheckPolicy.AUTO));
+        assertEquals(IdentityCheckPolicy.AUTO, IdentityCheckPolicy.parse("nonsense", IdentityCheckPolicy.AUTO));
+        assertEquals(IdentityCheckPolicy.AUTO, IdentityCheckPolicy.parse(null, IdentityCheckPolicy.AUTO));
+        assertEquals("auto", IdentityCheckPolicy.AUTO.wireName());
+    }
+
+    @Test
     void nullRoleMeansAuto() {
         assertEquals(ServerRole.AUTO, BootstrapConfig.builder().role(null).build().role());
     }
@@ -91,6 +121,9 @@ class BootstrapConfigTest {
         assertEquals(original, original.toBuilder().build());
         assertEquals(original.hashCode(), original.toBuilder().build().hashCode());
         assertNotEquals(original, original.toBuilder().serverId("creative").build());
+        assertNotEquals(original,
+                original.toBuilder().identityCheck(IdentityCheckPolicy.OFF).build());
+        assertNotEquals(original, original.toBuilder().instanceFingerprint("host:other|/srv").build());
     }
 
     @Test

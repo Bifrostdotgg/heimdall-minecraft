@@ -478,7 +478,7 @@ selftest() {
         "[22:34:45 INFO] [heimdall]: Migrated the v2 config at /server/plugins/heimdall-whitelist/config.json - wrote /server/plugins/heimdall/bootstrap.yml and the v2 file has been kept as /server/plugins/heimdall-whitelist/config.json.v2-backup." \
         yes "migrate: the v2 config was found and rewritten (velocity/json)" || failures=$((failures + 1))
     check_match "${MIGRATED_PATTERN}" \
-        "[13:53:00 INFO]: [Heimdall] not set up yet - run /hd setup <code> to connect this server to Discord" \
+        "[13:53:00 INFO]: [Heimdall] not set up yet: run /hd setup <code> to connect this server to Discord (see /data/plugins/Heimdall/bootstrap.yml)" \
         no "migrate: a migration vs a fresh install" || failures=$((failures + 1))
     # The row does not stop at MIGRATED_PATTERN: it then greps for its OWN platform's directory and
     # file name, so a Velocity row cannot go green on the line a Bukkit row would produce. That

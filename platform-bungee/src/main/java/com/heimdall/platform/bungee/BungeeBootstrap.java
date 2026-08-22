@@ -117,6 +117,7 @@ final class BungeeBootstrap {
                 .executors(executors)
                 .bootstrapStore(store)
                 .identitySource(new BungeeIdentitySource(proxy, role, startedAtMs))
+                .commandLabel("hdp")
                 .healthSource(new BungeeHealthSource(proxy))
                 .bedrockIdentityProvider(FloodgateIdentityProvider.create())
                 .build();
@@ -126,7 +127,6 @@ final class BungeeBootstrap {
         // the next config push.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
-                .label("hdp")
                 .pluginVersion(BuildConstants.VERSION);
         HeimdallModules.registerAll(runtime, admin);
 

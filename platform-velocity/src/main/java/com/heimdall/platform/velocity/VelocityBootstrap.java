@@ -111,6 +111,7 @@ final class VelocityBootstrap {
                 .executors(executors)
                 .bootstrapStore(store)
                 .identitySource(new VelocityIdentitySource(proxy, role, startedAtMs))
+                .commandLabel("hdp")
                 .healthSource(new VelocityHealthSource(proxy))
                 .bedrockIdentityProvider(FloodgateIdentityProvider.create())
                 .build();
@@ -120,7 +121,6 @@ final class VelocityBootstrap {
         // next config push.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
-                .label("hdp")
                 .pluginVersion(BuildConstants.VERSION);
         HeimdallModules.registerAll(runtime, admin);
 

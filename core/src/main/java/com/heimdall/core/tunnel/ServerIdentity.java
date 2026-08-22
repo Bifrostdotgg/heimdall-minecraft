@@ -89,6 +89,24 @@ public final class ServerIdentity {
         return extra;
     }
 
+    /**
+     * A writer pre-populated with this identity's values.
+     *
+     * <p>Exists so a caller can add to {@link #extra()} without restating the named fields, which is
+     * what {@code HeimdallRuntime} does to attach the instance fingerprint. Restating them would
+     * mean a field added here later silently stops being sent.
+     */
+    public Builder toBuilder() {
+        return builder()
+                .serverName(serverName)
+                .platform(platform)
+                .serverSoftware(serverSoftware)
+                .mcVersion(mcVersion)
+                .startedAtMs(startedAtMs)
+                .role(role)
+                .extra(extra);
+    }
+
     @Override
     public String toString() {
         return "ServerIdentity{serverName='" + serverName

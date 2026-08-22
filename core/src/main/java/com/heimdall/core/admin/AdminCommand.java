@@ -86,6 +86,7 @@ public final class AdminCommand {
         return Arrays.asList(
                 new SetupSubcommand(),
                 new StatusSubcommand(),
+                new IdentitySubcommand(),
                 new RuntimeSubcommands.Reload(),
                 new RuntimeSubcommands.Modules(),
                 new RuntimeSubcommands.Enable(),

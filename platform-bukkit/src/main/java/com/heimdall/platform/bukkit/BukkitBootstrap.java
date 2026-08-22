@@ -144,6 +144,7 @@ final class BukkitBootstrap {
                 .executors(executors)
                 .bootstrapStore(store)
                 .identitySource(new BukkitIdentitySource(role, startedAtMs))
+                .commandLabel("hd")
                 .healthSource(new BukkitHealthSource(ticks))
                 .bedrockIdentityProvider(FloodgateIdentityProvider.create())
                 .build();
@@ -152,7 +153,6 @@ final class BukkitBootstrap {
         // modules must be registered before the first reconcile, and start() is what runs it.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
-                .label("hd")
                 .pluginVersion(BuildConstants.VERSION);
         HeimdallModules.registerAll(runtime, admin);
 

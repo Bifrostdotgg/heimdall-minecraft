@@ -64,6 +64,26 @@ final class ConfigCache {
     }
 
     /**
+     * Deletes the cache, if there is one.
+     *
+     * <p>For the case where the cached document is no longer this server's: {@code /hd identity
+     * reset confirm} gives up the credentials it was fetched with, so keeping it would hand the
+     * next guild the previous guild's configuration. Failures are logged, not thrown, for the same
+     * reason {@link #save} does not throw.
+     */
+    void delete() {
+        if (path == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException e) {
+            logger.error("could not delete the cached remote config at " + path
+                    + "; it will be read again on the next boot", e);
+        }
+    }
+
+    /**
      * Writes the document.
      *
      * <p>Failures are logged, not thrown. A server whose data directory is read-only should keep
