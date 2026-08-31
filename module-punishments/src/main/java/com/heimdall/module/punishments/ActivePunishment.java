@@ -15,6 +15,8 @@ public final class ActivePunishment {
     public String issuedAt;
     public String issuedByName;
     public String issuedByUuid;
+    public String country;
+    public String cidr;
     public boolean silent;
 
     public boolean expired(long nowMillis) {

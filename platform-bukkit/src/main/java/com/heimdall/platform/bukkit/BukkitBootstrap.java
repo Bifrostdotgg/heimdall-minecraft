@@ -286,6 +286,7 @@ final class BukkitBootstrap {
         Bukkit.getPluginManager().registerEvents(
                 new BukkitCommandListener(logger, runtime.commandPipeline(), platform.messenger()),
                 plugin);
+        Bukkit.getPluginManager().registerEvents(new BukkitPunishmentGuard(logger), plugin);
         // Phase 1c deliberately shipped no join/quit listeners rather than dead ones; the whitelist
         // mirror's extension windows are the first real consumer and arrive in 1d. See seam S1.
         Bukkit.getPluginManager().registerEvents(

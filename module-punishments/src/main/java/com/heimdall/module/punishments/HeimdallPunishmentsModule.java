@@ -51,6 +51,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     private volatile MirrorStore<ActivePunishment> mirror;
     private volatile PunishmentOutbox outbox;
     private volatile LastIpStore lastIps;
+    private volatile GeoCountryLookup geo;
     private volatile long lastFullSyncAt;
     private final AtomicBoolean flushing = new AtomicBoolean();
     private final AtomicBoolean flushAgain = new AtomicBoolean();
@@ -97,6 +98,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                     context.logger(),
                     context.platform().dataDirectory().resolve("punishments-last-ip.json"));
         }
+        this.geo = new GeoCountryLookup(context.logger(), context.platform().dataDirectory());
 
         context.interceptLogin(this::onLogin, 50);
         boolean backend = role == ServerRole.ENFORCER || role == ServerRole.STANDALONE;
@@ -185,6 +187,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         }
         LiteBansSupport.unhook();
         aliasBinds.clear();
+        geo = null;
         outbox = null;
         if (INSTANCE == this) INSTANCE = null;
         context = null;
@@ -487,6 +490,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                 return Verdict.deny(render(settings.banScreen, ipban, settings));
             }
         }
+        ServerRole role = context.platform().role();
+        if ((role == ServerRole.GATEKEEPER || role == ServerRole.STANDALONE)
+                && attempt.ipAddress() != null && !attempt.ipAddress().isEmpty()) {
+            Verdict geoDeny = geoDeny(attempt.ipAddress(), settings);
+            if (geoDeny != null) return geoDeny;
+            Verdict subnetDeny = subnetDeny(attempt.ipAddress(), settings);
+            if (subnetDeny != null) return subnetDeny;
+        }
         return Verdict.abstain();
     }
 
@@ -502,6 +513,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         if (mirror == null) return Verdict.abstain();
         PunishmentSettings settings = PunishmentSettings.from(context.config());
         if (!settings.replaceMode()) return Verdict.abstain();
+        if (isFrozen(message.senderUuid())) {
+            return Verdict.deny(Msg.legacy("§cYou are frozen."));
+        }
         ActivePunishment mute = mirror.get("mute:" + message.senderUuid());
         if (mute != null && !mute.expired(System.currentTimeMillis())) {
             return Verdict.deny(render(settings.muteScreen, mute, settings));
@@ -513,6 +527,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         if (mirror == null) return Verdict.abstain();
         PunishmentSettings settings = PunishmentSettings.from(context.config());
         if (!settings.replaceMode()) return Verdict.abstain();
+        if (isFrozen(attempt.senderUuid())) {
+            return Verdict.deny(Msg.legacy("§cYou are frozen."));
+        }
         ActivePunishment mute = mirror.get("mute:" + attempt.senderUuid());
         if (mute == null || mute.expired(System.currentTimeMillis())) return Verdict.abstain();
         if (settings.blockedCommands.contains(attempt.label())) {
@@ -1087,6 +1104,56 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         }
     }
 
+    private Verdict geoDeny(String ip, PunishmentSettings settings) {
+        GeoCountryLookup lookup = this.geo;
+        if (lookup == null || !lookup.ready() || mirror == null) return null;
+        String country = lookup.countryOf(ip);
+        if (country == null || country.isEmpty()) return null;
+        ActivePunishment geoBan = mirror.get("geo:" + country.toUpperCase(Locale.ROOT));
+        if (geoBan != null && !geoBan.expired(System.currentTimeMillis())) {
+            return Verdict.deny(render(settings.banScreen, geoBan, settings));
+        }
+        return null;
+    }
+
+    private Verdict subnetDeny(String ip, PunishmentSettings settings) {
+        if (mirror == null) return null;
+        long now = System.currentTimeMillis();
+        for (String key : mirror.keys()) {
+            if (!key.startsWith("subnet:")) continue;
+            ActivePunishment p = mirror.get(key);
+            if (p == null || p.expired(now)) continue;
+            if (Cidr.matches(p.cidr, ip)) {
+                return Verdict.deny(render(settings.banScreen, p, settings));
+            }
+        }
+        return null;
+    }
+
+    public boolean isFrozen(UUID uuid) {
+        if (uuid == null || mirror == null) return false;
+        ActivePunishment freeze = mirror.get("freeze:" + uuid);
+        return freeze != null && !freeze.expired(System.currentTimeMillis());
+    }
+
+    public boolean isMuted(UUID uuid) {
+        if (uuid == null || mirror == null) return false;
+        ActivePunishment mute = mirror.get("mute:" + uuid);
+        return mute != null && !mute.expired(System.currentTimeMillis());
+    }
+
+    public void notifyStaff(String line) {
+        ModuleContext ctx = this.context;
+        if (ctx == null || line == null) return;
+        Component message = Msg.legacy(line);
+        for (PlayerHandle player : ctx.platform().players().onlinePlayers()) {
+            if (player.hasPermission("heimdall.punishments.mute")
+                    || player.hasPermission("heimdall.admin")) {
+                player.sendMessage(message);
+            }
+        }
+    }
+
     /**
      * Login looks up {@code ipban:<hmac>}. A digest-less ipban must not be stored under the UUID
      * or the gate can never hit it, and every player would share that miss.
@@ -1096,6 +1163,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         if ("ipban".equals(p.type)) {
             if (p.ipDigest == null || p.ipDigest.isEmpty()) return null;
             return "ipban:" + p.ipDigest;
+        }
+        if ("geo".equals(p.type)) {
+            String cc = p.country != null && !p.country.isEmpty() ? p.country : p.targetName;
+            if (cc == null || cc.isEmpty()) return null;
+            return "geo:" + cc.toUpperCase(Locale.ROOT);
+        }
+        if ("subnet".equals(p.type)) {
+            String cidr = Cidr.canonical(p.cidr != null && !p.cidr.isEmpty() ? p.cidr : p.targetName);
+            if (cidr.isEmpty()) return null;
+            p.cidr = cidr;
+            return "subnet:" + cidr;
         }
         if (p.targetUuid == null || p.targetUuid.isEmpty()) return null;
         return p.type + ":" + p.targetUuid;
@@ -1114,6 +1192,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         p.issuedAt = issuedAtOf(payload);
         p.issuedByName = payload.string("issuedByName", null);
         p.issuedByUuid = payload.string("issuedByUuid", null);
+        p.country = payload.string("country", null);
+        p.cidr = payload.string("cidr", null);
         p.silent = payload.bool("silent", false);
         if (p.type.isEmpty()) return null;
         return p;
