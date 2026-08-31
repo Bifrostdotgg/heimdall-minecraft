@@ -52,6 +52,15 @@ class PunishmentParserTest {
     }
 
     @Test
+    void senderFlagIsParsedAndStrippedFromReason() {
+        PunishmentParser.Parsed parsed = PunishmentParser.parse(
+                Arrays.asList("Steve", "--sender=Console", "1d", "grief"));
+        assertEquals("Console", parsed.senderOverride);
+        assertEquals("grief", parsed.reason);
+        assertEquals(Integer.valueOf(24 * 60), parsed.durationMinutes);
+    }
+
+    @Test
     void combinedDurationTokens() {
         assertEquals(Integer.valueOf(2 * 24 * 60 + 3 * 60), PunishmentParser.parseDurationMinutes("2d3h"));
         assertTrue(PunishmentParser.looksLikeDuration("permanent"));

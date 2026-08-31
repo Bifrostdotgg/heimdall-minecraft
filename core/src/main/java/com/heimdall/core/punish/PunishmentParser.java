@@ -26,13 +26,17 @@ public final class PunishmentParser {
         public final String target;
         public final Integer durationMinutes;
         public final String reason;
+        /** From {@code --sender=}; hook/import may use it. Native /hd issue must ignore it. */
+        public final String senderOverride;
 
-        Parsed(boolean silent, boolean publicFlag, String target, Integer durationMinutes, String reason) {
+        Parsed(boolean silent, boolean publicFlag, String target, Integer durationMinutes,
+                String reason, String senderOverride) {
             this.silent = silent;
             this.publicFlag = publicFlag;
             this.target = target;
             this.durationMinutes = durationMinutes;
             this.reason = reason;
+            this.senderOverride = senderOverride;
         }
     }
 
@@ -42,6 +46,7 @@ public final class PunishmentParser {
         }
         boolean silent = false;
         boolean pub = false;
+        String senderOverride = null;
         List<String> rest = new ArrayList<String>();
         for (String raw : args) {
             if (raw == null) continue;
@@ -52,6 +57,10 @@ public final class PunishmentParser {
             }
             if ("-p".equalsIgnoreCase(token)) {
                 pub = true;
+                continue;
+            }
+            if (token.length() > 9 && token.toLowerCase(Locale.ROOT).startsWith("--sender=")) {
+                senderOverride = token.substring(9);
                 continue;
             }
             rest.add(token);
@@ -67,7 +76,7 @@ public final class PunishmentParser {
             reasonFrom = 2;
         }
         String reason = join(rest, reasonFrom);
-        return new Parsed(silent, pub, target, duration, reason);
+        return new Parsed(silent, pub, target, duration, reason, senderOverride);
     }
 
     public static boolean looksLikeDuration(String token) {

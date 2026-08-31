@@ -4,7 +4,14 @@ plugins {
     id("heimdall.java8")
 }
 
+sourceSets {
+    create("litebansApi") {
+        java.srcDir("src/litebansApi/java")
+    }
+}
+
 dependencies {
+    compileOnly(sourceSets["litebansApi"].output)
     implementation(project(":core"))
     // FakePlatform, FakePlayer, FakeCommandSource, RecordingCommands and RecordingLogger. A module
     // test asserts against behaviour — "that command was dispatched", "the sender was told the

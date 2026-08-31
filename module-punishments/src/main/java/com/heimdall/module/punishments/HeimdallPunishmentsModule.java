@@ -183,6 +183,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             }
             mirror = null;
         }
+        LiteBansSupport.unhook();
         aliasBinds.clear();
         outbox = null;
         if (INSTANCE == this) INSTANCE = null;
