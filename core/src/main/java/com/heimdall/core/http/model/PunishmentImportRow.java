@@ -30,9 +30,14 @@ public final class PunishmentImportRow {
     public String importProviderId;
     public boolean active;
 
-    /** HMAC the scratch IP with the guild salt, then drop the raw address. */
+    /**
+     * HMAC the scratch IP with the guild salt, then drop the raw address.
+     *
+     * <p>An empty salt must not produce a digest: HMAC with {@code ""} is well-defined and would
+     * look like a real hash while matching nothing the live plugin computes.
+     */
     public void hashIpWith(String salt) {
-        if (ip != null && !ip.isEmpty()) {
+        if (ip != null && !ip.isEmpty() && salt != null && !salt.isEmpty()) {
             ipDigest = PunishmentIp.hash(ip, salt);
         }
         ip = null;

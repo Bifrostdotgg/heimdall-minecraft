@@ -17,6 +17,9 @@ import com.heimdall.core.testing.FakePlayer;
 import com.heimdall.core.testing.TestText;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -228,5 +231,152 @@ class HeimdallPunishmentsModuleTest {
             assertTrue(harness.module.outboxForTest() == null
                     || harness.module.outboxForTest().isEmpty());
         }
+    }
+
+    @Test
+    @DisplayName("hook + rootAliases does not steal /ban")
+    void hookModeDoesNotBindRootBan() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.GATEKEEPER)
+                .enableWith(Payload.builder()
+                        .put("mode", "hook")
+                        .put("ipSalt", SALT)
+                        .put("rootAliases", true)
+                        .build())) {
+            assertFalse(harness.platform.commandRegistry().has("ban"));
+            assertFalse(harness.platform.commandRegistry().has("ipban"));
+        }
+    }
+
+    @Test
+    @DisplayName("an ipban without a digest is not stored under the UUID")
+    void digestlessIpbanHasNoMirrorKey() {
+        ActivePunishment p = new ActivePunishment();
+        p.type = "ipban";
+        p.targetUuid = STEVE.toString();
+        assertNull(HeimdallPunishmentsModule.keyFor(p));
+        p.ipDigest = "abc";
+        assertEquals("ipban:abc", HeimdallPunishmentsModule.keyFor(p));
+    }
+
+    @Test
+    @DisplayName("empty salt does not HMAC an import IP")
+    void importRefusesEmptySalt() {
+        PunishmentImportRow row = new PunishmentImportRow();
+        row.ip = "198.51.100.7";
+        PunishmentImportRow.hashIps(java.util.Collections.singletonList(row), "");
+        assertNull(row.ip);
+        assertNull(row.ipDigest);
+    }
+
+    @Test
+    @DisplayName("a local unban is not resurrected by a stale ETag pull while the revoke is queued")
+    void pendingRevokeSurvivesReconcile() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE).enableReplace()) {
+            ActivePunishment ban = new ActivePunishment();
+            ban.id = "ban-1";
+            ban.type = "ban";
+            ban.targetUuid = STEVE.toString();
+            ban.targetName = "Steve";
+            harness.module.mirrorForTest().record("ban:" + STEVE, ban);
+
+            harness.platform.join(new FakePlayer(STEVE, "Steve"));
+            harness.module.onStaffCommand(FakeCommandSource.console(), "unban", Arrays.asList("Steve"));
+            assertNull(harness.module.mirrorForTest().get("ban:" + STEVE));
+            assertFalse(harness.module.outboxForTest().isEmpty());
+
+            Map<String, ActivePunishment> snap = new LinkedHashMap<String, ActivePunishment>();
+            snap.put("ban:" + STEVE, ban);
+            harness.module.mirrorForTest().reconcile(snap);
+            assertTrue(harness.module.mirrorForTest().isPresent("ban:" + STEVE),
+                    "reconcile would put the ban back");
+            harness.module.replayPendingWrites();
+            assertNull(harness.module.mirrorForTest().get("ban:" + STEVE),
+                    "unacked revoke must win over a stale snapshot");
+        }
+    }
+
+    @Test
+    @DisplayName("flushQueue posts issue then filter-revoke, and stores the sync ETag")
+    void flushQueueHitsHttpAndKeepsEtag() throws Exception {
+        try (ScriptedPunishApi bot = new ScriptedPunishApi();
+                PunishmentsHarness harness = PunishmentsHarness.withApi(
+                        dataDir, ServerRole.STANDALONE, bot.baseUrl()).enableReplace()) {
+            waitFor(() -> harness.module.mirrorForTest().lastEtag() != null, 5_000);
+            assertEquals("\"etag-1\"", harness.module.mirrorForTest().lastEtag());
+
+            harness.platform.join(new FakePlayer(STEVE, "Steve"));
+            FakeCommandSource console = FakeCommandSource.console();
+            harness.module.onStaffCommand(console, "ban", Arrays.asList("Steve", "griefing"));
+            harness.module.onStaffCommand(console, "unban", Arrays.asList("Steve"));
+            harness.module.flushQueue();
+            waitFor(() -> harness.module.outboxForTest().isEmpty(), 5_000);
+
+            assertTrue(bot.countSuffix("/punishments") >= 1, "issue was posted");
+            assertTrue(bot.countSuffix("/punishments/revoke") >= 1, "revoke used the filter route");
+            for (ScriptedPunishApi.Hit hit : bot.hits()) {
+                assertFalse(hit.path.contains("/punishments/local-"), hit.path);
+            }
+            assertNull(harness.module.mirrorForTest().get("ban:" + STEVE));
+        }
+    }
+
+    @Test
+    @DisplayName("a 404 revoke is dropped so the rest of the outbox can flush")
+    void flushQueueContinuesAfterRevoke404() throws Exception {
+        try (ScriptedPunishApi bot = new ScriptedPunishApi();
+                PunishmentsHarness harness = PunishmentsHarness.withApi(
+                        dataDir.resolve("404"), ServerRole.STANDALONE, bot.baseUrl()).enableReplace()) {
+            waitFor(() -> harness.module.mirrorForTest().lastEtag() != null, 5_000);
+            bot.revokeResponds(404,
+                    "{\"success\":false,\"error\":{\"code\":\"NOT_FOUND\",\"message\":\"gone\"}}");
+
+            harness.platform.join(new FakePlayer(STEVE, "Steve"));
+            ActivePunishment ban = new ActivePunishment();
+            ban.id = "ban-1";
+            ban.type = "ban";
+            ban.targetUuid = STEVE.toString();
+            ban.targetName = "Steve";
+            harness.module.mirrorForTest().record("ban:" + STEVE, ban);
+            harness.module.onStaffCommand(FakeCommandSource.console(), "unban", Arrays.asList("Steve"));
+            ActivePunishment mute = new ActivePunishment();
+            mute.id = "mute-1";
+            mute.type = "mute";
+            mute.targetUuid = STEVE.toString();
+            mute.targetName = "Steve";
+            harness.module.mirrorForTest().record("mute:" + STEVE, mute);
+            harness.module.onStaffCommand(FakeCommandSource.console(), "unmute", Arrays.asList("Steve"));
+
+            harness.module.flushQueue();
+            waitFor(() -> harness.module.outboxForTest().isEmpty(), 5_000);
+            assertTrue(harness.module.outboxForTest().isEmpty());
+        }
+    }
+
+    @Test
+    @DisplayName("root aliases rebind when config.push flips replace mode on")
+    void aliasesRebindOnConfigChange() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.GATEKEEPER)
+                .enableWith(Payload.builder()
+                        .put("mode", "hook")
+                        .put("ipSalt", SALT)
+                        .put("rootAliases", true)
+                        .build())) {
+            assertFalse(harness.platform.commandRegistry().has("ban"));
+            harness.enableWith(Payload.builder()
+                    .put("mode", "replace")
+                    .put("ipSalt", SALT)
+                    .put("rootAliases", true)
+                    .build());
+            assertTrue(harness.platform.commandRegistry().has("ban"));
+        }
+    }
+
+    private static void waitFor(java.util.function.BooleanSupplier condition, long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L);
+        }
+        assertTrue(condition.getAsBoolean(), "timed out");
     }
 }

@@ -42,6 +42,18 @@ final class PunishmentsHarness implements AutoCloseable {
         this(dataDir, role, ApiSettings.builder().build());
     }
 
+    static PunishmentsHarness withApi(Path dataDir, ServerRole role, String baseUrl) {
+        return new PunishmentsHarness(dataDir, role, ApiSettings.builder()
+                .baseUrl(baseUrl)
+                .guildId("123456789012345678")
+                .apiKey("test-secret-key")
+                .serverId("survival")
+                .timeoutMs(2000)
+                .retries(1)
+                .retryDelayMs(10)
+                .build());
+    }
+
     PunishmentsHarness(Path dataDir, ServerRole role, ApiSettings settings) {
         this.executors = new HeimdallExecutors(logger, 2);
         this.loginPipeline = new LoginPipeline(logger);

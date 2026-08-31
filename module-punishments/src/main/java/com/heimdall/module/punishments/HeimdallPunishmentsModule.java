@@ -4,6 +4,7 @@ import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.config.ServerRole;
+import com.heimdall.core.http.ApiError;
 import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
@@ -19,17 +20,23 @@ import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.remoteconfig.ModuleConfig;
+import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.text.Msg;
 import com.heimdall.core.tunnel.Capabilities;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
+import com.heimdall.core.util.Registration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -44,6 +51,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     private volatile PunishmentOutbox outbox;
     private volatile LastIpStore lastIps;
     private volatile long lastFullSyncAt;
+    private final AtomicBoolean flushing = new AtomicBoolean();
+    private final List<Registration> aliasBinds = new CopyOnWriteArrayList<Registration>();
 
     static volatile HeimdallPunishmentsModule INSTANCE;
 
@@ -66,7 +75,6 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     public void enable(ModuleContext context) {
         this.context = context;
         INSTANCE = this;
-        PunishmentSettings settings = PunishmentSettings.from(context.config());
         this.mirror = MirrorStore.builder(
                 context.logger(),
                 context.platform().dataDirectory().resolve("punishments-mirror.json"),
@@ -103,22 +111,50 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         context.tunnel().subscribe("punish.apply", applyHandler());
         context.tunnel().subscribe("punish.revoke", revokeHandler());
         context.tunnel().subscribe("punish.import", importHandler());
+        context.onConfigChanged(new ModuleConfigListener() {
+            @Override
+            public void onModuleConfigChanged(String moduleId, ModuleConfig previous, ModuleConfig current) {
+                ModuleContext ctx = HeimdallPunishmentsModule.this.context;
+                if (ctx == null) return;
+                ctx.platform().mainThread().execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        rebindAliases();
+                    }
+                });
+            }
+        });
         context.scheduleRepeating(new Runnable() {
             @Override
             public void run() {
-                flushQueue();
-                if (lastIps != null) {
-                    lastIps.flush();
-                }
+                ModuleContext ctx = HeimdallPunishmentsModule.this.context;
+                if (ctx == null) return;
+                ctx.executors().io().execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        flushQueue();
+                        LastIpStore ips = lastIps;
+                        if (ips != null) {
+                            ips.flush();
+                        }
+                    }
+                });
             }
         }, 2_000, 5_000);
         context.scheduleRepeating(new Runnable() {
             @Override
             public void run() {
-                sync(false);
+                ModuleContext ctx = HeimdallPunishmentsModule.this.context;
+                if (ctx == null) return;
+                ctx.executors().io().execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        sync(false);
+                    }
+                });
             }
         }, 5_000, TimeUnit.MINUTES.toMillis(5));
-        registerCommands(context, settings, role);
+        rebindAliases();
         context.executors().io().execute(new Runnable() {
             @Override
             public void run() {
@@ -145,38 +181,54 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             }
             mirror = null;
         }
+        aliasBinds.clear();
         outbox = null;
         if (INSTANCE == this) INSTANCE = null;
         context = null;
     }
 
-    private void registerCommands(ModuleContext context, PunishmentSettings settings, ServerRole role) {
+    /**
+     * Root {@code /ban} family is replace-mode only. Hook mode must not steal LiteBans' verbs.
+     * Re-run when {@code config.push} flips {@code rootAliases} or {@code mode}.
+     */
+    private void rebindAliases() {
+        ModuleContext ctx = this.context;
+        if (ctx == null) return;
+        for (int i = 0; i < aliasBinds.size(); i++) {
+            aliasBinds.get(i).close();
+        }
+        aliasBinds.clear();
+        PunishmentSettings settings = PunishmentSettings.from(ctx.config());
+        if (!settings.replaceMode() || !settings.rootAliases) {
+            return;
+        }
+        ServerRole role = ctx.platform().role();
         boolean proxy = role == ServerRole.GATEKEEPER || role == ServerRole.STANDALONE;
         boolean backend = role == ServerRole.ENFORCER || role == ServerRole.STANDALONE;
-        if (settings.rootAliases && proxy) {
-            bind(context, "ban", "heimdall.punishments.ban", "ban");
-            bind(context, "tempban", "heimdall.punishments.ban", "tempban");
-            bind(context, "ipban", "heimdall.punishments.ipban", "ipban");
-            bind(context, "unban", "heimdall.punishments.unban", "unban");
-            bind(context, "kick", "heimdall.punishments.kick", "kick");
-            bind(context, "warn", "heimdall.punishments.warn", "warn");
-            bind(context, "unwarn", "heimdall.punishments.unban", "unwarn");
-            bind(context, "history", "heimdall.punishments.history", "history");
-            bind(context, "staffhistory", "heimdall.punishments.history", "staffhistory");
-            bind(context, "banlist", "heimdall.punishments.history", "banlist");
-            bind(context, "dupeip", "heimdall.punishments.dupeip", "dupeip");
-            bind(context, "iphistory", "heimdall.punishments.dupeip", "iphistory");
-            bind(context, "rollback", "heimdall.punishments.unban", "rollback");
+        if (proxy) {
+            bind(ctx, "ban", "heimdall.punishments.ban", "ban");
+            bind(ctx, "tempban", "heimdall.punishments.ban", "tempban");
+            bind(ctx, "ipban", "heimdall.punishments.ipban", "ipban");
+            bind(ctx, "unban", "heimdall.punishments.unban", "unban");
+            bind(ctx, "kick", "heimdall.punishments.kick", "kick");
+            bind(ctx, "warn", "heimdall.punishments.warn", "warn");
+            bind(ctx, "unwarn", "heimdall.punishments.unban", "unwarn");
+            bind(ctx, "history", "heimdall.punishments.history", "history");
+            bind(ctx, "staffhistory", "heimdall.punishments.history", "staffhistory");
+            bind(ctx, "banlist", "heimdall.punishments.history", "banlist");
+            bind(ctx, "dupeip", "heimdall.punishments.dupeip", "dupeip");
+            bind(ctx, "iphistory", "heimdall.punishments.dupeip", "iphistory");
+            bind(ctx, "rollback", "heimdall.punishments.unban", "rollback");
         }
-        if (settings.rootAliases && backend) {
-            bind(context, "mute", "heimdall.punishments.mute", "mute");
-            bind(context, "tempmute", "heimdall.punishments.mute", "tempmute");
-            bind(context, "unmute", "heimdall.punishments.unban", "unmute");
+        if (backend) {
+            bind(ctx, "mute", "heimdall.punishments.mute", "mute");
+            bind(ctx, "tempmute", "heimdall.punishments.mute", "tempmute");
+            bind(ctx, "unmute", "heimdall.punishments.unban", "unmute");
         }
     }
 
     private void bind(ModuleContext context, final String name, String permission, final String type) {
-        context.registerCommand(CommandSpec.named(name)
+        Registration handle = context.registerCommand(CommandSpec.named(name)
                 .permission(permission)
                 .usage("/" + name + " <player> [duration] [reason]")
                 .description("Heimdall punishment")
@@ -187,6 +239,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                     }
                 })
                 .build());
+        aliasBinds.add(handle);
     }
 
     void onStaffCommand(CommandSource source, String type, List<String> args) {
@@ -295,8 +348,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             local.expiresAt = Instant.ofEpochMilli(now)
                     .plusSeconds(parsed.durationMinutes.intValue() * 60L).toString();
         }
-        if (mirror != null && !"kick".equals(type)) {
-            mirror.record(keyFor(local), local);
+        String mirrorKey = keyFor(local);
+        if (mirror != null && !"kick".equals(type) && mirrorKey != null) {
+            mirror.record(mirrorKey, local);
         }
         applyLive(uuid, local, settings);
         Payload.Builder body = Payload.builder()
@@ -371,8 +425,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         long now = System.currentTimeMillis();
         for (int i = 0; i < matches.size(); i++) {
             ActivePunishment punishment = matches.get(i);
-            if (mirror != null) {
-                mirror.evict(keyFor(punishment));
+            String key = keyFor(punishment);
+            if (mirror != null && key != null) {
+                mirror.evict(key);
             }
             String opId = UUID.randomUUID().toString();
             Payload.Builder body = Payload.builder()
@@ -483,7 +538,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                     applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
                     return;
                 }
-                mirror.record(keyFor(p), p);
+                String key = keyFor(p);
+                if (key == null) return;
+                mirror.record(key, p);
                 applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
             }
         };
@@ -530,6 +587,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     }
 
     void flushQueue() {
+        if (!flushing.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            flushQueueLocked();
+        } finally {
+            flushing.set(false);
+        }
+    }
+
+    private void flushQueueLocked() {
         ModuleContext ctx = this.context;
         PunishmentOutbox box = this.outbox;
         if (ctx == null || box == null || box.isEmpty() || !ctx.api().isUsable()) return;
@@ -545,14 +613,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                     box.remove(entry.opId);
                     uploaded = true;
                 } else if ("revoke".equals(entry.op)) {
-                    String id = entry.payload.string("id", "");
-                    if (id.isEmpty() || id.startsWith("local-")) {
-                        id = resolveRemoteId(entry.payload);
-                    }
-                    if (id.isEmpty() || id.startsWith("local-")) {
-                        continue;
-                    }
-                    ctx.api().revokePunishment(id, entry.payload)
+                    ctx.api().revokePunishment(entry.payload)
                             .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
                     box.remove(entry.opId);
                     uploaded = true;
@@ -560,7 +621,16 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                     box.remove(entry.opId);
                 }
             } catch (Exception e) {
-                ctx.logger().debug(() -> "punishment outbox upload deferred: " + e.getMessage());
+                Throwable cause = e instanceof ExecutionException && e.getCause() != null
+                        ? e.getCause()
+                        : e;
+                if (cause instanceof ApiError && !((ApiError) cause).isRetryable()) {
+                    ctx.logger().warn("punishment outbox dropped " + entry.op + " " + entry.opId
+                            + ": " + cause.getMessage());
+                    box.remove(entry.opId);
+                    continue;
+                }
+                ctx.logger().debug(() -> "punishment outbox upload deferred: " + cause.getMessage());
                 break;
             }
         }
@@ -583,28 +653,13 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         local.reason = request.string("reason", result.string("reason", ""));
         local.silent = request.bool("silent", false);
         if (local.type.isEmpty() || "kick".equals(local.type)) return;
-        ActivePunishment existing = mirror.get(keyFor(local));
+        String key = keyFor(local);
+        if (key == null) return;
+        ActivePunishment existing = mirror.get(key);
         if (existing != null) {
             existing.id = id;
-            mirror.record(keyFor(existing), existing);
+            mirror.record(key, existing);
         }
-    }
-
-    private String resolveRemoteId(Payload revoke) throws Exception {
-        ModuleContext ctx = this.context;
-        String uuid = revoke.string("targetUuid", "");
-        String type = revoke.string("type", "");
-        if (uuid.isEmpty() || !ctx.api().isUsable()) return "";
-        Payload data = ctx.api().playerPunishments(uuid)
-                .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
-        for (Payload row : data.children("punishments")) {
-            if (!row.bool("active", false)) continue;
-            if (!type.isEmpty() && !type.equals(row.string("type", ""))) continue;
-            String id = row.string("id", "");
-            if (id.isEmpty()) id = row.string("_id", "");
-            if (!id.isEmpty()) return id;
-        }
-        return "";
     }
 
     private void sync(boolean force) {
@@ -622,9 +677,19 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                         new java.util.LinkedHashMap<String, ActivePunishment>();
                 for (Payload row : data.children("punishments")) {
                     ActivePunishment p = fromPayload(row);
-                    if (p != null && !"kick".equals(p.type)) {
-                        authoritative.put(keyFor(p), p);
+                    if (p == null || "kick".equals(p.type)) continue;
+                    String key = keyFor(p);
+                    if (key == null) continue;
+                    ActivePunishment existing = store.get(key);
+                    if (existing != null) {
+                        if (p.issuedAt == null || p.issuedAt.isEmpty()) {
+                            p.issuedAt = existing.issuedAt;
+                        }
+                        if (p.issuedByName == null || p.issuedByName.isEmpty()) {
+                            p.issuedByName = existing.issuedByName;
+                        }
                     }
+                    authoritative.put(key, p);
                 }
                 store.reconcile(authoritative);
                 String hash = data.string("hash", "");
@@ -632,6 +697,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                     store.setLastEtag(hash);
                 }
                 lastFullSyncAt = System.currentTimeMillis();
+                replayPendingWrites();
             } catch (RuntimeException e) {
                 ctx.logger().error("punishment sync apply failed", e);
             }
@@ -940,10 +1006,53 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         box.enqueue(new PunishmentOutbox.Entry(opId, issuedAt, serverId, op, payload));
     }
 
+    /**
+     * Re-applies unacked outbox rows onto the mirror after an ETag pull, so a local unban cannot
+     * be resurrected by a stale full snapshot while the revoke is still queued.
+     */
+    void replayPendingWrites() {
+        MirrorStore<ActivePunishment> store = this.mirror;
+        PunishmentOutbox box = this.outbox;
+        if (store == null || box == null) return;
+        List<PunishmentOutbox.Entry> pending = box.snapshot();
+        for (int i = 0; i < pending.size(); i++) {
+            PunishmentOutbox.Entry entry = pending.get(i);
+            if ("issue".equals(entry.op)) {
+                ActivePunishment local = fromPayload(entry.payload);
+                if (local == null || "kick".equals(local.type)) continue;
+                String key = keyFor(local);
+                if (key != null) {
+                    store.record(key, local);
+                }
+            } else if ("revoke".equals(entry.op)) {
+                evictFromPayload(entry.payload);
+            }
+        }
+    }
+
+    private void evictFromPayload(Payload payload) {
+        if (mirror == null || payload == null) return;
+        String type = payload.string("type", "");
+        String uuid = payload.string("targetUuid", "");
+        String digest = payload.string("ipDigest", "");
+        if ("ipban".equals(type) && !digest.isEmpty()) {
+            mirror.evict("ipban:" + digest);
+        } else if (!uuid.isEmpty() && !type.isEmpty()) {
+            mirror.evict(type + ":" + uuid);
+        }
+    }
+
+    /**
+     * Login looks up {@code ipban:<hmac>}. A digest-less ipban must not be stored under the UUID
+     * or the gate can never hit it, and every player would share that miss.
+     */
     static String keyFor(ActivePunishment p) {
-        if ("ipban".equals(p.type) && p.ipDigest != null && !p.ipDigest.isEmpty()) {
+        if (p == null || p.type == null || p.type.isEmpty()) return null;
+        if ("ipban".equals(p.type)) {
+            if (p.ipDigest == null || p.ipDigest.isEmpty()) return null;
             return "ipban:" + p.ipDigest;
         }
+        if (p.targetUuid == null || p.targetUuid.isEmpty()) return null;
         return p.type + ":" + p.targetUuid;
     }
 
@@ -957,12 +1066,25 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         p.ipDigest = payload.string("ipDigest", null);
         p.reason = payload.string("reason", "");
         p.expiresAt = payload.string("expiresAt", null);
-        p.issuedAt = payload.string("issuedAt", null);
+        p.issuedAt = issuedAtOf(payload);
         p.issuedByName = payload.string("issuedByName", null);
         p.issuedByUuid = payload.string("issuedByUuid", null);
         p.silent = payload.bool("silent", false);
         if (p.type.isEmpty()) return null;
         return p;
+    }
+
+    static String issuedAtOf(Payload payload) {
+        String raw = payload.string("issuedAt", "");
+        if (raw.isEmpty()) return null;
+        if (raw.indexOf('-') >= 0 || raw.indexOf('T') >= 0) {
+            return raw;
+        }
+        try {
+            return Instant.ofEpochMilli(Long.parseLong(raw)).toString();
+        } catch (RuntimeException e) {
+            return raw;
+        }
     }
 
     static Component render(String template, ActivePunishment p, PunishmentSettings settings) {

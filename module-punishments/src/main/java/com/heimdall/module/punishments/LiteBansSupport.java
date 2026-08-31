@@ -24,12 +24,16 @@ final class LiteBansSupport {
     }
 
     static void importNow(final ModuleContext context) {
+        String salt = PunishmentSettings.from(context.config()).ipSalt;
+        if (salt == null || salt.isEmpty()) {
+            context.logger().warn("LiteBans import refused: ip salt has not been pushed");
+            return;
+        }
         List<PunishmentImportRow> rows = LiteBansImporter.readAll(context.logger());
         if (rows.isEmpty()) {
             context.logger().warn("LiteBans import produced no rows");
             return;
         }
-        String salt = PunishmentSettings.from(context.config()).ipSalt;
         PunishmentImportRow.hashIps(rows, salt);
         context.logger().info("Posting " + rows.size() + " LiteBans rows to Heimdall");
         context.api().importPunishmentRows(rows).whenComplete((ok, failure) -> {

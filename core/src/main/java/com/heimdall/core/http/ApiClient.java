@@ -308,6 +308,25 @@ public final class ApiClient {
         return revokePunishment(id, payloadObject(body));
     }
 
+    /**
+     * Revoke by mongo id when the payload carries a real one, otherwise
+     * {@code POST punishments/revoke} filtered by type, targetUuid and ipDigest.
+     */
+    public CompletableFuture<JsonObject> revokePunishment(Payload body) {
+        Payload payload = body == null ? Payload.empty() : body;
+        String id = payload.string("id", "");
+        if (Strings.isNotBlank(id) && !id.startsWith("local-")) {
+            return revokePunishment(id, payload);
+        }
+        return async(() -> {
+            ApiSettings current = settings;
+            RawResponse response = requests.execute(current,
+                    HttpCall.post(guildPath(current, "punishments/revoke"),
+                            payload.toJson(), current.timeoutMs()));
+            return Envelopes.unwrapObject(response.status(), response.body());
+        });
+    }
+
     public CompletableFuture<JsonObject> importPunishmentRows(java.util.List<PunishmentImportRow> rows) {
         JsonArray array = new JsonArray();
         if (rows != null) {

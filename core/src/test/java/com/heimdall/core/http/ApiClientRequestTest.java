@@ -12,6 +12,7 @@ import com.google.gson.JsonParser;
 import com.heimdall.core.BuildConstants;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.http.model.ConnectionAttempt;
+import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.stubbot.Hmac;
 import java.io.UncheckedIOException;
@@ -190,6 +191,39 @@ class ApiClientRequestTest {
                     com.heimdall.core.punish.PunishmentIp.hash("203.0.113.9", "salt"),
                     first.get("ipDigest").getAsString());
             assertNull(row.ip, "the scratch IP is cleared after hashing");
+        }
+
+        @Test
+        @DisplayName("empty salt does not produce an HMAC that would look real")
+        void importDoesNotHashWithEmptySalt() {
+            com.heimdall.core.http.model.PunishmentImportRow row =
+                    new com.heimdall.core.http.model.PunishmentImportRow();
+            row.ip = "203.0.113.9";
+            row.hashIpWith("");
+            assertNull(row.ip);
+            assertNull(row.ipDigest);
+            row.ip = "203.0.113.9";
+            row.hashIpWith(null);
+            assertNull(row.ipDigest);
+        }
+
+        @Test
+        @DisplayName("a revoke without a mongo id posts to punishments/revoke")
+        void revokeWithoutIdUsesFilterRoute() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"revoked\":1}}");
+            Payload body = Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", UUID)
+                    .put("opId", "op-1")
+                    .build();
+            await(client.revokePunishment(body));
+            RecordingHttpServer.Request request = server.lastRequest();
+            assertEquals("POST", request.method);
+            assertTrue(request.path.endsWith("/punishments/revoke"), request.path);
+            JsonObject sent = bodyOf(request);
+            assertEquals("ban", sent.get("type").getAsString());
+            assertEquals(UUID, sent.get("targetUuid").getAsString());
+            assertFalse(sent.has("id") && !sent.get("id").getAsString().isEmpty());
         }
 
         @Test

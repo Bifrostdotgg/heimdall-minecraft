@@ -191,6 +191,14 @@ public final class HeimdallApi {
         return gated(() -> client.revokePunishment(id, body).thenApply(HeimdallApi::asPayload));
     }
 
+    /**
+     * Revoke using the payload's {@code id} when it is a real mongo id, otherwise by
+     * type + targetUuid / ipDigest.
+     */
+    public CompletableFuture<Payload> revokePunishment(final Payload body) {
+        return gated(() -> client.revokePunishment(body).thenApply(HeimdallApi::asPayload));
+    }
+
     public CompletableFuture<Payload> listPunishments(
             final String type, final String uuid, final Boolean active) {
         return gated(() -> client.listPunishments(type, uuid, active, 200)
