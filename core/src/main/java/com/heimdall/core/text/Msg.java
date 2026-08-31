@@ -1,6 +1,7 @@
 package com.heimdall.core.text;
 
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 
 /**
@@ -12,19 +13,14 @@ import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
  * conversions were spread across the call sites. A single model type converted once at the edge is
  * what makes a deny reason usable identically on a 1.8.8 kick screen and a Velocity proxy.
  *
- * <h2>What 1b deliberately does not have</h2>
- *
- * <p>MiniMessage. It is the obvious next step and it is <em>not</em> here, because the templates it
- * would parse are dashboard-owned and that work has not landed. Adding the parser now would mean
- * shipping a syntax nothing produces, and the first thing anyone would do with it is hand-write
- * templates in a config file that phase 1d is about to take away.
- *
- * <p>So the input format is the one the bot actually sends today: §-coded legacy text.
+ * <p>Two input formats: §-coded legacy for bot-owned chat lines, and MiniMessage for punishment
+ * screens pushed in {@code config.push}. Placeholder substitution for screens lives next to the
+ * MiniMessage parser so a player-supplied {@code {reason}} cannot inject tags.
  *
  * <h2>Thread safety</h2>
  *
- * <p>Stateless and safe from any thread. {@link LegacyComponentSerializer} instances are immutable
- * and the shared one is reused rather than rebuilt per call — the login path calls this.
+ * <p>Stateless and safe from any thread. Serializer instances are immutable and the shared ones are
+ * reused rather than rebuilt per call — the login path calls this.
  */
 public final class Msg {
 
@@ -57,6 +53,8 @@ public final class Msg {
             .useUnusualXRepeatedCharacterHexFormat()
             .build();
 
+    private static final MiniMessage MINI = MiniMessage.miniMessage();
+
     private Msg() {
     }
 
@@ -81,6 +79,61 @@ public final class Msg {
      */
     public static Component plain(String text) {
         return text == null ? Component.empty() : Component.text(text);
+    }
+
+    /**
+     * Parses MiniMessage, falling back to the raw text if the template is unusable.
+     *
+     * <p>A thrown parse must not take out a login or a kick. The dashboard owns the templates;
+     * a typo there is a bad screen, not a locked network.
+     */
+    public static Component mini(String text) {
+        if (text == null || text.isEmpty()) {
+            return Component.empty();
+        }
+        try {
+            return MINI.deserialize(text);
+        } catch (RuntimeException e) {
+            return Component.text(text);
+        }
+    }
+
+    /**
+     * MiniMessage template with brace placeholders.
+     *
+     * <p>Values are tag-escaped before substitution so a reason containing {@code <red>} cannot
+     * restyle the rest of the screen. Keys are {@code {name}} in the template.
+     *
+     * @param replacements even-length name/value pairs; a dangling last name is ignored
+     */
+    public static Component miniTemplate(String template, String... replacements) {
+        if (template == null || template.isEmpty()) {
+            return Component.empty();
+        }
+        String filled = template;
+        if (replacements != null) {
+            for (int i = 0; i + 1 < replacements.length; i += 2) {
+                String key = replacements[i];
+                String value = replacements[i + 1];
+                if (key == null) {
+                    continue;
+                }
+                filled = filled.replace("{" + key + "}", escapeMini(value));
+            }
+        }
+        return mini(filled);
+    }
+
+    /** MiniMessage-escapes untrusted text so it cannot introduce tags. */
+    public static String escapeMini(String text) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        try {
+            return MINI.escapeTags(text);
+        } catch (RuntimeException e) {
+            return text.replace("<", "").replace(">", "");
+        }
     }
 
     /**

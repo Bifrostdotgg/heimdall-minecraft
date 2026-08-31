@@ -1,6 +1,7 @@
 package com.heimdall.core.http;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.heimdall.core.http.model.ConfigImportResult;
@@ -287,15 +288,24 @@ public final class ApiClient {
         });
     }
 
+    public CompletableFuture<JsonObject> issuePunishment(Payload body) {
+        return issuePunishment(payloadObject(body));
+    }
+
     public CompletableFuture<JsonObject> revokePunishment(String id, JsonObject body) {
         if (Strings.isBlank(id)) throw new IllegalArgumentException("id is required");
         return async(() -> {
             ApiSettings current = settings;
             String json = body == null ? "{}" : body.toString();
             RawResponse response = requests.execute(current,
-                    HttpCall.post(guildPath(current, "punishments/" + id + "/revoke"), json, current.timeoutMs()));
+                    HttpCall.post(guildPath(current, "punishments/" + encodePath(id) + "/revoke"),
+                            json, current.timeoutMs()));
             return Envelopes.unwrapObject(response.status(), response.body());
         });
+    }
+
+    public CompletableFuture<JsonObject> revokePunishment(String id, Payload body) {
+        return revokePunishment(id, payloadObject(body));
     }
 
     public CompletableFuture<JsonObject> importPunishmentRows(java.util.List<PunishmentImportRow> rows) {
@@ -307,7 +317,7 @@ public final class ApiClient {
                 o.addProperty("type", row.type);
                 if (row.targetUuid != null) o.addProperty("targetUuid", row.targetUuid);
                 if (row.targetName != null) o.addProperty("targetName", row.targetName);
-                if (row.ip != null) o.addProperty("ip", row.ip);
+                if (row.ipDigest != null) o.addProperty("ipDigest", row.ipDigest);
                 if (row.reason != null) o.addProperty("reason", row.reason);
                 if (row.durationMinutes != null) o.addProperty("durationMinutes", row.durationMinutes);
                 o.addProperty("silent", row.silent);
@@ -315,12 +325,45 @@ public final class ApiClient {
                 if (row.issuedAtMillis > 0) o.addProperty("issuedAt", row.issuedAtMillis);
                 o.addProperty("importProvider", "litebans");
                 if (row.importProviderId != null) o.addProperty("importProviderId", row.importProviderId);
+                o.addProperty("active", row.active);
                 array.add(o);
             }
         }
         JsonObject body = new JsonObject();
         body.add("rows", array);
         return importPunishments(body);
+    }
+
+    public CompletableFuture<RawResponse> listPunishments(
+            String type, String uuid, Boolean active, int limit) {
+        return async(() -> {
+            ApiSettings current = settings;
+            StringBuilder path = new StringBuilder("punishments?limit=");
+            path.append(Math.min(200, Math.max(1, limit)));
+            if (Strings.isNotBlank(type)) {
+                path.append("&type=").append(encodeQuery(type));
+            }
+            if (Strings.isNotBlank(uuid)) {
+                path.append("&uuid=").append(encodeQuery(uuid));
+            }
+            if (active != null) {
+                path.append("&active=").append(active.booleanValue());
+            }
+            return requests.execute(current,
+                    HttpCall.get(guildPath(current, path.toString()), current.timeoutMs()));
+        });
+    }
+
+    public CompletableFuture<RawResponse> playerPunishments(String uuid) {
+        if (Strings.isBlank(uuid)) {
+            throw new IllegalArgumentException("uuid is required");
+        }
+        return async(() -> {
+            ApiSettings current = settings;
+            return requests.execute(current,
+                    HttpCall.get(guildPath(current, "punishments/player/" + encodePath(uuid.trim())),
+                            current.timeoutMs()));
+        });
     }
 
     public CompletableFuture<JsonObject> importPunishments(JsonObject body) {
@@ -443,6 +486,26 @@ public final class ApiClient {
         body.addProperty("isBedrock", Boolean.TRUE);
         body.addProperty("bedrockGamertag", identity.gamertag());
         addIfPresent(body, "bedrockXuid", identity.xuid());
+    }
+
+    private static JsonObject payloadObject(Payload payload) {
+        if (payload == null || payload.isEmpty()) {
+            return new JsonObject();
+        }
+        JsonElement parsed = JsonParser.parseString(payload.toJson());
+        return parsed.isJsonObject() ? parsed.getAsJsonObject() : new JsonObject();
+    }
+
+    private static String encodeQuery(String value) {
+        try {
+            return URLEncoder.encode(value, StandardCharsets.UTF_8.name());
+        } catch (java.io.UnsupportedEncodingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static String encodePath(String value) {
+        return encodeQuery(value).replace("+", "%20");
     }
 
     private static void addIfPresent(JsonObject body, String key, String value) {

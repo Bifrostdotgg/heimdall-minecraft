@@ -131,13 +131,11 @@ final class BukkitBootstrap {
         // what is on disk if a setup command wrote between them, and it is a file parse on the
         // boot path either way.
         BootstrapConfig bootstrap = store.load();
-        ServerRole role = InstanceRoleDetector.resolve(
-                bootstrap.role(),
-                new BukkitRoleDetector(Bukkit.getWorldContainer(), logger),
-                logger);
+        BukkitRoleDetector detector = new BukkitRoleDetector(Bukkit.getWorldContainer(), logger);
+        ServerRole role = InstanceRoleDetector.resolve(bootstrap.role(), detector, logger);
 
         executors = new HeimdallExecutors(logger);
-        platform = new BukkitPlatform(plugin, logger, role, executors);
+        platform = new BukkitPlatform(plugin, logger, role, detector.isBehindProxy(), executors);
 
         TickSource ticks = BukkitAdapters.tickSource(logger);
         runtime = HeimdallRuntime.builder(logger, platform)

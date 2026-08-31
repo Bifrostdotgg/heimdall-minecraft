@@ -9,23 +9,16 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * {@code /hd offense reload|types} — the offense-type cache behind {@code /offend}.
+ * {@code /hd offense} plus the native punishment verbs. {@code /hd ban} and family stay registered
+ * even when root {@code /ban} aliases are off.
  *
- * <p>Both verbs exist for one support question: "why will that slug not tab-complete?" The answers
- * are that the type is disabled, that the cache is stale, or that the slug does not exist — and the
- * two verbs together tell them apart, which is why {@code types} lists disabled types rather than
- * filtering them out the way {@code /offend}'s own completion does.
- *
- * <p>{@code /offend} itself is not here. It is player-facing, it belongs to the module that
- * implements it, and it is registered and unregistered with that module so switching the feature off
- * really takes the verb away (departure D53). What lives in the admin tree is the operator half.
+ * <p>{@code /offend} itself is not here. It is player-facing and belongs to the offenses module.
  */
 final class PunishmentSubcommands {
 
     private PunishmentSubcommands() {
     }
 
-    /** The one verb, with two arguments. */
     static final class Offense implements AdminSubcommand {
 
         @Override
@@ -57,9 +50,6 @@ final class PunishmentSubcommands {
                     @Override
                     public void run() {
                         offenses.reload();
-                        // The list rather than a success line, deliberately. A failed refresh keeps
-                        // the previous cache and is indistinguishable from a successful one by any
-                        // return value — but not by its contents.
                         list(source, offenses.types());
                     }
                 });
@@ -79,12 +69,6 @@ final class PunishmentSubcommands {
                     : Collections.<String>emptyList();
         }
 
-        /**
-         * Prints every cached type, disabled ones included and marked as such.
-         *
-         * <p>An empty list is its own line rather than silence: "no types are configured" and "the
-         * refresh has not landed yet" are both real, and both look like a command that did nothing.
-         */
         private static void list(CommandSource source, List<OffenseType> types) {
             if (types.isEmpty()) {
                 source.sendMessage(Msg.legacy("§eNo offense types are cached. Either none are "
@@ -101,48 +85,41 @@ final class PunishmentSubcommands {
         }
     }
 
-    static final class Ban implements AdminSubcommand {
-        public String name() { return "ban"; }
-        public String usage() { return "<player> [duration] [reason]"; }
-        public String description() { return "ban a player (native punishments)"; }
-        public void run(CommandSource source, List<String> args, AdminContext context) {
-            delegate(source, "ban", args);
-        }
+    static AdminSubcommand verb(String name, String usage, String description, String type) {
+        return new Verb(name, usage, description, type);
     }
 
-    static final class Mute implements AdminSubcommand {
-        public String name() { return "mute"; }
-        public String usage() { return "<player> [duration] [reason]"; }
-        public String description() { return "mute a player (native punishments)"; }
-        public void run(CommandSource source, List<String> args, AdminContext context) {
-            delegate(source, "mute", args);
-        }
-    }
+    private static final class Verb implements AdminSubcommand {
+        private final String name;
+        private final String usage;
+        private final String description;
+        private final String type;
 
-    static final class Kick implements AdminSubcommand {
-        public String name() { return "kick"; }
-        public String usage() { return "<player> [reason]"; }
-        public String description() { return "kick a player (native punishments)"; }
-        public void run(CommandSource source, List<String> args, AdminContext context) {
-            delegate(source, "kick", args);
+        Verb(String name, String usage, String description, String type) {
+            this.name = name;
+            this.usage = usage;
+            this.description = description;
+            this.type = type;
         }
-    }
 
-    static final class Warn implements AdminSubcommand {
-        public String name() { return "warn"; }
-        public String usage() { return "<player> [reason]"; }
-        public String description() { return "warn a player (native punishments)"; }
-        public void run(CommandSource source, List<String> args, AdminContext context) {
-            delegate(source, "warn", args);
+        @Override
+        public String name() {
+            return name;
         }
-    }
 
-    static final class Unban implements AdminSubcommand {
-        public String name() { return "unban"; }
-        public String usage() { return "<player>"; }
-        public String description() { return "revoke a ban"; }
+        @Override
+        public String usage() {
+            return usage;
+        }
+
+        @Override
+        public String description() {
+            return description;
+        }
+
+        @Override
         public void run(CommandSource source, List<String> args, AdminContext context) {
-            delegate(source, "unban", args);
+            delegate(source, type, args);
         }
     }
 

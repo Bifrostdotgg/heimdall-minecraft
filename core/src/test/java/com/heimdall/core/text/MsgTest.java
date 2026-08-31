@@ -2,6 +2,7 @@ package com.heimdall.core.text;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
@@ -110,6 +111,43 @@ class MsgTest {
     void namedColoursStillRoundTrip() {
         assertEquals("§cDenied", Msg.toLegacy(Msg.legacy("§cDenied")));
         assertEquals("§a§lBold green", Msg.toLegacy(Msg.legacy("§a§lBold green")));
+    }
+
+    @Test
+    @DisplayName("MiniMessage tags become real colour, not literal angle brackets")
+    void miniMessageParsesTags() {
+        Component parsed = Msg.mini("<red>You are banned.</red>");
+        assertEquals(NamedTextColor.RED, colourOf(parsed));
+        assertEquals("You are banned.", contentOf(parsed));
+    }
+
+    @Test
+    @DisplayName("brace placeholders are substituted and reason tags cannot restyle the screen")
+    void miniTemplateEscapesReason() {
+        Component parsed = Msg.miniTemplate(
+                "<red>Banned.</red> <gray>{reason}</gray>",
+                "reason", "<red>injected</red>",
+                "player", "Steve",
+                "appeal_url", "https://bans.example/abc");
+        String plain = contentTree(parsed);
+        assertTrue(plain.contains("injected"), "the reason text still appears");
+        assertEquals(NamedTextColor.RED, colourOf(parsed),
+                "a reason containing MiniMessage tags must not restyle the template");
+    }
+
+    private static String contentTree(Component component) {
+        StringBuilder out = new StringBuilder();
+        appendContent(component, out);
+        return out.toString();
+    }
+
+    private static void appendContent(Component component, StringBuilder out) {
+        if (component instanceof TextComponent) {
+            out.append(((TextComponent) component).content());
+        }
+        for (Component child : component.children()) {
+            appendContent(child, out);
+        }
     }
 
     /** Any colour in the tree, named or hex. */

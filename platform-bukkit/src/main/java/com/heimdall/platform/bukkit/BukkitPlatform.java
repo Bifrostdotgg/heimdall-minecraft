@@ -28,6 +28,7 @@ import org.bukkit.plugin.Plugin;
 final class BukkitPlatform implements PlatformFacade, AutoCloseable {
 
     private final ServerRole role;
+    private final boolean forwardsPlayerIps;
     private final Path dataDirectory;
     private final ServerThread mainThread;
     private final BukkitMessenger messenger;
@@ -51,8 +52,13 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
      * rethrown unchanged, because it is the one the operator needs to see.
      */
     BukkitPlatform(
-            Plugin plugin, HeimdallLogger logger, ServerRole role, HeimdallExecutors executors) {
+            Plugin plugin,
+            HeimdallLogger logger,
+            ServerRole role,
+            boolean forwardsPlayerIps,
+            HeimdallExecutors executors) {
         this.role = role;
+        this.forwardsPlayerIps = forwardsPlayerIps;
         this.dataDirectory = plugin.getDataFolder().toPath();
         this.mainThread = createServerThread(plugin, logger);
         this.messenger = new BukkitMessenger(plugin, logger);
@@ -134,6 +140,11 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     @Override
     public ServerRole role() {
         return role;
+    }
+
+    @Override
+    public boolean forwardsPlayerIps() {
+        return forwardsPlayerIps;
     }
 
     @Override

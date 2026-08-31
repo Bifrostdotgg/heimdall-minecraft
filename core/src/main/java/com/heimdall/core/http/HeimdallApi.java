@@ -183,12 +183,22 @@ public final class HeimdallApi {
                 }));
     }
 
-    public CompletableFuture<JsonObject> issuePunishment(final JsonObject body) {
-        return gated(() -> client.issuePunishment(body));
+    public CompletableFuture<Payload> issuePunishment(final Payload body) {
+        return gated(() -> client.issuePunishment(body).thenApply(HeimdallApi::asPayload));
     }
 
-    public CompletableFuture<JsonObject> revokePunishment(final String id, final JsonObject body) {
-        return gated(() -> client.revokePunishment(id, body));
+    public CompletableFuture<Payload> revokePunishment(final String id, final Payload body) {
+        return gated(() -> client.revokePunishment(id, body).thenApply(HeimdallApi::asPayload));
+    }
+
+    public CompletableFuture<Payload> listPunishments(
+            final String type, final String uuid, final Boolean active) {
+        return gated(() -> client.listPunishments(type, uuid, active, 200)
+                .thenApply(HeimdallApi::unwrapPayload));
+    }
+
+    public CompletableFuture<Payload> playerPunishments(final String uuid) {
+        return gated(() -> client.playerPunishments(uuid).thenApply(HeimdallApi::unwrapPayload));
     }
 
     public CompletableFuture<Boolean> importPunishmentRows(final java.util.List<PunishmentImportRow> rows) {
@@ -211,8 +221,12 @@ public final class HeimdallApi {
                 if (response.status() == 304) {
                     return null;
                 }
-                JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
-                return Payload.parse(data.toString());
+                Payload payload = unwrapPayload(response);
+                String header = response.etag();
+                if (header != null && !header.isEmpty() && !payload.has("hash")) {
+                    return payload.toBuilder().put("hash", header).build();
+                }
+                return payload;
             }
         }));
     }
@@ -248,6 +262,15 @@ public final class HeimdallApi {
         CompletableFuture<T> refused = new CompletableFuture<T>();
         refused.completeExceptionally(new ApiUnavailableException(state, explain(state)));
         return refused;
+    }
+
+    private static Payload asPayload(JsonObject json) {
+        return json == null ? Payload.empty() : Payload.parse(json.toString());
+    }
+
+    private static Payload unwrapPayload(RawResponse response) {
+        JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
+        return Payload.parse(data.toString());
     }
 
     private static String explain(Availability state) {

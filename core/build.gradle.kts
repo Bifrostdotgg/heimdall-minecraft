@@ -54,14 +54,14 @@ dependencies {
     // String (throwing away the whole reason for using Adventure) or push a re-export shim into
     // every consumer's build file.
     //
-    // The serializer stays `implementation`: it is how `Msg.legacy` is built, not part of what it
-    // promises. Swapping legacy §-codes for MiniMessage when the dashboard-template work lands is
-    // then a core-local change.
+    // The serializers stay `implementation`: they are how `Msg` is built, not part of what it
+    // promises. MiniMessage is the punishment-screen format; legacy remains for §-coded bot text.
     //
     // `net.kyori` is already in :app's relocation list and in verifyShadowJar's required set, so
     // both jars land under com/heimdall/libs/kyori/ like everything else.
     api(libs.adventure.api)
     implementation(libs.adventure.text.serializer.legacy)
+    implementation(libs.adventure.text.minimessage)
 
     // The wire contract, executable. core's integration tests run the real ApiClient against
     // :stub-bot rather than against hand-written fixtures, so "the plugin parses what the bot

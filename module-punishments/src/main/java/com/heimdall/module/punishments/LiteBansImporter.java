@@ -24,9 +24,9 @@ import java.util.List;
  *   silent, ipban, active
  * </pre>
  *
- * <p>IPs are sent to the bot as raw strings on this hop only so the bot can
- * HMAC them with the guild salt before they are stored. They never persist on
- * Heimdall in the clear.
+ * <p>Raw IPs stay in the scratch {@code ip} field on the row until
+ * {@link com.heimdall.core.http.model.PunishmentImportRow#hashIpWith} runs,
+ * which is before the HTTP body is built. The bot never sees an address.
  */
 final class LiteBansImporter {
 

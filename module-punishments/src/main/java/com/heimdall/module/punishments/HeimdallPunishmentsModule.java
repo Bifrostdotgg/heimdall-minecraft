@@ -5,7 +5,7 @@ import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.http.HeimdallApi;
-import com.heimdall.core.http.model.ResolvedName;
+import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.mirror.MirrorPolicy;
@@ -17,26 +17,23 @@ import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.platform.PlayerHandle;
+import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.text.Msg;
-import com.heimdall.core.json.Envelope;
 import com.heimdall.core.tunnel.Capabilities;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.util.Arrays;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
+import net.kyori.adventure.text.Component;
 
 /**
- * Native punishments: local mirror, login/chat/command gates, /ban family, LiteBans hook.
+ * Native punishments: local mirror, login/chat/command gates, /hd ban family, durable outage queue.
  */
 public final class HeimdallPunishmentsModule implements HeimdallModule {
 
@@ -44,7 +41,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
 
     private volatile ModuleContext context;
     private volatile MirrorStore<ActivePunishment> mirror;
-    private volatile String lastEtag;
+    private volatile PunishmentOutbox outbox;
+    private volatile LastIpStore lastIps;
+    private volatile long lastFullSyncAt;
 
     static volatile HeimdallPunishmentsModule INSTANCE;
 
@@ -68,8 +67,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         this.context = context;
         INSTANCE = this;
         PunishmentSettings settings = PunishmentSettings.from(context.config());
-        Path path = context.platform().dataDirectory().resolve("punishments-mirror.json");
-        this.mirror = MirrorStore.builder(context.logger(), path, ActivePunishment.class)
+        this.mirror = MirrorStore.builder(
+                context.logger(),
+                context.platform().dataDirectory().resolve("punishments-mirror.json"),
+                ActivePunishment.class)
                 .policy(MirrorPolicy.builder()
                         .windowMs(TimeUnit.HOURS.toMillis(24))
                         .maxExtensionMs(TimeUnit.HOURS.toMillis(24))
@@ -77,28 +78,52 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                         .build())
                 .scheduler(context.executors().scheduler())
                 .open();
+        this.outbox = new PunishmentOutbox(
+                context.logger(),
+                context.platform().dataDirectory().resolve("punishments-outbox.json"));
+        ServerRole role = context.platform().role();
+        if (role == ServerRole.GATEKEEPER || role == ServerRole.STANDALONE) {
+            this.lastIps = new LastIpStore(
+                    context.logger(),
+                    context.platform().dataDirectory().resolve("punishments-last-ip.json"));
+        }
 
         context.interceptLogin(this::onLogin, 50);
-        ServerRole role = context.platform().role();
         boolean backend = role == ServerRole.ENFORCER || role == ServerRole.STANDALONE;
         if (backend) {
             context.interceptChat(this::onChat, 50);
             context.interceptCommand(this::onCommand, 50);
         }
+        context.onPlayerJoin(new PlayerSessionListener() {
+            @Override
+            public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                notifyWarn(player);
+            }
+        });
         context.tunnel().subscribe("punish.apply", applyHandler());
         context.tunnel().subscribe("punish.revoke", revokeHandler());
         context.tunnel().subscribe("punish.import", importHandler());
         context.scheduleRepeating(new Runnable() {
             @Override
             public void run() {
-                sync();
+                flushQueue();
+                if (lastIps != null) {
+                    lastIps.flush();
+                }
+            }
+        }, 2_000, 5_000);
+        context.scheduleRepeating(new Runnable() {
+            @Override
+            public void run() {
+                sync(false);
             }
         }, 5_000, TimeUnit.MINUTES.toMillis(5));
         registerCommands(context, settings, role);
         context.executors().io().execute(new Runnable() {
             @Override
             public void run() {
-                sync();
+                flushQueue();
+                sync(true);
             }
         });
         LiteBansSupport.tryHook(this, context);
@@ -106,14 +131,21 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
 
     @Override
     public void disable() {
+        if (lastIps != null) {
+            lastIps.flush();
+            lastIps = null;
+        }
         if (mirror != null) {
             try {
                 mirror.close();
             } catch (Exception e) {
-                context.logger().error("closing punishment mirror", e);
+                if (context != null) {
+                    context.logger().error("closing punishment mirror", e);
+                }
             }
             mirror = null;
         }
+        outbox = null;
         if (INSTANCE == this) INSTANCE = null;
         context = null;
     }
@@ -123,21 +155,22 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         boolean backend = role == ServerRole.ENFORCER || role == ServerRole.STANDALONE;
         if (settings.rootAliases && proxy) {
             bind(context, "ban", "heimdall.punishments.ban", "ban");
-            bind(context, "tempban", "heimdall.punishments.ban", "ban");
+            bind(context, "tempban", "heimdall.punishments.ban", "tempban");
             bind(context, "ipban", "heimdall.punishments.ipban", "ipban");
             bind(context, "unban", "heimdall.punishments.unban", "unban");
             bind(context, "kick", "heimdall.punishments.kick", "kick");
             bind(context, "warn", "heimdall.punishments.warn", "warn");
-            bind(context, "unwarn", "heimdall.punishments.warn", "unwarn");
+            bind(context, "unwarn", "heimdall.punishments.unban", "unwarn");
             bind(context, "history", "heimdall.punishments.history", "history");
             bind(context, "staffhistory", "heimdall.punishments.history", "staffhistory");
             bind(context, "banlist", "heimdall.punishments.history", "banlist");
             bind(context, "dupeip", "heimdall.punishments.dupeip", "dupeip");
             bind(context, "iphistory", "heimdall.punishments.dupeip", "iphistory");
+            bind(context, "rollback", "heimdall.punishments.unban", "rollback");
         }
-        if (settings.rootAliases) {
+        if (settings.rootAliases && backend) {
             bind(context, "mute", "heimdall.punishments.mute", "mute");
-            bind(context, "tempmute", "heimdall.punishments.mute", "mute");
+            bind(context, "tempmute", "heimdall.punishments.mute", "tempmute");
             bind(context, "unmute", "heimdall.punishments.unban", "unmute");
         }
     }
@@ -160,23 +193,23 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         ModuleContext ctx = this.context;
         if (ctx == null) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
-        if (!settings.replaceMode() && !type.equals("history") && !type.equals("banlist")
-                && !type.equals("dupeip") && !type.equals("iphistory") && !type.equals("staffhistory")) {
+        if (isLookup(type)) {
+            lookup(source, type, args);
+            return;
+        }
+        if (!settings.replaceMode()) {
             source.sendMessage(Msg.legacy("§eNative punishments are not in replace mode. "
                     + "Use LiteBans or switch mode in the dashboard."));
             return;
         }
-        if (type.equals("history") || type.equals("banlist") || type.equals("staffhistory")
-                || type.equals("dupeip") || type.equals("iphistory")) {
-            source.sendMessage(Msg.legacy("§7Look up punishments on the dashboard player page for now."));
-            return;
-        }
-        if ("unban".equals(type) || "unmute".equals(type) || "unwarn".equals(type)) {
+        if ("unban".equals(type) || "unmute".equals(type) || "unwarn".equals(type)
+                || "rollback".equals(type)) {
             if (args.isEmpty()) {
-                source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player>"));
+                source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [reason]"));
                 return;
             }
-            revoke(source, type, args.get(0));
+            String reason = args.size() > 1 ? join(args, 1) : "";
+            revoke(source, type, args.get(0), reason);
             return;
         }
         PunishmentParser.Parsed parsed;
@@ -186,10 +219,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [duration] [reason]"));
             return;
         }
+        if (("tempban".equals(type) || "tempmute".equals(type)) && parsed.durationMinutes == null) {
+            source.sendMessage(Msg.legacy("§cA duration is required for /" + type + "."));
+            return;
+        }
+        String issueType = type;
+        if ("tempban".equals(type)) issueType = "ban";
+        if ("tempmute".equals(type)) issueType = "mute";
         boolean silent = parsed.silent || (settings.silentByDefault && !parsed.publicFlag);
-        String durationType = type;
-        if ("ban".equals(type) && parsed.durationMinutes != null) durationType = "ban";
-        issue(source, durationType, parsed, silent);
+        issue(source, issueType, parsed, silent);
+    }
+
+    private static boolean isLookup(String type) {
+        return "history".equals(type) || "banlist".equals(type) || "staffhistory".equals(type)
+                || "dupeip".equals(type) || "iphistory".equals(type);
     }
 
     private void issue(final CommandSource source, final String type, final PunishmentParser.Parsed parsed,
@@ -200,10 +243,16 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             submitIssue(source, type, online.uuid().toString(), online.name(), parsed, silent);
             return;
         }
+        LastIpStore.PlayerIps seen = lastIps == null ? null : lastIps.byName(parsed.target);
+        if (seen != null) {
+            submitIssue(source, type, seen.uuid, seen.name, parsed, silent);
+            return;
+        }
         source.sendMessage(Msg.legacy("§eResolving §f" + parsed.target + "§e..."));
         ctx.api().resolveName(parsed.target).whenComplete((resolved, failure) -> {
             if (failure != null || resolved == null) {
-                source.sendMessage(Msg.legacy("§cCould not resolve §f" + parsed.target));
+                source.sendMessage(Msg.legacy("§cCould not resolve §f" + parsed.target
+                        + "§c. Offline never-seen names need the bot."));
                 return;
             }
             submitIssue(source, type, resolved.uuid(), resolved.username(), parsed, silent);
@@ -213,74 +262,182 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     private void submitIssue(CommandSource source, String type, String uuid, String name,
             PunishmentParser.Parsed parsed, boolean silent) {
         ModuleContext ctx = this.context;
+        PunishmentSettings settings = PunishmentSettings.from(ctx.config());
+        String ipDigest = null;
+        if ("ipban".equals(type)) {
+            String ip = lastIpOf(uuid);
+            if (ip == null || ip.isEmpty()) {
+                source.sendMessage(Msg.legacy("§cNo last address for §f" + name
+                        + "§c. IP bans are issued from the proxy or a standalone server "
+                        + "after that player has connected."));
+                return;
+            }
+            if (settings.ipSalt.isEmpty()) {
+                source.sendMessage(Msg.legacy("§cIP salt has not been pushed yet. Wait for config."));
+                return;
+            }
+            ipDigest = PunishmentIp.hash(ip, settings.ipSalt);
+        }
+        long now = System.currentTimeMillis();
+        String opId = UUID.randomUUID().toString();
         ActivePunishment local = new ActivePunishment();
-        local.id = "local-" + uuid + "-" + type;
+        local.id = "local-" + opId;
         local.type = type;
         local.targetUuid = uuid;
         local.targetName = name;
+        local.ipDigest = ipDigest;
         local.reason = parsed.reason;
         local.silent = silent;
+        local.issuedAt = Instant.ofEpochMilli(now).toString();
+        local.issuedByName = source.name();
+        local.issuedByUuid = source.uuid() == null ? null : source.uuid().toString();
         if (parsed.durationMinutes != null) {
-            local.expiresAt = java.time.Instant.now()
+            local.expiresAt = Instant.ofEpochMilli(now)
                     .plusSeconds(parsed.durationMinutes.intValue() * 60L).toString();
         }
-        if (mirror != null && !"kick".equals(type) && !"warn".equals(type)) {
+        if (mirror != null && !"kick".equals(type)) {
             mirror.record(keyFor(local), local);
         }
-        kickIfBanned(uuid, local);
-        ctx.api().issuePunishment(
-                "ipban".equals(type) ? "ipban" : type,
-                uuid,
-                name,
-                parsed.reason == null ? "" : parsed.reason,
-                parsed.durationMinutes,
-                silent,
-                source.uuid() == null ? null : source.uuid().toString(),
-                source.name()).whenComplete((result, failure) -> {
-            if (failure != null) {
-                source.sendMessage(Msg.legacy("§cPunishment queued locally but the bot refused: "
-                        + failure.getMessage()));
+        applyLive(uuid, local, settings);
+        Payload.Builder body = Payload.builder()
+                .put("type", type)
+                .put("targetUuid", uuid)
+                .put("targetName", name)
+                .put("reason", parsed.reason == null ? "" : parsed.reason)
+                .put("silent", silent)
+                .put("source", "command")
+                .put("opId", opId)
+                .put("issuedAt", now);
+        if (parsed.durationMinutes != null) {
+            body.put("durationMinutes", parsed.durationMinutes.intValue());
+        }
+        if (ipDigest != null) {
+            body.put("ipDigest", ipDigest);
+        }
+        if (source.uuid() != null) {
+            body.put("issuedByUuid", source.uuid().toString());
+        }
+        if (source.name() != null) {
+            body.put("issuedByName", source.name());
+        }
+        enqueue("issue", opId, now, body.build());
+        source.sendMessage(Msg.legacy("§a" + type + " issued for §f" + name));
+        flushSoon();
+    }
+
+    private void revoke(final CommandSource source, final String type, final String target,
+            final String reason) {
+        ModuleContext ctx = this.context;
+        PlayerHandle online = ctx.platform().players().byName(target).orElse(null);
+        if (online != null) {
+            submitRevoke(source, type, online.uuid().toString(), online.name(), reason);
+            return;
+        }
+        LastIpStore.PlayerIps seen = lastIps == null ? null : lastIps.byName(target);
+        if (seen != null) {
+            submitRevoke(source, type, seen.uuid, seen.name, reason);
+            return;
+        }
+        source.sendMessage(Msg.legacy("§eResolving §f" + target + "§e..."));
+        ctx.api().resolveName(target).whenComplete((resolved, failure) -> {
+            if (failure != null || resolved == null) {
+                ActivePunishment local = findByName(target, revokeTypes(type));
+                if (local != null) {
+                    submitRevoke(source, type, local.targetUuid, local.targetName, reason);
+                    return;
+                }
+                source.sendMessage(Msg.legacy("§cCould not resolve §f" + target));
                 return;
             }
-            source.sendMessage(Msg.legacy("§a" + type + " issued for §f" + name));
+            submitRevoke(source, type, resolved.uuid(), resolved.username(), reason);
         });
     }
 
-    private void revoke(CommandSource source, String type, String target) {
-        ModuleContext ctx = this.context;
-        PlayerHandle online = ctx.platform().players().byName(target).orElse(null);
-        final String name = online == null ? target : online.name();
-        Runnable send = new Runnable() {
-            @Override
-            public void run() {
-                source.sendMessage(Msg.legacy("§eRevoke is applied from the dashboard for now, "
-                        + "or re-issue after looking up the id. Target: §f" + name));
+    private void submitRevoke(CommandSource source, String type, String uuid, String name,
+            String reason) {
+        List<ActivePunishment> matches;
+        if ("rollback".equals(type)) {
+            ActivePunishment latest = latestActive(uuid);
+            matches = latest == null
+                    ? Collections.<ActivePunishment>emptyList()
+                    : Collections.singletonList(latest);
+        } else {
+            matches = activeOf(uuid, revokeTypes(type));
+        }
+        if (matches.isEmpty()) {
+            source.sendMessage(Msg.legacy("§eNo active " + typeLabel(type) + " for §f" + name));
+            return;
+        }
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < matches.size(); i++) {
+            ActivePunishment punishment = matches.get(i);
+            if (mirror != null) {
+                mirror.evict(keyFor(punishment));
             }
-        };
-        ctx.executors().io().execute(send);
+            String opId = UUID.randomUUID().toString();
+            Payload.Builder body = Payload.builder()
+                    .put("opId", opId)
+                    .put("issuedAt", now)
+                    .put("type", punishment.type)
+                    .put("targetUuid", uuid)
+                    .put("reason", reason == null ? "" : reason)
+                    .put("revokedBy", source.name() == null ? "" : source.name());
+            if (punishment.id != null && !punishment.id.startsWith("local-")) {
+                body.put("id", punishment.id);
+            }
+            if (punishment.ipDigest != null) {
+                body.put("ipDigest", punishment.ipDigest);
+            }
+            enqueue("revoke", opId, now, body.build());
+        }
+        source.sendMessage(Msg.legacy("§aRevoked " + matches.size() + " punishment(s) for §f" + name));
+        flushSoon();
+    }
+
+    private static String[] revokeTypes(String type) {
+        if ("unban".equals(type)) return new String[] {"ban", "ipban"};
+        if ("unmute".equals(type)) return new String[] {"mute"};
+        if ("unwarn".equals(type)) return new String[] {"warn"};
+        return new String[] {"ban", "ipban", "mute", "warn"};
+    }
+
+    private static String typeLabel(String type) {
+        if ("unban".equals(type)) return "ban";
+        if ("unmute".equals(type)) return "mute";
+        if ("unwarn".equals(type)) return "warn";
+        if ("rollback".equals(type)) return "punishment";
+        return type;
     }
 
     private Verdict onLogin(LoginAttempt attempt) {
+        if (lastIps != null && attempt.ipAddress() != null && !attempt.ipAddress().isEmpty()) {
+            lastIps.record(attempt.uuid().toString(), attempt.username(), attempt.ipAddress(),
+                    System.currentTimeMillis());
+        }
         if (mirror == null) return Verdict.abstain();
         PunishmentSettings settings = PunishmentSettings.from(context.config());
         if (!settings.replaceMode()) return Verdict.abstain();
         ActivePunishment ban = mirror.get("ban:" + attempt.uuid().toString());
         if (ban != null && !ban.expired(System.currentTimeMillis())) {
-            return Verdict.deny(Msg.legacy(render(settings.banScreen, ban)));
+            return Verdict.deny(render(settings.banScreen, ban, settings));
         }
-        String ip = attempt.ipAddress();
-        if (ip != null && !settings.ipSalt.isEmpty()) {
-            String digest = hmacIp(ip, settings.ipSalt);
+        if (shouldCheckIpBan() && attempt.ipAddress() != null && !attempt.ipAddress().isEmpty()
+                && !settings.ipSalt.isEmpty()) {
+            String digest = PunishmentIp.hash(attempt.ipAddress(), settings.ipSalt);
             ActivePunishment ipban = mirror.get("ipban:" + digest);
             if (ipban != null && !ipban.expired(System.currentTimeMillis())) {
-                boolean checkIp = context.platform().role() != ServerRole.ENFORCER
-                        || Boolean.TRUE.equals(null);
-                if (context.platform().role() != ServerRole.ENFORCER) {
-                    return Verdict.deny(Msg.legacy(render(settings.banScreen, ipban)));
-                }
+                return Verdict.deny(render(settings.banScreen, ipban, settings));
             }
         }
         return Verdict.abstain();
+    }
+
+    private boolean shouldCheckIpBan() {
+        ServerRole role = context.platform().role();
+        if (role != ServerRole.ENFORCER) {
+            return true;
+        }
+        return context.platform().forwardsPlayerIps();
     }
 
     private Verdict onChat(ChatMessage message) {
@@ -289,7 +446,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         if (!settings.replaceMode()) return Verdict.abstain();
         ActivePunishment mute = mirror.get("mute:" + message.senderUuid());
         if (mute != null && !mute.expired(System.currentTimeMillis())) {
-            return Verdict.deny(Msg.legacy(render(settings.muteScreen, mute)));
+            return Verdict.deny(render(settings.muteScreen, mute, settings));
         }
         return Verdict.abstain();
     }
@@ -301,9 +458,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         ActivePunishment mute = mirror.get("mute:" + attempt.senderUuid());
         if (mute == null || mute.expired(System.currentTimeMillis())) return Verdict.abstain();
         if (settings.blockedCommands.contains(attempt.label())) {
-            return Verdict.deny(Msg.legacy(render(settings.muteScreen, mute)));
+            return Verdict.deny(render(settings.muteScreen, mute, settings));
         }
         return Verdict.abstain();
+    }
+
+    private void notifyWarn(PlayerHandle player) {
+        if (player == null || mirror == null || context == null) return;
+        PunishmentSettings settings = PunishmentSettings.from(context.config());
+        if (!settings.replaceMode()) return;
+        ActivePunishment warn = mirror.get("warn:" + player.uuid());
+        if (warn == null || warn.expired(System.currentTimeMillis())) return;
+        player.sendMessage(render(settings.warnScreen, warn, settings));
     }
 
     private TunnelMessageHandler applyHandler() {
@@ -313,12 +479,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                 Payload payload = envelope.payload();
                 ActivePunishment p = fromPayload(payload);
                 if (p == null || mirror == null) return;
-                if ("kick".equals(p.type) || "warn".equals(p.type)) {
-                    kickIfBanned(p.targetUuid, p);
+                if ("kick".equals(p.type)) {
+                    applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
                     return;
                 }
                 mirror.record(keyFor(p), p);
-                kickIfBanned(p.targetUuid, p);
+                applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
             }
         };
     }
@@ -352,28 +518,134 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         };
     }
 
-    private void sync() {
+    private void flushSoon() {
+        ModuleContext ctx = this.context;
+        if (ctx == null) return;
+        ctx.executors().io().execute(new Runnable() {
+            @Override
+            public void run() {
+                flushQueue();
+            }
+        });
+    }
+
+    void flushQueue() {
+        ModuleContext ctx = this.context;
+        PunishmentOutbox box = this.outbox;
+        if (ctx == null || box == null || box.isEmpty() || !ctx.api().isUsable()) return;
+        boolean uploaded = false;
+        List<PunishmentOutbox.Entry> pending = box.snapshot();
+        for (int i = 0; i < pending.size(); i++) {
+            PunishmentOutbox.Entry entry = pending.get(i);
+            try {
+                if ("issue".equals(entry.op)) {
+                    Payload result = ctx.api().issuePunishment(entry.payload)
+                            .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
+                    rememberIssuedId(entry.payload, result);
+                    box.remove(entry.opId);
+                    uploaded = true;
+                } else if ("revoke".equals(entry.op)) {
+                    String id = entry.payload.string("id", "");
+                    if (id.isEmpty() || id.startsWith("local-")) {
+                        id = resolveRemoteId(entry.payload);
+                    }
+                    if (id.isEmpty() || id.startsWith("local-")) {
+                        continue;
+                    }
+                    ctx.api().revokePunishment(id, entry.payload)
+                            .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
+                    box.remove(entry.opId);
+                    uploaded = true;
+                } else {
+                    box.remove(entry.opId);
+                }
+            } catch (Exception e) {
+                ctx.logger().debug(() -> "punishment outbox upload deferred: " + e.getMessage());
+                break;
+            }
+        }
+        if (uploaded) {
+            sync(true);
+        }
+    }
+
+    private void rememberIssuedId(Payload request, Payload result) {
+        if (mirror == null || result == null) return;
+        String id = result.string("id", "");
+        if (id.isEmpty()) id = result.string("_id", "");
+        if (id.isEmpty()) return;
+        ActivePunishment local = new ActivePunishment();
+        local.id = id;
+        local.type = request.string("type", result.string("type", ""));
+        local.targetUuid = request.string("targetUuid", result.string("targetUuid", null));
+        local.targetName = request.string("targetName", result.string("targetName", null));
+        local.ipDigest = request.string("ipDigest", result.string("ipDigest", null));
+        local.reason = request.string("reason", result.string("reason", ""));
+        local.silent = request.bool("silent", false);
+        if (local.type.isEmpty() || "kick".equals(local.type)) return;
+        ActivePunishment existing = mirror.get(keyFor(local));
+        if (existing != null) {
+            existing.id = id;
+            mirror.record(keyFor(existing), existing);
+        }
+    }
+
+    private String resolveRemoteId(Payload revoke) throws Exception {
+        ModuleContext ctx = this.context;
+        String uuid = revoke.string("targetUuid", "");
+        String type = revoke.string("type", "");
+        if (uuid.isEmpty() || !ctx.api().isUsable()) return "";
+        Payload data = ctx.api().playerPunishments(uuid)
+                .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
+        for (Payload row : data.children("punishments")) {
+            if (!row.bool("active", false)) continue;
+            if (!type.isEmpty() && !type.equals(row.string("type", ""))) continue;
+            String id = row.string("id", "");
+            if (id.isEmpty()) id = row.string("_id", "");
+            if (!id.isEmpty()) return id;
+        }
+        return "";
+    }
+
+    private void sync(boolean force) {
         ModuleContext ctx = this.context;
         MirrorStore<ActivePunishment> store = this.mirror;
         if (ctx == null || store == null || !ctx.api().isUsable()) return;
-        ctx.api().punishmentSync(lastEtag).whenComplete((data, failure) -> {
+        if (!force && lastFullSyncAt != 0
+                && System.currentTimeMillis() - lastFullSyncAt < TimeUnit.MINUTES.toMillis(4)) {
+            return;
+        }
+        ctx.api().punishmentSync(store.lastEtag()).whenComplete((data, failure) -> {
             if (failure != null || data == null) return;
             try {
-                Payload payload = data;
-                java.util.Map<String, ActivePunishment> authoritative = new java.util.LinkedHashMap<String, ActivePunishment>();
-                for (Payload row : payload.children("punishments")) {
+                java.util.Map<String, ActivePunishment> authoritative =
+                        new java.util.LinkedHashMap<String, ActivePunishment>();
+                for (Payload row : data.children("punishments")) {
                     ActivePunishment p = fromPayload(row);
-                    if (p != null) authoritative.put(keyFor(p), p);
+                    if (p != null && !"kick".equals(p.type)) {
+                        authoritative.put(keyFor(p), p);
+                    }
                 }
                 store.reconcile(authoritative);
+                String hash = data.string("hash", "");
+                if (!hash.isEmpty()) {
+                    store.setLastEtag(hash);
+                }
+                lastFullSyncAt = System.currentTimeMillis();
             } catch (RuntimeException e) {
                 ctx.logger().error("punishment sync apply failed", e);
             }
         });
     }
 
-    private void kickIfBanned(String uuid, ActivePunishment punishment) {
-        if (uuid == null || context == null) return;
+    private void applyLive(String uuid, ActivePunishment punishment, PunishmentSettings settings) {
+        if (uuid == null || context == null || punishment == null) return;
+        PlayerHandle player = context.platform().players().byUuid(parseUuid(uuid)).orElse(null);
+        if (player == null) return;
+        if ("warn".equals(punishment.type)) {
+            player.sendMessage(render(settings.warnScreen, punishment, settings));
+            return;
+        }
         if (!"ban".equals(punishment.type) && !"ipban".equals(punishment.type)
                 && !"kick".equals(punishment.type)) {
             return;
@@ -382,51 +654,372 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         if (role == ServerRole.ENFORCER && !"kick".equals(punishment.type)) {
             return;
         }
-        PlayerHandle player = context.platform().players().byUuid(parseUuid(uuid)).orElse(null);
-        if (player == null) return;
-        PunishmentSettings settings = PunishmentSettings.from(context.config());
         String screen = "kick".equals(punishment.type) ? settings.kickScreen : settings.banScreen;
-        player.kick(Msg.legacy(render(screen, punishment)));
+        player.kick(render(screen, punishment, settings));
+    }
+
+    private void lookup(final CommandSource source, final String type, final List<String> args) {
+        if ("banlist".equals(type)) {
+            showBanlist(source);
+            return;
+        }
+        if ("iphistory".equals(type)) {
+            showIpHistory(source, args);
+            return;
+        }
+        if ("dupeip".equals(type)) {
+            showDupeip(source, args);
+            return;
+        }
+        if (args.isEmpty()) {
+            source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player>"));
+            return;
+        }
+        final String target = args.get(0);
+        if ("staffhistory".equals(type)) {
+            showStaffHistory(source, target);
+            return;
+        }
+        PlayerHandle online = context.platform().players().byName(target).orElse(null);
+        if (online != null) {
+            showHistory(source, online.uuid().toString(), online.name());
+            return;
+        }
+        LastIpStore.PlayerIps seen = lastIps == null ? null : lastIps.byName(target);
+        if (seen != null) {
+            showHistory(source, seen.uuid, seen.name);
+            return;
+        }
+        source.sendMessage(Msg.legacy("§eResolving §f" + target + "§e..."));
+        context.api().resolveName(target).whenComplete((resolved, failure) -> {
+            if (failure != null || resolved == null) {
+                ActivePunishment local = findByName(target, new String[] {"ban", "ipban", "mute", "warn"});
+                if (local != null) {
+                    showHistory(source, local.targetUuid, local.targetName);
+                    return;
+                }
+                source.sendMessage(Msg.legacy("§cCould not resolve §f" + target));
+                return;
+            }
+            showHistory(source, resolved.uuid(), resolved.username());
+        });
+    }
+
+    private void showHistory(final CommandSource source, final String uuid, final String name) {
+        final List<String> lines = new ArrayList<String>();
+        lines.add("§6History for §f" + name);
+        if (context.api().isUsable()) {
+            context.api().playerPunishments(uuid).whenComplete((data, failure) -> {
+                if (failure != null || data == null) {
+                    source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name))));
+                    return;
+                }
+                List<Payload> rows = data.children("punishments");
+                if (rows.isEmpty()) {
+                    source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name))));
+                    return;
+                }
+                for (int i = 0; i < rows.size() && i < 20; i++) {
+                    lines.add(formatRow(rows.get(i)));
+                }
+                source.sendMessage(Msg.legacy(joinLines(lines)));
+            });
+            return;
+        }
+        source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name))));
+    }
+
+    private List<String> localHistory(String uuid, String name) {
+        List<String> lines = new ArrayList<String>();
+        lines.add("§6History for §f" + name + " §8(local mirror)");
+        List<ActivePunishment> found = activeOf(uuid, new String[] {"ban", "ipban", "mute", "warn"});
+        if (found.isEmpty()) {
+            lines.add("§7No active punishments on this instance.");
+            return lines;
+        }
+        for (int i = 0; i < found.size(); i++) {
+            lines.add(formatLocal(found.get(i)));
+        }
+        return lines;
+    }
+
+    private void showBanlist(CommandSource source) {
+        List<String> lines = new ArrayList<String>();
+        lines.add("§6Active bans");
+        int n = 0;
+        if (mirror != null) {
+            for (String key : mirror.keys()) {
+                ActivePunishment p = mirror.get(key);
+                if (p == null || p.expired(System.currentTimeMillis())) continue;
+                if (!"ban".equals(p.type) && !"ipban".equals(p.type)) continue;
+                lines.add(formatLocal(p));
+                n++;
+            }
+        }
+        if (n == 0) {
+            lines.add("§7None on this instance.");
+        }
+        source.sendMessage(Msg.legacy(joinLines(lines)));
+        final int localCount = n;
+        if (context.api().isUsable()) {
+            context.api().listPunishments("ban", null, Boolean.TRUE).whenComplete((data, failure) -> {
+                if (failure != null || data == null) return;
+                int extra = data.children("punishments").size();
+                if (extra > localCount) {
+                    source.sendMessage(Msg.legacy("§7Bot lists " + extra + " active bans network-wide."));
+                }
+            });
+        }
+    }
+
+    private void showStaffHistory(final CommandSource source, final String staff) {
+        if (!context.api().isUsable()) {
+            source.sendMessage(Msg.legacy("§eStaff history needs the bot. Showing local issued-by matches."));
+            List<String> lines = new ArrayList<String>();
+            lines.add("§6Staff history for §f" + staff + " §8(local)");
+            int n = 0;
+            if (mirror != null) {
+                for (String key : mirror.keys()) {
+                    ActivePunishment p = mirror.get(key);
+                    if (p == null || p.issuedByName == null) continue;
+                    if (!staff.equalsIgnoreCase(p.issuedByName)) continue;
+                    lines.add(formatLocal(p));
+                    n++;
+                }
+            }
+            if (n == 0) lines.add("§7None on this instance.");
+            source.sendMessage(Msg.legacy(joinLines(lines)));
+            return;
+        }
+        context.api().listPunishments(null, null, null).whenComplete((data, failure) -> {
+            List<String> lines = new ArrayList<String>();
+            lines.add("§6Staff history for §f" + staff);
+            int n = 0;
+            if (data != null) {
+                for (Payload row : data.children("punishments")) {
+                    String by = row.string("issuedByName", "");
+                    if (!staff.equalsIgnoreCase(by)) continue;
+                    lines.add(formatRow(row));
+                    n++;
+                    if (n >= 20) break;
+                }
+            }
+            if (n == 0) lines.add("§7No matching punishments.");
+            source.sendMessage(Msg.legacy(joinLines(lines)));
+        });
+    }
+
+    private void showDupeip(CommandSource source, List<String> args) {
+        if (args.isEmpty()) {
+            source.sendMessage(Msg.legacy("§cUsage: /dupeip <player>"));
+            return;
+        }
+        if (lastIps == null) {
+            source.sendMessage(Msg.legacy("§e/dupeip reads this proxy's last-address file. "
+                    + "Run it on the gatekeeper or a standalone server."));
+            return;
+        }
+        String target = args.get(0);
+        LastIpStore.PlayerIps player = lastIps.byName(target);
+        if (player == null) {
+            PlayerHandle online = context.platform().players().byName(target).orElse(null);
+            if (online != null) {
+                player = lastIps.get(online.uuid().toString());
+            }
+        }
+        if (player == null || player.lastIp == null) {
+            source.sendMessage(Msg.legacy("§eNo last address recorded for §f" + target));
+            return;
+        }
+        List<LastIpStore.PlayerIps> alts = lastIps.sharing(player.lastIp);
+        List<String> names = new ArrayList<String>();
+        for (int i = 0; i < alts.size(); i++) {
+            LastIpStore.PlayerIps alt = alts.get(i);
+            if (alt.name != null && !alt.name.isEmpty()) {
+                names.add(alt.name);
+            }
+        }
+        source.sendMessage(Msg.legacy("§6Accounts sharing §f" + target + "§6's last address §7("
+                + names.size() + ")"));
+        if (names.isEmpty()) {
+            source.sendMessage(Msg.legacy("§7None recorded."));
+        } else {
+            source.sendMessage(Msg.legacy("§7 " + joinNames(names)));
+        }
+    }
+
+    private void showIpHistory(CommandSource source, List<String> args) {
+        if (lastIps == null) {
+            source.sendMessage(Msg.legacy("§e/iphistory is local to the proxy and standalone. "
+                    + "Enforcer backends do not store addresses."));
+            return;
+        }
+        if (args.isEmpty()) {
+            source.sendMessage(Msg.legacy("§cUsage: /iphistory <player>"));
+            return;
+        }
+        LastIpStore.PlayerIps player = lastIps.byName(args.get(0));
+        if (player == null) {
+            PlayerHandle online = context.platform().players().byName(args.get(0)).orElse(null);
+            if (online != null) player = lastIps.get(online.uuid().toString());
+        }
+        if (player == null) {
+            source.sendMessage(Msg.legacy("§eNo address history for §f" + args.get(0)));
+            return;
+        }
+        List<String> lines = new ArrayList<String>();
+        lines.add("§6Address history for §f" + (player.name == null ? args.get(0) : player.name));
+        for (int i = player.history.size() - 1; i >= 0; i--) {
+            LastIpStore.Sighting sight = player.history.get(i);
+            lines.add("§7 - §f" + LastIpStore.obfuscate(sight.ip) + " §8" + Instant.ofEpochMilli(sight.seenAt));
+        }
+        source.sendMessage(Msg.legacy(joinLines(lines)));
+    }
+
+    private String lastIpOf(String uuid) {
+        if (lastIps == null) return null;
+        LastIpStore.PlayerIps row = lastIps.get(uuid);
+        return row == null ? null : row.lastIp;
+    }
+
+    private List<ActivePunishment> activeOf(String uuid, String[] types) {
+        List<ActivePunishment> out = new ArrayList<ActivePunishment>();
+        if (mirror == null || uuid == null) return out;
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < types.length; i++) {
+            ActivePunishment p = mirror.get(types[i] + ":" + uuid);
+            if (p != null && !p.expired(now)) out.add(p);
+        }
+        if (java.util.Arrays.asList(types).contains("ipban")) {
+            for (String key : mirror.keys()) {
+                if (!key.startsWith("ipban:")) continue;
+                ActivePunishment p = mirror.get(key);
+                if (p != null && uuid.equalsIgnoreCase(p.targetUuid) && !p.expired(now)
+                        && !out.contains(p)) {
+                    out.add(p);
+                }
+            }
+        }
+        return out;
+    }
+
+    private ActivePunishment latestActive(String uuid) {
+        List<ActivePunishment> all = activeOf(uuid, new String[] {"ban", "ipban", "mute", "warn"});
+        ActivePunishment best = null;
+        for (int i = 0; i < all.size(); i++) {
+            ActivePunishment p = all.get(i);
+            if (best == null || p.issuedAtMillis() >= best.issuedAtMillis()) {
+                best = p;
+            }
+        }
+        return best;
+    }
+
+    private ActivePunishment findByName(String name, String[] types) {
+        if (mirror == null || name == null) return null;
+        for (String key : mirror.keys()) {
+            ActivePunishment p = mirror.get(key);
+            if (p == null || p.targetName == null) continue;
+            if (!name.equalsIgnoreCase(p.targetName)) continue;
+            for (int i = 0; i < types.length; i++) {
+                if (types[i].equals(p.type)) return p;
+            }
+        }
+        return null;
+    }
+
+    private void enqueue(String op, String opId, long issuedAt, Payload payload) {
+        PunishmentOutbox box = this.outbox;
+        if (box == null) return;
+        String serverId = "";
+        try {
+            serverId = context.api().settings().serverId();
+        } catch (RuntimeException ignored) {
+            serverId = "";
+        }
+        box.enqueue(new PunishmentOutbox.Entry(opId, issuedAt, serverId, op, payload));
     }
 
     static String keyFor(ActivePunishment p) {
-        if ("ipban".equals(p.type) && p.ipDigest != null) return "ipban:" + p.ipDigest;
+        if ("ipban".equals(p.type) && p.ipDigest != null && !p.ipDigest.isEmpty()) {
+            return "ipban:" + p.ipDigest;
+        }
         return p.type + ":" + p.targetUuid;
     }
 
     static ActivePunishment fromPayload(Payload payload) {
         ActivePunishment p = new ActivePunishment();
         p.id = payload.string("id", "");
+        if (p.id.isEmpty()) p.id = payload.string("_id", "");
         p.type = payload.string("type", "");
         p.targetUuid = payload.string("targetUuid", null);
         p.targetName = payload.string("targetName", null);
         p.ipDigest = payload.string("ipDigest", null);
         p.reason = payload.string("reason", "");
         p.expiresAt = payload.string("expiresAt", null);
+        p.issuedAt = payload.string("issuedAt", null);
+        p.issuedByName = payload.string("issuedByName", null);
+        p.issuedByUuid = payload.string("issuedByUuid", null);
         p.silent = payload.bool("silent", false);
         if (p.type.isEmpty()) return null;
         return p;
     }
 
-    private static String render(String template, ActivePunishment p) {
+    static Component render(String template, ActivePunishment p, PunishmentSettings settings) {
         String reason = p.reason == null ? "" : p.reason;
-        return template.replace("{reason}", reason)
-                .replace("{player}", p.targetName == null ? "" : p.targetName);
+        String player = p.targetName == null ? "" : p.targetName;
+        String appeal = settings == null || settings.appealUrl == null ? "" : settings.appealUrl;
+        return Msg.miniTemplate(template,
+                "reason", reason,
+                "player", player,
+                "appeal_url", appeal);
     }
 
-    static String hmacIp(String ip, String salt) {
-        try {
-            String canonical = ip.trim().toLowerCase(Locale.ROOT);
-            if (canonical.startsWith("::ffff:")) canonical = canonical.substring(7);
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(salt.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] raw = mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8));
-            StringBuilder hex = new StringBuilder();
-            for (byte b : raw) hex.append(String.format("%02x", Integer.valueOf(b & 0xff)));
-            return hex.toString();
-        } catch (Exception e) {
-            return "";
+    private static String formatLocal(ActivePunishment p) {
+        String who = p.targetName == null ? "?" : p.targetName;
+        String by = p.issuedByName == null || p.issuedByName.isEmpty() ? "" : " §7by §f" + p.issuedByName;
+        String reason = p.reason == null || p.reason.isEmpty() ? "" : " §8" + p.reason;
+        return "§7 - §c" + p.type + " §f" + who + by + reason;
+    }
+
+    private static String formatRow(Payload row) {
+        String type = row.string("type", "?");
+        String who = row.string("targetName", "?");
+        String by = row.string("issuedByName", "");
+        String reason = row.string("reason", "");
+        boolean active = row.bool("active", false);
+        String line = "§7 - §c" + type + " §f" + who;
+        if (!by.isEmpty()) line += " §7by §f" + by;
+        if (!reason.isEmpty()) line += " §8" + reason;
+        if (!active) line += " §8(revoked)";
+        return line;
+    }
+
+    private static String joinLines(List<String> lines) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < lines.size(); i++) {
+            if (i > 0) b.append('\n');
+            b.append(lines.get(i));
         }
+        return b.toString();
+    }
+
+    private static String joinNames(List<String> names) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < names.size(); i++) {
+            if (i > 0) b.append("§7, §f");
+            b.append(names.get(i));
+        }
+        return b.toString();
+    }
+
+    private static String join(List<String> parts, int from) {
+        StringBuilder b = new StringBuilder();
+        for (int i = from; i < parts.size(); i++) {
+            if (b.length() > 0) b.append(' ');
+            b.append(parts.get(i));
+        }
+        return b.toString();
     }
 
     private static UUID parseUuid(String value) {
@@ -448,5 +1041,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
 
     public HeimdallApi api() {
         return context == null ? null : context.api();
+    }
+
+    MirrorStore<ActivePunishment> mirrorForTest() {
+        return mirror;
+    }
+
+    PunishmentOutbox outboxForTest() {
+        return outbox;
+    }
+
+    LastIpStore lastIpsForTest() {
+        return lastIps;
     }
 }

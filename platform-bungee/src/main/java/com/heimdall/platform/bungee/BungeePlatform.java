@@ -79,6 +79,11 @@ final class BungeePlatform implements PlatformFacade, AutoCloseable {
     }
 
     @Override
+    public boolean forwardsPlayerIps() {
+        return true;
+    }
+
+    @Override
     public Path dataDirectory() {
         return dataDirectory;
     }

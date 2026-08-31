@@ -15,7 +15,7 @@ final class LiteBansSupport {
     static void tryHook(final HeimdallPunishmentsModule module, final ModuleContext context) {
         try {
             Class.forName("litebans.api.Database");
-            context.logger().info("LiteBans is present; import and hook are available");
+            context.logger().info("LiteBans is present; import is available. Event hook is a later slice.");
         } catch (ClassNotFoundException absent) {
             context.logger().debug(() -> "LiteBans is not on the classpath; hook idle");
         } catch (Throwable failed) {
@@ -29,6 +29,8 @@ final class LiteBansSupport {
             context.logger().warn("LiteBans import produced no rows");
             return;
         }
+        String salt = PunishmentSettings.from(context.config()).ipSalt;
+        PunishmentImportRow.hashIps(rows, salt);
         context.logger().info("Posting " + rows.size() + " LiteBans rows to Heimdall");
         context.api().importPunishmentRows(rows).whenComplete((ok, failure) -> {
             if (failure != null) {

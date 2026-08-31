@@ -37,6 +37,19 @@ public interface PlatformFacade {
     ServerRole role();
 
     /**
+     * Whether {@code LoginAttempt#ipAddress()} is the connecting player's address.
+     *
+     * <p>Always true on a proxy and on standalone. An {@link ServerRole#ENFORCER} backend only
+     * sees the real address when proxy forwarding is on; otherwise it is the proxy's address, and
+     * an IP-ban check would apply the same digest to every player.
+     *
+     * <p>Default: everything except an enforcer. Platforms that know the forwarding switch override.
+     */
+    default boolean forwardsPlayerIps() {
+        return role() != ServerRole.ENFORCER;
+    }
+
+    /**
      * The plugin's own data directory, already created.
      *
      * <p>Everything Heimdall persists lives under it — the bootstrap config, the remote-config

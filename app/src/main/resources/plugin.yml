@@ -95,10 +95,38 @@ commands:
     description: Warn a player
     usage: /<command> <player> [reason]
     permission: heimdall.punishments.warn
+  unwarn:
+    description: Revoke a warn
+    usage: /<command> <player>
+    permission: heimdall.punishments.unban
   kick:
     description: Kick a player
     usage: /<command> <player> [reason]
     permission: heimdall.punishments.kick
+  history:
+    description: View a player's punishment history
+    usage: /<command> <player>
+    permission: heimdall.punishments.history
+  staffhistory:
+    description: View punishments issued by a staff member
+    usage: /<command> <staff>
+    permission: heimdall.punishments.history
+  banlist:
+    description: List active bans
+    usage: /<command>
+    permission: heimdall.punishments.history
+  dupeip:
+    description: Accounts sharing a last address
+    usage: /<command> <player>
+    permission: heimdall.punishments.dupeip
+  iphistory:
+    description: Local address history for a player
+    usage: /<command> <player>
+    permission: heimdall.punishments.dupeip
+  rollback:
+    description: Revoke the most recent active punishment
+    usage: /<command> <player>
+    permission: heimdall.punishments.unban
 
 permissions:
   heimdall.admin:
@@ -138,7 +166,6 @@ permissions:
     default: op
   heimdall.punishments.dupeip:
     description: Look up accounts sharing an IP
-    default: op
     default: op
   heimdall.bypass:
     # Note that this does NOT bypass the whitelist itself. Permissions are not

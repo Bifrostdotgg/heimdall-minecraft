@@ -72,10 +72,12 @@ public final class FakePlatform implements PlatformFacade {
     private volatile CompletableFuture<String> dispatchAnswer;
     private final java.util.Set<String> unknownCommands =
             Collections.synchronizedSet(new java.util.LinkedHashSet<String>());
+    private volatile boolean forwardsPlayerIps;
 
     public FakePlatform(ServerRole role, Path dataDirectory) {
         this.role = role;
         this.dataDirectory = dataDirectory;
+        this.forwardsPlayerIps = role != ServerRole.ENFORCER;
     }
 
     // ── Steering ─────────────────────────────────────────────────────────────
@@ -127,6 +129,17 @@ public final class FakePlatform implements PlatformFacade {
     /** Supplies a Bedrock identity provider, as Floodgate would. */
     public FakePlatform withFloodgate(BedrockIdentityProvider provider) {
         this.floodgate = provider == null ? BedrockIdentityProvider.NONE : provider;
+        return this;
+    }
+
+    /**
+     * Whether login attempts carry the connecting player's address rather than the proxy's.
+     *
+     * <p>Default is {@code true} except for {@link ServerRole#ENFORCER}, matching a backend whose
+     * forwarding switch has not been flipped.
+     */
+    public FakePlatform withPlayerIpForwarding(boolean enabled) {
+        this.forwardsPlayerIps = enabled;
         return this;
     }
 
@@ -279,6 +292,11 @@ public final class FakePlatform implements PlatformFacade {
     @Override
     public ServerRole role() {
         return role;
+    }
+
+    @Override
+    public boolean forwardsPlayerIps() {
+        return forwardsPlayerIps;
     }
 
     @Override

@@ -172,6 +172,27 @@ class ApiClientRequestTest {
         }
 
         @Test
+        @DisplayName("punishment import sends ipDigest and never a raw ip")
+        void importNeverSendsRawIp() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"imported\":1}}");
+            com.heimdall.core.http.model.PunishmentImportRow row =
+                    new com.heimdall.core.http.model.PunishmentImportRow();
+            row.type = "ipban";
+            row.targetUuid = UUID;
+            row.ip = "203.0.113.9";
+            row.hashIpWith("salt");
+
+            await(client.importPunishmentRows(java.util.Collections.singletonList(row)));
+
+            JsonObject first = bodyOf(server.lastRequest()).getAsJsonArray("rows").get(0).getAsJsonObject();
+            assertFalse(first.has("ip"), "raw IPs must not leave the plugin");
+            assertEquals(
+                    com.heimdall.core.punish.PunishmentIp.hash("203.0.113.9", "salt"),
+                    first.get("ipDigest").getAsString());
+            assertNull(row.ip, "the scratch IP is cleared after hashing");
+        }
+
+        @Test
         @DisplayName("a GET signs over the empty-body hash")
         void getRequestsAreSignedToo() throws Exception {
             server.respond(200, "{\"success\":true,\"data\":[]}");

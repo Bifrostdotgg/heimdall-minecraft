@@ -18,6 +18,7 @@ final class PunishmentSettings {
     final boolean silentByDefault;
     final List<String> blockedCommands;
     final String ipSalt;
+    final String appealUrl;
     final String banScreen;
     final String muteScreen;
     final String kickScreen;
@@ -30,6 +31,11 @@ final class PunishmentSettings {
         this.rootAliases = settings.bool("rootAliases", false);
         this.silentByDefault = settings.bool("silentByDefault", false);
         this.ipSalt = settings.string("ipSalt", "");
+        String appeal = settings.string("appealUrl", "");
+        if (appeal.isEmpty()) {
+            appeal = settings.string("appeal_url", "");
+        }
+        this.appealUrl = appeal;
         this.banScreen = settings.string("banScreen",
                 "<red>You are banned.</red>\n<gray>{reason}</gray>");
         this.muteScreen = settings.string("muteScreen",
