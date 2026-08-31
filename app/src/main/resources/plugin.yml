@@ -15,17 +15,14 @@ description: Discord-to-Minecraft whitelist, role sync, punishments and console 
 # methods exist. On servers that lack them, BukkitMainThread is unchanged.
 folia-supported: true
 
-# Every command a module can claim has to be declared here.
+# Commands that must exist the moment the plugin loads live here. Bukkit fixes a
+# descriptor command's existence at load time; a Disabled stub is the only unbind
+# those names get, and that stub would swallow /ban on a LiteBans hook install.
 #
-# Bukkit fixes a command's existence and its aliases at load time. The command map
-# can be reached reflectively; v2 did not do it and neither does this — the map's
-# shape has changed across the decade of servers this jar supports, the reflective
-# path is invisible to the conformance rules, and the failure is a verb that
-# silently does not exist on one server generation. So the names live here, and
-# BukkitCommandRegistrar binds a module's handler to whichever of them it asks for.
-#
-# A name declared here that no enabled module has claimed answers with its usage
-# line, which is the right behaviour for a feature that is switched off.
+# Punishments root aliases (/ban, /mute, /history, ...) are therefore NOT listed.
+# They are registered on the CommandMap at runtime only when replaceMode and
+# rootAliases are both on, and they are removed from the map when either turns
+# off, so LiteBans can keep /ban.
 #
 # `permission:` is declared on every command, and it is not decoration. Without it
 # Bukkit gives a command NAME-level visibility to everyone: an unprivileged player
@@ -63,70 +60,6 @@ commands:
     description: Record an offence against a player and apply the escalation tier
     usage: /<command> <player> <offense> [notes]
     permission: heimdall.offend
-  ban:
-    description: Ban a player
-    usage: /<command> <player> [duration] [reason]
-    permission: heimdall.punishments.ban
-  tempban:
-    description: Temporarily ban a player
-    usage: /<command> <player> <duration> [reason]
-    permission: heimdall.punishments.ban
-  ipban:
-    description: IP-ban a player
-    usage: /<command> <player> [duration] [reason]
-    permission: heimdall.punishments.ipban
-  unban:
-    description: Revoke a ban
-    usage: /<command> <player>
-    permission: heimdall.punishments.unban
-  mute:
-    description: Mute a player
-    usage: /<command> <player> [duration] [reason]
-    permission: heimdall.punishments.mute
-  tempmute:
-    description: Temporarily mute a player
-    usage: /<command> <player> <duration> [reason]
-    permission: heimdall.punishments.mute
-  unmute:
-    description: Revoke a mute
-    usage: /<command> <player>
-    permission: heimdall.punishments.unban
-  warn:
-    description: Warn a player
-    usage: /<command> <player> [reason]
-    permission: heimdall.punishments.warn
-  unwarn:
-    description: Revoke a warn
-    usage: /<command> <player>
-    permission: heimdall.punishments.unban
-  kick:
-    description: Kick a player
-    usage: /<command> <player> [reason]
-    permission: heimdall.punishments.kick
-  history:
-    description: View a player's punishment history
-    usage: /<command> <player>
-    permission: heimdall.punishments.history
-  staffhistory:
-    description: View punishments issued by a staff member
-    usage: /<command> <staff>
-    permission: heimdall.punishments.history
-  banlist:
-    description: List active bans
-    usage: /<command>
-    permission: heimdall.punishments.history
-  dupeip:
-    description: Accounts sharing a last address
-    usage: /<command> <player>
-    permission: heimdall.punishments.dupeip
-  iphistory:
-    description: Local address history for a player
-    usage: /<command> <player>
-    permission: heimdall.punishments.dupeip
-  rollback:
-    description: Revoke the most recent active punishment
-    usage: /<command> <player>
-    permission: heimdall.punishments.unban
 
 permissions:
   heimdall.admin:

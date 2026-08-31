@@ -31,6 +31,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -52,6 +53,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     private volatile LastIpStore lastIps;
     private volatile long lastFullSyncAt;
     private final AtomicBoolean flushing = new AtomicBoolean();
+    private final AtomicBoolean flushAgain = new AtomicBoolean();
     private final List<Registration> aliasBinds = new CopyOnWriteArrayList<Registration>();
 
     static volatile HeimdallPunishmentsModule INSTANCE;
@@ -578,6 +580,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     private void flushSoon() {
         ModuleContext ctx = this.context;
         if (ctx == null) return;
+        flushAgain.set(true);
         ctx.executors().io().execute(new Runnable() {
             @Override
             public void run() {
@@ -586,14 +589,25 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         });
     }
 
+    /**
+     * Uploads queued writes. A second call while one is in flight is remembered and run after,
+     * rather than dropped.
+     */
     void flushQueue() {
         if (!flushing.compareAndSet(false, true)) {
+            flushAgain.set(true);
             return;
         }
         try {
-            flushQueueLocked();
+            do {
+                flushAgain.set(false);
+                flushQueueLocked();
+            } while (flushAgain.get());
         } finally {
             flushing.set(false);
+        }
+        if (flushAgain.get()) {
+            flushQueue();
         }
     }
 
@@ -613,8 +627,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                     box.remove(entry.opId);
                     uploaded = true;
                 } else if ("revoke".equals(entry.op)) {
-                    ctx.api().revokePunishment(entry.payload)
+                    Payload result = ctx.api().revokePunishment(entry.payload)
                             .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
+                    if (result != null && result.intValue("revoked", 1) == 0) {
+                        box.remove(entry.opId);
+                        continue;
+                    }
                     box.remove(entry.opId);
                     uploaded = true;
                 } else {
@@ -624,10 +642,15 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                 Throwable cause = e instanceof ExecutionException && e.getCause() != null
                         ? e.getCause()
                         : e;
-                if (cause instanceof ApiError && !((ApiError) cause).isRetryable()) {
+                if (isGone(cause)) {
                     ctx.logger().warn("punishment outbox dropped " + entry.op + " " + entry.opId
-                            + ": " + cause.getMessage());
+                            + " (already gone): " + cause.getMessage());
                     box.remove(entry.opId);
+                    continue;
+                }
+                if (cause instanceof ApiError) {
+                    ctx.logger().debug(() -> "punishment outbox holding " + entry.opId
+                            + ": " + cause.getMessage());
                     continue;
                 }
                 ctx.logger().debug(() -> "punishment outbox upload deferred: " + cause.getMessage());
@@ -637,6 +660,27 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         if (uploaded) {
             sync(true);
         }
+    }
+
+    /**
+     * Drop only when the bot says that selector is already gone. HMAC 401, 400, 403 and 5xx hold
+     * the row so a later successful flush can still send it, and so a following ETag GET cannot
+     * resurrect a local unban.
+     */
+    static boolean isGone(Throwable cause) {
+        if (!(cause instanceof ApiError)) {
+            return false;
+        }
+        ApiError error = (ApiError) cause;
+        if (error.httpStatus() != 404) {
+            return false;
+        }
+        String code = error.code() == null ? "" : error.code().toUpperCase(Locale.ROOT);
+        String message = error.getMessage() == null ? "" : error.getMessage().toLowerCase(Locale.ROOT);
+        return code.contains("NOT_FOUND")
+                || message.contains("not found")
+                || message.contains("no active")
+                || message.contains("gone");
     }
 
     private void rememberIssuedId(Payload request, Payload result) {

@@ -54,6 +54,12 @@ final class ScriptedPunishApi implements AutoCloseable {
         return "http://127.0.0.1:" + server.getAddress().getPort();
     }
 
+    ScriptedPunishApi issueResponds(int status, String body) {
+        this.issueStatus = status;
+        this.issueBody = body;
+        return this;
+    }
+
     ScriptedPunishApi revokeResponds(int status, String body) {
         this.revokeStatus = status;
         this.revokeBody = body;
@@ -74,6 +80,14 @@ final class ScriptedPunishApi implements AutoCloseable {
         int n = 0;
         for (int i = 0; i < hits.size(); i++) {
             if (hits.get(i).path.endsWith(suffix)) n++;
+        }
+        return n;
+    }
+
+    int countRevokes() {
+        int n = 0;
+        for (int i = 0; i < hits.size(); i++) {
+            if (hits.get(i).path.contains("/revoke")) n++;
         }
         return n;
     }

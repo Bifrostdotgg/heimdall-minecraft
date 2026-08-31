@@ -58,52 +58,68 @@ final class BukkitCommandRegistrar implements CommandRegistrar {
         if (spec == null) {
             throw new IllegalArgumentException("spec is required");
         }
-        final PluginCommand command = plugin.getServer().getPluginCommand(spec.name());
-        if (command == null || command.getPlugin() != plugin) {
-            logger.warn("plugin.yml declares no '" + spec.name() + "' command, so it will answer "
-                    + "\"Unknown command\" however the module is configured. Add it to the "
-                    + "descriptor.");
-            return Registration.NONE;
+        PluginCommand declared = plugin.getServer().getPluginCommand(spec.name());
+        if (declared != null && declared.getPlugin() == plugin) {
+            return bindDescriptor(spec, declared);
         }
-        warnAboutUndeclaredAliases(spec, command);
+        return bindDynamic(spec);
+    }
 
+    /**
+     * A name that lives in plugin.yml. Unbind is a Disabled stub, because Bukkit will not take the
+     * PluginCommand out of the map. Do not put optional aliases such as /ban in the descriptor:
+     * that stub would swallow the label when LiteBans should own it.
+     */
+    private Registration bindDescriptor(final CommandSpec spec, final PluginCommand command) {
+        warnAboutUndeclaredAliases(spec, command);
         final Bridge bridge = new Bridge(spec);
         command.setExecutor(bridge);
         command.setTabCompleter(bridge);
-
-        // Read back, rather than assumed. setExecutor has no return value and no failure mode of its
-        // own, but the binding is a mutable field on an object the whole server can reach: another
-        // plugin doing the same thing to the same PluginCommand — a command-manager plugin, or one
-        // that "fixes" conflicts by re-pointing them — silently wins, and every symptom afterwards
-        // is Heimdall's command doing somebody else's thing with no line anywhere to explain it.
         if (command.getExecutor() != bridge) {
             logger.warn("something else claimed /" + spec.name() + " immediately after Heimdall "
                     + "registered it (now " + describe(command.getExecutor()) + ") — that command "
                     + "will not reach Heimdall. A command-manager plugin is the usual cause.");
         }
-
         return Registration.once(new Runnable() {
             @Override
             public void run() {
-                // Only if it is still ours. Unbinding a command another plugin has since taken over
-                // would break THEIR command as a side effect of disabling one of our modules, which
-                // is a far worse failure than leaving a verb bound to a module that is off — and
-                // that case is handled: the bridge answers "this feature is disabled".
                 if (command.getExecutor() == bridge) {
-                    // Swapped for a stub rather than cleared. setExecutor(null) makes Bukkit fall
-                    // back to the plugin's own onCommand, which returns false, which prints the
-                    // descriptor's usage line — so a player who runs /offend while the module is off
-                    // is told the argument syntax for a command that will not do anything. Telling
-                    // them the feature is disabled is the answer to the question they asked.
-                    //
-                    // The completer is replaced rather than cleared for the same reason it returns
-                    // empty on a permission failure: a null completer falls through to Bukkit's own
-                    // online-player completion, so a disabled command would still be quietly
-                    // listing who is on the server.
                     Disabled disabled = new Disabled(spec.name());
                     command.setExecutor(disabled);
                     command.setTabCompleter(disabled);
                 }
+            }
+        });
+    }
+
+    /**
+     * A name that is not in plugin.yml: constructed and put on the command map, then taken off
+     * again so another plugin can reclaim it.
+     */
+    private Registration bindDynamic(final CommandSpec spec) {
+        final PluginCommand command = BukkitCommandMap.create(plugin, spec.name(), logger);
+        if (command == null) {
+            logger.warn("cannot register /" + spec.name() + " at runtime on this server");
+            return Registration.NONE;
+        }
+        command.setDescription(spec.description() == null ? "" : spec.description());
+        command.setUsage(spec.usage() == null ? "/" + spec.name() : spec.usage());
+        command.setPermission(spec.permission());
+        command.setAliases(spec.aliases());
+        final Bridge bridge = new Bridge(spec);
+        command.setExecutor(bridge);
+        command.setTabCompleter(bridge);
+        final BukkitCommandMap.RegistrationHandle handle =
+                BukkitCommandMap.bind(plugin, command, spec.aliases(), logger);
+        if (handle == null) {
+            logger.warn("command map refused /" + spec.name()
+                    + " — the verb will not exist until the server exposes SimpleCommandMap");
+            return Registration.NONE;
+        }
+        return Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                handle.unbind();
             }
         });
     }

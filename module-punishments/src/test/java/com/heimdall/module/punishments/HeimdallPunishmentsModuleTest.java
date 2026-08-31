@@ -321,6 +321,71 @@ class HeimdallPunishmentsModuleTest {
     }
 
     @Test
+    @DisplayName("plugin.yml does not claim a ban: command key")
+    void pluginYmlDoesNotClaimBan() throws Exception {
+        java.nio.file.Path yml = pluginYml();
+        String text = new String(java.nio.file.Files.readAllBytes(yml), java.nio.charset.StandardCharsets.UTF_8);
+        assertFalse(java.util.regex.Pattern.compile("(?m)^  ban:\\s*$").matcher(text).find(),
+                "a plugin.yml ban: command would swallow /ban on Paper even when unbound");
+        assertFalse(java.util.regex.Pattern.compile("(?m)^  mute:\\s*$").matcher(text).find());
+        assertFalse(java.util.regex.Pattern.compile("(?m)^  history:\\s*$").matcher(text).find());
+    }
+
+    private static java.nio.file.Path pluginYml() {
+        java.nio.file.Path[] candidates = {
+                java.nio.file.Paths.get("app", "src", "main", "resources", "plugin.yml"),
+                java.nio.file.Paths.get("..", "app", "src", "main", "resources", "plugin.yml"),
+        };
+        for (int i = 0; i < candidates.length; i++) {
+            if (java.nio.file.Files.isRegularFile(candidates[i])) {
+                return candidates[i];
+            }
+        }
+        throw new AssertionError("plugin.yml not found from " + java.nio.file.Paths.get(".").toAbsolutePath());
+    }
+
+    @Test
+    @DisplayName("a 401 flush holds the outbox so a later flush can still send the revoke")
+    void hmac401DoesNotEmptyOutbox() throws Exception {
+        try (ScriptedPunishApi bot = new ScriptedPunishApi()) {
+            bot.revokeResponds(401, "{\"error\":\"Unauthorized\"}");
+            PunishmentsHarness harness = PunishmentsHarness.withApi(
+                    dataDir.resolve("401"), ServerRole.STANDALONE, bot.baseUrl()).enableReplace();
+            try {
+            waitFor(() -> harness.module.mirrorForTest().lastEtag() != null, 5_000);
+
+            harness.platform.join(new FakePlayer(STEVE, "Steve"));
+            ActivePunishment ban = new ActivePunishment();
+            ban.id = "ban-1";
+            ban.type = "ban";
+            ban.targetUuid = STEVE.toString();
+            ban.targetName = "Steve";
+            harness.module.mirrorForTest().record("ban:" + STEVE, ban);
+            harness.module.onStaffCommand(FakeCommandSource.console(), "unban", Arrays.asList("Steve"));
+            harness.module.flushQueue();
+            assertFalse(harness.module.outboxForTest().isEmpty(), "401 must not wipe the queue");
+
+            java.util.Map<String, ActivePunishment> snap =
+                    new LinkedHashMap<String, ActivePunishment>();
+            snap.put("ban:" + STEVE, ban);
+            harness.module.mirrorForTest().reconcile(snap);
+            harness.module.replayPendingWrites();
+            assertNull(harness.module.mirrorForTest().get("ban:" + STEVE),
+                    "queued revoke still wins over ETag GET");
+
+            int held = bot.countRevokes();
+            bot.revokeResponds(200, "{\"success\":true,\"data\":{\"revoked\":1}}");
+            harness.module.flushQueue();
+            waitFor(() -> harness.module.outboxForTest().isEmpty(), 5_000);
+            assertTrue(bot.countRevokes() > held,
+                    "later successful flush must still send the held revoke");
+            } finally {
+                harness.close();
+            }
+        }
+    }
+
+    @Test
     @DisplayName("a 404 revoke is dropped so the rest of the outbox can flush")
     void flushQueueContinuesAfterRevoke404() throws Exception {
         try (ScriptedPunishApi bot = new ScriptedPunishApi();

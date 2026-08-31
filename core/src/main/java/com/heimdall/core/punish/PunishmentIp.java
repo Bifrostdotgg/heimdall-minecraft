@@ -38,10 +38,15 @@ public final class PunishmentIp {
      * Lower-case hex HMAC-SHA256 of {@link #canonical(String)} with {@code salt} as the key.
      *
      * @return {@code ""} when {@code ip} is blank or hashing is unavailable
+     * @throws IllegalArgumentException when {@code salt} is null or empty. HMAC with {@code ""}
+     *     is well-defined and would look like a real digest while matching nothing live.
      */
     public static String hash(String ip, String salt) {
+        if (salt == null || salt.isEmpty()) {
+            throw new IllegalArgumentException("ip salt is required");
+        }
         String canonical = canonical(ip);
-        if (canonical.isEmpty() || salt == null) {
+        if (canonical.isEmpty()) {
             return "";
         }
         try {

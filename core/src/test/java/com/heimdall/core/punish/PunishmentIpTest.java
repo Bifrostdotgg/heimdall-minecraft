@@ -2,6 +2,7 @@ package com.heimdall.core.punish;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -40,5 +41,12 @@ class PunishmentIpTest {
         assertEquals("", PunishmentIp.hash("", "salt"));
         assertEquals("", PunishmentIp.hash(null, "salt"));
         assertTrue(PunishmentIp.canonical(null).isEmpty());
+    }
+
+    @Test
+    void emptySaltThrows() {
+        assertThrows(IllegalArgumentException.class, () -> PunishmentIp.hash("1.2.3.4", ""));
+        assertThrows(IllegalArgumentException.class, () -> PunishmentIp.hash("1.2.3.4", null));
+        assertThrows(IllegalArgumentException.class, () -> PunishmentIp.hash("", ""));
     }
 }

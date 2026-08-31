@@ -14,10 +14,10 @@ import com.heimdall.core.util.Registration;
  * close. A module registers through its {@code ModuleContext} and the registration is unwound when
  * it is disabled, whether or not the module remembered.
  *
- * <p>Implementations are safe to call from any thread and must tolerate a name the platform will not
- * give them: on the Bukkit family a command that {@code plugin.yml} never declared cannot be
- * created at runtime, and the honest answer is a warning and {@link Registration#NONE} rather than
- * an exception that fails a module's enable.
+ * <p>Implementations are safe to call from any thread. On the Bukkit family, names declared in
+ * {@code plugin.yml} bind to that descriptor; names that are not (punishments root aliases) are
+ * put on the command map at runtime and taken off again. If the map cannot be reached, the
+ * registrar logs a warning and returns {@link Registration#NONE} rather than failing the module.
  */
 public interface CommandRegistrar {
 
