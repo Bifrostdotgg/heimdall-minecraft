@@ -110,6 +110,40 @@ final class LastIpStore {
         return out;
     }
 
+    /**
+     * The other accounts that share this player's last address, the target itself removed.
+     *
+     * <p>The matching is deliberately {@link #sharing}'s and nothing else: this is what backs both
+     * the in-game {@code /dupeip} and the bot's {@code dupeip.query}, and two answers to the same
+     * question that disagree is worse than one answer that is narrow. Narrow it is - a row only
+     * matches on the address a player was last seen on, so an alt that has since moved to another
+     * connection is not found. Widening it to the whole history is a change to make in one place,
+     * for both callers at once.
+     *
+     * <p>Keyed by uuid, so the result is already deduplicated.
+     *
+     * @return rows to read {@code uuid}, {@code name} and {@code seenAt} from. Never the address:
+     *     no caller outside this file is allowed to put one on a wire.
+     */
+    synchronized List<PlayerIps> altsOf(String uuid) {
+        PlayerIps target = get(uuid);
+        if (target == null || target.lastIp == null || target.lastIp.isEmpty()) {
+            return Collections.emptyList();
+        }
+        String self = target.uuid == null ? "" : target.uuid.toLowerCase(Locale.ROOT);
+        List<PlayerIps> out = new ArrayList<PlayerIps>();
+        List<PlayerIps> candidates = sharing(target.lastIp);
+        for (int i = 0; i < candidates.size(); i++) {
+            PlayerIps candidate = candidates.get(i);
+            String key = candidate.uuid == null ? "" : candidate.uuid.toLowerCase(Locale.ROOT);
+            if (key.equals(self)) {
+                continue;
+            }
+            out.add(candidate);
+        }
+        return out;
+    }
+
     synchronized void flush() {
         if (!dirty) {
             return;

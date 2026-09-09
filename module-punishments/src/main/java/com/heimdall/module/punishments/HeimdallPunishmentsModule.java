@@ -25,6 +25,7 @@ import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.text.Msg;
 import com.heimdall.core.tunnel.Capabilities;
+import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
 import java.time.Instant;
@@ -46,6 +47,12 @@ import net.kyori.adventure.text.Component;
 public final class HeimdallPunishmentsModule implements HeimdallModule {
 
     public static final String ID = "punishments";
+
+    /** The bot asking which other accounts have shared an address with a player. */
+    static final String DUPEIP_QUERY = "dupeip.query";
+
+    /** The reply to {@link #DUPEIP_QUERY}, correlated against the request's envelope id. */
+    static final String DUPEIP_RESULT = "dupeip_result";
 
     private volatile ModuleContext context;
     private volatile MirrorStore<ActivePunishment> mirror;
@@ -115,6 +122,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         context.tunnel().subscribe("punish.apply", applyHandler());
         context.tunnel().subscribe("punish.revoke", revokeHandler());
         context.tunnel().subscribe("punish.import", importHandler());
+        context.tunnel().subscribe(DUPEIP_QUERY, dupeipHandler(context.tunnel()));
         context.onConfigChanged(new ModuleConfigListener() {
             @Override
             public void onModuleConfigChanged(String moduleId, ModuleConfig previous, ModuleConfig current) {
@@ -573,6 +581,61 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                 ModuleContext ctx = HeimdallPunishmentsModule.this.context;
                 if (ctx == null) return;
                 LiteBansSupport.importNow(ctx);
+            }
+        };
+    }
+
+    /**
+     * Answers the dashboard's alt list: {@code dupeip.query {uuid}} in, {@code dupeip_result
+     * {uuid, alts}} back on the same envelope id.
+     *
+     * <p>The same question {@code /dupeip} answers in chat, over the tunnel, and deliberately from
+     * the same {@link LastIpStore#altsOf} so the two cannot drift into disagreeing about who an alt
+     * is.
+     *
+     * <h2>Nothing about an address leaves this method</h2>
+     *
+     * <p>A row is a uuid, a name and a timestamp. Not the address, not a prefix of it, not the
+     * salted digest, not a CIDR - the whole point of the last-address file living on this box is
+     * that raw addresses stay on it, and a convenience field on a reply would quietly move them to
+     * a database in another country. {@code name} is omitted rather than sent empty when the store
+     * has never seen one, so the bot can tell "no name recorded" from a player literally called "".
+     *
+     * <h2>An enforcer answers too</h2>
+     *
+     * <p>Only a gatekeeper or a standalone server opens a {@link LastIpStore}, so an enforcer has
+     * nothing to say here. It still replies, with an empty list: the bot is holding a correlated
+     * future either way, and a silent backend costs it the full request timeout to learn what an
+     * empty {@code alts} says immediately. Same rule as {@code RemoteRequestWiring}'s - every path
+     * ends in a reply.
+     *
+     * @param tunnel captured at subscribe time rather than read from the volatile context field,
+     *     so a disable racing an in-flight request cannot turn the reply into a
+     *     {@code NullPointerException} and a dangling bot future
+     */
+    private TunnelMessageHandler dupeipHandler(final TunnelBus tunnel) {
+        return new TunnelMessageHandler() {
+            @Override
+            public void onMessage(Envelope envelope) {
+                String uuid = envelope.payload().string("uuid", "").trim();
+                List<Payload> alts = new ArrayList<Payload>();
+                LastIpStore ips = lastIps;
+                if (ips != null && !uuid.isEmpty()) {
+                    List<LastIpStore.PlayerIps> sharing = ips.altsOf(uuid);
+                    for (int i = 0; i < sharing.size(); i++) {
+                        LastIpStore.PlayerIps alt = sharing.get(i);
+                        Payload.Builder row = Payload.builder()
+                                .put("uuid", alt.uuid == null ? "" : alt.uuid);
+                        if (alt.name != null && !alt.name.isEmpty()) {
+                            row.put("name", alt.name);
+                        }
+                        alts.add(row.put("lastSeenAt", alt.seenAt).build());
+                    }
+                }
+                tunnel.reply(envelope.id(), DUPEIP_RESULT, Payload.builder()
+                        .put("uuid", uuid)
+                        .putChildren("alts", alts)
+                        .build());
             }
         };
     }
