@@ -54,6 +54,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     /** The reply to {@link #DUPEIP_QUERY}, correlated against the request's envelope id. */
     static final String DUPEIP_RESULT = "dupeip_result";
 
+    /**
+     * The most alts either caller will show, and the point past which {@code truncated} is set.
+     *
+     * <p>Fifty is a display bound, not a safety one - the safety is that a bound exists at all. See
+     * {@link LastIpStore#altsOf} for why an unbounded answer here can be a guild's entire player
+     * history: nothing prunes the last-address file, and on a gatekeeper whose backends do not
+     * forward addresses every row shares one. Nobody reads the fiftieth name on a chat line or a
+     * dashboard card, so the cut costs nothing a real operator wanted.
+     */
+    static final int DUPEIP_ALT_LIMIT = 50;
+
     private volatile ModuleContext context;
     private volatile MirrorStore<ActivePunishment> mirror;
     private volatile PunishmentOutbox outbox;
@@ -122,7 +133,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         context.tunnel().subscribe("punish.apply", applyHandler());
         context.tunnel().subscribe("punish.revoke", revokeHandler());
         context.tunnel().subscribe("punish.import", importHandler());
-        context.tunnel().subscribe(DUPEIP_QUERY, dupeipHandler(context.tunnel()));
+        context.tunnel().subscribe(DUPEIP_QUERY, dupeipHandler(context.tunnel(), context.logger()));
         context.onConfigChanged(new ModuleConfigListener() {
             @Override
             public void onModuleConfigChanged(String moduleId, ModuleConfig previous, ModuleConfig current) {
@@ -593,49 +604,86 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
      * the same {@link LastIpStore#altsOf} so the two cannot drift into disagreeing about who an alt
      * is.
      *
-     * <h2>Nothing about an address leaves this method</h2>
+     * <h2>The wire shape</h2>
      *
-     * <p>A row is a uuid, a name and a timestamp. Not the address, not a prefix of it, not the
-     * salted digest, not a CIDR - the whole point of the last-address file living on this box is
-     * that raw addresses stay on it, and a convenience field on a reply would quietly move them to
-     * a database in another country. {@code name} is omitted rather than sent empty when the store
-     * has never seen one, so the bot can tell "no name recorded" from a player literally called "".
+     * <pre>{@code
+     * {
+     *   "uuid": "<the uuid asked about, echoed>",
+     *   "supported": true,
+     *   "alts": [ { "uuid": "...", "name": "Alex", "lastSeenAt": 1757000000000 } ],
+     *   "truncated": false
+     * }
+     * }</pre>
      *
-     * <h2>An enforcer answers too</h2>
+     * <p>{@code name} is the last name <strong>this server</strong> saw, and nothing refreshes it:
+     * a player who has since changed their Mojang name is listed under the old one until they next
+     * log in. It is a label for whoever is reading. {@code uuid} is the identity, and is what the
+     * bot should join on. The key is omitted entirely rather than sent empty when the store has
+     * never seen a name, so "no name recorded" is distinguishable from a player called "".
      *
-     * <p>Only a gatekeeper or a standalone server opens a {@link LastIpStore}, so an enforcer has
-     * nothing to say here. It still replies, with an empty list: the bot is holding a correlated
-     * future either way, and a silent backend costs it the full request timeout to learn what an
-     * empty {@code alts} says immediately. Same rule as {@code RemoteRequestWiring}'s - every path
-     * ends in a reply.
+     * <p>{@code lastSeenAt} is epoch milliseconds, taken from the last login this server recorded.
      *
-     * @param tunnel captured at subscribe time rather than read from the volatile context field,
-     *     so a disable racing an in-flight request cannot turn the reply into a
+     * <p>{@code truncated} says the answer was cut at {@link #DUPEIP_ALT_LIMIT}, so the bot can say
+     * "50+" rather than imply it has the whole list. Rows come newest first, which is the order
+     * that makes a cut list the useful half rather than an arbitrary one.
+     *
+     * <h2>supported, and why it is not just an empty list</h2>
+     *
+     * <p>Only a gatekeeper or a standalone server opens a {@link LastIpStore}; an enforcer never
+     * does, and neither does a server part-way through disabling the module. Such a server has
+     * nothing to say, but "I have no alt data" and "this player has no alts" are opposite facts and
+     * an empty {@code alts} alone cannot tell them apart. A dashboard that conflated them would
+     * show "no shared addresses" for a player nobody has ever checked, which is worse than showing
+     * nothing: it is a reassurance the server never gave.
+     *
+     * <p>It replies either way. The bot holds a correlated future regardless, and a silent backend
+     * costs it the full request timeout to learn what {@code supported: false} says at once. Same
+     * rule as {@code RemoteRequestWiring}'s: every path ends in a reply.
+     *
+     * <p>Package-private so a test can hold a handler across a disable and prove the two captured
+     * references below are what make that safe.
+     *
+     * @param tunnel captured at subscribe time rather than read from the volatile context field, so
+     *     a disable racing an in-flight request cannot turn the reply into a
      *     {@code NullPointerException} and a dangling bot future
+     * @param logger captured for the same reason
      */
-    private TunnelMessageHandler dupeipHandler(final TunnelBus tunnel) {
+    TunnelMessageHandler dupeipHandler(final TunnelBus tunnel, final HeimdallLogger logger) {
         return new TunnelMessageHandler() {
             @Override
-            public void onMessage(Envelope envelope) {
+            public void onMessage(final Envelope envelope) {
                 String uuid = envelope.payload().string("uuid", "").trim();
-                List<Payload> alts = new ArrayList<Payload>();
                 LastIpStore ips = lastIps;
-                if (ips != null && !uuid.isEmpty()) {
-                    List<LastIpStore.PlayerIps> sharing = ips.altsOf(uuid);
-                    for (int i = 0; i < sharing.size(); i++) {
-                        LastIpStore.PlayerIps alt = sharing.get(i);
+                LastIpStore.Alts found = ips == null || uuid.isEmpty()
+                        ? null
+                        : ips.altsOf(uuid, DUPEIP_ALT_LIMIT);
+                List<Payload> alts = new ArrayList<Payload>();
+                if (found != null) {
+                    for (int i = 0; i < found.rows.size(); i++) {
+                        LastIpStore.Alt alt = found.rows.get(i);
                         Payload.Builder row = Payload.builder()
                                 .put("uuid", alt.uuid == null ? "" : alt.uuid);
-                        if (alt.name != null && !alt.name.isEmpty()) {
+                        if (alt.name != null) {
                             row.put("name", alt.name);
                         }
                         alts.add(row.put("lastSeenAt", alt.seenAt).build());
                     }
                 }
-                tunnel.reply(envelope.id(), DUPEIP_RESULT, Payload.builder()
+                Payload answer = Payload.builder()
                         .put("uuid", uuid)
+                        .put("supported", ips != null)
                         .putChildren("alts", alts)
-                        .build());
+                        .put("truncated", found != null && found.truncated)
+                        .build();
+                try {
+                    tunnel.reply(envelope.id(), DUPEIP_RESULT, answer);
+                } catch (RuntimeException failed) {
+                    // The tunnel can drop between a frame arriving and its answer going out.
+                    // Nothing can be done about that, and the bot times out, which is the honest
+                    // outcome of a dead link. It must not escape the handler as an exception.
+                    logger.debug(() -> "could not reply '" + DUPEIP_RESULT + "' to request "
+                            + envelope.id() + ": " + failed);
+                }
             }
         };
     }
@@ -1005,38 +1053,38 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             source.sendMessage(Msg.legacy("§cUsage: /dupeip <player>"));
             return;
         }
-        if (lastIps == null) {
+        LastIpStore ips = lastIps;
+        if (ips == null) {
             source.sendMessage(Msg.legacy("§e/dupeip reads this proxy's last-address file. "
                     + "Run it on the gatekeeper or a standalone server."));
             return;
         }
         String target = args.get(0);
-        LastIpStore.PlayerIps player = lastIps.byName(target);
-        if (player == null) {
+        String uuid = ips.uuidByName(target);
+        if (uuid == null) {
             PlayerHandle online = context.platform().players().byName(target).orElse(null);
             if (online != null) {
-                player = lastIps.get(online.uuid().toString());
+                uuid = online.uuid().toString();
             }
         }
-        if (player == null || player.lastIp == null) {
+        // altsOf and nothing else: an account is not its own alt, and the rows come back as copies
+        // taken under the store's monitor, so a login landing mid-scan cannot be read half-written.
+        // The old code held a live PlayerIps across three field reads and counted the target among
+        // its own alts, so /dupeip Steve answered "Steve, Alex" while the tunnel said one.
+        LastIpStore.Alts found = uuid == null ? null : ips.altsOf(uuid, DUPEIP_ALT_LIMIT);
+        if (found == null || !found.addressKnown) {
             source.sendMessage(Msg.legacy("§eNo last address recorded for §f" + target));
             return;
         }
-        // altsOf, not sharing: an account is not its own alt. sharing() returns every row on the
-        // address including the target's own, so /dupeip Steve used to answer "Steve" and inflate
-        // the count by one. The tunnel's dupeip_result has never included the target, and two
-        // answers to the same question that disagree is a bug report nobody can reproduce because
-        // both are correct somewhere. Matching is unchanged: still the last address only.
-        List<LastIpStore.PlayerIps> alts = lastIps.altsOf(player.uuid);
         List<String> names = new ArrayList<String>();
-        for (int i = 0; i < alts.size(); i++) {
-            LastIpStore.PlayerIps alt = alts.get(i);
-            if (alt.name != null && !alt.name.isEmpty()) {
+        for (int i = 0; i < found.rows.size(); i++) {
+            LastIpStore.Alt alt = found.rows.get(i);
+            if (alt.name != null) {
                 names.add(alt.name);
             }
         }
         source.sendMessage(Msg.legacy("§6Accounts sharing §f" + target + "§6's last address §7("
-                + names.size() + ")"));
+                + names.size() + (found.truncated ? "+" : "") + ")"));
         if (names.isEmpty()) {
             source.sendMessage(Msg.legacy("§7None recorded."));
         } else {

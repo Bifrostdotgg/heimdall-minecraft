@@ -112,6 +112,25 @@ final class PunishmentsHarness implements AutoCloseable {
         return this;
     }
 
+    /**
+     * Turns the module off the way the bot does, with a {@code config.push} that says so.
+     *
+     * <p>Not {@code manager.shutdown()}: a runtime toggle is the case where a subscription can be
+     * left behind, and it is the one the tracked-registration design exists for.
+     */
+    PunishmentsHarness disableModule() {
+        remoteConfig.onConfigPush(Payload.builder()
+                .put("version", ++configVersion)
+                .put("modules", Payload.builder()
+                        .put(HeimdallPunishmentsModule.ID, Payload.builder()
+                                .put("enabled", false)
+                                .build())
+                        .build())
+                .build());
+        manager.reconcileFromConfig();
+        return this;
+    }
+
     Verdict login(UUID uuid, String name, String ip) {
         return loginPipeline.dispatch(LoginAttempt.builder(uuid)
                 .username(name)

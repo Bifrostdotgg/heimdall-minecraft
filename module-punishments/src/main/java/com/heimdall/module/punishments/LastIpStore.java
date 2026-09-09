@@ -40,6 +40,67 @@ final class LastIpStore {
         final List<Sighting> history = new ArrayList<Sighting>();
     }
 
+    /**
+     * One alt, copied out from under the store's monitor. Immutable, and carrying nothing about an
+     * address.
+     *
+     * <p>{@link PlayerIps} is mutated in place by {@link #record} on whichever thread a login
+     * arrives on, so handing a live row to a caller that reads it later is handing them a race:
+     * {@code name} can change under them, and {@code seenAt} is a non-volatile {@code long}, which
+     * the JLS permits a 32-bit JVM to tear across two writes. A copy taken while the lock is held
+     * cannot be observed half-written.
+     */
+    static final class Alt {
+
+        final String uuid;
+
+        /**
+         * The last name <strong>this server</strong> saw, or {@code null} when it has never seen
+         * one.
+         *
+         * <p>Nothing refreshes it: a player who has since changed their Mojang name is still
+         * recorded here under the old one, and will be until they next log in. It is a label for a
+         * human reading a list, and {@link #uuid} is the identity.
+         */
+        final String name;
+
+        final long seenAt;
+
+        Alt(String uuid, String name, long seenAt) {
+            this.uuid = uuid;
+            this.name = name == null || name.isEmpty() ? null : name;
+            this.seenAt = seenAt;
+        }
+    }
+
+    /** What {@link #altsOf} found: the rows, whether they were cut short, and whether it looked. */
+    static final class Alts {
+
+        /** The target is unknown to this store, or has no address recorded against it. */
+        static final Alts UNKNOWN = new Alts(Collections.<Alt>emptyList(), false, false);
+
+        /** At most {@code limit} rows, newest sighting first. Unmodifiable. */
+        final List<Alt> rows;
+
+        /** Whether more accounts matched than {@code limit} allowed through. */
+        final boolean truncated;
+
+        /**
+         * Whether the target had a last address to compare at all.
+         *
+         * <p>Separate from an empty {@link #rows} because the two mean opposite things to whoever
+         * is reading: "nobody else has been on that address" is an answer, and "this server has
+         * never seen that player" is not.
+         */
+        final boolean addressKnown;
+
+        Alts(List<Alt> rows, boolean truncated, boolean addressKnown) {
+            this.rows = rows;
+            this.truncated = truncated;
+            this.addressKnown = addressKnown;
+        }
+    }
+
     private final HeimdallLogger logger;
     private final Path path;
     private final Map<String, PlayerIps> byUuid = new LinkedHashMap<String, PlayerIps>();
@@ -97,51 +158,78 @@ final class LastIpStore {
         return null;
     }
 
-    synchronized List<PlayerIps> sharing(String ip) {
-        if (ip == null || ip.isEmpty()) {
-            return Collections.emptyList();
-        }
-        List<PlayerIps> out = new ArrayList<PlayerIps>();
-        for (PlayerIps row : byUuid.values()) {
-            if (ip.equals(row.lastIp)) {
-                out.add(row);
-            }
-        }
-        return out;
+    /** The stored uuid for a name, or {@code null}. A String is immutable, so this is a safe copy. */
+    synchronized String uuidByName(String name) {
+        PlayerIps row = byName(name);
+        return row == null ? null : row.uuid;
     }
 
     /**
-     * The other accounts that share this player's last address, the target itself removed.
+     * The other accounts that share this player's last address, newest sighting first, the target
+     * itself removed.
      *
-     * <p>The matching is deliberately {@link #sharing}'s and nothing else: this is what backs both
-     * the in-game {@code /dupeip} and the bot's {@code dupeip.query}, and two answers to the same
-     * question that disagree is worse than one answer that is narrow. Narrow it is - a row only
-     * matches on the address a player was last seen on, so an alt that has since moved to another
-     * connection is not found. Widening it to the whole history is a change to make in one place,
-     * for both callers at once.
+     * <p>One method, two callers: the in-game {@code /dupeip} and the bot's {@code dupeip.query}.
+     * Two answers to the same question that disagree is a bug report nobody can reproduce, because
+     * both are correct somewhere.
      *
-     * <p>Keyed by uuid, so the result is already deduplicated.
+     * <p>The matching is narrow, by decision rather than by oversight. A row matches only on the
+     * address a player was <strong>last</strong> seen on, so an alt who has since reconnected from
+     * somewhere else is not found, and the 20-sighting history each row carries is not consulted.
+     * Widening it is a change to make here, once, for both callers at the same time.
      *
-     * @return rows to read {@code uuid}, {@code name} and {@code seenAt} from. Never the address:
-     *     no caller outside this file is allowed to put one on a wire.
+     * <h2>Why there is a limit at all</h2>
+     *
+     * <p>Nothing prunes this file. Worse, on a gatekeeper whose backends do not forward player
+     * addresses, every row can legitimately carry the <em>same</em> {@code lastIp}, the proxy one,
+     * so "who shares an address with this player" degenerates into "everyone who has ever logged
+     * in". Unbounded, that is a guild's whole player history serialised into one tunnel frame.
+     *
+     * <p>The scan therefore holds at most {@code limit} rows at a time rather than collecting every
+     * match and trimming afterwards, so that guild costs a bounded amount of memory as well as a
+     * bounded frame. Insertion into the kept list is linear in {@code limit}, which is worth it at
+     * 50 and would not be at 50,000.
+     *
+     * @param limit the most rows to return; a negative value reads as zero, which still reports
+     *     {@link Alts#truncated} honestly for a caller that only wants to know there were some
+     * @return copies. Never a live {@link PlayerIps}, and never an address in any form.
      */
-    synchronized List<PlayerIps> altsOf(String uuid) {
-        PlayerIps target = get(uuid);
+    synchronized Alts altsOf(String uuid, int limit) {
+        PlayerIps target = byUuid.get(key(uuid));
         if (target == null || target.lastIp == null || target.lastIp.isEmpty()) {
-            return Collections.emptyList();
+            return Alts.UNKNOWN;
         }
-        String self = target.uuid == null ? "" : target.uuid.toLowerCase(Locale.ROOT);
-        List<PlayerIps> out = new ArrayList<PlayerIps>();
-        List<PlayerIps> candidates = sharing(target.lastIp);
-        for (int i = 0; i < candidates.size(); i++) {
-            PlayerIps candidate = candidates.get(i);
-            String key = candidate.uuid == null ? "" : candidate.uuid.toLowerCase(Locale.ROOT);
-            if (key.equals(self)) {
+        int cap = Math.max(0, limit);
+        String self = key(target.uuid);
+        String address = target.lastIp;
+        List<Alt> kept = new ArrayList<Alt>(Math.min(cap, 16));
+        int matched = 0;
+        for (PlayerIps row : byUuid.values()) {
+            if (!address.equals(row.lastIp) || key(row.uuid).equals(self)) {
                 continue;
             }
-            out.add(candidate);
+            matched++;
+            if (cap == 0) {
+                continue;
+            }
+            long seenAt = row.seenAt;
+            int at = kept.size();
+            while (at > 0 && kept.get(at - 1).seenAt < seenAt) {
+                at--;
+            }
+            if (at >= cap) {
+                // Older than everything already held, and there is no room. Counted, not kept.
+                continue;
+            }
+            kept.add(at, new Alt(row.uuid, row.name, seenAt));
+            if (kept.size() > cap) {
+                kept.remove(kept.size() - 1);
+            }
         }
-        return out;
+        return new Alts(Collections.unmodifiableList(kept), matched > cap, true);
+    }
+
+    private static String key(String uuid) {
+        return uuid == null ? "" : uuid.toLowerCase(Locale.ROOT);
     }
 
     synchronized void flush() {
