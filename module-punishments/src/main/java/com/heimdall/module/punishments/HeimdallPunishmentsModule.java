@@ -610,6 +610,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
      * {
      *   "uuid": "<the uuid asked about, echoed>",
      *   "supported": true,
+     *   "known": true,
      *   "alts": [ { "uuid": "...", "name": "Alex", "lastSeenAt": 1757000000000 } ],
      *   "truncated": false
      * }
@@ -627,18 +628,29 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
      * "50+" rather than imply it has the whole list. Rows come newest first, which is the order
      * that makes a cut list the useful half rather than an arbitrary one.
      *
-     * <h2>supported, and why it is not just an empty list</h2>
+     * <h2>supported and known, and why neither is just an empty list</h2>
      *
-     * <p>Only a gatekeeper or a standalone server opens a {@link LastIpStore}; an enforcer never
-     * does, and neither does a server part-way through disabling the module. Such a server has
-     * nothing to say, but "I have no alt data" and "this player has no alts" are opposite facts and
-     * an empty {@code alts} alone cannot tell them apart. A dashboard that conflated them would
-     * show "no shared addresses" for a player nobody has ever checked, which is worse than showing
-     * nothing: it is a reassurance the server never gave.
+     * <p>An empty {@code alts} has three causes that mean entirely different things, and a reply
+     * that could not separate them would be read as the mildest one:
      *
-     * <p>It replies either way. The bot holds a correlated future regardless, and a silent backend
-     * costs it the full request timeout to learn what {@code supported: false} says at once. Same
-     * rule as {@code RemoteRequestWiring}'s: every path ends in a reply.
+     * <ul>
+     *   <li>{@code supported: false} - this server holds no last-address data at all. Only a
+     *       gatekeeper or a standalone server opens a {@link LastIpStore}; an enforcer never does,
+     *       and neither does a server part-way through disabling the module.
+     *   <li>{@code known: false} - the server has the data and looked, but has no address on file
+     *       for this player: it has never seen them, or the uuid was empty or malformed. Always
+     *       false when {@code supported} is, since a server with no store knows nothing.
+     *   <li>both true, {@code alts} empty - the real answer. This player has been here, and nobody
+     *       else has connected from the address they last used.
+     * </ul>
+     *
+     * <p>Only the third is a finding. A dashboard that showed "no shared addresses" for the first
+     * two would be offering a reassurance the server never gave, about a player nobody has ever
+     * checked.
+     *
+     * <p>It replies in all three cases. The bot holds a correlated future regardless, and a silent
+     * backend costs it the full request timeout to learn what a flag says at once. Same rule as
+     * {@code RemoteRequestWiring}'s: every path ends in a reply.
      *
      * <p>Package-private so a test can hold a handler across a disable and prove the two captured
      * references below are what make that safe.
@@ -672,6 +684,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                 Payload answer = Payload.builder()
                         .put("uuid", uuid)
                         .put("supported", ips != null)
+                        .put("known", found != null && found.addressKnown)
                         .putChildren("alts", alts)
                         .put("truncated", found != null && found.truncated)
                         .build();

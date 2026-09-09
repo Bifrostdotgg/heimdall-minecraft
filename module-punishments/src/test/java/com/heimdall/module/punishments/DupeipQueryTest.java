@@ -34,7 +34,8 @@ import org.junit.jupiter.api.io.TempDir;
  * and has nothing to contribute, and if it stayed quiet the bot would spend its whole request
  * timeout learning that. It answers {@code supported: false}, which is a different fact from an
  * empty list and has to stay different: "I have no alt data" read as "this player has no alts" is a
- * reassurance the server never gave.
+ * reassurance the server never gave. {@code known: false} is the third of those facts, for a server
+ * that does hold the data and has simply never seen the player.
  *
  * <p>The second is that no address ever appears in the reply. The assertions below are written
  * against the serialised JSON and against the complete key list rather than against named keys, so
@@ -69,6 +70,7 @@ class DupeipQueryTest {
 
             assertEquals(STEVE, reply.string("uuid", ""), "the reply echoes the uuid asked about");
             assertTrue(reply.bool("supported", false), "a gatekeeper holds a store");
+            assertTrue(reply.bool("known", false), "and has seen this player");
             assertFalse(reply.bool("truncated", true), "three rows is not fifty");
             List<Payload> alts = reply.children("alts");
             assertEquals(2, alts.size(), reply.toJson());
@@ -83,7 +85,7 @@ class DupeipQueryTest {
             // The wire contract, spelled out. The bot correlates on the envelope id and reads these
             // exact keys; pinning the serialised form means a reordering or a renamed field is a
             // failing test here rather than an empty alt list on a dashboard nobody is watching.
-            assertEquals("{\"uuid\":\"" + STEVE + "\",\"supported\":true,\"alts\":["
+            assertEquals("{\"uuid\":\"" + STEVE + "\",\"supported\":true,\"known\":true,\"alts\":["
                             + "{\"uuid\":\"" + HEROBRINE + "\",\"name\":\"Herobrine\",\"lastSeenAt\":3000},"
                             + "{\"uuid\":\"" + ALEX + "\",\"name\":\"Alex\",\"lastSeenAt\":2000}"
                             + "],\"truncated\":false}",
@@ -149,6 +151,8 @@ class DupeipQueryTest {
             assertFalse(reply.bool("supported", true),
                     "an enforcer never opens a last-address file, and says so rather than "
                             + "letting an empty list be read as 'this player has no alts'");
+            assertFalse(reply.bool("known", true),
+                    "a server with no store knows nothing, so known can never outrank supported");
             assertTrue(reply.hasArray("alts"), "alts is present and an array: " + reply.toJson());
             assertEquals(0, reply.children("alts").size(), reply.toJson());
             assertFalse(reply.bool("truncated", true), reply.toJson());
@@ -156,7 +160,7 @@ class DupeipQueryTest {
     }
 
     @Test
-    @DisplayName("a uuid the store has never seen is supported:true with an empty list")
+    @DisplayName("a uuid the store has never seen is supported:true, known:false")
     void unknownUuidRepliesEmptyButSupported() {
         try (PunishmentsHarness harness = gatekeeper()) {
             harness.module.lastIpsForTest().record(ALEX, "Alex", SHARED_IP, 2_000L);
@@ -165,8 +169,30 @@ class DupeipQueryTest {
 
             assertEquals(HEROBRINE, reply.string("uuid", ""));
             assertTrue(reply.bool("supported", false),
-                    "the server did look; it simply has never seen this player");
+                    "the server did look, so it can answer about players it does know");
+            assertFalse(reply.bool("known", true),
+                    "but it has never seen this one, which is not the same as finding no alts");
             assertEquals(0, reply.children("alts").size(), reply.toJson());
+        }
+    }
+
+    @Test
+    @DisplayName("an empty or malformed uuid is known:false, not a silent or misleading answer")
+    void aUselessUuidIsAnsweredHonestly() {
+        try (PunishmentsHarness harness = gatekeeper()) {
+            harness.module.lastIpsForTest().record(STEVE, "Steve", SHARED_IP, 1_000L);
+            harness.module.lastIpsForTest().record(ALEX, "Alex", SHARED_IP, 2_000L);
+
+            for (String useless : new String[] {"", "   ", "not-a-uuid"}) {
+                Payload reply = ask(harness, "req-bad-" + useless.trim(), useless);
+
+                assertTrue(reply.bool("supported", false),
+                        "the store is open; the request is what was no good: " + reply.toJson());
+                assertFalse(reply.bool("known", true),
+                        "nothing was found, and saying so beats an empty list that reads as a "
+                                + "clean bill of health: " + reply.toJson());
+                assertEquals(0, reply.children("alts").size(), reply.toJson());
+            }
         }
     }
 
@@ -195,7 +221,7 @@ class DupeipQueryTest {
             for (Payload row : reply.children("alts")) {
                 assertEquals("[uuid, name, lastSeenAt]", row.keys().toString(), json);
             }
-            assertEquals("[uuid, supported, alts, truncated]", reply.keys().toString(), json);
+            assertEquals("[uuid, supported, known, alts, truncated]", reply.keys().toString(), json);
         }
     }
 
@@ -268,6 +294,7 @@ class DupeipQueryTest {
             assertEquals("req-9", replies.get(0).requestId());
             assertFalse(replies.get(0).payload().bool("supported", true),
                     "the store is closed, so the honest answer is that there is no alt data");
+            assertFalse(replies.get(0).payload().bool("known", true));
             assertEquals(0, replies.get(0).payload().children("alts").size());
         }
     }
