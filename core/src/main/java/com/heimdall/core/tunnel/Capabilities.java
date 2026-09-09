@@ -47,7 +47,18 @@ public final class Capabilities {
      */
     public static final String BRIDGE = "bridge@1";
 
-    /** Native punishments: punish.apply / punish.revoke and the local mirror. */
+    /**
+     * Native punishments: punish.apply / punish.revoke / punish.import, dupeip.query, and the local
+     * mirror.
+     *
+     * <p><strong>Not bumped for dupeip.query.</strong> The version says what a bot must understand
+     * to talk to this client correctly, and a bot that has never heard of the alt list keeps working
+     * unchanged - it simply never asks. The cost falls the other way: a bot that does ask will hit
+     * its own request timeout against a client older than this one, because {@code punishments@1}
+     * cannot distinguish them. That is the bot's timeout to own, and it is the same trade every
+     * additive request type makes; a bump would instead strand every deployed rc from configuration
+     * it understands perfectly.
+     */
     public static final String PUNISHMENTS = "punishments@1";
 
     /** The module framework itself: this client can enable and disable modules at runtime. */
