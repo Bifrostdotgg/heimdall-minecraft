@@ -7,9 +7,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.testing.FakeCommandSource;
 import com.heimdall.core.testing.RecordingTunnelBus;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import org.junit.jupiter.api.DisplayName;
@@ -25,6 +27,12 @@ import org.junit.jupiter.api.io.TempDir;
  * ever appears in the reply - the raw addresses are the reason the file is local, and the assertion
  * below is written against the serialised JSON rather than against named keys so a field added
  * later cannot smuggle one out under a name this test never thought to check.
+ *
+ * <p>The in-game {@code /dupeip} is pinned here too, next to the tunnel reply rather than off with
+ * the other command tests, because the property worth protecting is not either answer on its own -
+ * it is that the two agree. They are one method apart ({@link LastIpStore#altsOf}) and that is the
+ * only reason they cannot drift; a test that watched one of them would not notice the day somebody
+ * gave the other its own matching.
  */
 class DupeipQueryTest {
 
@@ -159,6 +167,32 @@ class DupeipQueryTest {
             assertEquals(ALEX, alts.get(0).string("uuid", ""));
             assertFalse(alts.get(0).has("name"), "an unknown name is absent, not \"\": " + reply.toJson());
             assertEquals(2_000L, alts.get(0).longValue("lastSeenAt", 0L));
+        }
+    }
+
+    @Test
+    @DisplayName("/dupeip agrees with the tunnel: the target is not one of its own alts")
+    void theCommandExcludesTheTargetTheSameWay() {
+        try (PunishmentsHarness harness = gatekeeper()) {
+            LastIpStore ips = harness.module.lastIpsForTest();
+            ips.record(STEVE, "Steve", SHARED_IP, 1_000L);
+            ips.record(ALEX, "Alex", SHARED_IP, 2_000L);
+
+            FakeCommandSource console = FakeCommandSource.console();
+            harness.module.onStaffCommand(console, "dupeip", Collections.singletonList("Steve"));
+
+            List<String> told = console.messageText();
+            assertEquals(2, told.size(), told.toString());
+            // The header names the player asked about, so "Steve" belongs there. The list below it
+            // is the answer, and Steve is not an alt of Steve.
+            assertTrue(told.get(0).contains("(1)"),
+                    "the count drops the target as well as the list: " + told);
+            assertTrue(told.get(1).contains("Alex"), told.toString());
+            assertFalse(told.get(1).contains("Steve"),
+                    "an account is not its own alt: " + told);
+
+            assertEquals(uuidsOf(ask(harness, "req-7", STEVE)).size(), 1,
+                    "and the tunnel says the same thing");
         }
     }
 

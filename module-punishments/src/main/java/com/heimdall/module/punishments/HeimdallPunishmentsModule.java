@@ -1022,7 +1022,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             source.sendMessage(Msg.legacy("§eNo last address recorded for §f" + target));
             return;
         }
-        List<LastIpStore.PlayerIps> alts = lastIps.sharing(player.lastIp);
+        // altsOf, not sharing: an account is not its own alt. sharing() returns every row on the
+        // address including the target's own, so /dupeip Steve used to answer "Steve" and inflate
+        // the count by one. The tunnel's dupeip_result has never included the target, and two
+        // answers to the same question that disagree is a bug report nobody can reproduce because
+        // both are correct somewhere. Matching is unchanged: still the last address only.
+        List<LastIpStore.PlayerIps> alts = lastIps.altsOf(player.uuid);
         List<String> names = new ArrayList<String>();
         for (int i = 0; i < alts.size(); i++) {
             LastIpStore.PlayerIps alt = alts.get(i);
