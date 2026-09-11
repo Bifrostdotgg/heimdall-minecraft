@@ -49,6 +49,15 @@ public final class PunishmentAnnouncement {
      */
     private static final Pattern TAG = Pattern.compile("<[A-Za-z/!][^<>]*>");
 
+    /**
+     * How many times {@link #clean} repeats before giving up.
+     *
+     * <p>Generous: each pass strips at least one character or stops, so anything a human types
+     * settles in two or three. A reason long enough to need more is adversarial, and by then the
+     * §-codes and tags left in it have been thinned that many times over.
+     */
+    private static final int MAX_CLEAN_PASSES = 8;
+
     private static final int MINUTES_PER_HOUR = 60;
     private static final int MINUTES_PER_DAY = 60 * 24;
 
@@ -199,15 +208,35 @@ public final class PunishmentAnnouncement {
      * happens to be on the other end is not safe. Stripped here instead.
      *
      * <p><strong>Line breaks.</strong> Folded to spaces, so one punishment stays one line.
+     *
+     * <h2>Run to a fixpoint, not once</h2>
+     *
+     * <p>One pass in a fixed order composes into an escape. {@code <§4red>} is not a tag while the
+     * §4 is in it, so the tag pass leaves it; the legacy pass then removes the §4 and hands back a
+     * live {@code <red>} that nothing looks at again. {@code <&4red>} is the same trick in the
+     * other spelling, and the two passes can be arranged into that shape whichever order they run
+     * in, because each one's output is the other one's input.
+     *
+     * <p>So the passes repeat until the string stops changing. {@link #MAX_CLEAN_PASSES} bounds it
+     * rather than trusting the loop to converge: every pass only deletes, so a string of length n
+     * settles in at most n rounds and the cap is never the thing that ends it, but a reason
+     * arrives from a moderator and an unbounded loop over user input is not something to leave to
+     * a proof.
      */
     private static String clean(String value) {
         if (value == null) {
             return "";
         }
         String text = value.replace('\n', ' ').replace('\r', ' ');
-        text = TAG.matcher(text).replaceAll("");
-        text = HEX_CODE.matcher(text).replaceAll("");
-        text = LEGACY_CODE.matcher(text).replaceAll("");
+        for (int pass = 0; pass < MAX_CLEAN_PASSES; pass++) {
+            String before = text;
+            text = TAG.matcher(text).replaceAll("");
+            text = HEX_CODE.matcher(text).replaceAll("");
+            text = LEGACY_CODE.matcher(text).replaceAll("");
+            if (text.equals(before)) {
+                break;
+            }
+        }
         return text.replace("\u00A7", "").trim();
     }
 

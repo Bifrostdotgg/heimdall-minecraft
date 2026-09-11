@@ -115,6 +115,30 @@ class PunishmentAnnouncementTest {
     }
 
     @Test
+    @DisplayName("a code hidden inside a tag cannot survive the strip that removes it")
+    void strippingRunsToAFixpoint() {
+        // <§4red> is not a tag while the §4 is in it, so a single tag pass leaves it alone and the
+        // legacy pass then hands back a live <red> that nothing looks at again.
+        assertEquals("\u00A7fAdam \u00A7cbanned \u00A7fSteve \u00A77: \u00A7fcheating",
+                PunishmentAnnouncement.issued(
+                        "ban", "Adam", "Steve", null, "<\u00A74red>cheating", ANNOUNCED).line());
+        assertEquals("\u00A7fAdam \u00A7cbanned \u00A7fSteve \u00A77: \u00A7fcheating",
+                PunishmentAnnouncement.issued(
+                        "ban", "Adam", "Steve", null, "<&4red>cheating", ANNOUNCED).line());
+    }
+
+    @Test
+    @DisplayName("the same trick nested several deep also runs out")
+    void nestedEscapesAlsoRunOut() {
+        String line = PunishmentAnnouncement.issued(
+                "ban", "Adam", "Steve", null, "<<\u00A74&4red>red>hi", ANNOUNCED).line();
+
+        assertFalse(line.contains("<red>"), line);
+        assertFalse(line.contains("\u00A7f<"), line);
+        assertTrue(line.endsWith("hi"), line);
+    }
+
+    @Test
     @DisplayName("MiniMessage tags go too, and ordinary punctuation stays")
     void tagsAreStrippedAndTextSurvives() {
         assertTrue(PunishmentAnnouncement.issued(
