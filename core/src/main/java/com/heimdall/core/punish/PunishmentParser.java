@@ -40,14 +40,39 @@ public final class PunishmentParser {
         }
     }
 
-    public static Parsed parse(List<String> args) {
-        if (args == null || args.isEmpty()) {
-            throw new IllegalArgumentException("a target is required");
+    /**
+     * The options, split from everything else, with nothing else interpreted.
+     *
+     * <p>Its own type because the revoke verbs need exactly this and nothing more:
+     * {@code /unban Steve 3d ban evasion} has no duration, so running it through {@link #parse}
+     * would swallow {@code 3d} as one and hand back a truncated reason. One place decides how
+     * {@code -s}, {@code -p} and {@code --sender=} are spelled, and two callers read it
+     * differently on purpose.
+     */
+    public static final class Flags {
+        public final boolean silent;
+        public final boolean publicFlag;
+        public final String senderOverride;
+        /** Every argument that was not an option, in order. */
+        public final List<String> rest;
+
+        Flags(boolean silent, boolean publicFlag, String senderOverride, List<String> rest) {
+            this.silent = silent;
+            this.publicFlag = publicFlag;
+            this.senderOverride = senderOverride;
+            this.rest = rest;
         }
+    }
+
+    /** Strips the options out of an argument list. Never throws; an empty list yields empty. */
+    public static Flags flags(List<String> args) {
         boolean silent = false;
         boolean pub = false;
         String senderOverride = null;
         List<String> rest = new ArrayList<String>();
+        if (args == null) {
+            return new Flags(false, false, null, rest);
+        }
         for (String raw : args) {
             if (raw == null) continue;
             String token = raw.trim();
@@ -65,6 +90,18 @@ public final class PunishmentParser {
             }
             rest.add(token);
         }
+        return new Flags(silent, pub, senderOverride, rest);
+    }
+
+    public static Parsed parse(List<String> args) {
+        if (args == null || args.isEmpty()) {
+            throw new IllegalArgumentException("a target is required");
+        }
+        Flags options = flags(args);
+        boolean silent = options.silent;
+        boolean pub = options.publicFlag;
+        String senderOverride = options.senderOverride;
+        List<String> rest = options.rest;
         if (rest.isEmpty()) {
             throw new IllegalArgumentException("a target is required");
         }

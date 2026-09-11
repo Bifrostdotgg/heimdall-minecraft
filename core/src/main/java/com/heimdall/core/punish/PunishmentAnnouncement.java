@@ -1,0 +1,218 @@
+package com.heimdall.core.punish;
+
+import java.util.Locale;
+
+/**
+ * The one chat line a punishment produces, and who is allowed to see it.
+ *
+ * <p>Everything here is a string transformation over primitives. That is deliberate: the audience
+ * rule and the wording are the parts that would otherwise only be exercised by starting a server,
+ * and they are also the parts a mistake is least visible in - an announcement that reaches one
+ * person too many is not an error anything logs.
+ *
+ * <h2>What it never contains</h2>
+ *
+ * <p>No address, no digest, no UUID. An IP ban announces as "IP-banned", and the address it was
+ * computed from stays where it already lives, behind {@code /iphistory} and its own permission.
+ * The line is also single-line by construction: a reason arrives from a moderator or from the
+ * dashboard, so any newline in it is folded to a space rather than trusted to be one line.
+ *
+ * <h2>Silence is about the audience, not the text</h2>
+ *
+ * <p>A silent punishment produces the same sentence with a {@code (silent)} prefix, shown only to
+ * holders of {@link #NOTIFY_PERMISSION} (or {@code heimdall.admin}). Staff therefore always learn
+ * that an action happened; what silence buys is that the server at large does not. A silent
+ * punishment that produced no line at all would make "silent" mean "unaudited in chat", which is
+ * not what a moderator asking for it wants.
+ */
+public final class PunishmentAnnouncement {
+
+    /** Sees silent punishment announcements. Default: op only. */
+    public static final String NOTIFY_PERMISSION = "heimdall.punishments.notify";
+
+    /** Holders see everything the notify node sees, as they do everywhere else in the plugin. */
+    public static final String ADMIN_PERMISSION = "heimdall.admin";
+
+    /** What an issuer with no recorded name is called. */
+    public static final String CONSOLE = "Console";
+
+    private static final int MINUTES_PER_HOUR = 60;
+    private static final int MINUTES_PER_DAY = 60 * 24;
+
+    private final String line;
+    private final boolean silent;
+
+    private PunishmentAnnouncement(String line, boolean silent) {
+        this.line = line;
+        this.silent = silent;
+    }
+
+    /**
+     * The line for a punishment that was just issued, or {@code null} if there is nothing to say.
+     *
+     * <p>{@code null} rather than an empty line for the two cases that are not an announcement:
+     * a type nobody is announced for ({@code geo}, {@code subnet}, {@code freeze} - none of them
+     * name a player, and a country-wide ban is not a moderation event a server should read as one),
+     * and a missing target name. Announcing a UUID would be worse than staying quiet.
+     *
+     * @param type the punishment type - {@code ban}, {@code tempban}, {@code ipban}, {@code mute},
+     *     {@code tempmute}, {@code kick} or {@code warn}
+     * @param staff who issued it; blank means the console
+     * @param target the punished player's name
+     * @param durationMinutes how long it lasts, or {@code null} for permanent
+     * @param reason free text from the issuer, possibly empty
+     * @param silent whether only notify holders see it
+     */
+    public static PunishmentAnnouncement issued(String type, String staff, String target,
+            Integer durationMinutes, String reason, boolean silent) {
+        String verb = issueVerb(type);
+        if (verb == null) {
+            return null;
+        }
+        String who = clean(target);
+        if (who.isEmpty()) {
+            return null;
+        }
+        StringBuilder body = new StringBuilder();
+        body.append("§f").append(issuer(staff)).append(" §c").append(verb).append(" §f").append(who);
+        String duration = compactDuration(durationMinutes);
+        if (duration != null) {
+            body.append(" §7for §f").append(duration);
+        }
+        appendReason(body, reason);
+        return new PunishmentAnnouncement(prefixed(body.toString(), silent), silent);
+    }
+
+    /**
+     * The line for a punishment that was just revoked, or {@code null} if there is nothing to say.
+     *
+     * <p>Takes either spelling of the action, because the two callers have different ones in hand:
+     * a moderator typed {@code unban}, while a {@code punish.revoke} frame from the bot names the
+     * punishment type ({@code ban}) that is being lifted. One table, so the two cannot word the
+     * same event differently.
+     */
+    public static PunishmentAnnouncement revoked(String typeOrVerb, String staff, String target,
+            String reason, boolean silent) {
+        String verb = revokeVerb(typeOrVerb);
+        if (verb == null) {
+            return null;
+        }
+        String who = clean(target);
+        if (who.isEmpty()) {
+            return null;
+        }
+        StringBuilder body = new StringBuilder();
+        body.append("§f").append(issuer(staff)).append(" §a").append(verb).append(" §f").append(who);
+        appendReason(body, reason);
+        return new PunishmentAnnouncement(prefixed(body.toString(), silent), silent);
+    }
+
+    /** The finished legacy-§ line, ready for {@code Msg.legacy}. */
+    public String line() {
+        return line;
+    }
+
+    /** Whether this goes only to notify holders. */
+    public boolean silent() {
+        return silent;
+    }
+
+    /**
+     * Whether one player sees this line.
+     *
+     * <p>Takes the two answers rather than a player, so the rule stays testable without a server
+     * and so the caller does the permission lookups on whichever thread it is already on.
+     */
+    public boolean visibleTo(boolean hasNotify, boolean hasAdmin) {
+        return !silent || hasNotify || hasAdmin;
+    }
+
+    /**
+     * A duration a human reads at a glance, or {@code null} for permanent.
+     *
+     * <p>Two units at most. "3d 4h" is the answer to "how long"; "3d 4h 17m" is an answer to a
+     * question nobody asked in a broadcast line.
+     */
+    public static String compactDuration(Integer minutes) {
+        if (minutes == null || minutes.intValue() <= 0) {
+            return null;
+        }
+        int total = minutes.intValue();
+        int days = total / MINUTES_PER_DAY;
+        int hours = (total % MINUTES_PER_DAY) / MINUTES_PER_HOUR;
+        int mins = total % MINUTES_PER_HOUR;
+        if (days > 0) {
+            return hours > 0 ? days + "d " + hours + "h" : days + "d";
+        }
+        if (hours > 0) {
+            return mins > 0 ? hours + "h " + mins + "m" : hours + "h";
+        }
+        return mins + "m";
+    }
+
+    private static void appendReason(StringBuilder body, String reason) {
+        String text = clean(reason);
+        if (!text.isEmpty()) {
+            body.append(" §7: §f").append(text);
+        }
+    }
+
+    private static String prefixed(String body, boolean silent) {
+        return silent ? "§8(silent) " + body : body;
+    }
+
+    private static String issuer(String staff) {
+        String name = clean(staff);
+        if (name.isEmpty() || "console".equals(name.toLowerCase(Locale.ROOT))) {
+            return CONSOLE;
+        }
+        return name;
+    }
+
+    /** Folds newlines and trims, so a reason cannot turn one broadcast into three. */
+    private static String clean(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace('\n', ' ').replace('\r', ' ').trim();
+    }
+
+    private static String issueVerb(String type) {
+        if (type == null) {
+            return null;
+        }
+        String key = type.toLowerCase(Locale.ROOT);
+        if ("ban".equals(key) || "tempban".equals(key)) return "banned";
+        if ("ipban".equals(key)) return "IP-banned";
+        if ("mute".equals(key) || "tempmute".equals(key)) return "muted";
+        if ("kick".equals(key)) return "kicked";
+        if ("warn".equals(key)) return "warned";
+        return null;
+    }
+
+    private static String revokeVerb(String typeOrVerb) {
+        if (typeOrVerb == null) {
+            return null;
+        }
+        String key = typeOrVerb.toLowerCase(Locale.ROOT);
+        if ("ban".equals(key) || "tempban".equals(key) || "ipban".equals(key)
+                || "unban".equals(key)) {
+            return "unbanned";
+        }
+        if ("mute".equals(key) || "tempmute".equals(key) || "unmute".equals(key)) {
+            return "unmuted";
+        }
+        if ("warn".equals(key) || "unwarn".equals(key)) {
+            return "unwarned";
+        }
+        if ("rollback".equals(key)) {
+            return "revoked a punishment for";
+        }
+        return null;
+    }
+
+    @Override
+    public String toString() {
+        return "PunishmentAnnouncement{" + (silent ? "silent" : "public") + ", " + line + "}";
+    }
+}
