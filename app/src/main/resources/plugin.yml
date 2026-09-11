@@ -67,6 +67,20 @@ permissions:
     # Operators only. Every subcommand this gates is a server-wide change, and a
     # server that wants finer control has a permissions plugin for exactly that.
     default: op
+    # The two announcement nodes are granted by holding this one, because the
+    # code already treats them that way: the audience check for a silent
+    # punishment is `notify OR admin`. Without these children that equivalence
+    # lives only in Java, so `/lp user <name> permission check` on an admin
+    # answers false for a node they demonstrably have, and any other plugin or
+    # script reading the node is told the opposite of what happens.
+    #
+    # Only these two. The verb nodes (ban, mute, ...) are deliberately NOT
+    # children: an admin holding them is a server's own decision, and wiring
+    # them here would make "may administer Heimdall" silently mean "may ban",
+    # which is exactly the grant a server splitting the two wants to withhold.
+    children:
+      heimdall.punishments.notify: true
+      heimdall.punishments.silent: true
   heimdall.linkdiscord:
     description: Request a Discord link code for your own account
     # Everyone, on purpose: linking is how a player gets themselves whitelisted,

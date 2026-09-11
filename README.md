@@ -315,7 +315,24 @@ Two more decide who hears about a punishment, rather than who may issue one:
   because both are a decision about who finds out that a moderator acted. Without the node the
   command is **refused** rather than run with the flag quietly dropped: a moderator who believes a
   ban went out quietly, on a server that announced it, has been misled by their own tool. A flag
-  that agrees with the default is a no-op and is always allowed
+  that agrees with the default is a no-op and is always allowed. Revoking follows the row being
+  lifted rather than the guild setting, so lifting a silent ban is announced silently and needs
+  this node to be made loud
+
+> **On a proxy, grant these through your permissions plugin.** The defaults above come from the
+> Bukkit descriptor, which only the backend build reads: Velocity and BungeeCord have no
+> equivalent, so an unlisted node there is simply *not held* by anyone except the console. That is
+> the right default, but it means `heimdall.punishments.notify` has to be granted explicitly in
+> LuckPerms (or whatever the proxy runs) before any staff member sees a silent punishment
+> announced on the proxy. `heimdall.admin` is honoured in code rather than by the descriptor, so an
+> admin sees silent announcements on every platform without the notify node; on the Bukkit family
+> the descriptor says so as well, via `children`, so `/lp user <name> permission check` agrees with
+> what actually happens.
+
+> **Announcements come from the outermost instance.** A gatekeeper proxy or a standalone server
+> announces punishments in chat; an enforcer backend never does. Otherwise a proxied network says
+> everything twice, once from the proxy and once from the backend the player is on. So on a
+> proxied network the nodes that matter for announcements are the ones on the **proxy**.
 
 ## How It Works
 

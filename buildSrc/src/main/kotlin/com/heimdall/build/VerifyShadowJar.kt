@@ -256,6 +256,46 @@ abstract class VerifyShadowJar : DefaultTask() {
         if (unsubstituted != null) {
             problems += "plugin.yml still contains an unsubstituted token: ${unsubstituted.value}"
         }
+        checkAnnouncementNodes(pluginYml, problems)
+    }
+
+    /**
+     * The two announcement permission nodes, and the `children:` that makes them true.
+     *
+     * The audience check for a silent punishment is `notify OR admin`, written in Java. The
+     * descriptor is the only place a permissions plugin, an operator running
+     * `/lp user <name> permission check`, or any other plugin can learn that, and a claim that
+     * lives only in code is one those three are told the opposite of.
+     *
+     * Undeclared is worse than wrong here rather than merely undocumented: Bukkit gives an
+     * unlisted node no default at all, so `heimdall.punishments.notify` would be held by nobody
+     * but the console and every silent punishment would be announced to an empty audience, which
+     * is indistinguishable from the feature working.
+     *
+     * Only these two are checked. The verb nodes are deliberately not children of
+     * `heimdall.admin`, because "may administer Heimdall" silently meaning "may ban" is the grant
+     * a server splitting the two wants to withhold.
+     */
+    private fun checkAnnouncementNodes(pluginYml: String, problems: MutableList<String>) {
+        for (node in listOf("heimdall.punishments.notify", "heimdall.punishments.silent")) {
+            if (!pluginYml.contains(Regex("(?m)^\\s*${Regex.escape(node)}:\\s*$"))) {
+                problems += "plugin.yml does not declare $node, so Bukkit gives it no default " +
+                    "and nobody but the console holds it"
+            }
+        }
+        val children = Regex("(?ms)^\\s*heimdall\\.admin:.*?^\\s*children:\\s*$(.*?)(?=^\\s{2}\\S)")
+            .find(pluginYml)?.groupValues?.get(1)
+        if (children == null) {
+            problems += "heimdall.admin declares no children, but the code treats it as granting " +
+                "heimdall.punishments.notify and heimdall.punishments.silent"
+            return
+        }
+        for (node in listOf("heimdall.punishments.notify", "heimdall.punishments.silent")) {
+            if (!children.contains(Regex("${Regex.escape(node)}:\\s*true"))) {
+                problems += "heimdall.admin does not list $node as a child, so the descriptor " +
+                    "disagrees with the audience check the plugin actually runs"
+            }
+        }
     }
 
     private fun checkVelocityPluginJson(zip: ZipFile, problems: MutableList<String>) {
