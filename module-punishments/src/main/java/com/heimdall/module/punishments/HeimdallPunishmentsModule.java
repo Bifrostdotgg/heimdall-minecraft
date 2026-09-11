@@ -930,20 +930,50 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     /**
      * Shows one line to everybody who is allowed to see it.
      *
-     * <p>Called from a command handler (the server's main thread on the Bukkit family) and from
-     * the tunnel's reading thread, and it must not block either. It does not: {@code hasPermission}
-     * is an in-memory read on every platform, and {@code PlayerHandle#sendMessage} hops to the
-     * right thread itself - on Bukkit onto the player's own region thread, which is the hop a
-     * caller would otherwise have to know to make. So there is no scheduler call here, and the
-     * tunnel thread is never held waiting for a tick.
+     * <h2>The audience is computed on the server thread</h2>
+     *
+     * <p>Called from a command handler and from the tunnel's reading thread, and the second of
+     * those is the problem. <strong>Bukkit's {@code Player#hasPermission} is not safe off the main
+     * thread.</strong> It walks a permissible's attachment list, which the server, LuckPerms and
+     * any other permissions plugin mutate on the main thread as attachments are added, recalculated
+     * and removed, so an asynchronous read can see a half-rebuilt map: usually a wrong answer,
+     * occasionally a {@code ConcurrentModificationException}. A wrong answer here means a silent
+     * punishment shown to somebody who does not hold the node, which nothing logs and nobody
+     * reports.
+     *
+     * <p>So the whole body hops through {@code PlatformFacade.mainThread()} once, and the roster
+     * read, the permission checks and the sends all happen there. Once per announcement rather than
+     * once per player, and on Bukkit the executor runs inline when it is already on the main thread,
+     * so a moderator typing {@code /ban} sees no deferral at all.
+     *
+     * <p><strong>Velocity and BungeeCord do not need it</strong> and are unharmed by it. Velocity's
+     * {@code PermissionSubject} is answered by a {@code PermissionFunction} the proxy treats as
+     * safe from any thread - it has no main thread to speak of - and BungeeCord's
+     * {@code CommandSender#hasPermission} reads a synchronised permission map. On both, the hop is
+     * a task on the proxy's scheduler and costs a scheduling round.
+     *
+     * <p>The free side-effect is that the roster snapshot is no longer taken off-thread either,
+     * which is the race {@code BukkitPlayerDirectory} retries around.
      *
      * <p>{@code null} is the ordinary answer for a punishment nothing is announced for, so it is
      * accepted here rather than guarded against at every call site.
      */
-    private void announce(PunishmentAnnouncement announcement) {
-        ModuleContext ctx = this.context;
+    private void announce(final PunishmentAnnouncement announcement) {
+        final ModuleContext ctx = this.context;
         if (ctx == null || announcement == null) return;
         if (!announcesHere(ctx.platform().role())) return;
+        // One hop, then everything: the roster read, the permission checks and the sends. See the
+        // javadoc above for why the permission checks are what force it.
+        ctx.platform().mainThread().execute(new Runnable() {
+            @Override
+            public void run() {
+                deliver(ctx, announcement);
+            }
+        });
+    }
+
+    /** The body of {@link #announce}, on the server thread. */
+    private static void deliver(ModuleContext ctx, PunishmentAnnouncement announcement) {
         Collection<PlayerHandle> online;
         try {
             online = ctx.platform().players().onlinePlayers();
@@ -957,15 +987,21 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         Component line = Msg.legacy(announcement.line());
         for (PlayerHandle player : online) {
-            if (!announcement.visibleTo(
-                    player.hasPermission(PunishmentAnnouncement.NOTIFY_PERMISSION),
-                    player.hasPermission(PunishmentAnnouncement.ADMIN_PERMISSION))) {
+            boolean visible;
+            try {
+                visible = announcement.visibleTo(
+                        player.hasPermission(PunishmentAnnouncement.NOTIFY_PERMISSION),
+                        player.hasPermission(PunishmentAnnouncement.ADMIN_PERMISSION));
+            } catch (RuntimeException gone) {
+                // Asking a player who left between the snapshot and the check. Silence is the
+                // right answer: they are not online to be told.
                 continue;
             }
+            if (!visible) continue;
             try {
                 player.sendMessage(line);
             } catch (RuntimeException gone) {
-                // Somebody who left between the snapshot and the send. The ordinary race, which
+                // Somebody who left between the check and the send. The ordinary race, which
                 // every handle already tolerates; this is the belt for a platform whose braces
                 // slipped.
             }

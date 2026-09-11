@@ -458,6 +458,49 @@ class PunishmentAnnounceTest {
     }
 
     @Test
+    @DisplayName("the audience is computed on the server thread, not the tunnel's")
+    void announcementHopsToTheServerThread() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+            harness.platform.deferringMainThread();
+
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Steve"))
+                    .put("targetName", "Steve")
+                    .put("reason", "griefing")
+                    .build());
+
+            assertEquals(1, harness.platform.pendingMainThread(),
+                    "one hop per announcement, not one per player");
+            assertTrue(bystander.messageText().isEmpty(),
+                    "Bukkit's Player#hasPermission walks a permissible whose attachments are "
+                            + "rebuilt on the main thread, so reading it from the tunnel thread "
+                            + "can answer wrongly and show a silent punishment to somebody who "
+                            + "does not hold the node");
+
+            assertEquals(1, harness.platform.runMainThread());
+            assertTrue(told(bystander, "banned"), bystander.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("a command announcement runs inline, because the caller is already on that thread")
+    void commandAnnouncementIsNotDeferred() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "ban", Arrays.asList("Steve", "griefing"));
+
+            assertTrue(told(bystander, "banned"),
+                    "Bukkit's main-thread executor runs inline when it is already there, so a "
+                            + "moderator sees no deferral");
+        }
+    }
+
+    @Test
     @DisplayName("a ban that names a country announces nothing, because it names no player")
     void geoBansAreNotAnnounced() {
         try (PunishmentsHarness harness = announcing()) {

@@ -45,8 +45,8 @@ import java.util.function.Function;
  *
  * <p><strong>Everything runs inline.</strong> {@link #mainThread()}, {@code runOnEntityThread} and
  * {@code runLater} all execute on the calling thread, so a test needs no latch to observe a hop.
- * {@link #deferringLaterTasks()} is the exception, and exists for the one case where the delay
- * itself is the behaviour under test.
+ * {@link #deferringLaterTasks()} and {@link #deferringMainThread()} are the exceptions, and exist
+ * for the cases where the hop itself is the behaviour under test.
  *
  * <p>Thread-safe.
  */
@@ -68,6 +68,9 @@ public final class FakePlatform implements PlatformFacade {
     private volatile Function<PlayerHandle, Payload> describer;
     private volatile CompletableFuture<Payload> traceProbe;
     private volatile boolean deferLater;
+    private volatile boolean deferMainThread;
+    private final List<Runnable> mainThreadQueue =
+            Collections.synchronizedList(new ArrayList<Runnable>());
     private volatile RuntimeException dispatchFailure;
     private volatile CompletableFuture<String> dispatchAnswer;
     private final java.util.Set<String> unknownCommands =
@@ -190,6 +193,37 @@ public final class FakePlatform implements PlatformFacade {
         return this;
     }
 
+    /**
+     * Makes {@link #mainThread()} queue rather than run inline.
+     *
+     * <p>Off by default, for the same reason {@code runLater} is. On, it is how a test proves work
+     * really was handed to the server thread rather than done on the caller's: with the queue held,
+     * anything that took the hop has visibly not happened yet. {@link #runMainThread()} releases
+     * it.
+     */
+    public FakePlatform deferringMainThread() {
+        this.deferMainThread = true;
+        return this;
+    }
+
+    /** Runs everything {@link #deferringMainThread()} queued, oldest first. */
+    public int runMainThread() {
+        List<Runnable> due;
+        synchronized (mainThreadQueue) {
+            due = new ArrayList<Runnable>(mainThreadQueue);
+            mainThreadQueue.clear();
+        }
+        for (Runnable task : due) {
+            task.run();
+        }
+        return due.size();
+    }
+
+    /** How many tasks {@link #deferringMainThread()} is currently holding. */
+    public int pendingMainThread() {
+        return mainThreadQueue.size();
+    }
+
     /** Runs everything {@link #deferringLaterTasks()} queued, oldest first. */
     public int runDeferred() {
         List<Deferred> due;
@@ -309,6 +343,10 @@ public final class FakePlatform implements PlatformFacade {
         return new Executor() {
             @Override
             public void execute(Runnable command) {
+                if (deferMainThread) {
+                    mainThreadQueue.add(command);
+                    return;
+                }
                 command.run();
             }
         };
