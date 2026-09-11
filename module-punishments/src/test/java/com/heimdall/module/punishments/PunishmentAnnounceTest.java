@@ -558,6 +558,7 @@ class PunishmentAnnounceTest {
         try (PunishmentsHarness harness = announcing()) {
             FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
             harness.platform.deferringMainThread();
+            harness.platform.clearMainThreadHops();
 
             harness.tunnel.push("punish.apply", Payload.builder()
                     .put("type", "ban")
@@ -566,8 +567,9 @@ class PunishmentAnnounceTest {
                     .put("reason", "griefing")
                     .build());
 
-            assertEquals(1, harness.platform.pendingMainThread(),
+            assertEquals(1, harness.platform.mainThreadHops(),
                     "one hop per announcement, not one per player");
+            assertEquals(1, harness.platform.pendingMainThread());
             assertTrue(bystander.messageText().isEmpty(),
                     "Bukkit's Player#hasPermission walks a permissible whose attachments are "
                             + "rebuilt on the main thread, so reading it from the tunnel thread "
@@ -580,18 +582,63 @@ class PunishmentAnnounceTest {
     }
 
     @Test
-    @DisplayName("a command announcement runs inline, because the caller is already on that thread")
-    void commandAnnouncementIsNotDeferred() {
+    @DisplayName("a command announcement takes the hop too, and Bukkit runs it inline")
+    void commandAnnouncementAlsoHops() {
         try (PunishmentsHarness harness = announcing()) {
             FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
             harness.platform.join(FakePlayer.named("Steve"));
+            harness.platform.clearMainThreadHops();
 
             harness.module.onStaffCommand(
                     FakeCommandSource.console(), "ban", Arrays.asList("Steve", "griefing"));
 
+            assertEquals(1, harness.platform.mainThreadHops(),
+                    "the command path is not exempt: on Bukkit it is usually already on the main "
+                            + "thread and the executor runs inline, but 'usually' is not a thing "
+                            + "to gate a permission read on, and a console command dispatched "
+                            + "from the console thread is the exception");
             assertTrue(told(bystander, "banned"),
-                    "Bukkit's main-thread executor runs inline when it is already there, so a "
-                            + "moderator sees no deferral");
+                    "and inline means the moderator sees no deferral");
+        }
+    }
+
+    @Test
+    @DisplayName("an enforcer asks for the server thread not at all, having nothing to say")
+    void suppressedAnnouncementDoesNotEvenHop() {
+        try (PunishmentsHarness harness = harnessWith(false, ServerRole.ENFORCER)) {
+            harness.platform.join(FakePlayer.named("Notch"));
+            harness.platform.join(FakePlayer.named("Steve"));
+            harness.platform.clearMainThreadHops();
+
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "mute", Arrays.asList("Steve", "spam"));
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Steve"))
+                    .put("targetName", "Steve")
+                    .build());
+
+            assertEquals(0, harness.platform.mainThreadHops(),
+                    "the role check comes before the hop, so a backend behind a proxy does not "
+                            + "put a task on the tick loop per punishment to decide it has "
+                            + "nothing to say");
+        }
+    }
+
+    @Test
+    @DisplayName("a punishment nobody is announced for does not reach the server thread either")
+    void nothingToSayDoesNotHop() {
+        try (PunishmentsHarness harness = announcing()) {
+            harness.platform.join(FakePlayer.named("Notch"));
+            harness.platform.clearMainThreadHops();
+
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "geo")
+                    .put("country", "DE")
+                    .build());
+
+            assertEquals(0, harness.platform.mainThreadHops(),
+                    "there is no line, so there is nothing to compute an audience for");
         }
     }
 

@@ -71,6 +71,8 @@ public final class FakePlatform implements PlatformFacade {
     private volatile boolean deferMainThread;
     private final List<Runnable> mainThreadQueue =
             Collections.synchronizedList(new ArrayList<Runnable>());
+    private final java.util.concurrent.atomic.AtomicInteger mainThreadHops =
+            new java.util.concurrent.atomic.AtomicInteger();
     private volatile RuntimeException dispatchFailure;
     private volatile CompletableFuture<String> dispatchAnswer;
     private final java.util.Set<String> unknownCommands =
@@ -224,6 +226,23 @@ public final class FakePlatform implements PlatformFacade {
         return mainThreadQueue.size();
     }
 
+    /**
+     * How many times anything has asked for the server thread, deferred or not.
+     *
+     * <p>Counted separately from {@link #pendingMainThread()} because inline execution is the
+     * default here, and a test that only watched the queue could not tell "hopped, and the fake
+     * ran it immediately" from "never hopped at all". Those are the same observable outcome on
+     * this fake and very different ones on Bukkit, which is the platform the hop exists for.
+     */
+    public int mainThreadHops() {
+        return mainThreadHops.get();
+    }
+
+    /** Forgets the hop count, so one test can measure two phases in turn. */
+    public void clearMainThreadHops() {
+        mainThreadHops.set(0);
+    }
+
     /** Runs everything {@link #deferringLaterTasks()} queued, oldest first. */
     public int runDeferred() {
         List<Deferred> due;
@@ -343,6 +362,7 @@ public final class FakePlatform implements PlatformFacade {
         return new Executor() {
             @Override
             public void execute(Runnable command) {
+                mainThreadHops.incrementAndGet();
                 if (deferMainThread) {
                     mainThreadQueue.add(command);
                     return;
