@@ -188,9 +188,84 @@ class PunishmentAnnounceTest {
             assertTrue(told(bystander, "served their time"),
                     "a revoke reason is not a duration, so it must survive the parse intact");
 
+            // Re-banned first: the silence decision is made against the row being lifted, so with
+            // nothing active the verb answers "no active ban" and never reaches the gate.
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "ban", Arrays.asList("Steve", "again"));
             FakeCommandSource moderator = FakeCommandSource.player("Adam");
             harness.module.onStaffCommand(moderator, "unban", Arrays.asList("Steve", "-s"));
             assertTrue(moderator.wasTold(SilenceDecision.REFUSAL_MESSAGE));
+        }
+    }
+
+    @Test
+    @DisplayName("lifting a silent ban is announced as quietly as the ban was, from the command too")
+    void commandRevokeInheritsTheLiftedRowsSilence() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
+            FakePlayer notify = harness.platform.join(
+                    FakePlayer.named("Mod").grant(PunishmentAnnouncement.NOTIFY_PERMISSION));
+            harness.platform.join(FakePlayer.named("Steve"));
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "ban", Arrays.asList("Steve", "-s", "griefing"));
+            int before = linesTo(notify);
+
+            FakeCommandSource moderator = FakeCommandSource.player("Adam");
+            harness.module.onStaffCommand(moderator, "unban", Arrays.asList("Steve"));
+
+            assertFalse(moderator.wasTold(SilenceDecision.REFUSAL_MESSAGE),
+                    "the guild announces by default, but this row does not, and following the row "
+                            + "is not an override");
+            assertTrue(ordinary.messageText().isEmpty(),
+                    "announcing the unban tells the server about the ban it was hiding: "
+                            + ordinary.messageText());
+            assertEquals(before + 1, linesTo(notify));
+            assertTrue(told(notify, "unbanned"));
+            assertTrue(told(notify, "(silent)"));
+        }
+    }
+
+    @Test
+    @DisplayName("-p on a silent row needs the override node, and then announces the unban")
+    void loudlyLiftingASilentBanIsPrivileged() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
+            harness.platform.join(FakePlayer.named("Steve"));
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "ban", Arrays.asList("Steve", "-s", "griefing"));
+
+            FakeCommandSource unprivileged = FakeCommandSource.player("Adam");
+            harness.module.onStaffCommand(unprivileged, "unban", Arrays.asList("Steve", "-p"));
+            assertTrue(unprivileged.wasTold(SilenceDecision.REFUSAL_MESSAGE));
+            assertTrue(ordinary.messageText().isEmpty(), "and the row is still there, unlifted");
+            assertNotNull(harness.module.mirrorForTest().get("ban:" + uuidOf("Steve")));
+
+            FakeCommandSource privileged =
+                    FakeCommandSource.player("Boss").grant(SilenceDecision.OVERRIDE_PERMISSION);
+            harness.module.onStaffCommand(privileged, "unban", Arrays.asList("Steve", "-p"));
+            assertTrue(told(ordinary, "unbanned"), ordinary.messageText().toString());
+            assertFalse(told(ordinary, "(silent)"));
+        }
+    }
+
+    @Test
+    @DisplayName("-s on an announced row is the override in the other direction")
+    void quietlyLiftingAnAnnouncedBanIsPrivilegedToo() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
+            FakePlayer notify = harness.platform.join(
+                    FakePlayer.named("Mod").grant(PunishmentAnnouncement.NOTIFY_PERMISSION));
+            harness.platform.join(FakePlayer.named("Steve"));
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "ban", Arrays.asList("Steve", "griefing"));
+            int ordinaryBefore = linesTo(ordinary);
+
+            FakeCommandSource privileged =
+                    FakeCommandSource.player("Boss").grant(SilenceDecision.OVERRIDE_PERMISSION);
+            harness.module.onStaffCommand(privileged, "unban", Arrays.asList("Steve", "-s"));
+
+            assertEquals(ordinaryBefore, linesTo(ordinary), ordinary.messageText().toString());
+            assertTrue(told(notify, "(silent)"));
         }
     }
 

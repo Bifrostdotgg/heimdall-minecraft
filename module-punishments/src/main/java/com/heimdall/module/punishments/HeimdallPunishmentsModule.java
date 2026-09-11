@@ -346,13 +346,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [reason]"));
                 return;
             }
-            SilenceDecision decision = silence(source, options.silent, options.publicFlag, settings);
-            if (decision.refused()) {
-                source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
-                return;
-            }
+            // The flags travel rather than being resolved here: a revoke's default is the
+            // silence of the row it lifts, and which row that is is not known until the target
+            // has been resolved and matched. See submitRevoke.
             String reason = options.rest.size() > 1 ? join(options.rest, 1) : "";
-            revoke(source, type, options.rest.get(0), reason, decision.silent());
+            revoke(source, type, options.rest.get(0), reason, options.silent, options.publicFlag);
             return;
         }
         PunishmentParser.Parsed parsed;
@@ -491,16 +489,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     private void revoke(final CommandSource source, final String type, final String target,
-            final String reason, final boolean silent) {
+            final String reason, final boolean silentFlag, final boolean publicFlag) {
         ModuleContext ctx = this.context;
         PlayerHandle online = ctx.platform().players().byName(target).orElse(null);
         if (online != null) {
-            submitRevoke(source, type, online.uuid().toString(), online.name(), reason, silent);
+            submitRevoke(source, type, online.uuid().toString(), online.name(), reason,
+                    silentFlag, publicFlag);
             return;
         }
         LastIpStore.PlayerIps seen = lastIps == null ? null : lastIps.byName(target);
         if (seen != null) {
-            submitRevoke(source, type, seen.uuid, seen.name, reason, silent);
+            submitRevoke(source, type, seen.uuid, seen.name, reason, silentFlag, publicFlag);
             return;
         }
         source.sendMessage(Msg.legacy("§eResolving §f" + target + "§e..."));
@@ -508,18 +507,37 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             if (failure != null || resolved == null) {
                 ActivePunishment local = findByName(target, revokeTypes(type));
                 if (local != null) {
-                    submitRevoke(source, type, local.targetUuid, local.targetName, reason, silent);
+                    submitRevoke(source, type, local.targetUuid, local.targetName, reason,
+                            silentFlag, publicFlag);
                     return;
                 }
                 source.sendMessage(Msg.legacy("§cCould not resolve §f" + target));
                 return;
             }
-            submitRevoke(source, type, resolved.uuid(), resolved.username(), reason, silent);
+            submitRevoke(source, type, resolved.uuid(), resolved.username(), reason,
+                    silentFlag, publicFlag);
         });
     }
 
+    /**
+     * Files the revoke and announces it.
+     *
+     * <p><strong>A revoke's silence defaults to the silence of the punishment it lifts, not to the
+     * guild's setting.</strong> Announcing "Adam unbanned Steve" on a server that was never told
+     * Steve was banned discloses the very thing the silent ban was hiding, and it discloses it
+     * later, out of context, to everybody. The tunnel path has always read the flag off the row;
+     * this is the same rule for a moderator typing the command.
+     *
+     * <p>{@code -s} and {@code -p} still override it, and still need
+     * {@link SilenceDecision#OVERRIDE_PERMISSION} to do so - against this default rather than
+     * against the guild's, so lifting a silent ban loudly is the privileged act it should be.
+     *
+     * <p>The first match decides when a verb lifts several rows at once ({@code /unban} takes a
+     * ban and an ipban together). They are one player's punishments and the announcement is one
+     * line, so there is one flag to read and the primary row is the one to read it from.
+     */
     private void submitRevoke(CommandSource source, String type, String uuid, String name,
-            String reason, boolean silent) {
+            String reason, boolean silentFlag, boolean publicFlag) {
         List<ActivePunishment> matches;
         if ("rollback".equals(type)) {
             ActivePunishment latest = latestActive(uuid);
@@ -531,6 +549,13 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         if (matches.isEmpty()) {
             source.sendMessage(Msg.legacy("§eNo active " + typeLabel(type) + " for §f" + name));
+            return;
+        }
+        SilenceDecision decision = SilenceDecision.decide(silentFlag, publicFlag,
+                matches.get(0).silent,
+                source.hasPermission(SilenceDecision.OVERRIDE_PERMISSION));
+        if (decision.refused()) {
+            source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
             return;
         }
         long now = System.currentTimeMillis();
@@ -559,7 +584,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         source.sendMessage(Msg.legacy("§aRevoked " + matches.size() + " punishment(s) for §f" + name));
         // Once, on the verb the moderator typed, rather than once per matching row: /unban lifts a
         // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
-        announce(PunishmentAnnouncement.revoked(type, source.name(), name, reason, silent));
+        announce(PunishmentAnnouncement.revoked(type, source.name(), name, reason,
+                decision.silent()));
         flushSoon();
     }
 
