@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.BuildConstants;
+import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
@@ -363,6 +364,48 @@ class AdminCommandTest {
     }
 
     @Nested
+    @DisplayName("punishment verbs")
+    class Punishments {
+
+        @Test
+        @DisplayName("every verb reaches the module, with its args and flags intact")
+        void everyVerbReachesTheModule() {
+            RecordingPunishments punishments = new RecordingPunishments();
+            install(context().punishments(punishments));
+
+            say("ban", "Steve", "-s", "1d", "griefing");
+            say("unban", "Steve");
+            say("history", "Steve");
+
+            assertEquals(Arrays.asList("ban", "unban", "history"), punishments.verbs);
+            assertEquals(Arrays.asList("Steve", "-s", "1d", "griefing"), punishments.args.get(0),
+                    "flags are the module's to parse, so the tree must not swallow or reorder them");
+        }
+
+        @Test
+        @DisplayName("a dispatch failure names the exception type, never a bare word")
+        void failureIsLegible() {
+            install(context().punishments(new ThrowingPunishments()));
+
+            List<String> lines = say("ban", "Steve");
+
+            assertTrue(anyContains(lines, "IllegalStateException"),
+                    "the reflective version reported NoSuchFieldException's message, which was the "
+                            + "single word INSTANCE and named nothing an operator could act on");
+            assertTrue(anyContains(lines, "the outbox is closed"));
+        }
+
+        @Test
+        @DisplayName("without the module they say so rather than doing nothing")
+        void withoutTheModule() {
+            install();
+
+            assertTrue(anyContains(say("ban", "Steve"), "not running"));
+            assertTrue(anyContains(say("history", "Steve"), "not running"));
+        }
+    }
+
+    @Nested
     @DisplayName("cache")
     class Cache {
 
@@ -561,6 +604,38 @@ class AdminCommandTest {
                     .stage("the bot says they are not whitelisted")
                     .message("You are not whitelisted on this server.")
                     .build();
+        }
+    }
+
+    /** A punishments module that records what the tree handed it. */
+    private static final class RecordingPunishments implements PunishmentAdmin {
+
+        private final List<String> verbs = new ArrayList<String>();
+        private final List<List<String>> args = new ArrayList<List<String>>();
+
+        @Override
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @Override
+        public void onStaffCommand(CommandSource source, String verb, List<String> arguments) {
+            verbs.add(verb);
+            args.add(new ArrayList<String>(arguments));
+        }
+    }
+
+    /** A punishments module that blows up, so the tree's own error path can be read. */
+    private static final class ThrowingPunishments implements PunishmentAdmin {
+
+        @Override
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @Override
+        public void onStaffCommand(CommandSource source, String verb, List<String> args) {
+            throw new IllegalStateException("the outbox is closed");
         }
     }
 

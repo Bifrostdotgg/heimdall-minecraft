@@ -1,5 +1,6 @@
 package com.heimdall.module.punishments;
 
+import com.heimdall.core.admin.PunishmentAdmin;
 import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
@@ -44,7 +45,7 @@ import net.kyori.adventure.text.Component;
 /**
  * Native punishments: local mirror, login/chat/command gates, /hd ban family, durable outage queue.
  */
-public final class HeimdallPunishmentsModule implements HeimdallModule {
+public final class HeimdallPunishmentsModule implements HeimdallModule, PunishmentAdmin {
 
     public static final String ID = "punishments";
 
@@ -75,7 +76,23 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
     private final AtomicBoolean flushAgain = new AtomicBoolean();
     private final List<Registration> aliasBinds = new CopyOnWriteArrayList<Registration>();
 
-    static volatile HeimdallPunishmentsModule INSTANCE;
+    /**
+     * The enabled instance, or {@code null}.
+     *
+     * <p><strong>Public because two callers can only reach this module reflectively, and
+     * {@code Field#get} needs a public field on a public class.</strong> Those two are
+     * {@code BukkitPunishmentGuard} (in {@code :platform-bukkit}, which must not compile against a
+     * feature module) and {@code OffendCommand}'s {@code nativeReplaceActive} (in
+     * {@code :module-offenses}, which must not depend on a sibling module). Both were silently
+     * dead while this field was package-private: {@code getField} sees only public members, so the
+     * freeze and muted-sign guards never fired and {@code /offend} always reported the dispatch
+     * path. Narrowing it again re-breaks them without a compiler error, which is why the reason is
+     * written here rather than left to a reviewer to reconstruct.
+     *
+     * <p>The admin command tree does <em>not</em> use this. It goes through {@link PunishmentAdmin},
+     * which the compiler checks - see that interface for what the reflective version cost.
+     */
+    public static volatile HeimdallPunishmentsModule INSTANCE;
 
     @Override
     public String id() {
@@ -267,7 +284,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         aliasBinds.add(handle);
     }
 
-    void onStaffCommand(CommandSource source, String type, List<String> args) {
+    /** Whether this module is enabled right now - {@link PunishmentAdmin}'s half of the contract. */
+    @Override
+    public boolean isAvailable() {
+        return context != null;
+    }
+
+    @Override
+    public void onStaffCommand(CommandSource source, String type, List<String> args) {
         ModuleContext ctx = this.context;
         if (ctx == null) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());

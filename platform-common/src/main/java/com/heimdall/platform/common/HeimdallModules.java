@@ -28,7 +28,8 @@ import com.heimdall.module.whitelist.HeimdallWhitelistModule;
  *
  * <h2>The same reasoning is why the admin surfaces are introduced here</h2>
  *
- * <p>Three admin verbs — {@code test}, {@code cache}, {@code offense} — are about a specific module,
+ * <p>Several admin verbs - {@code test}, {@code cache}, {@code offense}, and the whole
+ * {@code ban}/{@code mute}/{@code history} family - are about a specific module,
  * and core cannot name one. So core declares small interfaces, the modules implement them, and this
  * class, which is the one place that already depends on both sides, hands the implementations to the
  * command tree. A module absent from a build simply never arrives, and the command tree falls back
@@ -80,7 +81,8 @@ public final class HeimdallModules {
         runtime.modules().register(whitelist);
         runtime.modules().register(roleSync);
         runtime.modules().register(offenses);
-        runtime.modules().register(new HeimdallPunishmentsModule());
+        HeimdallPunishmentsModule punishments = new HeimdallPunishmentsModule();
+        runtime.modules().register(punishments);
         runtime.modules().register(new HeimdallConsoleModule());
         // The Discord chat bridge. Registered like every other module and eligible on every role —
         // whether an instance relays its own chat is its `relayChat` setting rather than an
@@ -89,6 +91,6 @@ public final class HeimdallModules {
 
         // The modules themselves implement the admin interfaces. A separate adapter object would
         // only be a place for the two to disagree about whether a module is running.
-        admin.whitelist(whitelist).offenses(offenses);
+        admin.whitelist(whitelist).offenses(offenses).punishments(punishments);
     }
 }

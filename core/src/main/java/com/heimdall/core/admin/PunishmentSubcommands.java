@@ -119,24 +119,38 @@ final class PunishmentSubcommands {
 
         @Override
         public void run(CommandSource source, List<String> args, AdminContext context) {
-            delegate(source, type, args);
+            delegate(source, type, args, context);
         }
     }
 
-    private static void delegate(CommandSource source, String type, List<String> args) {
+    /**
+     * Hands one verb to the punishments module.
+     *
+     * <p>Through {@link PunishmentAdmin}, which the wiring in {@code :platform-common} fills in,
+     * rather than through reflection. The reflective version looked up a field
+     * ({@code HeimdallPunishmentsModule.INSTANCE}) that was declared package-private, so
+     * {@code getField} threw {@code NoSuchFieldException("INSTANCE")} before any command could run
+     * and every punishment verb answered "Could not issue the punishment: INSTANCE". A compiler
+     * checks an interface; nothing checks a string naming a field in another module.
+     *
+     * <p>The remaining catch is for a module that throws, not for a lookup that cannot resolve, and
+     * it names the exception type as well as its message: a {@code NullPointerException} carries no
+     * message at all, and "Could not issue the punishment: null" is the same dead end by another
+     * spelling.
+     */
+    private static void delegate(CommandSource source, String type, List<String> args,
+            AdminContext context) {
+        PunishmentAdmin punishments = context.punishments();
+        if (!punishments.isAvailable()) {
+            source.sendMessage(Msg.legacy("§eThe punishments module is not running."));
+            return;
+        }
         try {
-            Class<?> module = Class.forName("com.heimdall.module.punishments.HeimdallPunishmentsModule");
-            Object instance = module.getField("INSTANCE").get(null);
-            if (instance == null) {
-                source.sendMessage(Msg.legacy("§eThe punishments module is not running."));
-                return;
-            }
-            module.getDeclaredMethod("onStaffCommand", CommandSource.class, String.class, List.class)
-                    .invoke(instance, source, type, args);
-        } catch (ClassNotFoundException e) {
-            source.sendMessage(Msg.legacy("§ePunishments are not in this build."));
-        } catch (Exception e) {
-            source.sendMessage(Msg.legacy("§cCould not issue the punishment: " + e.getMessage()));
+            punishments.onStaffCommand(source, type, args);
+        } catch (RuntimeException e) {
+            source.sendMessage(Msg.legacy("§cCould not issue the punishment: "
+                    + e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : ": " + e.getMessage())));
         }
     }
 }
