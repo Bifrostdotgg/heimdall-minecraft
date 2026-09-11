@@ -340,6 +340,71 @@ class PunishmentAnnounceTest {
     }
 
     @Test
+    @DisplayName("a manual revoke is announced, with or without the cause on the frame")
+    void manualRevokeAnnounces() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+            banInMirror(harness, "Steve");
+            banInMirror(harness, "Alex");
+
+            harness.tunnel.push("punish.revoke", revokeFrame("Steve", "manual"));
+            harness.tunnel.push("punish.revoke", revokeFrame("Alex", null));
+
+            assertEquals(2, linesTo(bystander),
+                    "an absent cause is an older bot, and every revoke an older bot sends is a "
+                            + "lifting: " + bystander.messageText());
+            assertTrue(told(bystander, "unbanned"));
+        }
+    }
+
+    @Test
+    @DisplayName("an expiry is never announced, because nothing decided anything")
+    void expiryIsNotAnnounced() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+            banInMirror(harness, "Steve");
+
+            harness.tunnel.push("punish.revoke", revokeFrame("Steve", "expiry"));
+
+            assertTrue(bystander.messageText().isEmpty(),
+                    "every tempban would otherwise produce a second line hours later, attributed "
+                            + "to nobody: " + bystander.messageText());
+            assertNull(harness.module.mirrorForTest().get("ban:" + uuidOf("Steve")),
+                    "the eviction is not conditional; only the chat line is");
+        }
+    }
+
+    @Test
+    @DisplayName("an override is never announced, because the replacement announces itself")
+    void overrideIsNotAnnounced() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+            banInMirror(harness, "Steve");
+
+            harness.tunnel.push("punish.revoke", revokeFrame("Steve", "override"));
+
+            assertTrue(bystander.messageText().isEmpty(),
+                    "an 'unbanned' beside the replacement's own line reads as the moderator "
+                            + "having undone their own ban: " + bystander.messageText());
+        }
+    }
+
+    @Test
+    @DisplayName("the cause is matched loosely, and an unknown one still announces")
+    void causeMatching() {
+        assertTrue(HeimdallPunishmentsModule.announceableRevoke(null));
+        assertTrue(HeimdallPunishmentsModule.announceableRevoke(""));
+        assertTrue(HeimdallPunishmentsModule.announceableRevoke("manual"));
+        assertFalse(HeimdallPunishmentsModule.announceableRevoke("expiry"));
+        assertFalse(HeimdallPunishmentsModule.announceableRevoke(" EXPIRY "));
+        assertFalse(HeimdallPunishmentsModule.announceableRevoke("Override"));
+        assertTrue(HeimdallPunishmentsModule.announceableRevoke("amnesty"),
+                "a cause this build has never heard of is likelier a lifting with a new name than "
+                        + "a sweep, and staying quiet would mean silently stopping the day the bot "
+                        + "renames a value");
+    }
+
+    @Test
     @DisplayName("lifting a silent ban is announced as quietly as the ban was")
     void tunnelRevokeInheritsSilence() {
         try (PunishmentsHarness harness = announcing()) {
@@ -616,6 +681,28 @@ class PunishmentAnnounceTest {
                         .put("rootAliases", false)
                         .put("silentByDefault", silentByDefault)
                         .build());
+    }
+
+    /** A revoke frame as the bot sends it, with or without the additive cause. */
+    private static Payload revokeFrame(String target, String cause) {
+        Payload.Builder frame = Payload.builder()
+                .put("type", "ban")
+                .put("targetUuid", uuidOf(target))
+                .put("revokedBy", cause == null || "manual".equals(cause) ? "Adam" : "");
+        if (cause != null) {
+            frame.put("revokeCause", cause);
+        }
+        return frame.build();
+    }
+
+    /** An active ban on the mirror, as a sync or an apply would have left one. */
+    private static void banInMirror(PunishmentsHarness harness, String target) {
+        ActivePunishment ban = new ActivePunishment();
+        ban.type = "ban";
+        ban.targetUuid = uuidOf(target);
+        ban.targetName = target;
+        ban.reason = "griefing";
+        harness.module.mirrorForTest().record("ban:" + ban.targetUuid, ban);
     }
 
     /** The operation id of the only punishment queued for the bot. */

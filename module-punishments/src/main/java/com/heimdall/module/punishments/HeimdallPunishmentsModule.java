@@ -703,6 +703,38 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         };
     }
 
+    /**
+     * Whether a {@code punish.revoke} frame describes something a server should be told about.
+     *
+     * <p>A revoke frame carries {@code revokeCause}, and only {@code manual} is a moderator
+     * deciding to lift a punishment. The other two are bookkeeping, and announcing them would be
+     * worse than noise:
+     *
+     * <ul>
+     *   <li>{@code expiry} - a temporary ban reached its end. Every tempban would produce a second
+     *       chat line hours or days later, attributed to nobody, telling a server something it can
+     *       already see. Nothing decided anything.
+     *   <li>{@code override} - the punishment was replaced by a newer one for the same player. The
+     *       apply frame for the replacement is the event, and it announces itself; a paired
+     *       "unbanned" beside it reads as the moderator having undone their own ban.
+     * </ul>
+     *
+     * <p>An absent cause is treated as {@code manual}. That is the only safe reading: it is what
+     * an older bot sends, and every revoke an older bot sends is a lifting, since expiry and
+     * override are what the field was added to distinguish. Unknown causes are announced too, for
+     * the same reason - a new cause the plugin has never heard of is more likely to be a lifting
+     * with a name than a sweep, and a plugin that stayed quiet for anything it did not recognise
+     * would silently stop announcing the day the bot renamed the value.
+     *
+     * <p>The bot sends an empty {@code revokedBy} for non-manual causes, so an announcement that
+     * slipped through would be attributed to "Console", which is a second reason not to make one.
+     */
+    static boolean announceableRevoke(String revokeCause) {
+        if (revokeCause == null) return true;
+        String cause = revokeCause.trim().toLowerCase(Locale.ROOT);
+        return !"expiry".equals(cause) && !"override".equals(cause);
+    }
+
     /** Records an operation id as ours, dropping the oldest once {@link #ECHO_MEMORY} is full. */
     private void rememberIssued(String opId) {
         if (opId == null || opId.isEmpty()) return;
@@ -896,6 +928,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 ActivePunishment lifted = mirror.get(key);
                 mirror.evict(key);
                 if (lifted == null) return;
+                if (!announceableRevoke(payload.string("revokeCause", ""))) return;
                 announce(PunishmentAnnouncement.revoked(lifted.type,
                         payload.string("revokedBy", ""), lifted.targetName,
                         payload.string("reason", ""), lifted.silent));
