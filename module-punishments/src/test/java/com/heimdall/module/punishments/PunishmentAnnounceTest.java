@@ -319,18 +319,85 @@ class PunishmentAnnounceTest {
                 java.time.Instant.ofEpochMilli(now + 3_600_000L).toString(), now));
     }
 
+    @Test
+    @DisplayName("a backend behind a proxy announces nothing, from either path")
+    void enforcerNeverAnnounces() {
+        try (PunishmentsHarness harness = harnessWith(false, ServerRole.ENFORCER)) {
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
+            FakePlayer notify = harness.platform.join(
+                    FakePlayer.named("Mod").grant(PunishmentAnnouncement.NOTIFY_PERMISSION));
+            FakePlayer admin = harness.platform.join(
+                    FakePlayer.named("Boss").grant(PunishmentAnnouncement.ADMIN_PERMISSION));
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "mute", Arrays.asList("Steve", "spam"));
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Steve"))
+                    .put("targetName", "Steve")
+                    .put("reason", "griefing")
+                    .put("issuedByName", "Adam")
+                    .build());
+
+            assertTrue(ordinary.messageText().isEmpty(),
+                    "the proxy in front already told everyone, including this player: "
+                            + ordinary.messageText());
+            assertTrue(notify.messageText().isEmpty(), notify.messageText().toString());
+            assertTrue(admin.messageText().isEmpty(),
+                    "not even staff: a second copy of a line they already have is not more "
+                            + "information");
+        }
+    }
+
+    @Test
+    @DisplayName("a gatekeeper announces, because it is the outermost instance")
+    void gatekeeperAnnounces() {
+        try (PunishmentsHarness harness = harnessWith(false, ServerRole.GATEKEEPER)) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Steve"))
+                    .put("targetName", "Steve")
+                    .put("reason", "griefing")
+                    .put("issuedByName", "Adam")
+                    .build());
+
+            assertTrue(told(bystander, "banned"), bystander.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("an enforcer still applies and records what it does not announce")
+    void enforcerStillPunishes() {
+        try (PunishmentsHarness harness = harnessWith(false, ServerRole.ENFORCER)) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "kick")
+                    .put("targetUuid", steve.uuid().toString())
+                    .put("targetName", "Steve")
+                    .put("reason", "griefing")
+                    .build());
+
+            assertEquals(1, steve.kickReasons().size(),
+                    "silence is about the chat line, never about whether the punishment lands");
+        }
+    }
+
     // ── fixtures ─────────────────────────────────────────────────────────────
 
     private PunishmentsHarness announcing() {
-        return harnessWith(false);
+        return harnessWith(false, ServerRole.STANDALONE);
     }
 
     private PunishmentsHarness silentByDefault() {
-        return harnessWith(true);
+        return harnessWith(true, ServerRole.STANDALONE);
     }
 
-    private PunishmentsHarness harnessWith(boolean silentByDefault) {
-        return new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+    private PunishmentsHarness harnessWith(boolean silentByDefault, ServerRole role) {
+        return new PunishmentsHarness(dataDir, role)
                 .enableWith(Payload.builder()
                         .put("mode", "replace")
                         .put("ipSalt", "replace-salt")

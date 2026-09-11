@@ -47,6 +47,10 @@ import net.kyori.adventure.text.Component;
 
 /**
  * Native punishments: local mirror, login/chat/command gates, /hd ban family, durable outage queue.
+ *
+ * <p>Chat announcements belong to the outermost instance a player is connected through: a
+ * gatekeeper or standalone server announces, an enforcer backend never does. See
+ * {@link #announcesHere(ServerRole)}.
  */
 public final class HeimdallPunishmentsModule implements HeimdallModule, PunishmentAdmin {
 
@@ -819,6 +823,30 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     /**
+     * Whether this instance is the one that announces, which is a fact about its role.
+     *
+     * <p><strong>The outermost Heimdall instance a player is connected through owns the
+     * announcement.</strong> A {@link ServerRole#GATEKEEPER} proxy and a
+     * {@link ServerRole#STANDALONE} server always announce; a {@link ServerRole#ENFORCER} backend
+     * never does, silent or not.
+     *
+     * <p>Without that rule a proxied network announces everything twice: the proxy broadcasts to
+     * everybody online, the bot fans {@code punish.apply} out to the backends, and each backend
+     * broadcasts to the same players again. Nothing is lost by the backend staying quiet, because
+     * every player it can see is connected through the proxy, which can see them too. The rule has
+     * to be local and static rather than negotiated: a backend cannot know whether the proxy in
+     * front of it runs Heimdall, and a network-wide election is a lot of machinery for one chat
+     * line.
+     *
+     * <p>A network whose proxy does <em>not</em> run Heimdall is the case this costs. Those
+     * backends resolve as {@code STANDALONE} rather than {@code ENFORCER} unless an operator has
+     * said otherwise, so they keep announcing; see {@code ServerRole} for how the role resolves.
+     */
+    private static boolean announcesHere(ServerRole role) {
+        return role != ServerRole.ENFORCER;
+    }
+
+    /**
      * Shows one line to everybody who is allowed to see it.
      *
      * <p>Called from a command handler (the server's main thread on the Bukkit family) and from
@@ -834,6 +862,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private void announce(PunishmentAnnouncement announcement) {
         ModuleContext ctx = this.context;
         if (ctx == null || announcement == null) return;
+        if (!announcesHere(ctx.platform().role())) return;
         Collection<PlayerHandle> online;
         try {
             online = ctx.platform().players().onlinePlayers();
