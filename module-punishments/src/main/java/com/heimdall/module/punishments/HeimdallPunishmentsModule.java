@@ -19,8 +19,10 @@ import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.platform.PlayerHandle;
+import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.punish.SilenceDecision;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerSessionListener;
@@ -31,6 +33,7 @@ import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -306,12 +309,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         if ("unban".equals(type) || "unmute".equals(type) || "unwarn".equals(type)
                 || "rollback".equals(type)) {
-            if (args.isEmpty()) {
+            // flags() rather than parse(): a revoke takes no duration, and parse would read the
+            // "3d" in "/unban Steve 3d ban evasion" as one and drop it out of the reason.
+            PunishmentParser.Flags options = PunishmentParser.flags(args);
+            if (options.rest.isEmpty()) {
                 source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [reason]"));
                 return;
             }
-            String reason = args.size() > 1 ? join(args, 1) : "";
-            revoke(source, type, args.get(0), reason);
+            SilenceDecision decision = silence(source, options.silent, options.publicFlag, settings);
+            if (decision.refused()) {
+                source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
+                return;
+            }
+            String reason = options.rest.size() > 1 ? join(options.rest, 1) : "";
+            revoke(source, type, options.rest.get(0), reason, decision.silent());
             return;
         }
         PunishmentParser.Parsed parsed;
@@ -328,8 +339,25 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String issueType = type;
         if ("tempban".equals(type)) issueType = "ban";
         if ("tempmute".equals(type)) issueType = "mute";
-        boolean silent = parsed.silent || (settings.silentByDefault && !parsed.publicFlag);
-        issue(source, issueType, parsed, silent);
+        SilenceDecision decision = silence(source, parsed.silent, parsed.publicFlag, settings);
+        if (decision.refused()) {
+            source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
+            return;
+        }
+        issue(source, issueType, parsed, decision.silent());
+    }
+
+    /**
+     * Resolves {@code -s}/{@code -p} against the guild default and the sender's permission.
+     *
+     * <p>The permission is read here rather than inside {@link SilenceDecision} so the decision
+     * stays a pure function of four booleans, which is what makes its table of cases testable
+     * without a server.
+     */
+    private static SilenceDecision silence(CommandSource source, boolean silentFlag,
+            boolean publicFlag, PunishmentSettings settings) {
+        return SilenceDecision.decide(silentFlag, publicFlag, settings.silentByDefault,
+                source.hasPermission(SilenceDecision.OVERRIDE_PERMISSION));
     }
 
     private static boolean isLookup(String type) {
@@ -425,20 +453,22 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         enqueue("issue", opId, now, body.build());
         source.sendMessage(Msg.legacy("§a" + type + " issued for §f" + name));
+        announce(PunishmentAnnouncement.issued(
+                type, source.name(), name, parsed.durationMinutes, parsed.reason, silent));
         flushSoon();
     }
 
     private void revoke(final CommandSource source, final String type, final String target,
-            final String reason) {
+            final String reason, final boolean silent) {
         ModuleContext ctx = this.context;
         PlayerHandle online = ctx.platform().players().byName(target).orElse(null);
         if (online != null) {
-            submitRevoke(source, type, online.uuid().toString(), online.name(), reason);
+            submitRevoke(source, type, online.uuid().toString(), online.name(), reason, silent);
             return;
         }
         LastIpStore.PlayerIps seen = lastIps == null ? null : lastIps.byName(target);
         if (seen != null) {
-            submitRevoke(source, type, seen.uuid, seen.name, reason);
+            submitRevoke(source, type, seen.uuid, seen.name, reason, silent);
             return;
         }
         source.sendMessage(Msg.legacy("§eResolving §f" + target + "§e..."));
@@ -446,18 +476,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             if (failure != null || resolved == null) {
                 ActivePunishment local = findByName(target, revokeTypes(type));
                 if (local != null) {
-                    submitRevoke(source, type, local.targetUuid, local.targetName, reason);
+                    submitRevoke(source, type, local.targetUuid, local.targetName, reason, silent);
                     return;
                 }
                 source.sendMessage(Msg.legacy("§cCould not resolve §f" + target));
                 return;
             }
-            submitRevoke(source, type, resolved.uuid(), resolved.username(), reason);
+            submitRevoke(source, type, resolved.uuid(), resolved.username(), reason, silent);
         });
     }
 
     private void submitRevoke(CommandSource source, String type, String uuid, String name,
-            String reason) {
+            String reason, boolean silent) {
         List<ActivePunishment> matches;
         if ("rollback".equals(type)) {
             ActivePunishment latest = latestActive(uuid);
@@ -495,6 +525,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             enqueue("revoke", opId, now, body.build());
         }
         source.sendMessage(Msg.legacy("§aRevoked " + matches.size() + " punishment(s) for §f" + name));
+        // Once, on the verb the moderator typed, rather than once per matching row: /unban lifts a
+        // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
+        announce(PunishmentAnnouncement.revoked(type, source.name(), name, reason, silent));
         flushSoon();
     }
 
@@ -599,14 +632,44 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 if (p == null || mirror == null) return;
                 if ("kick".equals(p.type)) {
                     applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
+                    announce(announcementFor(p));
                     return;
                 }
                 String key = keyFor(p);
                 if (key == null) return;
                 mirror.record(key, p);
                 applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
+                announce(announcementFor(p));
             }
         };
+    }
+
+    /**
+     * The line for a punishment that arrived over the tunnel, rather than one typed here.
+     *
+     * <p>Everything it needs is on the row, which is why a punishment issued from Discord or the
+     * dashboard reads the same in chat as one typed in-game: the same issuer name, the same
+     * duration, the same {@code silent} flag the bot stored. The remaining duration is computed
+     * from {@code expiresAt} because the wire carries an instant rather than a length, and a ban
+     * set for a week two days ago has five days left, which is the true answer to the question
+     * the line is asking.
+     */
+    private static PunishmentAnnouncement announcementFor(ActivePunishment p) {
+        return PunishmentAnnouncement.issued(p.type, p.issuedByName, p.targetName,
+                minutesUntil(p.expiresAt, System.currentTimeMillis()), p.reason, p.silent);
+    }
+
+    /** Whole minutes from {@code now} to an ISO instant, or {@code null} for no expiry. */
+    static Integer minutesUntil(String expiresAt, long nowMillis) {
+        if (expiresAt == null || expiresAt.isEmpty()) return null;
+        try {
+            long remaining = Instant.parse(expiresAt).toEpochMilli() - nowMillis;
+            if (remaining <= 0) return null;
+            long minutes = remaining / TimeUnit.MINUTES.toMillis(1);
+            return Integer.valueOf((int) Math.max(1L, Math.min(Integer.MAX_VALUE, minutes)));
+        } catch (RuntimeException unparseable) {
+            return null;
+        }
     }
 
     private TunnelMessageHandler importHandler() {
@@ -734,13 +797,69 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 String type = payload.string("type", "");
                 String uuid = payload.string("targetUuid", "");
                 String digest = payload.string("ipDigest", "");
+                String key = null;
                 if ("ipban".equals(type) && !digest.isEmpty()) {
-                    mirror.evict("ipban:" + digest);
+                    key = "ipban:" + digest;
                 } else if (!uuid.isEmpty() && !type.isEmpty()) {
-                    mirror.evict(type + ":" + uuid);
+                    key = type + ":" + uuid;
                 }
+                if (key == null) return;
+                // Read before the evict: the row is the only thing that knows the player's name
+                // and whether the punishment was silent, and the revoke frame carries neither.
+                // Announcing an unban more loudly than the ban it lifts would undo the silence
+                // the moderator asked for.
+                ActivePunishment lifted = mirror.get(key);
+                mirror.evict(key);
+                if (lifted == null) return;
+                announce(PunishmentAnnouncement.revoked(lifted.type,
+                        payload.string("revokedBy", ""), lifted.targetName,
+                        payload.string("reason", ""), lifted.silent));
             }
         };
+    }
+
+    /**
+     * Shows one line to everybody who is allowed to see it.
+     *
+     * <p>Called from a command handler (the server's main thread on the Bukkit family) and from
+     * the tunnel's reading thread, and it must not block either. It does not: {@code hasPermission}
+     * is an in-memory read on every platform, and {@code PlayerHandle#sendMessage} hops to the
+     * right thread itself - on Bukkit onto the player's own region thread, which is the hop a
+     * caller would otherwise have to know to make. So there is no scheduler call here, and the
+     * tunnel thread is never held waiting for a tick.
+     *
+     * <p>{@code null} is the ordinary answer for a punishment nothing is announced for, so it is
+     * accepted here rather than guarded against at every call site.
+     */
+    private void announce(PunishmentAnnouncement announcement) {
+        ModuleContext ctx = this.context;
+        if (ctx == null || announcement == null) return;
+        Collection<PlayerHandle> online;
+        try {
+            online = ctx.platform().players().onlinePlayers();
+        } catch (RuntimeException raced) {
+            // The directory is allowed to throw rather than claim the server is empty (see
+            // PlayerDirectory#onlinePlayers). A lost announcement is one chat line; the punishment
+            // itself has already been applied and recorded.
+            ctx.logger().debug(() -> "could not read the online list to announce a punishment: "
+                    + raced);
+            return;
+        }
+        Component line = Msg.legacy(announcement.line());
+        for (PlayerHandle player : online) {
+            if (!announcement.visibleTo(
+                    player.hasPermission(PunishmentAnnouncement.NOTIFY_PERMISSION),
+                    player.hasPermission(PunishmentAnnouncement.ADMIN_PERMISSION))) {
+                continue;
+            }
+            try {
+                player.sendMessage(line);
+            } catch (RuntimeException gone) {
+                // Somebody who left between the snapshot and the send. The ordinary race, which
+                // every handle already tolerates; this is the belt for a platform whose braces
+                // slipped.
+            }
+        }
     }
 
     private void flushSoon() {
