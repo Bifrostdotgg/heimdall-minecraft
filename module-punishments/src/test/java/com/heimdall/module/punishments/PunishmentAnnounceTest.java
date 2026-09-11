@@ -2,6 +2,7 @@ package com.heimdall.module.punishments;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -289,6 +290,99 @@ class PunishmentAnnounceTest {
     }
 
     @Test
+    @DisplayName("the bot echoing our own punishment back does not announce it twice")
+    void ownEchoIsNotAnnouncedTwice() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "ban", Arrays.asList("Steve", "griefing"));
+            assertEquals(1, linesTo(bystander), "the command announced it once");
+
+            // The bot excludes the issuing server when it knows the origin, and cannot always
+            // know it. This is the frame it sends when it cannot: our own punishment, back.
+            String opId = issuedOpId(harness);
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("id", "srv-1")
+                    .put("opId", opId)
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Steve"))
+                    .put("targetName", "Steve")
+                    .put("reason", "griefing")
+                    .build());
+
+            assertEquals(1, linesTo(bystander),
+                    "still once: " + bystander.messageText());
+            assertNotNull(harness.module.mirrorForTest().get("ban:" + uuidOf("Steve")),
+                    "only the announcement is suppressed; the echo carries the server-side id and "
+                            + "expiry the local row was invented without");
+        }
+    }
+
+    @Test
+    @DisplayName("somebody else's punishment is announced, opId or not")
+    void foreignFramesStillAnnounce() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("opId", "an-op-id-from-another-server")
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Steve"))
+                    .put("targetName", "Steve")
+                    .build());
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Alex"))
+                    .put("targetName", "Alex")
+                    .build());
+
+            assertEquals(2, linesTo(bystander), bystander.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("an operation id is remembered once and forgotten when it is used")
+    void echoMemoryIsBoundedAndSingleUse() {
+        try (PunishmentsHarness harness = announcing()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "ban", Arrays.asList("Steve", "griefing"));
+            String opId = issuedOpId(harness);
+
+            assertTrue(harness.module.isOwnEcho(opId));
+            assertFalse(harness.module.isOwnEcho(opId),
+                    "an id is used once: holding it forever would mute a later, genuinely "
+                            + "different punishment that happened to reuse it");
+            assertFalse(harness.module.isOwnEcho(""), "a frame with no opId is somebody else's");
+            assertFalse(harness.module.isOwnEcho(null));
+        }
+    }
+
+    @Test
+    @DisplayName("the memory is capped, and drops the oldest rather than growing")
+    void echoMemoryIsCapped() {
+        try (PunishmentsHarness harness = announcing()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+            int overflow = HeimdallPunishmentsModule.ECHO_MEMORY + 5;
+            String first = null;
+            for (int i = 0; i < overflow; i++) {
+                harness.module.onStaffCommand(
+                        FakeCommandSource.console(), "warn", Arrays.asList("Steve", "spam " + i));
+                if (i == 0) {
+                    first = issuedOpIdAt(harness, 0);
+                }
+            }
+
+            assertFalse(harness.module.isOwnEcho(first),
+                    "the oldest id is gone, and its echo has certainly already been and gone too");
+            assertTrue(harness.module.isOwnEcho(issuedOpIdAt(harness, overflow - 1)),
+                    "the newest is still remembered");
+        }
+    }
+
+    @Test
     @DisplayName("a ban that names a country announces nothing, because it names no player")
     void geoBansAreNotAnnounced() {
         try (PunishmentsHarness harness = announcing()) {
@@ -404,6 +498,21 @@ class PunishmentAnnounceTest {
                         .put("rootAliases", false)
                         .put("silentByDefault", silentByDefault)
                         .build());
+    }
+
+    /** The operation id of the only punishment queued for the bot. */
+    private static String issuedOpId(PunishmentsHarness harness) {
+        return issuedOpIdAt(harness, 0);
+    }
+
+    private static String issuedOpIdAt(PunishmentsHarness harness, int index) {
+        List<PunishmentOutbox.Entry> queued = harness.module.outboxForTest().snapshot();
+        assertTrue(index < queued.size(), "no queued write at " + index + " of " + queued.size());
+        return queued.get(index).opId;
+    }
+
+    private static int linesTo(FakePlayer player) {
+        return player.messageText().size();
     }
 
     private static String uuidOf(String name) {

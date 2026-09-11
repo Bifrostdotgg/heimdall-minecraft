@@ -35,6 +35,8 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -73,12 +75,36 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      */
     static final int DUPEIP_ALT_LIMIT = 50;
 
+    /** How many recently-issued operation ids are remembered for echo suppression. */
+    static final int ECHO_MEMORY = 256;
+
     private volatile ModuleContext context;
     private volatile MirrorStore<ActivePunishment> mirror;
     private volatile PunishmentOutbox outbox;
     private volatile LastIpStore lastIps;
     private volatile GeoCountryLookup geo;
     private volatile long lastFullSyncAt;
+    /**
+     * Operation ids this server issued itself, newest last, capped at {@value #ECHO_MEMORY}.
+     *
+     * <p>The bot excludes the issuing server from its {@code punish.apply} fanout, but it can only
+     * do that when it knows which server issued the punishment - and on the paths where the origin
+     * cannot be resolved it sends the frame to everybody, including us. We have already applied it
+     * and already announced it, so the echo is one redundant apply and, without this, a second
+     * chat line saying the same player was banned twice.
+     *
+     * <p>Only the announcement is skipped. The mirror write is idempotent and still happens,
+     * because the echo may carry the server-side id and expiry that the local row was invented
+     * without.
+     *
+     * <p>A bounded, ordered set rather than a cache with expiry: the echo arrives within a round
+     * trip of the issue, so a few hundred entries is minutes of the busiest moderation any server
+     * has, and nothing here is worth a scheduled sweep. Overflow drops the oldest, which is the
+     * one whose echo has certainly already been and gone.
+     */
+    private final Set<String> locallyIssued = Collections.synchronizedSet(
+            new LinkedHashSet<String>());
+
     private final AtomicBoolean flushing = new AtomicBoolean();
     private final AtomicBoolean flushAgain = new AtomicBoolean();
     private final List<Registration> aliasBinds = new CopyOnWriteArrayList<Registration>();
@@ -414,6 +440,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         long now = System.currentTimeMillis();
         String opId = UUID.randomUUID().toString();
+        // Before anything is sent, so an echo cannot outrun the record of what caused it.
+        rememberIssued(opId);
         ActivePunishment local = new ActivePunishment();
         local.id = "local-" + opId;
         local.type = type;
@@ -634,18 +662,45 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 Payload payload = envelope.payload();
                 ActivePunishment p = fromPayload(payload);
                 if (p == null || mirror == null) return;
+                boolean echo = isOwnEcho(payload.string("opId", ""));
                 if ("kick".equals(p.type)) {
                     applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
-                    announce(announcementFor(p));
+                    if (!echo) announce(announcementFor(p));
                     return;
                 }
                 String key = keyFor(p);
                 if (key == null) return;
                 mirror.record(key, p);
                 applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
-                announce(announcementFor(p));
+                if (!echo) announce(announcementFor(p));
             }
         };
+    }
+
+    /** Records an operation id as ours, dropping the oldest once {@link #ECHO_MEMORY} is full. */
+    private void rememberIssued(String opId) {
+        if (opId == null || opId.isEmpty()) return;
+        synchronized (locallyIssued) {
+            locallyIssued.remove(opId);
+            locallyIssued.add(opId);
+            while (locallyIssued.size() > ECHO_MEMORY) {
+                Iterator<String> oldest = locallyIssued.iterator();
+                oldest.next();
+                oldest.remove();
+            }
+        }
+    }
+
+    /**
+     * Whether an incoming apply frame is this server's own punishment coming back.
+     *
+     * <p>Consumed rather than merely read: an operation id is used once, and forgetting it here
+     * keeps the memory to punishments whose echo has not arrived yet. A frame with no
+     * {@code opId} is somebody else's by definition, since every id we put in this set we minted.
+     */
+    boolean isOwnEcho(String opId) {
+        if (opId == null || opId.isEmpty()) return false;
+        return locallyIssued.remove(opId);
     }
 
     /**
