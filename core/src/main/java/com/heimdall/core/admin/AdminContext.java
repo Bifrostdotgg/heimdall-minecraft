@@ -12,7 +12,7 @@ import java.util.concurrent.RejectedExecutionException;
  * each grow a six-argument constructor that has to be edited in a dozen places when the set changes,
  * and a test would have to build all six to exercise one.
  *
- * <p>The three module surfaces default to their {@code NONE} implementations, so a build compiled
+ * <p>The four module surfaces default to their {@code NONE} implementations, so a build compiled
  * without a feature module — or a test that only cares about {@code /hd status} — still produces a
  * context that answers every verb coherently.
  *
@@ -34,6 +34,7 @@ public final class AdminContext {
     private final String label;
     private final WhitelistAdmin whitelist;
     private final OffenseAdmin offenses;
+    private final PunishmentAdmin punishments;
     private final UpdateAdmin updates;
 
     private AdminContext(Builder builder) {
@@ -47,6 +48,7 @@ public final class AdminContext {
                 ? this.runtime.commandLabel() : builder.label;
         this.whitelist = builder.whitelist == null ? WhitelistAdmin.NONE : builder.whitelist;
         this.offenses = builder.offenses == null ? OffenseAdmin.NONE : builder.offenses;
+        this.punishments = builder.punishments == null ? PunishmentAdmin.NONE : builder.punishments;
         this.updates = builder.updates == null ? UpdateAdmin.NONE : builder.updates;
     }
 
@@ -89,6 +91,10 @@ public final class AdminContext {
         return offenses;
     }
 
+    public PunishmentAdmin punishments() {
+        return punishments;
+    }
+
     public UpdateAdmin updates() {
         return updates;
     }
@@ -121,6 +127,7 @@ public final class AdminContext {
         private String label;
         private WhitelistAdmin whitelist;
         private OffenseAdmin offenses;
+        private PunishmentAdmin punishments;
         private UpdateAdmin updates;
 
         private Builder() {
@@ -160,6 +167,12 @@ public final class AdminContext {
         /** The offenses module's surface. Left unset, {@link OffenseAdmin#NONE}. */
         public Builder offenses(OffenseAdmin value) {
             this.offenses = value;
+            return this;
+        }
+
+        /** The punishments module's surface. Left unset, {@link PunishmentAdmin#NONE}. */
+        public Builder punishments(PunishmentAdmin value) {
+            this.punishments = value;
             return this;
         }
 

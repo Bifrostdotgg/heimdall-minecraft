@@ -1,5 +1,6 @@
 package com.heimdall.module.punishments;
 
+import com.heimdall.core.admin.PunishmentAdmin;
 import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
@@ -18,8 +19,10 @@ import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.platform.PlayerHandle;
+import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.punish.SilenceDecision;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerSessionListener;
@@ -30,7 +33,10 @@ import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -43,8 +49,12 @@ import net.kyori.adventure.text.Component;
 
 /**
  * Native punishments: local mirror, login/chat/command gates, /hd ban family, durable outage queue.
+ *
+ * <p>Chat announcements belong to the outermost instance a player is connected through: a
+ * gatekeeper or standalone server announces, an enforcer backend never does. See
+ * {@link #announcesHere(ServerRole)}.
  */
-public final class HeimdallPunishmentsModule implements HeimdallModule {
+public final class HeimdallPunishmentsModule implements HeimdallModule, PunishmentAdmin {
 
     public static final String ID = "punishments";
 
@@ -65,17 +75,57 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
      */
     static final int DUPEIP_ALT_LIMIT = 50;
 
+    /** How many recently-issued operation ids are remembered for echo suppression. */
+    static final int ECHO_MEMORY = 256;
+
     private volatile ModuleContext context;
     private volatile MirrorStore<ActivePunishment> mirror;
     private volatile PunishmentOutbox outbox;
     private volatile LastIpStore lastIps;
     private volatile GeoCountryLookup geo;
     private volatile long lastFullSyncAt;
+    /**
+     * Operation ids this server issued itself, newest last, capped at {@value #ECHO_MEMORY}.
+     *
+     * <p>The bot excludes the issuing server from its {@code punish.apply} fanout, but it can only
+     * do that when it knows which server issued the punishment - and on the paths where the origin
+     * cannot be resolved it sends the frame to everybody, including us. We have already applied it
+     * and already announced it, so the echo is one redundant apply and, without this, a second
+     * chat line saying the same player was banned twice.
+     *
+     * <p>Only the announcement is skipped. The mirror write is idempotent and still happens,
+     * because the echo may carry the server-side id and expiry that the local row was invented
+     * without.
+     *
+     * <p>A bounded, ordered set rather than a cache with expiry: the echo arrives within a round
+     * trip of the issue, so a few hundred entries is minutes of the busiest moderation any server
+     * has, and nothing here is worth a scheduled sweep. Overflow drops the oldest, which is the
+     * one whose echo has certainly already been and gone.
+     */
+    private final Set<String> locallyIssued = Collections.synchronizedSet(
+            new LinkedHashSet<String>());
+
     private final AtomicBoolean flushing = new AtomicBoolean();
     private final AtomicBoolean flushAgain = new AtomicBoolean();
     private final List<Registration> aliasBinds = new CopyOnWriteArrayList<Registration>();
 
-    static volatile HeimdallPunishmentsModule INSTANCE;
+    /**
+     * The enabled instance, or {@code null}.
+     *
+     * <p><strong>Public because two callers can only reach this module reflectively, and
+     * {@code Field#get} needs a public field on a public class.</strong> Those two are
+     * {@code BukkitPunishmentGuard} (in {@code :platform-bukkit}, which must not compile against a
+     * feature module) and {@code OffendCommand}'s {@code nativeReplaceActive} (in
+     * {@code :module-offenses}, which must not depend on a sibling module). Both were silently
+     * dead while this field was package-private: {@code getField} sees only public members, so the
+     * freeze and muted-sign guards never fired and {@code /offend} always reported the dispatch
+     * path. Narrowing it again re-breaks them without a compiler error, which is why the reason is
+     * written here rather than left to a reviewer to reconstruct.
+     *
+     * <p>The admin command tree does <em>not</em> use this. It goes through {@link PunishmentAdmin},
+     * which the compiler checks - see that interface for what the reflective version cost.
+     */
+    public static volatile HeimdallPunishmentsModule INSTANCE;
 
     @Override
     public String id() {
@@ -267,7 +317,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         aliasBinds.add(handle);
     }
 
-    void onStaffCommand(CommandSource source, String type, List<String> args) {
+    /** Whether this module is enabled right now - {@link PunishmentAdmin}'s half of the contract. */
+    @Override
+    public boolean isAvailable() {
+        return context != null;
+    }
+
+    @Override
+    public void onStaffCommand(CommandSource source, String type, List<String> args) {
         ModuleContext ctx = this.context;
         if (ctx == null) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
@@ -282,12 +339,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         }
         if ("unban".equals(type) || "unmute".equals(type) || "unwarn".equals(type)
                 || "rollback".equals(type)) {
-            if (args.isEmpty()) {
+            // flags() rather than parse(): a revoke takes no duration, and parse would read the
+            // "3d" in "/unban Steve 3d ban evasion" as one and drop it out of the reason.
+            PunishmentParser.Flags options = PunishmentParser.flags(args);
+            if (options.rest.isEmpty()) {
                 source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [reason]"));
                 return;
             }
-            String reason = args.size() > 1 ? join(args, 1) : "";
-            revoke(source, type, args.get(0), reason);
+            // The flags travel rather than being resolved here: a revoke's default is the
+            // silence of the row it lifts, and which row that is is not known until the target
+            // has been resolved and matched. See submitRevoke.
+            String reason = options.rest.size() > 1 ? join(options.rest, 1) : "";
+            revoke(source, type, options.rest.get(0), reason, options.silent, options.publicFlag);
             return;
         }
         PunishmentParser.Parsed parsed;
@@ -304,8 +367,37 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         String issueType = type;
         if ("tempban".equals(type)) issueType = "ban";
         if ("tempmute".equals(type)) issueType = "mute";
-        boolean silent = parsed.silent || (settings.silentByDefault && !parsed.publicFlag);
-        issue(source, issueType, parsed, silent);
+        SilenceDecision decision = silence(source, parsed.silent, parsed.publicFlag, settings);
+        if (decision.refused()) {
+            source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
+            return;
+        }
+        issue(source, issueType, parsed, decision.silent());
+    }
+
+    /**
+     * Resolves {@code -s}/{@code -p} against the guild default and the sender's permission.
+     *
+     * <p>The permission is read here rather than inside {@link SilenceDecision} so the decision
+     * stays a pure function of four booleans, which is what makes its table of cases testable
+     * without a server.
+     */
+    private static SilenceDecision silence(CommandSource source, boolean silentFlag,
+            boolean publicFlag, PunishmentSettings settings) {
+        return SilenceDecision.decide(silentFlag, publicFlag, settings.silentByDefault,
+                mayOverrideSilence(source));
+    }
+
+    /**
+     * Whether this sender may depart from whatever the silence default is.
+     *
+     * <p>One place, so the issue path and the revoke path cannot answer differently, and so the
+     * admin implication is not written twice and then corrected once.
+     */
+    private static boolean mayOverrideSilence(CommandSource source) {
+        return SilenceDecision.mayOverride(
+                source.hasPermission(SilenceDecision.OVERRIDE_PERMISSION),
+                source.hasPermission(SilenceDecision.ADMIN_PERMISSION));
     }
 
     private static boolean isLookup(String type) {
@@ -358,6 +450,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         }
         long now = System.currentTimeMillis();
         String opId = UUID.randomUUID().toString();
+        // Before anything is sent, so an echo cannot outrun the record of what caused it.
+        rememberIssued(opId);
         ActivePunishment local = new ActivePunishment();
         local.id = "local-" + opId;
         local.type = type;
@@ -401,20 +495,23 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         }
         enqueue("issue", opId, now, body.build());
         source.sendMessage(Msg.legacy("§a" + type + " issued for §f" + name));
+        announce(PunishmentAnnouncement.issued(
+                type, source.name(), name, parsed.durationMinutes, parsed.reason, silent));
         flushSoon();
     }
 
     private void revoke(final CommandSource source, final String type, final String target,
-            final String reason) {
+            final String reason, final boolean silentFlag, final boolean publicFlag) {
         ModuleContext ctx = this.context;
         PlayerHandle online = ctx.platform().players().byName(target).orElse(null);
         if (online != null) {
-            submitRevoke(source, type, online.uuid().toString(), online.name(), reason);
+            submitRevoke(source, type, online.uuid().toString(), online.name(), reason,
+                    silentFlag, publicFlag);
             return;
         }
         LastIpStore.PlayerIps seen = lastIps == null ? null : lastIps.byName(target);
         if (seen != null) {
-            submitRevoke(source, type, seen.uuid, seen.name, reason);
+            submitRevoke(source, type, seen.uuid, seen.name, reason, silentFlag, publicFlag);
             return;
         }
         source.sendMessage(Msg.legacy("§eResolving §f" + target + "§e..."));
@@ -422,18 +519,37 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             if (failure != null || resolved == null) {
                 ActivePunishment local = findByName(target, revokeTypes(type));
                 if (local != null) {
-                    submitRevoke(source, type, local.targetUuid, local.targetName, reason);
+                    submitRevoke(source, type, local.targetUuid, local.targetName, reason,
+                            silentFlag, publicFlag);
                     return;
                 }
                 source.sendMessage(Msg.legacy("§cCould not resolve §f" + target));
                 return;
             }
-            submitRevoke(source, type, resolved.uuid(), resolved.username(), reason);
+            submitRevoke(source, type, resolved.uuid(), resolved.username(), reason,
+                    silentFlag, publicFlag);
         });
     }
 
+    /**
+     * Files the revoke and announces it.
+     *
+     * <p><strong>A revoke's silence defaults to the silence of the punishment it lifts, not to the
+     * guild's setting.</strong> Announcing "Adam unbanned Steve" on a server that was never told
+     * Steve was banned discloses the very thing the silent ban was hiding, and it discloses it
+     * later, out of context, to everybody. The tunnel path has always read the flag off the row;
+     * this is the same rule for a moderator typing the command.
+     *
+     * <p>{@code -s} and {@code -p} still override it, and still need
+     * {@link SilenceDecision#OVERRIDE_PERMISSION} to do so - against this default rather than
+     * against the guild's, so lifting a silent ban loudly is the privileged act it should be.
+     *
+     * <p>The first match decides when a verb lifts several rows at once ({@code /unban} takes a
+     * ban and an ipban together). They are one player's punishments and the announcement is one
+     * line, so there is one flag to read and the primary row is the one to read it from.
+     */
     private void submitRevoke(CommandSource source, String type, String uuid, String name,
-            String reason) {
+            String reason, boolean silentFlag, boolean publicFlag) {
         List<ActivePunishment> matches;
         if ("rollback".equals(type)) {
             ActivePunishment latest = latestActive(uuid);
@@ -445,6 +561,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
         }
         if (matches.isEmpty()) {
             source.sendMessage(Msg.legacy("§eNo active " + typeLabel(type) + " for §f" + name));
+            return;
+        }
+        SilenceDecision decision = SilenceDecision.decide(silentFlag, publicFlag,
+                matches.get(0).silent, mayOverrideSilence(source));
+        if (decision.refused()) {
+            source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
             return;
         }
         long now = System.currentTimeMillis();
@@ -471,6 +593,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
             enqueue("revoke", opId, now, body.build());
         }
         source.sendMessage(Msg.legacy("§aRevoked " + matches.size() + " punishment(s) for §f" + name));
+        // Once, on the verb the moderator typed, rather than once per matching row: /unban lifts a
+        // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
+        announce(PunishmentAnnouncement.revoked(type, source.name(), name, reason,
+                decision.silent()));
         flushSoon();
     }
 
@@ -573,16 +699,105 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                 Payload payload = envelope.payload();
                 ActivePunishment p = fromPayload(payload);
                 if (p == null || mirror == null) return;
+                boolean echo = isOwnEcho(payload.string("opId", ""));
                 if ("kick".equals(p.type)) {
                     applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
+                    if (!echo) announce(announcementFor(p));
                     return;
                 }
                 String key = keyFor(p);
                 if (key == null) return;
                 mirror.record(key, p);
                 applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
+                if (!echo) announce(announcementFor(p));
             }
         };
+    }
+
+    /**
+     * Whether a {@code punish.revoke} frame describes something a server should be told about.
+     *
+     * <p>A revoke frame carries {@code revokeCause}, and only {@code manual} is a moderator
+     * deciding to lift a punishment. The other two are bookkeeping, and announcing them would be
+     * worse than noise:
+     *
+     * <ul>
+     *   <li>{@code expiry} - a temporary ban reached its end. Every tempban would produce a second
+     *       chat line hours or days later, attributed to nobody, telling a server something it can
+     *       already see. Nothing decided anything.
+     *   <li>{@code override} - the punishment was replaced by a newer one for the same player. The
+     *       apply frame for the replacement is the event, and it announces itself; a paired
+     *       "unbanned" beside it reads as the moderator having undone their own ban.
+     * </ul>
+     *
+     * <p>An absent cause is treated as {@code manual}. That is the only safe reading: it is what
+     * an older bot sends, and every revoke an older bot sends is a lifting, since expiry and
+     * override are what the field was added to distinguish. Unknown causes are announced too, for
+     * the same reason - a new cause the plugin has never heard of is more likely to be a lifting
+     * with a name than a sweep, and a plugin that stayed quiet for anything it did not recognise
+     * would silently stop announcing the day the bot renamed the value.
+     *
+     * <p>The bot sends an empty {@code revokedBy} for non-manual causes, so an announcement that
+     * slipped through would be attributed to "Console", which is a second reason not to make one.
+     */
+    static boolean announceableRevoke(String revokeCause) {
+        if (revokeCause == null) return true;
+        String cause = revokeCause.trim().toLowerCase(Locale.ROOT);
+        return !"expiry".equals(cause) && !"override".equals(cause);
+    }
+
+    /** Records an operation id as ours, dropping the oldest once {@link #ECHO_MEMORY} is full. */
+    private void rememberIssued(String opId) {
+        if (opId == null || opId.isEmpty()) return;
+        synchronized (locallyIssued) {
+            locallyIssued.remove(opId);
+            locallyIssued.add(opId);
+            while (locallyIssued.size() > ECHO_MEMORY) {
+                Iterator<String> oldest = locallyIssued.iterator();
+                oldest.next();
+                oldest.remove();
+            }
+        }
+    }
+
+    /**
+     * Whether an incoming apply frame is this server's own punishment coming back.
+     *
+     * <p>Consumed rather than merely read: an operation id is used once, and forgetting it here
+     * keeps the memory to punishments whose echo has not arrived yet. A frame with no
+     * {@code opId} is somebody else's by definition, since every id we put in this set we minted.
+     */
+    boolean isOwnEcho(String opId) {
+        if (opId == null || opId.isEmpty()) return false;
+        return locallyIssued.remove(opId);
+    }
+
+    /**
+     * The line for a punishment that arrived over the tunnel, rather than one typed here.
+     *
+     * <p>Everything it needs is on the row, which is why a punishment issued from Discord or the
+     * dashboard reads the same in chat as one typed in-game: the same issuer name, the same
+     * duration, the same {@code silent} flag the bot stored. The remaining duration is computed
+     * from {@code expiresAt} because the wire carries an instant rather than a length, and a ban
+     * set for a week two days ago has five days left, which is the true answer to the question
+     * the line is asking.
+     */
+    private static PunishmentAnnouncement announcementFor(ActivePunishment p) {
+        return PunishmentAnnouncement.issued(p.type, p.issuedByName, p.targetName,
+                minutesUntil(p.expiresAt, System.currentTimeMillis()), p.reason, p.silent);
+    }
+
+    /** Whole minutes from {@code now} to an ISO instant, or {@code null} for no expiry. */
+    static Integer minutesUntil(String expiresAt, long nowMillis) {
+        if (expiresAt == null || expiresAt.isEmpty()) return null;
+        try {
+            long remaining = Instant.parse(expiresAt).toEpochMilli() - nowMillis;
+            if (remaining <= 0) return null;
+            long minutes = remaining / TimeUnit.MINUTES.toMillis(1);
+            return Integer.valueOf((int) Math.max(1L, Math.min(Integer.MAX_VALUE, minutes)));
+        } catch (RuntimeException unparseable) {
+            return null;
+        }
     }
 
     private TunnelMessageHandler importHandler() {
@@ -710,13 +925,131 @@ public final class HeimdallPunishmentsModule implements HeimdallModule {
                 String type = payload.string("type", "");
                 String uuid = payload.string("targetUuid", "");
                 String digest = payload.string("ipDigest", "");
+                String key = null;
                 if ("ipban".equals(type) && !digest.isEmpty()) {
-                    mirror.evict("ipban:" + digest);
+                    key = "ipban:" + digest;
                 } else if (!uuid.isEmpty() && !type.isEmpty()) {
-                    mirror.evict(type + ":" + uuid);
+                    key = type + ":" + uuid;
                 }
+                if (key == null) return;
+                // Read before the evict: the row is the only thing that knows the player's name
+                // and whether the punishment was silent, and the revoke frame carries neither.
+                // Announcing an unban more loudly than the ban it lifts would undo the silence
+                // the moderator asked for.
+                ActivePunishment lifted = mirror.get(key);
+                mirror.evict(key);
+                if (lifted == null) return;
+                if (!announceableRevoke(payload.string("revokeCause", ""))) return;
+                announce(PunishmentAnnouncement.revoked(lifted.type,
+                        payload.string("revokedBy", ""), lifted.targetName,
+                        payload.string("reason", ""), lifted.silent));
             }
         };
+    }
+
+    /**
+     * Whether this instance is the one that announces, which is a fact about its role.
+     *
+     * <p><strong>The outermost Heimdall instance a player is connected through owns the
+     * announcement.</strong> A {@link ServerRole#GATEKEEPER} proxy and a
+     * {@link ServerRole#STANDALONE} server always announce; a {@link ServerRole#ENFORCER} backend
+     * never does, silent or not.
+     *
+     * <p>Without that rule a proxied network announces everything twice: the proxy broadcasts to
+     * everybody online, the bot fans {@code punish.apply} out to the backends, and each backend
+     * broadcasts to the same players again. Nothing is lost by the backend staying quiet, because
+     * every player it can see is connected through the proxy, which can see them too. The rule has
+     * to be local and static rather than negotiated: a backend cannot know whether the proxy in
+     * front of it runs Heimdall, and a network-wide election is a lot of machinery for one chat
+     * line.
+     *
+     * <p>A network whose proxy does <em>not</em> run Heimdall is the case this costs. Those
+     * backends resolve as {@code STANDALONE} rather than {@code ENFORCER} unless an operator has
+     * said otherwise, so they keep announcing; see {@code ServerRole} for how the role resolves.
+     */
+    private static boolean announcesHere(ServerRole role) {
+        return role != ServerRole.ENFORCER;
+    }
+
+    /**
+     * Shows one line to everybody who is allowed to see it.
+     *
+     * <h2>The audience is computed on the server thread</h2>
+     *
+     * <p>Called from a command handler and from the tunnel's reading thread, and the second of
+     * those is the problem. <strong>Bukkit's {@code Player#hasPermission} is not safe off the main
+     * thread.</strong> It walks a permissible's attachment list, which the server, LuckPerms and
+     * any other permissions plugin mutate on the main thread as attachments are added, recalculated
+     * and removed, so an asynchronous read can see a half-rebuilt map: usually a wrong answer,
+     * occasionally a {@code ConcurrentModificationException}. A wrong answer here means a silent
+     * punishment shown to somebody who does not hold the node, which nothing logs and nobody
+     * reports.
+     *
+     * <p>So the whole body hops through {@code PlatformFacade.mainThread()} once, and the roster
+     * read, the permission checks and the sends all happen there. Once per announcement rather than
+     * once per player, and on Bukkit the executor runs inline when it is already on the main thread,
+     * so a moderator typing {@code /ban} sees no deferral at all.
+     *
+     * <p><strong>Velocity and BungeeCord do not need it</strong> and are unharmed by it. Velocity's
+     * {@code PermissionSubject} is answered by a {@code PermissionFunction} the proxy treats as
+     * safe from any thread - it has no main thread to speak of - and BungeeCord's
+     * {@code CommandSender#hasPermission} reads a synchronised permission map. On both, the hop is
+     * a task on the proxy's scheduler and costs a scheduling round.
+     *
+     * <p>The free side-effect is that the roster snapshot is no longer taken off-thread either,
+     * which is the race {@code BukkitPlayerDirectory} retries around.
+     *
+     * <p>{@code null} is the ordinary answer for a punishment nothing is announced for, so it is
+     * accepted here rather than guarded against at every call site.
+     */
+    private void announce(final PunishmentAnnouncement announcement) {
+        final ModuleContext ctx = this.context;
+        if (ctx == null || announcement == null) return;
+        if (!announcesHere(ctx.platform().role())) return;
+        // One hop, then everything: the roster read, the permission checks and the sends. See the
+        // javadoc above for why the permission checks are what force it.
+        ctx.platform().mainThread().execute(new Runnable() {
+            @Override
+            public void run() {
+                deliver(ctx, announcement);
+            }
+        });
+    }
+
+    /** The body of {@link #announce}, on the server thread. */
+    private static void deliver(ModuleContext ctx, PunishmentAnnouncement announcement) {
+        Collection<PlayerHandle> online;
+        try {
+            online = ctx.platform().players().onlinePlayers();
+        } catch (RuntimeException raced) {
+            // The directory is allowed to throw rather than claim the server is empty (see
+            // PlayerDirectory#onlinePlayers). A lost announcement is one chat line; the punishment
+            // itself has already been applied and recorded.
+            ctx.logger().debug(() -> "could not read the online list to announce a punishment: "
+                    + raced);
+            return;
+        }
+        Component line = Msg.legacy(announcement.line());
+        for (PlayerHandle player : online) {
+            boolean visible;
+            try {
+                visible = announcement.visibleTo(
+                        player.hasPermission(PunishmentAnnouncement.NOTIFY_PERMISSION),
+                        player.hasPermission(PunishmentAnnouncement.ADMIN_PERMISSION));
+            } catch (RuntimeException gone) {
+                // Asking a player who left between the snapshot and the check. Silence is the
+                // right answer: they are not online to be told.
+                continue;
+            }
+            if (!visible) continue;
+            try {
+                player.sendMessage(line);
+            } catch (RuntimeException gone) {
+                // Somebody who left between the check and the send. The ordinary race, which
+                // every handle already tolerates; this is the belt for a platform whose braces
+                // slipped.
+            }
+        }
     }
 
     private void flushSoon() {

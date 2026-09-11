@@ -67,6 +67,20 @@ permissions:
     # Operators only. Every subcommand this gates is a server-wide change, and a
     # server that wants finer control has a permissions plugin for exactly that.
     default: op
+    # The two announcement nodes are granted by holding this one, because the
+    # code already treats them that way: the audience check for a silent
+    # punishment is `notify OR admin`. Without these children that equivalence
+    # lives only in Java, so `/lp user <name> permission check` on an admin
+    # answers false for a node they demonstrably have, and any other plugin or
+    # script reading the node is told the opposite of what happens.
+    #
+    # Only these two. The verb nodes (ban, mute, ...) are deliberately NOT
+    # children: an admin holding them is a server's own decision, and wiring
+    # them here would make "may administer Heimdall" silently mean "may ban",
+    # which is exactly the grant a server splitting the two wants to withhold.
+    children:
+      heimdall.punishments.notify: true
+      heimdall.punishments.silent: true
   heimdall.linkdiscord:
     description: Request a Discord link code for your own account
     # Everyone, on purpose: linking is how a player gets themselves whitelisted,
@@ -99,6 +113,21 @@ permissions:
     default: op
   heimdall.punishments.dupeip:
     description: Look up accounts sharing an IP
+    default: op
+  heimdall.punishments.notify:
+    # Who sees a SILENT punishment announced. A non-silent one goes to everybody
+    # online and needs no node at all, so this is not "may see announcements" -
+    # it is "is staff for the purpose of the quiet ones". heimdall.admin implies
+    # it, the same way it does everywhere else here.
+    description: See silent punishment announcements
+    default: op
+  heimdall.punishments.silent:
+    # Overriding the guild's silentByDefault setting, in EITHER direction: -s on
+    # a guild that announces, -p on a guild that does not. Both are a decision
+    # about who finds out that a moderator acted, so one node covers both rather
+    # than gating the -s spelling specifically. A flag that agrees with the
+    # default is a no-op and needs nothing.
+    description: Override whether a punishment is silent
     default: op
   heimdall.bypass:
     # Note that this does NOT bypass the whitelist itself. Permissions are not

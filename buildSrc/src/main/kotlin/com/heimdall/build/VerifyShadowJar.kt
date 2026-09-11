@@ -256,6 +256,33 @@ abstract class VerifyShadowJar : DefaultTask() {
         if (unsubstituted != null) {
             problems += "plugin.yml still contains an unsubstituted token: ${unsubstituted.value}"
         }
+        checkAnnouncementNodes(pluginYml, problems)
+    }
+
+    /**
+     * The two announcement permission nodes, and the `children:` that makes them true.
+     *
+     * The audience check for a silent punishment is `notify OR admin`, and so is the -s / -p
+     * override gate, both written in Java. The descriptor is the only place a permissions plugin,
+     * an operator running `/lp user <name> permission check`, or any other plugin can learn that,
+     * and a claim that lives only in code is one those three are told the opposite of.
+     *
+     * Undeclared is worse than wrong here rather than merely undocumented: Bukkit gives an
+     * unlisted node no default at all, so `heimdall.punishments.notify` would be held by nobody
+     * but the console and every silent punishment would be announced to an empty audience, which
+     * is indistinguishable from the feature working.
+     *
+     * The reading of the file is in [DescriptorChecks], which has its own tests, including the
+     * two descriptors the original regex got wrong in opposite directions.
+     */
+    private fun checkAnnouncementNodes(pluginYml: String, problems: MutableList<String>) {
+        // The fixtures first: a check that has never been seen rejecting anything is
+        // indistinguishable from one that does not work, and this one has been both kinds of
+        // broken already. A failure here is the check being wrong, not the descriptor.
+        for (broken in DescriptorChecks.selfCheckProblems()) {
+            problems += "the plugin.yml descriptor check is not working: $broken"
+        }
+        problems += DescriptorChecks.announcementNodeProblems(pluginYml)
     }
 
     private fun checkVelocityPluginJson(zip: ZipFile, problems: MutableList<String>) {

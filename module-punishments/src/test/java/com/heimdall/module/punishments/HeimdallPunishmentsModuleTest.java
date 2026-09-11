@@ -2,6 +2,7 @@ package com.heimdall.module.punishments;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -342,6 +343,33 @@ class HeimdallPunishmentsModuleTest {
             }
         }
         throw new AssertionError("plugin.yml not found from " + java.nio.file.Paths.get(".").toAbsolutePath());
+    }
+
+    @Test
+    @DisplayName("the post-upload sync does not prune the ban that upload just confirmed")
+    void syncAfterUploadKeepsTheJustIssuedBan() throws Exception {
+        try (ScriptedPunishApi bot = new ScriptedPunishApi();
+                PunishmentsHarness harness = PunishmentsHarness.withApi(
+                        dataDir.resolve("keep"), ServerRole.STANDALONE, bot.baseUrl())
+                        .enableReplace()) {
+            waitFor(() -> harness.module.mirrorForTest().lastEtag() != null, 5_000);
+
+            harness.platform.join(new FakePlayer(STEVE, "Steve"));
+            harness.module.onStaffCommand(
+                    FakeCommandSource.console(), "ban", Arrays.asList("Steve", "griefing"));
+            assertNotNull(harness.module.mirrorForTest().get("ban:" + STEVE));
+
+            harness.module.flushQueue();
+            waitFor(() -> harness.module.outboxForTest().isEmpty(), 5_000);
+
+            // A successful upload is followed by sync(true), and reconcile prunes every key the
+            // snapshot omits. This stub's snapshot is empty, so before it answered 304 the poll
+            // wiped the row it had just accepted - and it did so on a schedule (five-minute
+            // timer, plus one per upload) that raced every test here that puts a row in the
+            // mirror and then acts on it.
+            assertNotNull(harness.module.mirrorForTest().get("ban:" + STEVE),
+                    "a sync that reports no change must leave the mirror alone");
+        }
     }
 
     @Test

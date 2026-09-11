@@ -14,7 +14,15 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-/** Loopback bot stand-in for flushQueue tests. Ignores HMAC; routes on path suffix. */
+/**
+ * Loopback bot stand-in for flushQueue tests. Ignores HMAC; routes on path suffix.
+ *
+ * <p>It does honour {@code If-None-Match} on {@code /punishments/sync}, because that is the one
+ * piece of real-bot behaviour a test cannot do without: the plugin re-syncs after every
+ * successful upload and every five minutes, so a stub that answered 200 with the same canned
+ * snapshot each time would reconcile the mirror at an unpredictable moment. Change the snapshot
+ * with {@link #syncResponds(String, String)} and give it a new ETag to make a poll take effect.
+ */
 final class ScriptedPunishApi implements AutoCloseable {
 
     static final class Hit {
@@ -104,6 +112,17 @@ final class ScriptedPunishApi implements AutoCloseable {
         if ("GET".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/sync")) {
             if (syncEtag != null) {
                 exchange.getResponseHeaders().set("ETag", syncEtag);
+            }
+            // A real bot answers 304 when the caller already has this snapshot, and the plugin
+            // polls every five minutes plus once after every successful upload. Answering 200
+            // with the same body every time made the stub reconcile the mirror to whatever the
+            // canned list says on an unpredictable schedule, which raced every test that puts a
+            // row in the mirror and then acts on it: the poll could land between the two and
+            // wipe the row. That is a property of this fixture, not of the plugin.
+            if (syncEtag != null && syncEtag.equals(exchange.getRequestHeaders().getFirst("If-None-Match"))) {
+                exchange.sendResponseHeaders(304, -1);
+                exchange.close();
+                return;
             }
             send(exchange, 200, syncBody);
             return;
