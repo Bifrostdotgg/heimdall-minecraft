@@ -385,7 +385,19 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private static SilenceDecision silence(CommandSource source, boolean silentFlag,
             boolean publicFlag, PunishmentSettings settings) {
         return SilenceDecision.decide(silentFlag, publicFlag, settings.silentByDefault,
-                source.hasPermission(SilenceDecision.OVERRIDE_PERMISSION));
+                mayOverrideSilence(source));
+    }
+
+    /**
+     * Whether this sender may depart from whatever the silence default is.
+     *
+     * <p>One place, so the issue path and the revoke path cannot answer differently, and so the
+     * admin implication is not written twice and then corrected once.
+     */
+    private static boolean mayOverrideSilence(CommandSource source) {
+        return SilenceDecision.mayOverride(
+                source.hasPermission(SilenceDecision.OVERRIDE_PERMISSION),
+                source.hasPermission(SilenceDecision.ADMIN_PERMISSION));
     }
 
     private static boolean isLookup(String type) {
@@ -552,8 +564,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             return;
         }
         SilenceDecision decision = SilenceDecision.decide(silentFlag, publicFlag,
-                matches.get(0).silent,
-                source.hasPermission(SilenceDecision.OVERRIDE_PERMISSION));
+                matches.get(0).silent, mayOverrideSilence(source));
         if (decision.refused()) {
             source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
             return;

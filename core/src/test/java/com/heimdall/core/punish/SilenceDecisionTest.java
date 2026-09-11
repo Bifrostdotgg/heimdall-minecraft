@@ -93,6 +93,23 @@ class SilenceDecisionTest {
     }
 
     @Test
+    @DisplayName("heimdall.admin grants the override, as it grants the notify node")
+    void adminMayOverride() {
+        assertTrue(SilenceDecision.mayOverride(false, true),
+                "the Bukkit descriptor declares the node a child of heimdall.admin, and a "
+                        + "descriptor that says a permission is held while the code refuses it is "
+                        + "worse than either answer on its own");
+        assertTrue(SilenceDecision.mayOverride(true, false));
+        assertTrue(SilenceDecision.mayOverride(true, true));
+        assertFalse(SilenceDecision.mayOverride(false, false));
+
+        SilenceDecision admin = SilenceDecision.decide(
+                true, false, DEFAULT_PUBLIC, SilenceDecision.mayOverride(false, true));
+        assertFalse(admin.refused());
+        assertTrue(admin.silent());
+    }
+
+    @Test
     @DisplayName("a refused decision still reports the default, so a missed check cannot invert it")
     void refusedKeepsTheDefault() {
         assertFalse(SilenceDecision.decide(true, false, DEFAULT_PUBLIC, MAY_NOT).silent());

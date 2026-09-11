@@ -25,6 +25,12 @@ public final class SilenceDecision {
     /** Lets a sender override the guild default with {@code -s} or {@code -p}. Default: op only. */
     public static final String OVERRIDE_PERMISSION = "heimdall.punishments.silent";
 
+    /**
+     * Holders may override without the node above, as they may see silent announcements without
+     * the notify node. One spelling, shared with {@link PunishmentAnnouncement#ADMIN_PERMISSION}.
+     */
+    public static final String ADMIN_PERMISSION = PunishmentAnnouncement.ADMIN_PERMISSION;
+
     /** What a refused sender is told. One sentence, and it names the thing they may not do. */
     public static final String REFUSAL_MESSAGE =
             "You are not allowed to change whether a punishment is silent.";
@@ -35,6 +41,25 @@ public final class SilenceDecision {
     private SilenceDecision(boolean silent, boolean refused) {
         this.silent = silent;
         this.refused = refused;
+    }
+
+    /**
+     * Whether a sender may depart from the guild default.
+     *
+     * <p>{@code heimdall.admin} grants it, exactly as it grants
+     * {@link PunishmentAnnouncement#NOTIFY_PERMISSION} in {@code visibleTo}. The Bukkit descriptor
+     * declares both as {@code children} of the admin node, and the two have to agree: a
+     * descriptor that says a permission is held while the code refuses it is worse than either
+     * answer on its own, because {@code /lp user <name> permission check} then confirms something
+     * the server will not do. The proxies have no descriptor at all, so on Velocity and BungeeCord
+     * this method is the only place the implication exists.
+     *
+     * <p>Two booleans rather than a sender, for the reason {@link #decide} takes four: the caller
+     * does the lookups on whatever thread it is already on, and this stays testable without a
+     * server.
+     */
+    public static boolean mayOverride(boolean hasOverrideNode, boolean hasAdminNode) {
+        return hasOverrideNode || hasAdminNode;
     }
 
     /**

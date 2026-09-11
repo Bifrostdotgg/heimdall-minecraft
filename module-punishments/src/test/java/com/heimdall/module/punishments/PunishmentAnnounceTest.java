@@ -139,6 +139,36 @@ class PunishmentAnnounceTest {
     }
 
     @Test
+    @DisplayName("an admin may override without the silent node, on issue and on revoke")
+    void adminOverridesWithoutTheSilentNode() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
+            FakePlayer notify = harness.platform.join(
+                    FakePlayer.named("Mod").grant(PunishmentAnnouncement.NOTIFY_PERMISSION));
+            harness.platform.join(FakePlayer.named("Steve"));
+            // Only heimdall.admin. plugin.yml declares the silent node a child of it, and the
+            // proxies have no descriptor at all, so the code has to be where that is true.
+            FakeCommandSource boss =
+                    FakeCommandSource.player("Boss").grant(SilenceDecision.ADMIN_PERMISSION);
+
+            harness.module.onStaffCommand(boss, "ban", Arrays.asList("Steve", "-s", "griefing"));
+
+            assertFalse(boss.wasTold(SilenceDecision.REFUSAL_MESSAGE),
+                    boss.messageText().toString());
+            assertTrue(ordinary.messageText().isEmpty());
+            assertTrue(told(notify, "(silent)"));
+
+            int ordinaryBefore = linesTo(ordinary);
+            harness.module.onStaffCommand(boss, "unban", Arrays.asList("Steve", "-p"));
+
+            assertFalse(boss.wasTold(SilenceDecision.REFUSAL_MESSAGE));
+            assertEquals(ordinaryBefore + 1, linesTo(ordinary),
+                    "the revoke path reads the same implication, not its own copy of it");
+            assertTrue(told(ordinary, "unbanned"));
+        }
+    }
+
+    @Test
     @DisplayName("-p with the override node makes a silent guild's ban public")
     void publicOverrideOnASilentGuild() {
         try (PunishmentsHarness harness = silentByDefault()) {
