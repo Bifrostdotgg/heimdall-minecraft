@@ -291,6 +291,32 @@ to the same tree and prints a one-time-per-start warning telling you to switch.
   list managed on the dashboard, since permissions aren't available yet at
   `AsyncPlayerPreLoginEvent`
 
+### Punishments
+
+One node per verb, all OP by default:
+
+- `heimdall.punishments.ban` - `/ban`, `/tempban`
+- `heimdall.punishments.ipban` - `/ipban`
+- `heimdall.punishments.mute` - `/mute`, `/tempmute`
+- `heimdall.punishments.kick` - `/kick`
+- `heimdall.punishments.warn` - `/warn`
+- `heimdall.punishments.unban` - `/unban`, `/unmute`, `/unwarn`, `/rollback`
+- `heimdall.punishments.history` - `/history`, `/staffhistory`, `/banlist`
+- `heimdall.punishments.dupeip` - `/dupeip`, `/iphistory`
+
+Two more decide who hears about a punishment, rather than who may issue one:
+
+- `heimdall.punishments.notify` - see **silent** punishment announcements (default: OP).
+  A punishment that is not silent is announced to everybody online and needs no node; a silent one
+  is announced only to holders of this (or of `heimdall.admin`), prefixed `(silent)`. Silent means
+  "the server at large does not find out", not "nobody does"
+- `heimdall.punishments.silent` - override the guild's `silentByDefault` setting with `-s` or `-p`
+  (default: OP). The guild default needs no permission. Departing from it in either direction does,
+  because both are a decision about who finds out that a moderator acted. Without the node the
+  command is **refused** rather than run with the flag quietly dropped: a moderator who believes a
+  ban went out quietly, on a server that announced it, has been misled by their own tool. A flag
+  that agrees with the default is a no-op and is always allowed
+
 ## How It Works
 
 ### For Players

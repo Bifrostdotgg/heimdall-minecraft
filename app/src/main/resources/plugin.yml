@@ -100,6 +100,21 @@ permissions:
   heimdall.punishments.dupeip:
     description: Look up accounts sharing an IP
     default: op
+  heimdall.punishments.notify:
+    # Who sees a SILENT punishment announced. A non-silent one goes to everybody
+    # online and needs no node at all, so this is not "may see announcements" -
+    # it is "is staff for the purpose of the quiet ones". heimdall.admin implies
+    # it, the same way it does everywhere else here.
+    description: See silent punishment announcements
+    default: op
+  heimdall.punishments.silent:
+    # Overriding the guild's silentByDefault setting, in EITHER direction: -s on
+    # a guild that announces, -p on a guild that does not. Both are a decision
+    # about who finds out that a moderator acted, so one node covers both rather
+    # than gating the -s spelling specifically. A flag that agrees with the
+    # default is a no-op and needs nothing.
+    description: Override whether a punishment is silent
+    default: op
   heimdall.bypass:
     # Note that this does NOT bypass the whitelist itself. Permissions are not
     # attached during AsyncPlayerPreLoginEvent — the player object does not exist
