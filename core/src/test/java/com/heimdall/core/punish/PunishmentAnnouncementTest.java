@@ -89,6 +89,48 @@ class PunishmentAnnouncementTest {
     }
 
     @Test
+    @DisplayName("a reason cannot forge a silent announcement with colour codes")
+    void reasonCannotInjectColourCodes() {
+        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
+                "ban", "Adam", "Steve", null, "\u00A7r\u00A78(silent) \u00A7fNotch", ANNOUNCED);
+
+        assertFalse(line.silent());
+        assertFalse(line.line().startsWith("\u00A78(silent) "),
+                "the forgery is the point: a reset plus a grey (silent) prints a convincing "
+                        + "announcement about a different player: " + line.line());
+        assertEquals("\u00A7fAdam \u00A7cbanned \u00A7fSteve \u00A77: \u00A7f(silent) Notch",
+                line.line(),
+                "the words survive, the formatting does not");
+    }
+
+    @Test
+    @DisplayName("every colour spelling is stripped, from every user-controlled segment")
+    void everySpellingIsStripped() {
+        String hexRun = "\u00A7x\u00A7f\u00A7f\u00A78\u00A78\u00A70\u00A70";
+        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
+                "ban", "&4Adam", "\u00A7lSteve", null, hexRun + "&khi\u00A7#ff8800 there",
+                ANNOUNCED);
+
+        assertEquals("\u00A7fAdam \u00A7cbanned \u00A7fSteve \u00A77: \u00A7fhi there", line.line());
+    }
+
+    @Test
+    @DisplayName("MiniMessage tags go too, and ordinary punctuation stays")
+    void tagsAreStrippedAndTextSurvives() {
+        assertTrue(PunishmentAnnouncement.issued(
+                "ban", "Adam", "Steve", null, "<red>cheating</red>", ANNOUNCED)
+                .line().endsWith("cheating"));
+        assertTrue(PunishmentAnnouncement.issued(
+                "ban", "Adam", "Steve", null, "said 3 < 4 and <3", ANNOUNCED)
+                .line().endsWith("said 3 < 4 and <3"),
+                "a tag is a tag, not every angle bracket a human types");
+        assertTrue(PunishmentAnnouncement.issued(
+                "ban", "Adam", "Steve", null, "Steve & Alex", ANNOUNCED)
+                .line().endsWith("Steve & Alex"),
+                "an ampersand only opens a colour code when a code character follows it");
+    }
+
+    @Test
     @DisplayName("silent prefixes the same sentence rather than replacing it")
     void silentIsPrefixed() {
         PunishmentAnnouncement line = PunishmentAnnouncement.issued(

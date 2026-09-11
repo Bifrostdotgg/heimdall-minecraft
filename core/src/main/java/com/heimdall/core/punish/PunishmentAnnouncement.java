@@ -1,6 +1,7 @@
 package com.heimdall.core.punish;
 
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 /**
  * The one chat line a punishment produces, and who is allowed to see it.
@@ -35,6 +36,18 @@ public final class PunishmentAnnouncement {
 
     /** What an issuer with no recorded name is called. */
     public static final String CONSOLE = "Console";
+
+    /** {@code §#rrggbb}, the serializer's own hex spelling. Stripped before the pair form. */
+    private static final Pattern HEX_CODE = Pattern.compile("[\u00A7&]#[0-9A-Fa-f]{6}");
+
+    /** One legacy code: a colour, a format, reset, or the {@code x} that opens the hex run. */
+    private static final Pattern LEGACY_CODE = Pattern.compile("[\u00A7&][0-9A-Fa-fK-Ok-oRrXx]");
+
+    /**
+     * A MiniMessage-shaped tag. Anchored on a letter, a slash or a bang after the {@code <} so an
+     * ordinary {@code <3} or {@code a < b} in a reason survives being written by a human.
+     */
+    private static final Pattern TAG = Pattern.compile("<[A-Za-z/!][^<>]*>");
 
     private static final int MINUTES_PER_HOUR = 60;
     private static final int MINUTES_PER_DAY = 60 * 24;
@@ -169,12 +182,33 @@ public final class PunishmentAnnouncement {
         return name;
     }
 
-    /** Folds newlines and trims, so a reason cannot turn one broadcast into three. */
+    /**
+     * Makes one user-controlled segment safe to drop into a formatted line.
+     *
+     * <p>Three things a reason, a target name or an issuer name must not be able to do.
+     *
+     * <p><strong>Colour.</strong> The line is assembled as legacy §-coded text and parsed by
+     * {@code Msg.legacy}, so a reason of {@code §r§8(silent) §fNotch} would reset the formatting
+     * and print a convincing forgery of a silent announcement about somebody else. Both the § and
+     * the & spellings go, along with the {@code §x§f§f…} and {@code §#ffffff} hex forms, and any
+     * § left over afterwards.
+     *
+     * <p><strong>Tags.</strong> {@code Msg.legacy} does not parse MiniMessage, so {@code <red>}
+     * renders literally today - but the punishment screens next door are MiniMessage, one
+     * {@code Msg.miniTemplate} call away, and a segment that is only safe because of which parser
+     * happens to be on the other end is not safe. Stripped here instead.
+     *
+     * <p><strong>Line breaks.</strong> Folded to spaces, so one punishment stays one line.
+     */
     private static String clean(String value) {
         if (value == null) {
             return "";
         }
-        return value.replace('\n', ' ').replace('\r', ' ').trim();
+        String text = value.replace('\n', ' ').replace('\r', ' ');
+        text = TAG.matcher(text).replaceAll("");
+        text = HEX_CODE.matcher(text).replaceAll("");
+        text = LEGACY_CODE.matcher(text).replaceAll("");
+        return text.replace("\u00A7", "").trim();
     }
 
     private static String issueVerb(String type) {
