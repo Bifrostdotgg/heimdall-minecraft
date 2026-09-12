@@ -49,6 +49,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -513,13 +514,16 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * <p>Lower-cased, because {@link KnownNames} matches that way and a moderator typing
      * {@code steve} means Steve.
      *
-     * <p><strong>A lookup, not a scan.</strong> This used to walk every key in the punishment
+     * <p><strong>A question, not a list.</strong> This used to walk every key in the punishment
      * mirror and do a {@code get} per key - on every tab press, for every revoke verb, on the main
-     * server thread on the Bukkit family. The set is now maintained in {@link KnownNames} at the
-     * moments a punishment lands or is lifted, which are the same moments the names themselves are
-     * recorded.
+     * server thread on the Bukkit family. The answer is now a predicate over an index
+     * {@link KnownNames} maintains at the moments a punishment lands or is lifted, which are the
+     * same moments the names themselves are recorded, and it is asked only of the names the prefix
+     * scan reaches. Materialising the family instead would have swapped a scan of every mirror key
+     * for an allocation the size of every active punishment, still per keystroke, to answer at
+     * most {@link PunishmentAdmin#COMPLETION_LIMIT} questions of it.
      */
-    private Set<String> targetFilter(String verb) {
+    private Predicate<String> targetFilter(String verb) {
         String family = revokeFamily(verb);
         if (family == null || !verb.startsWith("un")) {
             // Only the three revoke verbs filter. An issue verb takes anybody, and rollback takes
