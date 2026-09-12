@@ -58,8 +58,9 @@ public final class PunishmentAnnouncement {
      */
     private static final int MAX_CLEAN_PASSES = 8;
 
-    private static final int MINUTES_PER_HOUR = 60;
-    private static final int MINUTES_PER_DAY = 60 * 24;
+    private static final int SECONDS_PER_MINUTE = 60;
+    private static final int SECONDS_PER_HOUR = 60 * 60;
+    private static final int SECONDS_PER_DAY = 24 * 60 * 60;
 
     private final String line;
     private final boolean silent;
@@ -81,12 +82,12 @@ public final class PunishmentAnnouncement {
      *     {@code tempmute}, {@code kick} or {@code warn}
      * @param staff who issued it; blank means the console
      * @param target the punished player's name
-     * @param durationMinutes how long it lasts, or {@code null} for permanent
+     * @param durationSeconds how long it lasts, in seconds, or {@code null} for permanent
      * @param reason free text from the issuer, possibly empty
      * @param silent whether only notify holders see it
      */
     public static PunishmentAnnouncement issued(String type, String staff, String target,
-            Integer durationMinutes, String reason, boolean silent) {
+            Integer durationSeconds, String reason, boolean silent) {
         String verb = issueVerb(type);
         if (verb == null) {
             return null;
@@ -97,7 +98,7 @@ public final class PunishmentAnnouncement {
         }
         StringBuilder body = new StringBuilder();
         body.append("§f").append(issuer(staff)).append(" §c").append(verb).append(" §f").append(who);
-        String duration = compactDuration(durationMinutes);
+        String duration = compactDuration(durationSeconds);
         if (duration != null) {
             body.append(" §7for §f").append(duration);
         }
@@ -154,22 +155,31 @@ public final class PunishmentAnnouncement {
      *
      * <p>Two units at most. "3d 4h" is the answer to "how long"; "3d 4h 17m" is an answer to a
      * question nobody asked in a broadcast line.
+     *
+     * <p>Seconds in, and seconds out when that is all there is: a 30 second mute reads as
+     * {@code 30s} rather than being rounded up to the minute the whole pipeline used to store.
+     * The same two-unit shape as {@code formatDuration} in {@code packages/shared}, so the screen
+     * a player sees and the dashboard row a moderator reads say the same thing.
      */
-    public static String compactDuration(Integer minutes) {
-        if (minutes == null || minutes.intValue() <= 0) {
+    public static String compactDuration(Integer seconds) {
+        if (seconds == null || seconds.intValue() <= 0) {
             return null;
         }
-        int total = minutes.intValue();
-        int days = total / MINUTES_PER_DAY;
-        int hours = (total % MINUTES_PER_DAY) / MINUTES_PER_HOUR;
-        int mins = total % MINUTES_PER_HOUR;
+        int total = seconds.intValue();
+        int days = total / SECONDS_PER_DAY;
+        int hours = (total % SECONDS_PER_DAY) / SECONDS_PER_HOUR;
+        int minutes = (total % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
+        int rest = total % SECONDS_PER_MINUTE;
         if (days > 0) {
             return hours > 0 ? days + "d " + hours + "h" : days + "d";
         }
         if (hours > 0) {
-            return mins > 0 ? hours + "h " + mins + "m" : hours + "h";
+            return minutes > 0 ? hours + "h " + minutes + "m" : hours + "h";
         }
-        return mins + "m";
+        if (minutes > 0) {
+            return rest > 0 ? minutes + "m " + rest + "s" : minutes + "m";
+        }
+        return rest + "s";
     }
 
     private static void appendReason(StringBuilder body, String reason) {

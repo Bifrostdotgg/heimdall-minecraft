@@ -360,7 +360,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [duration] [reason]"));
             return;
         }
-        if (("tempban".equals(type) || "tempmute".equals(type)) && parsed.durationMinutes == null) {
+        if (("tempban".equals(type) || "tempmute".equals(type)) && parsed.durationSeconds == null) {
             source.sendMessage(Msg.legacy("§cA duration is required for /" + type + "."));
             return;
         }
@@ -463,9 +463,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         local.issuedAt = Instant.ofEpochMilli(now).toString();
         local.issuedByName = source.name();
         local.issuedByUuid = source.uuid() == null ? null : source.uuid().toString();
-        if (parsed.durationMinutes != null) {
+        if (parsed.durationSeconds != null) {
             local.expiresAt = Instant.ofEpochMilli(now)
-                    .plusSeconds(parsed.durationMinutes.intValue() * 60L).toString();
+                    .plusSeconds(parsed.durationSeconds.intValue()).toString();
         }
         String mirrorKey = keyFor(local);
         if (mirror != null && !"kick".equals(type) && mirrorKey != null) {
@@ -481,8 +481,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .put("source", "command")
                 .put("opId", opId)
                 .put("issuedAt", now);
-        if (parsed.durationMinutes != null) {
-            body.put("durationMinutes", parsed.durationMinutes.intValue());
+        if (parsed.durationSeconds != null) {
+            // Seconds, not minutes: a 30 second mute is a thing moderators ask for, and the
+            // minute-granular key rounded it up to one. The bot reads both for one release.
+            body.put("durationSeconds", parsed.durationSeconds.intValue());
         }
         if (ipDigest != null) {
             body.put("ipDigest", ipDigest);
@@ -496,7 +498,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         enqueue("issue", opId, now, body.build());
         source.sendMessage(Msg.legacy("§a" + type + " issued for §f" + name));
         announce(PunishmentAnnouncement.issued(
-                type, source.name(), name, parsed.durationMinutes, parsed.reason, silent));
+                type, source.name(), name, parsed.durationSeconds, parsed.reason, silent));
         flushSoon();
     }
 
@@ -784,17 +786,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      */
     private static PunishmentAnnouncement announcementFor(ActivePunishment p) {
         return PunishmentAnnouncement.issued(p.type, p.issuedByName, p.targetName,
-                minutesUntil(p.expiresAt, System.currentTimeMillis()), p.reason, p.silent);
+                secondsUntil(p.expiresAt, System.currentTimeMillis()), p.reason, p.silent);
     }
 
-    /** Whole minutes from {@code now} to an ISO instant, or {@code null} for no expiry. */
-    static Integer minutesUntil(String expiresAt, long nowMillis) {
+    /** Whole seconds from {@code now} to an ISO instant, or {@code null} for no expiry. */
+    static Integer secondsUntil(String expiresAt, long nowMillis) {
         if (expiresAt == null || expiresAt.isEmpty()) return null;
         try {
             long remaining = Instant.parse(expiresAt).toEpochMilli() - nowMillis;
             if (remaining <= 0) return null;
-            long minutes = remaining / TimeUnit.MINUTES.toMillis(1);
-            return Integer.valueOf((int) Math.max(1L, Math.min(Integer.MAX_VALUE, minutes)));
+            long seconds = remaining / TimeUnit.SECONDS.toMillis(1);
+            return Integer.valueOf((int) Math.max(1L, Math.min(Integer.MAX_VALUE, seconds)));
         } catch (RuntimeException unparseable) {
             return null;
         }

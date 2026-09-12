@@ -28,7 +28,7 @@ class PunishmentAnnouncementTest {
     @DisplayName("a temporary mute carries how long it lasts")
     void temporaryMute() {
         PunishmentAnnouncement line = PunishmentAnnouncement.issued(
-                "tempmute", "Adam", "Steve", Integer.valueOf(1440), "spam", ANNOUNCED);
+                "tempmute", "Adam", "Steve", Integer.valueOf(24 * 60 * 60), "spam", ANNOUNCED);
 
         assertTrue(line.line().contains("muted"));
         assertTrue(line.line().contains("1d"), line.line());
@@ -196,12 +196,17 @@ class PunishmentAnnouncementTest {
     void durations() {
         assertNull(PunishmentAnnouncement.compactDuration(null));
         assertNull(PunishmentAnnouncement.compactDuration(Integer.valueOf(0)));
-        assertEquals("45m", PunishmentAnnouncement.compactDuration(Integer.valueOf(45)));
-        assertEquals("1h 30m", PunishmentAnnouncement.compactDuration(Integer.valueOf(90)));
-        assertEquals("2h", PunishmentAnnouncement.compactDuration(Integer.valueOf(120)));
-        assertEquals("7d", PunishmentAnnouncement.compactDuration(Integer.valueOf(7 * 1440)));
+        assertEquals("30s", PunishmentAnnouncement.compactDuration(Integer.valueOf(30)),
+                "half a minute is a punishment somebody asked for, not a rounding error");
+        assertEquals("45m", PunishmentAnnouncement.compactDuration(Integer.valueOf(45 * 60)));
+        assertEquals("1m 30s", PunishmentAnnouncement.compactDuration(Integer.valueOf(90)));
+        assertEquals("1h 30m", PunishmentAnnouncement.compactDuration(Integer.valueOf(90 * 60)));
+        assertEquals("2h", PunishmentAnnouncement.compactDuration(Integer.valueOf(2 * 3600)));
+        assertEquals("23h 42m", PunishmentAnnouncement.compactDuration(
+                Integer.valueOf(23 * 3600 + 42 * 60 + 9)));
+        assertEquals("7d", PunishmentAnnouncement.compactDuration(Integer.valueOf(7 * 86400)));
         assertEquals("3d 4h", PunishmentAnnouncement.compactDuration(
-                Integer.valueOf(3 * 1440 + 4 * 60 + 17)),
+                Integer.valueOf(3 * 86400 + 4 * 3600 + 17 * 60)),
                 "the minutes are dropped once there are days: a broadcast answers 'how long', not "
                         + "'exactly when'");
     }

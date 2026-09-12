@@ -8,14 +8,56 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * LiteBans-shaped option parser: flags anywhere, first duration-like token is
- * the duration, the rest is the reason.
+ * LiteBans-shaped option parser: flags anywhere, the first whole duration token anywhere after the
+ * target is the duration, and everything else is the reason.
+ *
+ * <h2>Whole tokens, and the duration can be anywhere</h2>
+ *
+ * <p>Two rules that used to be one mistake each. The duration was only read from the token
+ * immediately after the name, so {@code /ban Steve griefing 1d} banned Steve forever with the
+ * reason "griefing 1d" - the shape a moderator types when the reason came to mind first. And
+ * {@code looksLikeDuration} searched inside the token rather than matching it, so {@code abc5m}
+ * was a duration and {@code 1day-old} was five minutes and a bit of a lie.
+ *
+ * <p>So: the FIRST token after the target that is a duration <em>in its entirety</em> becomes the
+ * duration and leaves the reason; every other non-flag token stays in the reason, in the order it
+ * was typed. A second duration-looking token is reason text, which is what "banned for 2 houses
+ * 1d" needs to mean.
+ *
+ * <h2>Seconds, not minutes</h2>
+ *
+ * <p>{@code /ban Steve 30s} used to round up to a minute, because the whole pipeline was
+ * minute-granular. Nothing about a punishment needs that: the wire, the mirror and the screens all
+ * carry instants, and a 30 second mute is a thing moderators ask for.
  */
 public final class PunishmentParser {
 
+    /**
+     * One duration token, whole, with at least one count-and-unit pair and nothing else.
+     *
+     * <p>Anchored at both ends on purpose - see the class javadoc. The unit alternatives are
+     * ordered longest-prefix-first within each family only where it matters ({@code mo} before
+     * {@code m}); the regex engine backtracks into the longer spellings for the rest, so
+     * {@code 5minutes} and {@code 5m} both match.
+     */
     private static final Pattern DURATION = Pattern.compile(
-            "(?i)^(?:perm(?:anent)?|(\\d+)\\s*(mo|months?|y|years?|w|weeks?|d|days?|h|hours?|m|mins?|minutes?|s|secs?|seconds?))$");
-    private static final Pattern TOKEN = Pattern.compile("(?i)(\\d+)(mo|months?|y|years?|w|weeks?|d|days?|h|hours?|m|mins?|minutes?|s|secs?|seconds?)");
+            "(?i)^(?:\\d++(?:mo|months?|y|years?|w|weeks?|d|days?|h|hrs?|hours?"
+                    + "|m|mins?|minutes?|s|secs?|seconds?))+$");
+
+    /** One count-and-unit pair inside an already-validated token. */
+    private static final Pattern PART = Pattern.compile(
+            "(?i)(\\d++)(mo|months?|y|years?|w|weeks?|d|days?|h|hrs?|hours?"
+                    + "|m|mins?|minutes?|s|secs?|seconds?)");
+
+    /** Longest token the duration matcher will look at. A real one is under ten characters. */
+    private static final int MAX_DURATION_TOKEN_CHARS = 40;
+
+    private static final long SECONDS_PER_MINUTE = 60L;
+    private static final long SECONDS_PER_HOUR = 60L * 60L;
+    private static final long SECONDS_PER_DAY = 24L * SECONDS_PER_HOUR;
+    private static final long SECONDS_PER_WEEK = 7L * SECONDS_PER_DAY;
+    private static final long SECONDS_PER_MONTH = 30L * SECONDS_PER_DAY;
+    private static final long SECONDS_PER_YEAR = 365L * SECONDS_PER_DAY;
 
     private PunishmentParser() {
     }
@@ -24,17 +66,18 @@ public final class PunishmentParser {
         public final boolean silent;
         public final boolean publicFlag;
         public final String target;
-        public final Integer durationMinutes;
+        /** How long it lasts, in seconds, or {@code null} for permanent. */
+        public final Integer durationSeconds;
         public final String reason;
         /** From {@code --sender=}; hook/import may use it. Native /hd issue must ignore it. */
         public final String senderOverride;
 
-        Parsed(boolean silent, boolean publicFlag, String target, Integer durationMinutes,
+        Parsed(boolean silent, boolean publicFlag, String target, Integer durationSeconds,
                 String reason, String senderOverride) {
             this.silent = silent;
             this.publicFlag = publicFlag;
             this.target = target;
-            this.durationMinutes = durationMinutes;
+            this.durationSeconds = durationSeconds;
             this.reason = reason;
             this.senderOverride = senderOverride;
         }
@@ -98,61 +141,91 @@ public final class PunishmentParser {
             throw new IllegalArgumentException("a target is required");
         }
         Flags options = flags(args);
-        boolean silent = options.silent;
-        boolean pub = options.publicFlag;
-        String senderOverride = options.senderOverride;
         List<String> rest = options.rest;
         if (rest.isEmpty()) {
             throw new IllegalArgumentException("a target is required");
         }
         String target = rest.get(0);
         Integer duration = null;
-        int reasonFrom = 1;
-        if (rest.size() > 1 && looksLikeDuration(rest.get(1))) {
-            duration = parseDurationMinutes(rest.get(1));
-            reasonFrom = 2;
+        boolean durationTaken = false;
+        List<String> reason = new ArrayList<String>();
+        for (int i = 1; i < rest.size(); i++) {
+            String token = rest.get(i);
+            if (!durationTaken && looksLikeDuration(token)) {
+                durationTaken = true;
+                duration = parseDurationSeconds(token);
+                continue;
+            }
+            reason.add(token);
         }
-        String reason = join(rest, reasonFrom);
-        return new Parsed(silent, pub, target, duration, reason, senderOverride);
+        return new Parsed(options.silent, options.publicFlag, target, duration,
+                join(reason), options.senderOverride);
     }
 
+    /**
+     * Whether this token, in its entirety, is a duration.
+     *
+     * <p>Whole-token rather than a substring search, which is the difference between
+     * {@code /ban Steve 1day-old account} reading as a permanent ban with that reason and reading
+     * as a one-day ban on an account whose age nobody mentioned.
+     */
     public static boolean looksLikeDuration(String token) {
         if (Strings.isBlank(token)) return false;
         String t = token.trim();
         if (t.equalsIgnoreCase("perm") || t.equalsIgnoreCase("permanent")) return true;
-        return DURATION.matcher(t).matches() || TOKEN.matcher(t).find();
+        // Nothing a human types is longer than this, and the cap keeps a pathological token out
+        // of the matcher entirely rather than trusting the pattern to shrug it off.
+        if (t.length() > MAX_DURATION_TOKEN_CHARS) return false;
+        return DURATION.matcher(t).matches();
     }
 
     /**
-     * @return minutes, or {@code null} for permanent
+     * @return seconds, or {@code null} for permanent and for anything that is not a duration
      */
-    public static Integer parseDurationMinutes(String token) {
-        if (Strings.isBlank(token)) return null;
+    public static Integer parseDurationSeconds(String token) {
+        if (!looksLikeDuration(token)) return null;
         String t = token.trim();
         if (t.equalsIgnoreCase("perm") || t.equalsIgnoreCase("permanent")) return null;
-        Matcher matcher = TOKEN.matcher(t);
-        int minutes = 0;
+        Matcher matcher = PART.matcher(t);
+        long seconds = 0L;
         boolean any = false;
         while (matcher.find()) {
             any = true;
-            int n = Integer.parseInt(matcher.group(1));
+            long n;
+            try {
+                n = Long.parseLong(matcher.group(1));
+            } catch (NumberFormatException tooBig) {
+                // A count with more digits than a long holds. Saturate rather than refuse: the
+                // moderator asked for "a very long time", and the clamp below is the answer.
+                n = Integer.MAX_VALUE;
+            }
+            if (n > Integer.MAX_VALUE) {
+                n = Integer.MAX_VALUE;
+            }
             String unit = matcher.group(2).toLowerCase(Locale.ROOT);
-            if (unit.startsWith("mo")) minutes += n * 30 * 24 * 60;
-            else if (unit.startsWith("y")) minutes += n * 365 * 24 * 60;
-            else if (unit.startsWith("w")) minutes += n * 7 * 24 * 60;
-            else if (unit.startsWith("d")) minutes += n * 24 * 60;
-            else if (unit.startsWith("h")) minutes += n * 60;
-            else if (unit.equals("s") || unit.startsWith("sec")) minutes += Math.max(1, n / 60);
-            else minutes += n;
+            seconds += n * secondsPerUnit(unit);
+            if (seconds >= Integer.MAX_VALUE) {
+                return Integer.valueOf(Integer.MAX_VALUE);
+            }
         }
         if (!any) return null;
-        return Integer.valueOf(Math.max(1, minutes));
+        // A zero-length punishment is a mistake, not a permanent one: null here would mean forever.
+        return Integer.valueOf((int) Math.max(1L, seconds));
     }
 
-    private static String join(List<String> parts, int from) {
-        if (from >= parts.size()) return "";
+    private static long secondsPerUnit(String unit) {
+        if (unit.startsWith("mo")) return SECONDS_PER_MONTH;
+        if (unit.startsWith("y")) return SECONDS_PER_YEAR;
+        if (unit.startsWith("w")) return SECONDS_PER_WEEK;
+        if (unit.startsWith("d")) return SECONDS_PER_DAY;
+        if (unit.startsWith("h")) return SECONDS_PER_HOUR;
+        if (unit.startsWith("s")) return 1L;
+        return SECONDS_PER_MINUTE;
+    }
+
+    private static String join(List<String> parts) {
         StringBuilder b = new StringBuilder();
-        for (int i = from; i < parts.size(); i++) {
+        for (int i = 0; i < parts.size(); i++) {
             if (b.length() > 0) b.append(' ');
             b.append(parts.get(i));
         }

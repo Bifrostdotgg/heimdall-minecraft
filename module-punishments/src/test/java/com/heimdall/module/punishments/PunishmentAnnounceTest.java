@@ -662,15 +662,18 @@ class PunishmentAnnounceTest {
     @DisplayName("the remaining duration is read off expiresAt, because the wire has no length")
     void remainingDuration() {
         long now = 1_700_000_000_000L;
-        assertNull(HeimdallPunishmentsModule.minutesUntil(null, now));
-        assertNull(HeimdallPunishmentsModule.minutesUntil("", now));
-        assertNull(HeimdallPunishmentsModule.minutesUntil("not an instant", now),
+        assertNull(HeimdallPunishmentsModule.secondsUntil(null, now));
+        assertNull(HeimdallPunishmentsModule.secondsUntil("", now));
+        assertNull(HeimdallPunishmentsModule.secondsUntil("not an instant", now),
                 "an unparseable expiry reads as permanent rather than taking the announcement down");
-        assertNull(HeimdallPunishmentsModule.minutesUntil(
+        assertNull(HeimdallPunishmentsModule.secondsUntil(
                 java.time.Instant.ofEpochMilli(now - 1000).toString(), now),
                 "already expired is not a duration");
-        assertEquals(Integer.valueOf(60), HeimdallPunishmentsModule.minutesUntil(
+        assertEquals(Integer.valueOf(3600), HeimdallPunishmentsModule.secondsUntil(
                 java.time.Instant.ofEpochMilli(now + 3_600_000L).toString(), now));
+        assertEquals(Integer.valueOf(30), HeimdallPunishmentsModule.secondsUntil(
+                java.time.Instant.ofEpochMilli(now + 30_000L).toString(), now),
+                "half a minute is half a minute, not a minute");
     }
 
     @Test
