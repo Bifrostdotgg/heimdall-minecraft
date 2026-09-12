@@ -100,6 +100,18 @@ public final class PunishmentAnnouncement {
         return build(template, PunishmentText.revokeVerb(typeOrVerb), view, nowMillis);
     }
 
+    /**
+     * The finished line, or {@code null} for the three cases that are not an announcement.
+     *
+     * <p><strong>A template that fills to nothing turns the line off for everybody, holders of
+     * {@link #NOTIFY_PERMISSION} included, and that is the switch rather than a gap in one.</strong>
+     * An empty template can only be a guild clearing the box on the dashboard: the bot sends its
+     * default whenever the key is unset, and the plugin falls back to the same default whenever
+     * the bot sends no key at all, so "" never arrives by omission. A guild that has said it wants
+     * no broadcast has said so about the broadcast, not about who reads it - silencing the server
+     * at large while still telling staff is what {@code -s} is for, and it is a per-punishment
+     * decision rather than a permanent one.
+     */
     private static PunishmentAnnouncement build(String template, String verb, PunishmentView view,
             long nowMillis) {
         if (verb == null) {

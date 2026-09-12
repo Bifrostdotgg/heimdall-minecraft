@@ -2,6 +2,7 @@ package com.heimdall.core.punish;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -236,6 +237,25 @@ class PunishmentAnnouncementTest {
                 PunishmentText.compactDuration(Long.valueOf(3 * 86400 + 4 * 3600 + 17 * 60L)),
                 "the minutes are dropped once there are days: a broadcast answers 'how long', not "
                         + "'exactly when'");
+    }
+
+    @Test
+    @DisplayName("a cleared template is the off switch, and it is off for notify holders too")
+    void aClearedTemplateSilencesEverybody() {
+        PunishmentView ban = view("ban", "Adam", "Steve", null, "griefing", ANNOUNCED);
+        PunishmentView silentBan = view("ban", "Adam", "Steve", null, "griefing", SILENT);
+
+        assertNull(PunishmentAnnouncement.issued("", ban, NOW));
+        assertNull(PunishmentAnnouncement.issued("   \n  ", ban, NOW),
+                "whitespace is a cleared box that kept a newline");
+        assertNull(PunishmentAnnouncement.issued(null, ban, NOW));
+        assertNull(PunishmentAnnouncement.revoked("", "unban", ban, NOW));
+        assertNull(PunishmentAnnouncement.issued("", silentBan, NOW),
+                "there is no line, so there is no audience question to answer: a guild that "
+                        + "cleared the box turned the broadcast off, not the public half of it");
+
+        assertNotNull(PunishmentAnnouncement.issued(ISSUE, ban, NOW),
+                "and an unset key is not a cleared one - it falls back to the shared default");
     }
 
     private static PunishmentAnnouncement issued(String type, String staff, String target,
