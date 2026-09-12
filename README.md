@@ -277,6 +277,10 @@ Tokens can be compounded: `1d12h`, `2h30m`, `1d12h30m15s`. Lengths are kept in *
 that can be issued is ten years; past that the command refuses and tells you to use `perm`. The
 same grammar is used by `/mc-punish` in Discord and by the dashboard form, from one shared table.
 
+In **hook mode**, a LiteBans ban longer than ten years is mirrored as permanent rather than
+refused. Nobody is present to be told, the ban is already live in LiteBans, and `/ban Steve 100y`
+is a common way to spell "forever" there; the server log records the length that was dropped.
+
 **Tab completion** offers player names at the target position - everyone online first, then
 everyone this server has seen or punished - the flags after a `-`, and a short duration list once
 a player is named. `/hd unban`, `/hd unmute` and `/hd unwarn` only offer players who actually have
@@ -286,7 +290,8 @@ one of those to lift.
 MiniMessage templates edited on the dashboard's Minecraft page, not in any file here. They carry
 the guild's name, the staff member, the reason, the length, the time remaining, the punishment id
 and the appeal link, and a clause whose value is empty disappears rather than printing a blank
-row.
+row. The ID row is one of those clauses: a punishment issued while the bot is unreachable has only
+a local id, which no appeal can be opened with, so the row appears once the real id syncs.
 
 ### Admin Commands
 
