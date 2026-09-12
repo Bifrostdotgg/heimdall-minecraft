@@ -651,9 +651,22 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         });
     }
 
-    private void submitIssue(CommandSource source, String type, String uuid, String name,
+    /**
+     * Files an issued punishment, applies it locally and announces it.
+     *
+     * <p>Package-private rather than private so a test can call it with the module already
+     * disabled, which is the one condition the guard below exists for and the one an end-to-end
+     * test cannot stage: the NPE it prevents happens inside a {@code whenComplete} callback, where
+     * nothing observes it.
+     */
+    void submitIssue(CommandSource source, String type, String uuid, String name,
             PunishmentParser.Parsed parsed, boolean silent) {
         ModuleContext ctx = this.context;
+        // Reached from inside the resolveName future as well as synchronously, so the module can
+        // be disabled between the command and this. Every other context read in this file guards;
+        // these two did not, and a config push that turned the module off mid-resolve threw inside
+        // a CompletableFuture, where the exception is swallowed and the moderator is told nothing.
+        if (ctx == null) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
         String ipDigest = null;
         if ("ipban".equals(type)) {
@@ -771,9 +784,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * <p>The first match decides when a verb lifts several rows at once ({@code /unban} takes a
      * ban and an ipban together). They are one player's punishments and the announcement is one
      * line, so there is one flag to read and the primary row is the one to read it from.
+     *
+     * <p>Package-private for the same reason as {@link #submitIssue}: the disabled-mid-request
+     * case is only reachable from a test that calls it directly.
      */
-    private void submitRevoke(CommandSource source, String type, String uuid, String name,
+    void submitRevoke(CommandSource source, String type, String uuid, String name,
             String reason, boolean silentFlag, boolean publicFlag) {
+        ModuleContext ctx = this.context;
+        // See submitIssue. Reached from inside the resolveName future, so the module can be gone
+        // by the time this runs, and the settings read at the end of it would NPE inside a
+        // CompletableFuture where nobody sees it.
+        if (ctx == null) return;
         List<ActivePunishment> matches;
         if ("rollback".equals(type)) {
             ActivePunishment latest = latestActive(uuid);
@@ -819,7 +840,6 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         source.sendMessage(Msg.legacy("§aRevoked " + matches.size() + " punishment(s) for §f" + name));
         // Once, on the verb the moderator typed, rather than once per matching row: /unban lifts a
         // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
-        ModuleContext ctx = this.context;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
         announce(PunishmentAnnouncement.revoked(settings.announceRevoke, type,
                 revokeView(matches.get(0), name, source.name(), reason, decision.silent(), settings),

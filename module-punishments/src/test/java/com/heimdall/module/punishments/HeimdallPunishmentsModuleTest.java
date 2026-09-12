@@ -13,6 +13,7 @@ import com.heimdall.core.pipeline.ChatMessage;
 import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.punish.PunishmentIp;
+import com.heimdall.core.punish.PunishmentParser;
 import com.heimdall.core.testing.FakeCommandSource;
 import com.heimdall.core.testing.FakePlayer;
 import com.heimdall.core.testing.TestText;
@@ -519,6 +520,29 @@ class HeimdallPunishmentsModuleTest {
             Payload body = queuedBody(harness);
             assertFalse(body.has("durationSeconds"), body.toJson());
             assertFalse(body.has("durationMinutes"), body.toJson());
+        }
+    }
+
+    @Test
+    @DisplayName("a module turned off mid-request files nothing rather than throwing")
+    void disabledMidRequestIsNotAnNpe() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+            String steve = FakePlayer.named("Steve").uuid().toString();
+            // Both are reached from inside the resolveName future, so a config push that turns
+            // the module off between the command and the reply lands here with no context. The
+            // throw that used to follow happened inside a CompletableFuture, where it was
+            // swallowed and the moderator was told nothing at all.
+            harness.disableModule();
+
+            FakeCommandSource console = FakeCommandSource.console();
+            harness.module.submitIssue(console, "ban", steve, "Steve",
+                    PunishmentParser.parse(Arrays.asList("Steve", "7d", "griefing")), false);
+            harness.module.submitRevoke(console, "unban", steve, "Steve", "", false, false);
+
+            assertTrue(console.messageText().isEmpty(),
+                    "nothing is filed and nothing is claimed: " + console.messageText());
         }
     }
 
