@@ -722,7 +722,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         enqueue("issue", opId, now, body.build());
         source.sendMessage(Msg.legacy("§a" + type + " issued for §f" + name));
         announce(PunishmentAnnouncement.issued(
-                type, source.name(), name, parsed.durationSeconds, parsed.reason, silent));
+                settings.announceIssue, viewOf(local, settings), now));
         flushSoon();
     }
 
@@ -821,8 +821,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         source.sendMessage(Msg.legacy("§aRevoked " + matches.size() + " punishment(s) for §f" + name));
         // Once, on the verb the moderator typed, rather than once per matching row: /unban lifts a
         // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
-        announce(PunishmentAnnouncement.revoked(type, source.name(), name, reason,
-                decision.silent()));
+        ModuleContext ctx = this.context;
+        PunishmentSettings settings = PunishmentSettings.from(ctx.config());
+        announce(PunishmentAnnouncement.revoked(settings.announceRevoke, type,
+                revokeView(matches.get(0), name, source.name(), reason, decision.silent(), settings),
+                now));
         flushSoon();
     }
 
@@ -930,17 +933,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 ActivePunishment p = fromPayload(payload);
                 if (p == null || mirror == null) return;
                 boolean echo = isOwnEcho(payload.string("opId", ""));
+                PunishmentSettings settings = PunishmentSettings.from(context.config());
                 if ("kick".equals(p.type)) {
-                    applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
-                    if (!echo) announce(announcementFor(p));
+                    applyLive(p.targetUuid, p, settings);
+                    if (!echo) announce(announcementFor(p, settings));
                     return;
                 }
                 String key = keyFor(p);
                 if (key == null) return;
                 names.remember(p.targetName);
                 mirror.record(key, p);
-                applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
-                if (!echo) announce(announcementFor(p));
+                applyLive(p.targetUuid, p, settings);
+                if (!echo) announce(announcementFor(p, settings));
             }
         };
     }
@@ -1013,9 +1017,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * set for a week two days ago has five days left, which is the true answer to the question
      * the line is asking.
      */
-    private static PunishmentAnnouncement announcementFor(ActivePunishment p) {
-        return PunishmentAnnouncement.issued(p.type, p.issuedByName, p.targetName,
-                secondsUntil(p.expiresAt, System.currentTimeMillis()), p.reason, p.silent);
+    private static PunishmentAnnouncement announcementFor(ActivePunishment p,
+            PunishmentSettings settings) {
+        return PunishmentAnnouncement.issued(
+                settings.announceIssue, viewOf(p, settings), System.currentTimeMillis());
     }
 
     /** Whole seconds from {@code now} to an ISO instant, or {@code null} for no expiry. */
@@ -1170,9 +1175,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 mirror.evict(key);
                 if (lifted == null) return;
                 if (!announceableRevoke(payload.string("revokeCause", ""))) return;
-                announce(PunishmentAnnouncement.revoked(lifted.type,
-                        payload.string("revokedBy", ""), lifted.targetName,
-                        payload.string("reason", ""), lifted.silent));
+                PunishmentSettings settings = PunishmentSettings.from(context.config());
+                announce(PunishmentAnnouncement.revoked(settings.announceRevoke, lifted.type,
+                        revokeView(lifted, lifted.targetName, payload.string("revokedBy", ""),
+                                payload.string("reason", ""), lifted.silent, settings),
+                        System.currentTimeMillis()));
             }
         };
     }
@@ -1259,7 +1266,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                     + raced);
             return;
         }
-        Component line = Msg.legacy(announcement.line());
+        Component line = announcement.message();
         for (PlayerHandle player : online) {
             boolean visible;
             try {
@@ -1950,6 +1957,29 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .expiresAtMillis(p.expiresAtMillis())
                 .lengthSeconds(p.durationSeconds)
                 .silent(p.silent)
+                .build();
+    }
+
+    /**
+     * A lifted punishment, as the revoke announcement reads it.
+     *
+     * <p>Three fields come from the lifting rather than from the row: the staff name is whoever
+     * revoked it, the reason is the reason they gave for revoking it, and the silence is the
+     * decision made about <em>this</em> announcement - which defaults to the silence of the row
+     * being lifted, because announcing "Adam unbanned Steve" on a server that was never told
+     * Steve was banned discloses the very thing the silent ban was hiding.
+     */
+    private static PunishmentView revokeView(ActivePunishment lifted, String name, String staff,
+            String reason, boolean silent, PunishmentSettings settings) {
+        return PunishmentView.builder()
+                .type(lifted == null ? "" : lifted.type)
+                .targetName(name)
+                .staffName(staff)
+                .id(lifted == null ? "" : lifted.id)
+                .reason(reason)
+                .serverName(settings == null ? "" : settings.serverName)
+                .appealUrl(settings == null ? "" : settings.appealUrl)
+                .silent(silent)
                 .build();
     }
 

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.heimdall.core.testing.TestText;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -14,65 +15,73 @@ class PunishmentAnnouncementTest {
     private static final boolean SILENT = true;
     private static final boolean ANNOUNCED = false;
 
+    private static final long NOW = 1_757_000_000_000L;
+    private static final String ISSUE = PunishmentScreens.ANNOUNCE_ISSUE;
+    private static final String REVOKE = PunishmentScreens.ANNOUNCE_REVOKE;
+
     @Test
     @DisplayName("a permanent ban reads as one sentence")
     void permanentBan() {
-        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "griefing", ANNOUNCED);
+        PunishmentAnnouncement line = issued("ban", "Adam", "Steve", null, "griefing", ANNOUNCED);
 
-        assertEquals("§fAdam §cbanned §fSteve §7: §fgriefing", line.line());
+        assertEquals("Bifrost » Adam banned Steve for griefing", plain(line));
         assertFalse(line.silent());
     }
 
     @Test
-    @DisplayName("a temporary mute carries how long it lasts")
-    void temporaryMute() {
-        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
-                "tempmute", "Adam", "Steve", Long.valueOf(24 * 60 * 60L), "spam", ANNOUNCED);
+    @DisplayName("a temporary ban says so, and carries how long it lasts")
+    void temporaryBan() {
+        PunishmentAnnouncement line = issued(
+                "ban", "Adam", "Steve", Long.valueOf(NOW + 86_400_000L), "spam", ANNOUNCED);
 
-        assertTrue(line.line().contains("muted"));
-        assertTrue(line.line().contains("1d"), line.line());
+        assertEquals("Bifrost » Adam temporarily banned Steve for spam (1d)", plain(line),
+                "the verb and the length are the whole difference between the two, and a "
+                        + "permanent ban must not read as a temporary one with the clause missing");
     }
 
     @Test
-    @DisplayName("a reasonless punishment stops after the name rather than trailing a colon")
+    @DisplayName("a temporary mute reads as one too")
+    void temporaryMute() {
+        PunishmentAnnouncement line = issued(
+                "mute", "Adam", "Steve", Long.valueOf(NOW + 3_600_000L), "spam", ANNOUNCED);
+
+        assertTrue(plain(line).contains("temporarily muted"), plain(line));
+        assertTrue(plain(line).contains("(1h)"), plain(line));
+    }
+
+    @Test
+    @DisplayName("a reasonless punishment stops after the name rather than trailing a clause")
     void noReason() {
-        assertEquals("§fAdam §ckicked §fSteve",
-                PunishmentAnnouncement.issued("kick", "Adam", "Steve", null, "", ANNOUNCED).line());
+        assertEquals("Bifrost » Adam kicked Steve",
+                plain(issued("kick", "Adam", "Steve", null, "", ANNOUNCED)));
     }
 
     @Test
     @DisplayName("a revoke reads as its own verb, from either spelling of the action")
     void revokes() {
-        assertEquals("§fAdam §aunbanned §fSteve",
-                PunishmentAnnouncement.revoked("unban", "Adam", "Steve", "", ANNOUNCED).line());
-        assertEquals("§fAdam §aunbanned §fSteve",
-                PunishmentAnnouncement.revoked("ban", "Adam", "Steve", "", ANNOUNCED).line(),
+        assertEquals("Bifrost » Adam unbanned Steve", plain(revoked("unban", "Steve", "")));
+        assertEquals("Bifrost » Adam unbanned Steve", plain(revoked("ban", "Steve", "")),
                 "the bot's revoke frame names the punishment type, a moderator types the verb, and "
                         + "the same event must not be worded two ways");
-        assertTrue(PunishmentAnnouncement.revoked("ipban", "Adam", "Steve", "", ANNOUNCED)
-                .line().contains("unbanned"));
-        assertTrue(PunishmentAnnouncement.revoked("rollback", "Adam", "Steve", "", ANNOUNCED)
-                .line().contains("revoked a punishment for"));
+        assertTrue(plain(revoked("ipban", "Steve", "")).contains("unbanned"));
+        assertTrue(plain(revoked("rollback", "Steve", "")).contains("revoked a punishment for"));
+        assertTrue(plain(revoked("unban", "Steve", "served their time"))
+                .contains("for served their time"));
     }
 
     @Test
     @DisplayName("an issuer with no name is the console")
     void consoleIssuer() {
-        assertTrue(PunishmentAnnouncement.issued("ban", null, "Steve", null, "", ANNOUNCED)
-                .line().contains("Console"));
-        assertTrue(PunishmentAnnouncement.issued("ban", "  ", "Steve", null, "", ANNOUNCED)
-                .line().contains("Console"));
-        assertTrue(PunishmentAnnouncement.issued("ban", "CONSOLE", "Steve", null, "", ANNOUNCED)
-                .line().contains("Console"),
+        assertTrue(plain(issued("ban", null, "Steve", null, "", ANNOUNCED)).contains("Console"));
+        assertTrue(plain(issued("ban", "  ", "Steve", null, "", ANNOUNCED)).contains("Console"));
+        assertTrue(plain(issued("ban", "CONSOLE", "Steve", null, "", ANNOUNCED)).contains("Console"),
                 "the platforms spell it CONSOLE; a broadcast line is read by players");
     }
 
     @Test
     @DisplayName("an IP ban says IP-banned and never the address")
     void ipBanNamesNoAddress() {
-        String line = PunishmentAnnouncement.issued(
-                "ipban", "Adam", "Steve", null, "alt account", ANNOUNCED).line();
+        String line = plain(issued("ipban", "Adam", "Steve", null, "alt account", ANNOUNCED));
 
         assertTrue(line.contains("IP-banned"));
         assertFalse(line.contains("."), "no address, no digest: " + line);
@@ -81,8 +90,7 @@ class PunishmentAnnouncementTest {
     @Test
     @DisplayName("a multi-line reason is folded, so one punishment is one line")
     void reasonIsFoldedToOneLine() {
-        String line = PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "first\nsecond", ANNOUNCED).line();
+        String line = plain(issued("ban", "Adam", "Steve", null, "first\nsecond", ANNOUNCED));
 
         assertFalse(line.contains("\n"), line);
         assertTrue(line.contains("first second"));
@@ -91,27 +99,26 @@ class PunishmentAnnouncementTest {
     @Test
     @DisplayName("a reason cannot forge a silent announcement with colour codes")
     void reasonCannotInjectColourCodes() {
-        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "\u00A7r\u00A78(silent) \u00A7fNotch", ANNOUNCED);
+        PunishmentAnnouncement line = issued(
+                "ban", "Adam", "Steve", null, "§r§8(silent) §fNotch", ANNOUNCED);
 
         assertFalse(line.silent());
-        assertFalse(line.line().startsWith("\u00A78(silent) "),
+        assertFalse(line.line().startsWith("§8(silent) "),
                 "the forgery is the point: a reset plus a grey (silent) prints a convincing "
                         + "announcement about a different player: " + line.line());
-        assertEquals("\u00A7fAdam \u00A7cbanned \u00A7fSteve \u00A77: \u00A7f(silent) Notch",
-                line.line(),
+        assertEquals("Bifrost » Adam banned Steve for (silent) Notch", plain(line),
                 "the words survive, the formatting does not");
     }
 
     @Test
     @DisplayName("every colour spelling is stripped, from every user-controlled segment")
     void everySpellingIsStripped() {
-        String hexRun = "\u00A7x\u00A7f\u00A7f\u00A78\u00A78\u00A70\u00A70";
-        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
-                "ban", "&4Adam", "\u00A7lSteve", null, hexRun + "&khi\u00A7#ff8800 there",
+        String hexRun = "§x§f§f§8§8§0§0";
+        PunishmentAnnouncement line = issued(
+                "ban", "&4Adam", "§lSteve", null, hexRun + "&khi§#ff8800 there",
                 ANNOUNCED);
 
-        assertEquals("\u00A7fAdam \u00A7cbanned \u00A7fSteve \u00A77: \u00A7fhi there", line.line());
+        assertEquals("Bifrost » Adam banned Steve for hi there", plain(line));
     }
 
     @Test
@@ -119,62 +126,62 @@ class PunishmentAnnouncementTest {
     void strippingRunsToAFixpoint() {
         // <§4red> is not a tag while the §4 is in it, so a single tag pass leaves it alone and the
         // legacy pass then hands back a live <red> that nothing looks at again.
-        assertEquals("\u00A7fAdam \u00A7cbanned \u00A7fSteve \u00A77: \u00A7fcheating",
-                PunishmentAnnouncement.issued(
-                        "ban", "Adam", "Steve", null, "<\u00A74red>cheating", ANNOUNCED).line());
-        assertEquals("\u00A7fAdam \u00A7cbanned \u00A7fSteve \u00A77: \u00A7fcheating",
-                PunishmentAnnouncement.issued(
-                        "ban", "Adam", "Steve", null, "<&4red>cheating", ANNOUNCED).line());
+        assertEquals("Bifrost » Adam banned Steve for cheating",
+                plain(issued("ban", "Adam", "Steve", null, "<§4red>cheating", ANNOUNCED)));
+        assertEquals("Bifrost » Adam banned Steve for cheating",
+                plain(issued("ban", "Adam", "Steve", null, "<&4red>cheating", ANNOUNCED)));
     }
 
     @Test
     @DisplayName("the same trick nested several deep also runs out")
     void nestedEscapesAlsoRunOut() {
-        String line = PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "<<\u00A74&4red>red>hi", ANNOUNCED).line();
+        String line = plain(issued("ban", "Adam", "Steve", null, "<<§4&4red>red>hi", ANNOUNCED));
 
         assertFalse(line.contains("<red>"), line);
-        assertFalse(line.contains("\u00A7f<"), line);
         assertTrue(line.endsWith("hi"), line);
     }
 
     @Test
     @DisplayName("MiniMessage tags go too, and ordinary punctuation stays")
     void tagsAreStrippedAndTextSurvives() {
-        assertTrue(PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "<red>cheating</red>", ANNOUNCED)
-                .line().endsWith("cheating"));
-        assertTrue(PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "said 3 < 4 and <3", ANNOUNCED)
-                .line().endsWith("said 3 < 4 and <3"),
+        assertTrue(plain(issued("ban", "Adam", "Steve", null, "<red>cheating</red>", ANNOUNCED))
+                .endsWith("cheating"));
+        assertTrue(plain(issued("ban", "Adam", "Steve", null, "said 3 < 4 and <3", ANNOUNCED))
+                .endsWith("said 3 < 4 and <3"),
                 "a tag is a tag, not every angle bracket a human types");
-        assertTrue(PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "Steve & Alex", ANNOUNCED)
-                .line().endsWith("Steve & Alex"),
+        assertTrue(plain(issued("ban", "Adam", "Steve", null, "Steve & Alex", ANNOUNCED))
+                .endsWith("Steve & Alex"),
                 "an ampersand only opens a colour code when a code character follows it");
     }
 
     @Test
     @DisplayName("silent prefixes the same sentence rather than replacing it")
     void silentIsPrefixed() {
-        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "griefing", SILENT);
+        PunishmentAnnouncement line = issued("ban", "Adam", "Steve", null, "griefing", SILENT);
 
         assertTrue(line.silent());
-        assertTrue(line.line().startsWith("§8(silent) "), line.line());
-        assertTrue(line.line().contains("banned §fSteve"));
+        assertTrue(plain(line).startsWith("(silent) "), plain(line));
+        assertTrue(plain(line).contains("banned Steve"));
+    }
+
+    @Test
+    @DisplayName("a guild cannot template its way out of the silent prefix")
+    void silenceIsNotConfigurable() {
+        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
+                "<white>{staff} did something</white>",
+                view("ban", "Adam", "Steve", null, "griefing", SILENT), NOW);
+
+        assertTrue(plain(line).startsWith("(silent) "), plain(line));
     }
 
     @Test
     @DisplayName("an announced line reaches everybody; a silent one only notify or admin")
     void audience() {
-        PunishmentAnnouncement announced = PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "", ANNOUNCED);
+        PunishmentAnnouncement announced = issued("ban", "Adam", "Steve", null, "", ANNOUNCED);
         assertTrue(announced.visibleTo(false, false));
         assertTrue(announced.visibleTo(true, false));
 
-        PunishmentAnnouncement silent = PunishmentAnnouncement.issued(
-                "ban", "Adam", "Steve", null, "", SILENT);
+        PunishmentAnnouncement silent = issued("ban", "Adam", "Steve", null, "", SILENT);
         assertFalse(silent.visibleTo(false, false), "an ordinary player must see nothing at all");
         assertTrue(silent.visibleTo(true, false));
         assertTrue(silent.visibleTo(false, true), "heimdall.admin implies the notify node");
@@ -183,31 +190,80 @@ class PunishmentAnnouncementTest {
     @Test
     @DisplayName("nothing is announced for a type that names no player, or for a nameless target")
     void nothingToSay() {
-        assertNull(PunishmentAnnouncement.issued("geo", "Adam", "DE", null, "", ANNOUNCED));
-        assertNull(PunishmentAnnouncement.issued("subnet", "Adam", "10.0.0.0/8", null, "", ANNOUNCED));
-        assertNull(PunishmentAnnouncement.issued("freeze", "Adam", "Steve", null, "", ANNOUNCED));
-        assertNull(PunishmentAnnouncement.issued("ban", "Adam", "", null, "", ANNOUNCED),
+        assertNull(issued("geo", "Adam", "DE", null, "", ANNOUNCED));
+        assertNull(issued("subnet", "Adam", "10.0.0.0/8", null, "", ANNOUNCED));
+        assertNull(issued("freeze", "Adam", "Steve", null, "", ANNOUNCED));
+        assertNull(issued("ban", "Adam", "", null, "", ANNOUNCED),
                 "a UUID is not a name, and announcing one would be worse than staying quiet");
-        assertNull(PunishmentAnnouncement.revoked("geo", "Adam", "DE", "", ANNOUNCED));
+        assertNull(revoked("geo", "DE", ""));
+    }
+
+    @Test
+    @DisplayName("a guild that cleared the template announces nothing at all")
+    void emptyTemplateIsOff() {
+        assertNull(PunishmentAnnouncement.issued(
+                "", view("ban", "Adam", "Steve", null, "griefing", ANNOUNCED), NOW));
+        assertNull(PunishmentAnnouncement.issued(
+                "   ", view("ban", "Adam", "Steve", null, "griefing", ANNOUNCED), NOW),
+                "and a template of nothing but spaces is the same decision typed less carefully");
+    }
+
+    @Test
+    @DisplayName("a guild's own template is used, with the same tokens")
+    void customTemplate() {
+        PunishmentAnnouncement line = PunishmentAnnouncement.issued(
+                "<red>{player}</red> was {verb} by {staff}[ ({duration})]",
+                view("ban", "Adam", "Steve", Long.valueOf(NOW + 3_600_000L), "", ANNOUNCED), NOW);
+
+        assertEquals("Steve was temporarily banned by Adam (1h)", plain(line));
     }
 
     @Test
     @DisplayName("durations read as at most two units, and permanent reads as none")
     void durations() {
-        assertNull(PunishmentAnnouncement.compactDuration(null));
-        assertNull(PunishmentAnnouncement.compactDuration(Long.valueOf(0L)));
-        assertEquals("30s", PunishmentAnnouncement.compactDuration(Long.valueOf(30L)),
+        assertNull(PunishmentText.compactDuration(null));
+        assertNull(PunishmentText.compactDuration(Long.valueOf(0L)));
+        assertEquals("30s", PunishmentText.compactDuration(Long.valueOf(30L)),
                 "half a minute is a punishment somebody asked for, not a rounding error");
-        assertEquals("45m", PunishmentAnnouncement.compactDuration(Long.valueOf(45 * 60L)));
-        assertEquals("1m 30s", PunishmentAnnouncement.compactDuration(Long.valueOf(90L)));
-        assertEquals("1h 30m", PunishmentAnnouncement.compactDuration(Long.valueOf(90 * 60L)));
-        assertEquals("2h", PunishmentAnnouncement.compactDuration(Long.valueOf(2 * 3600L)));
-        assertEquals("23h 42m", PunishmentAnnouncement.compactDuration(
-                Long.valueOf(23 * 3600 + 42 * 60 + 9L)));
-        assertEquals("7d", PunishmentAnnouncement.compactDuration(Long.valueOf(7 * 86400L)));
-        assertEquals("3d 4h", PunishmentAnnouncement.compactDuration(
-                Long.valueOf(3 * 86400 + 4 * 3600 + 17 * 60L)),
+        assertEquals("45m", PunishmentText.compactDuration(Long.valueOf(45 * 60L)));
+        assertEquals("1m 30s", PunishmentText.compactDuration(Long.valueOf(90L)));
+        assertEquals("1h 30m", PunishmentText.compactDuration(Long.valueOf(90 * 60L)));
+        assertEquals("2h", PunishmentText.compactDuration(Long.valueOf(2 * 3600L)));
+        assertEquals("23h 42m",
+                PunishmentText.compactDuration(Long.valueOf(23 * 3600 + 42 * 60 + 9L)));
+        assertEquals("7d", PunishmentText.compactDuration(Long.valueOf(7 * 86400L)));
+        assertEquals("3d 4h",
+                PunishmentText.compactDuration(Long.valueOf(3 * 86400 + 4 * 3600 + 17 * 60L)),
                 "the minutes are dropped once there are days: a broadcast answers 'how long', not "
                         + "'exactly when'");
+    }
+
+    private static PunishmentAnnouncement issued(String type, String staff, String target,
+            Long expiresAtMillis, String reason, boolean silent) {
+        return PunishmentAnnouncement.issued(
+                ISSUE, view(type, staff, target, expiresAtMillis, reason, silent), NOW);
+    }
+
+    private static PunishmentAnnouncement revoked(String typeOrVerb, String target, String reason) {
+        return PunishmentAnnouncement.revoked(REVOKE, typeOrVerb,
+                view(typeOrVerb, "Adam", target, null, reason, false), NOW);
+    }
+
+    private static PunishmentView view(String type, String staff, String target,
+            Long expiresAtMillis, String reason, boolean silent) {
+        return PunishmentView.builder()
+                .type(type)
+                .staffName(staff)
+                .targetName(target)
+                .reason(reason)
+                .serverName("Bifrost")
+                .issuedAtMillis(NOW)
+                .expiresAtMillis(expiresAtMillis)
+                .silent(silent)
+                .build();
+    }
+
+    private static String plain(PunishmentAnnouncement announcement) {
+        return TestText.plain(announcement.message());
     }
 }
