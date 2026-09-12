@@ -28,7 +28,7 @@ class PunishmentAnnouncementTest {
     @DisplayName("a temporary mute carries how long it lasts")
     void temporaryMute() {
         PunishmentAnnouncement line = PunishmentAnnouncement.issued(
-                "tempmute", "Adam", "Steve", Integer.valueOf(24 * 60 * 60), "spam", ANNOUNCED);
+                "tempmute", "Adam", "Steve", Long.valueOf(24 * 60 * 60L), "spam", ANNOUNCED);
 
         assertTrue(line.line().contains("muted"));
         assertTrue(line.line().contains("1d"), line.line());
@@ -195,18 +195,18 @@ class PunishmentAnnouncementTest {
     @DisplayName("durations read as at most two units, and permanent reads as none")
     void durations() {
         assertNull(PunishmentAnnouncement.compactDuration(null));
-        assertNull(PunishmentAnnouncement.compactDuration(Integer.valueOf(0)));
-        assertEquals("30s", PunishmentAnnouncement.compactDuration(Integer.valueOf(30)),
+        assertNull(PunishmentAnnouncement.compactDuration(Long.valueOf(0L)));
+        assertEquals("30s", PunishmentAnnouncement.compactDuration(Long.valueOf(30L)),
                 "half a minute is a punishment somebody asked for, not a rounding error");
-        assertEquals("45m", PunishmentAnnouncement.compactDuration(Integer.valueOf(45 * 60)));
-        assertEquals("1m 30s", PunishmentAnnouncement.compactDuration(Integer.valueOf(90)));
-        assertEquals("1h 30m", PunishmentAnnouncement.compactDuration(Integer.valueOf(90 * 60)));
-        assertEquals("2h", PunishmentAnnouncement.compactDuration(Integer.valueOf(2 * 3600)));
+        assertEquals("45m", PunishmentAnnouncement.compactDuration(Long.valueOf(45 * 60L)));
+        assertEquals("1m 30s", PunishmentAnnouncement.compactDuration(Long.valueOf(90L)));
+        assertEquals("1h 30m", PunishmentAnnouncement.compactDuration(Long.valueOf(90 * 60L)));
+        assertEquals("2h", PunishmentAnnouncement.compactDuration(Long.valueOf(2 * 3600L)));
         assertEquals("23h 42m", PunishmentAnnouncement.compactDuration(
-                Integer.valueOf(23 * 3600 + 42 * 60 + 9)));
-        assertEquals("7d", PunishmentAnnouncement.compactDuration(Integer.valueOf(7 * 86400)));
+                Long.valueOf(23 * 3600 + 42 * 60 + 9L)));
+        assertEquals("7d", PunishmentAnnouncement.compactDuration(Long.valueOf(7 * 86400L)));
         assertEquals("3d 4h", PunishmentAnnouncement.compactDuration(
-                Integer.valueOf(3 * 86400 + 4 * 3600 + 17 * 60)),
+                Long.valueOf(3 * 86400 + 4 * 3600 + 17 * 60L)),
                 "the minutes are dropped once there are days: a broadcast answers 'how long', not "
                         + "'exactly when'");
     }

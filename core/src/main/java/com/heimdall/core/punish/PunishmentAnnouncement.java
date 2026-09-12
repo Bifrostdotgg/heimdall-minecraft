@@ -87,7 +87,7 @@ public final class PunishmentAnnouncement {
      * @param silent whether only notify holders see it
      */
     public static PunishmentAnnouncement issued(String type, String staff, String target,
-            Integer durationSeconds, String reason, boolean silent) {
+            Long durationSeconds, String reason, boolean silent) {
         String verb = issueVerb(type);
         if (verb == null) {
             return null;
@@ -150,36 +150,9 @@ public final class PunishmentAnnouncement {
         return !silent || hasNotify || hasAdmin;
     }
 
-    /**
-     * A duration a human reads at a glance, or {@code null} for permanent.
-     *
-     * <p>Two units at most. "3d 4h" is the answer to "how long"; "3d 4h 17m" is an answer to a
-     * question nobody asked in a broadcast line.
-     *
-     * <p>Seconds in, and seconds out when that is all there is: a 30 second mute reads as
-     * {@code 30s} rather than being rounded up to the minute the whole pipeline used to store.
-     * The same two-unit shape as {@code formatDuration} in {@code packages/shared}, so the screen
-     * a player sees and the dashboard row a moderator reads say the same thing.
-     */
-    public static String compactDuration(Integer seconds) {
-        if (seconds == null || seconds.intValue() <= 0) {
-            return null;
-        }
-        int total = seconds.intValue();
-        int days = total / SECONDS_PER_DAY;
-        int hours = (total % SECONDS_PER_DAY) / SECONDS_PER_HOUR;
-        int minutes = (total % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
-        int rest = total % SECONDS_PER_MINUTE;
-        if (days > 0) {
-            return hours > 0 ? days + "d " + hours + "h" : days + "d";
-        }
-        if (hours > 0) {
-            return minutes > 0 ? hours + "h " + minutes + "m" : hours + "h";
-        }
-        if (minutes > 0) {
-            return rest > 0 ? minutes + "m " + rest + "s" : minutes + "m";
-        }
-        return rest + "s";
+    /** @deprecated call {@link PunishmentText#compactDuration(Long)}; kept as the old name. */
+    public static String compactDuration(Long seconds) {
+        return PunishmentText.compactDuration(seconds);
     }
 
     private static void appendReason(StringBuilder body, String reason) {

@@ -59,6 +59,16 @@ public final class PunishmentParser {
     private static final long SECONDS_PER_MONTH = 30L * SECONDS_PER_DAY;
     private static final long SECONDS_PER_YEAR = 365L * SECONDS_PER_DAY;
 
+    /**
+     * The longest punishment the parser will accept: a hundred years.
+     *
+     * <p>A cap rather than saturation, and the same one the shared TypeScript grammar uses. Past
+     * it a moderator has typed a number, not a length - {@code 999999999999y} is a slip, and a
+     * ban that silently became "the maximum" would hide it. The token is refused, so it stays in
+     * the reason where it is visible.
+     */
+    static final long MAX_SECONDS = 100L * SECONDS_PER_YEAR;
+
     private PunishmentParser() {
     }
 
@@ -67,12 +77,12 @@ public final class PunishmentParser {
         public final boolean publicFlag;
         public final String target;
         /** How long it lasts, in seconds, or {@code null} for permanent. */
-        public final Integer durationSeconds;
+        public final Long durationSeconds;
         public final String reason;
         /** From {@code --sender=}; hook/import may use it. Native /hd issue must ignore it. */
         public final String senderOverride;
 
-        Parsed(boolean silent, boolean publicFlag, String target, Integer durationSeconds,
+        Parsed(boolean silent, boolean publicFlag, String target, Long durationSeconds,
                 String reason, String senderOverride) {
             this.silent = silent;
             this.publicFlag = publicFlag;
@@ -146,7 +156,7 @@ public final class PunishmentParser {
             throw new IllegalArgumentException("a target is required");
         }
         String target = rest.get(0);
-        Integer duration = null;
+        Long duration = null;
         boolean durationTaken = false;
         List<String> reason = new ArrayList<String>();
         for (int i = 1; i < rest.size(); i++) {
@@ -163,54 +173,71 @@ public final class PunishmentParser {
     }
 
     /**
-     * Whether this token, in its entirety, is a duration.
+     * Whether this token, in its entirety, is a usable duration.
      *
      * <p>Whole-token rather than a substring search, which is the difference between
      * {@code /ban Steve 1day-old account} reading as a permanent ban with that reason and reading
      * as a one-day ban on an account whose age nobody mentioned.
+     *
+     * <p>{@code 0s} and {@code 200y} are <strong>not</strong> durations, which matters more than
+     * it looks. A refused token stays in the reason, so {@code /ban Steve 0s spam} bans Steve
+     * permanently for "0s spam" - visibly odd, and the moderator fixes it. Had it parsed as
+     * "no duration" instead, the same command would have read as a permanent ban with the token
+     * silently eaten, which looks exactly like what was asked for.
      */
     public static boolean looksLikeDuration(String token) {
         if (Strings.isBlank(token)) return false;
         String t = token.trim();
         if (t.equalsIgnoreCase("perm") || t.equalsIgnoreCase("permanent")) return true;
-        // Nothing a human types is longer than this, and the cap keeps a pathological token out
-        // of the matcher entirely rather than trusting the pattern to shrug it off.
-        if (t.length() > MAX_DURATION_TOKEN_CHARS) return false;
-        return DURATION.matcher(t).matches();
+        return totalSeconds(t) != null;
     }
 
     /**
      * @return seconds, or {@code null} for permanent and for anything that is not a duration
      */
-    public static Integer parseDurationSeconds(String token) {
-        if (!looksLikeDuration(token)) return null;
+    public static Long parseDurationSeconds(String token) {
+        if (Strings.isBlank(token)) return null;
         String t = token.trim();
         if (t.equalsIgnoreCase("perm") || t.equalsIgnoreCase("permanent")) return null;
-        Matcher matcher = PART.matcher(t);
+        return totalSeconds(t);
+    }
+
+    /**
+     * The length of a whole duration token, or {@code null} when it is not one.
+     *
+     * <p>A {@code Long} rather than an {@code Int}: the cap is a hundred years, and a hundred
+     * years in seconds is 3,153,600,000, which does not fit in a signed int. Saturating at
+     * {@code Integer.MAX_VALUE} instead would make {@code 100y} and {@code 68y} the same
+     * punishment, and the wire carries a JSON number that has no such limit.
+     */
+    private static Long totalSeconds(String token) {
+        // Nothing a human types is longer than this, and the cap keeps a pathological token out
+        // of the matcher entirely rather than trusting the pattern to shrug it off.
+        if (token.length() > MAX_DURATION_TOKEN_CHARS) return null;
+        if (!DURATION.matcher(token).matches()) return null;
+        Matcher matcher = PART.matcher(token);
         long seconds = 0L;
-        boolean any = false;
         while (matcher.find()) {
-            any = true;
             long n;
             try {
                 n = Long.parseLong(matcher.group(1));
-            } catch (NumberFormatException tooBig) {
-                // A count with more digits than a long holds. Saturate rather than refuse: the
-                // moderator asked for "a very long time", and the clamp below is the answer.
-                n = Integer.MAX_VALUE;
-            }
-            if (n > Integer.MAX_VALUE) {
-                n = Integer.MAX_VALUE;
+            } catch (NumberFormatException tooManyDigits) {
+                // Longer than a long. Whatever it is, it is past the cap.
+                return null;
             }
             String unit = matcher.group(2).toLowerCase(Locale.ROOT);
-            seconds += n * secondsPerUnit(unit);
-            if (seconds >= Integer.MAX_VALUE) {
-                return Integer.valueOf(Integer.MAX_VALUE);
+            long unitSeconds = secondsPerUnit(unit);
+            if (n > MAX_SECONDS / unitSeconds) {
+                return null;
+            }
+            seconds += n * unitSeconds;
+            if (seconds > MAX_SECONDS) {
+                return null;
             }
         }
-        if (!any) return null;
-        // A zero-length punishment is a mistake, not a permanent one: null here would mean forever.
-        return Integer.valueOf((int) Math.max(1L, seconds));
+        // Zero is refused rather than clamped to a second: somebody typed a length they meant,
+        // and a one-second ban is not it.
+        return seconds <= 0L ? null : Long.valueOf(seconds);
     }
 
     private static long secondsPerUnit(String unit) {

@@ -23,11 +23,13 @@ import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.punish.PunishmentView;
 import com.heimdall.core.punish.SilenceDecision;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.text.Msg;
+import com.heimdall.core.text.Template;
 import com.heimdall.core.tunnel.Capabilities;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
@@ -674,8 +676,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         local.issuedByName = source.name();
         local.issuedByUuid = source.uuid() == null ? null : source.uuid().toString();
         if (parsed.durationSeconds != null) {
+            local.durationSeconds = parsed.durationSeconds;
             local.expiresAt = Instant.ofEpochMilli(now)
-                    .plusSeconds(parsed.durationSeconds.intValue()).toString();
+                    .plusSeconds(parsed.durationSeconds.longValue()).toString();
         }
         names.remember(name);
         String mirrorKey = keyFor(local);
@@ -695,7 +698,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (parsed.durationSeconds != null) {
             // Seconds, not minutes: a 30 second mute is a thing moderators ask for, and the
             // minute-granular key rounded it up to one. The bot reads both for one release.
-            body.put("durationSeconds", parsed.durationSeconds.intValue());
+            body.put("durationSeconds", parsed.durationSeconds.longValue());
         }
         if (ipDigest != null) {
             body.put("ipDigest", ipDigest);
@@ -842,14 +845,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (!settings.replaceMode()) return Verdict.abstain();
         ActivePunishment ban = mirror.get("ban:" + attempt.uuid().toString());
         if (ban != null && !ban.expired(System.currentTimeMillis())) {
-            return Verdict.deny(render(settings.banScreen, ban, settings));
+            return Verdict.deny(render(ban, settings));
         }
         if (shouldCheckIpBan() && attempt.ipAddress() != null && !attempt.ipAddress().isEmpty()
                 && !settings.ipSalt.isEmpty()) {
             String digest = PunishmentIp.hash(attempt.ipAddress(), settings.ipSalt);
             ActivePunishment ipban = mirror.get("ipban:" + digest);
             if (ipban != null && !ipban.expired(System.currentTimeMillis())) {
-                return Verdict.deny(render(settings.banScreen, ipban, settings));
+                return Verdict.deny(render(ipban, settings));
             }
         }
         ServerRole role = context.platform().role();
@@ -880,7 +883,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         ActivePunishment mute = mirror.get("mute:" + message.senderUuid());
         if (mute != null && !mute.expired(System.currentTimeMillis())) {
-            return Verdict.deny(render(settings.muteScreen, mute, settings));
+            return Verdict.deny(render(mute, settings));
         }
         return Verdict.abstain();
     }
@@ -895,7 +898,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         ActivePunishment mute = mirror.get("mute:" + attempt.senderUuid());
         if (mute == null || mute.expired(System.currentTimeMillis())) return Verdict.abstain();
         if (settings.blockedCommands.contains(attempt.label())) {
-            return Verdict.deny(render(settings.muteScreen, mute, settings));
+            return Verdict.deny(render(mute, settings));
         }
         return Verdict.abstain();
     }
@@ -906,7 +909,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (!settings.replaceMode()) return;
         ActivePunishment warn = mirror.get("warn:" + player.uuid());
         if (warn == null || warn.expired(System.currentTimeMillis())) return;
-        player.sendMessage(render(settings.warnScreen, warn, settings));
+        player.sendMessage(render(warn, settings));
     }
 
     private TunnelMessageHandler applyHandler() {
@@ -1006,13 +1009,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     /** Whole seconds from {@code now} to an ISO instant, or {@code null} for no expiry. */
-    static Integer secondsUntil(String expiresAt, long nowMillis) {
+    static Long secondsUntil(String expiresAt, long nowMillis) {
         if (expiresAt == null || expiresAt.isEmpty()) return null;
         try {
             long remaining = Instant.parse(expiresAt).toEpochMilli() - nowMillis;
             if (remaining <= 0) return null;
-            long seconds = remaining / TimeUnit.SECONDS.toMillis(1);
-            return Integer.valueOf((int) Math.max(1L, Math.min(Integer.MAX_VALUE, seconds)));
+            return Long.valueOf(Math.max(1L, remaining / TimeUnit.SECONDS.toMillis(1)));
         } catch (RuntimeException unparseable) {
             return null;
         }
@@ -1447,7 +1449,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         PlayerHandle player = context.platform().players().byUuid(parseUuid(uuid)).orElse(null);
         if (player == null) return;
         if ("warn".equals(punishment.type)) {
-            player.sendMessage(render(settings.warnScreen, punishment, settings));
+            player.sendMessage(render(punishment, settings));
             return;
         }
         if (!"ban".equals(punishment.type) && !"ipban".equals(punishment.type)
@@ -1458,8 +1460,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (role == ServerRole.ENFORCER && !"kick".equals(punishment.type)) {
             return;
         }
-        String screen = "kick".equals(punishment.type) ? settings.kickScreen : settings.banScreen;
-        player.kick(render(screen, punishment, settings));
+        player.kick(render(punishment, settings));
     }
 
     private void lookup(final CommandSource source, final String type, final List<String> args) {
@@ -1792,7 +1793,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (country == null || country.isEmpty()) return null;
         ActivePunishment geoBan = mirror.get("geo:" + country.toUpperCase(Locale.ROOT));
         if (geoBan != null && !geoBan.expired(System.currentTimeMillis())) {
-            return Verdict.deny(render(settings.banScreen, geoBan, settings));
+            return Verdict.deny(render(geoBan, settings));
         }
         return null;
     }
@@ -1805,7 +1806,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             ActivePunishment p = mirror.get(key);
             if (p == null || p.expired(now)) continue;
             if (Cidr.matches(p.cidr, ip)) {
-                return Verdict.deny(render(settings.banScreen, p, settings));
+                return Verdict.deny(render(p, settings));
             }
         }
         return null;
@@ -1870,6 +1871,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         p.ipDigest = payload.string("ipDigest", null);
         p.reason = payload.string("reason", "");
         p.expiresAt = payload.string("expiresAt", null);
+        long seconds = payload.longValue("durationSeconds", 0L);
+        p.durationSeconds = seconds > 0L ? Long.valueOf(seconds) : null;
         p.issuedAt = issuedAtOf(payload);
         p.issuedByName = payload.string("issuedByName", null);
         p.issuedByUuid = payload.string("issuedByUuid", null);
@@ -1893,14 +1896,65 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
     }
 
-    static Component render(String template, ActivePunishment p, PunishmentSettings settings) {
-        String reason = p.reason == null ? "" : p.reason;
-        String player = p.targetName == null ? "" : p.targetName;
-        String appeal = settings == null || settings.appealUrl == null ? "" : settings.appealUrl;
-        return Msg.miniTemplate(template,
-                "reason", reason,
-                "player", player,
-                "appeal_url", appeal);
+    /**
+     * The screen a player is shown for one punishment.
+     *
+     * <p>Four decisions, in this order.
+     *
+     * <p><strong>Which template.</strong> By family - a country ban and a subnet ban are shown
+     * the ban screen, because from the player's side that is what happened - and then by whether
+     * it ends. An empty permanent variant means the temporary template is used for both, which
+     * is the default and is correct rather than lazy: the optional-segment rule already drops
+     * the Length row when there is no length.
+     *
+     * <p><strong>The base.</strong> Rendered first, with the same tokens, and inserted into
+     * {@code {base}} as already-parsed MiniMessage. It is rendered with a value set that has no
+     * {@code base} in it, so a base that refers to itself resolves to nothing rather than
+     * needing a recursion limit somebody has to defend.
+     *
+     * <p><strong>The tokens.</strong> {@link PunishmentView} owns them, so the disconnect screen
+     * and the chat announcement cannot disagree about what "Permanent ban" or "3d 4h" means.
+     *
+     * <p><strong>Parsing.</strong> Once, at the end, over the finished string. Values were
+     * escaped on their way in, so a reason cannot restyle the screen it appears on.
+     */
+    static Component render(ActivePunishment p, PunishmentSettings settings) {
+        long now = System.currentTimeMillis();
+        PunishmentView view = viewOf(p, settings);
+        String base = Template.fill(settings.screenBase, view.tokens(now));
+        Template.Values values = view.tokens(now).putRaw("base", base);
+        return Template.render(settings.screenFor(familyOf(p.type), view.permanent()), values);
+    }
+
+    /** The mirror row, as the shared renderer reads a punishment. */
+    private static PunishmentView viewOf(ActivePunishment p, PunishmentSettings settings) {
+        return PunishmentView.builder()
+                .type(p.type)
+                .targetName(p.targetName)
+                .staffName(p.issuedByName)
+                .id(p.id)
+                .reason(p.reason)
+                .serverName(settings == null ? "" : settings.serverName)
+                .appealUrl(settings == null ? "" : settings.appealUrl)
+                .issuedAtMillis(p.issuedAtMillis())
+                .expiresAtMillis(p.expiresAtMillis())
+                .lengthSeconds(p.durationSeconds)
+                .silent(p.silent)
+                .build();
+    }
+
+    /**
+     * Which of the four screens a punishment type is shown on.
+     *
+     * <p>{@code geo} and {@code subnet} are bans as far as the player is concerned: they were
+     * refused at login for where they connected from, and there is no separate screen for either
+     * because writing two more templates to say "you are banned" differently helps nobody.
+     */
+    private static String familyOf(String type) {
+        if ("mute".equals(type)) return "mute";
+        if ("kick".equals(type)) return "kick";
+        if ("warn".equals(type)) return "warn";
+        return "ban";
     }
 
     private static String formatLocal(ActivePunishment p) {

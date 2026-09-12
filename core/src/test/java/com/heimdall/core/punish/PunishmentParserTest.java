@@ -11,9 +11,9 @@ import org.junit.jupiter.api.Test;
 
 class PunishmentParserTest {
 
-    private static final int MINUTE = 60;
-    private static final int HOUR = 60 * 60;
-    private static final int DAY = 24 * HOUR;
+    private static final long MINUTE = 60L;
+    private static final long HOUR = 60L * 60L;
+    private static final long DAY = 24L * HOUR;
 
     @Test
     void flagsAnywhereAndDurationThenReason() {
@@ -21,7 +21,7 @@ class PunishmentParserTest {
                 Arrays.asList("-s", "Steve", "7d", "cheating", "again"));
         assertTrue(parsed.silent);
         assertEquals("Steve", parsed.target);
-        assertEquals(Integer.valueOf(7 * DAY), parsed.durationSeconds);
+        assertEquals(Long.valueOf(7 * DAY), parsed.durationSeconds);
         assertEquals("cheating again", parsed.reason);
     }
 
@@ -36,7 +36,7 @@ class PunishmentParserTest {
     @Test
     void permToken() {
         assertNull(PunishmentParser.parseDurationSeconds("perm"));
-        assertEquals(Integer.valueOf(90 * MINUTE), PunishmentParser.parseDurationSeconds("1h30m"));
+        assertEquals(Long.valueOf(90 * MINUTE), PunishmentParser.parseDurationSeconds("1h30m"));
     }
 
     @Test
@@ -44,7 +44,7 @@ class PunishmentParserTest {
         PunishmentParser.Parsed parsed = PunishmentParser.parse(
                 Arrays.asList("Steve", "-p", "1h", "spam"));
         assertTrue(parsed.publicFlag);
-        assertEquals(Integer.valueOf(HOUR), parsed.durationSeconds);
+        assertEquals(Long.valueOf(HOUR), parsed.durationSeconds);
         assertEquals("spam", parsed.reason);
     }
 
@@ -53,7 +53,7 @@ class PunishmentParserTest {
         PunishmentParser.Parsed parsed = PunishmentParser.parse(
                 Arrays.asList("Steve", "7d", "-s", "cheating"));
         assertTrue(parsed.silent);
-        assertEquals(Integer.valueOf(7 * DAY), parsed.durationSeconds);
+        assertEquals(Long.valueOf(7 * DAY), parsed.durationSeconds);
         assertEquals("cheating", parsed.reason);
     }
 
@@ -63,12 +63,12 @@ class PunishmentParserTest {
                 Arrays.asList("Steve", "--sender=Console", "1d", "grief"));
         assertEquals("Console", parsed.senderOverride);
         assertEquals("grief", parsed.reason);
-        assertEquals(Integer.valueOf(DAY), parsed.durationSeconds);
+        assertEquals(Long.valueOf(DAY), parsed.durationSeconds);
     }
 
     @Test
     void combinedDurationTokens() {
-        assertEquals(Integer.valueOf(2 * DAY + 3 * HOUR), PunishmentParser.parseDurationSeconds("2d3h"));
+        assertEquals(Long.valueOf(2 * DAY + 3 * HOUR), PunishmentParser.parseDurationSeconds("2d3h"));
         assertTrue(PunishmentParser.looksLikeDuration("permanent"));
         assertTrue(PunishmentParser.looksLikeDuration("perm"));
     }
@@ -79,7 +79,7 @@ class PunishmentParserTest {
         PunishmentParser.Parsed parsed = PunishmentParser.parse(
                 Arrays.asList("Steve", "griefing", "spawn", "1d"));
 
-        assertEquals(Integer.valueOf(DAY), parsed.durationSeconds);
+        assertEquals(Long.valueOf(DAY), parsed.durationSeconds);
         assertEquals("griefing spawn", parsed.reason);
     }
 
@@ -89,7 +89,7 @@ class PunishmentParserTest {
         PunishmentParser.Parsed parsed = PunishmentParser.parse(
                 Arrays.asList("Steve", "griefing", "7d", "at", "spawn"));
 
-        assertEquals(Integer.valueOf(7 * DAY), parsed.durationSeconds);
+        assertEquals(Long.valueOf(7 * DAY), parsed.durationSeconds);
         assertEquals("griefing at spawn", parsed.reason);
     }
 
@@ -98,10 +98,10 @@ class PunishmentParserTest {
     void secondsAreNotRounded() {
         PunishmentParser.Parsed parsed = PunishmentParser.parse(Arrays.asList("Steve", "30s", "spam"));
 
-        assertEquals(Integer.valueOf(30), parsed.durationSeconds);
+        assertEquals(Long.valueOf(30), parsed.durationSeconds);
         assertEquals("spam", parsed.reason);
-        assertEquals(Integer.valueOf(1), PunishmentParser.parseDurationSeconds("1s"));
-        assertEquals(Integer.valueOf(90), PunishmentParser.parseDurationSeconds("1m30s"));
+        assertEquals(Long.valueOf(1), PunishmentParser.parseDurationSeconds("1s"));
+        assertEquals(Long.valueOf(90), PunishmentParser.parseDurationSeconds("1m30s"));
     }
 
     @Test
@@ -126,54 +126,71 @@ class PunishmentParserTest {
         PunishmentParser.Parsed parsed = PunishmentParser.parse(
                 Arrays.asList("Steve", "1d", "griefed", "2", "houses", "7d"));
 
-        assertEquals(Integer.valueOf(DAY), parsed.durationSeconds);
+        assertEquals(Long.valueOf(DAY), parsed.durationSeconds);
         assertEquals("griefed 2 houses 7d", parsed.reason);
     }
 
     @Test
     @DisplayName("every unit spelling, case-insensitively")
     void unitSpellings() {
-        assertEquals(Integer.valueOf(30), PunishmentParser.parseDurationSeconds("30s"));
-        assertEquals(Integer.valueOf(30), PunishmentParser.parseDurationSeconds("30sec"));
-        assertEquals(Integer.valueOf(30), PunishmentParser.parseDurationSeconds("30secs"));
-        assertEquals(Integer.valueOf(30), PunishmentParser.parseDurationSeconds("30second"));
-        assertEquals(Integer.valueOf(30), PunishmentParser.parseDurationSeconds("30seconds"));
-        assertEquals(Integer.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5m"));
-        assertEquals(Integer.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5min"));
-        assertEquals(Integer.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5mins"));
-        assertEquals(Integer.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5minute"));
-        assertEquals(Integer.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5minutes"));
-        assertEquals(Integer.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2h"));
-        assertEquals(Integer.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2hr"));
-        assertEquals(Integer.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2hrs"));
-        assertEquals(Integer.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2hour"));
-        assertEquals(Integer.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2hours"));
-        assertEquals(Integer.valueOf(3 * DAY), PunishmentParser.parseDurationSeconds("3d"));
-        assertEquals(Integer.valueOf(3 * DAY), PunishmentParser.parseDurationSeconds("3day"));
-        assertEquals(Integer.valueOf(3 * DAY), PunishmentParser.parseDurationSeconds("3days"));
-        assertEquals(Integer.valueOf(2 * 7 * DAY), PunishmentParser.parseDurationSeconds("2w"));
-        assertEquals(Integer.valueOf(2 * 7 * DAY), PunishmentParser.parseDurationSeconds("2weeks"));
-        assertEquals(Integer.valueOf(30 * DAY), PunishmentParser.parseDurationSeconds("1mo"));
-        assertEquals(Integer.valueOf(2 * 30 * DAY), PunishmentParser.parseDurationSeconds("2months"));
-        assertEquals(Integer.valueOf(365 * DAY), PunishmentParser.parseDurationSeconds("1y"));
-        assertEquals(Integer.valueOf(365 * DAY), PunishmentParser.parseDurationSeconds("1year"));
-        assertEquals(Integer.valueOf(DAY), PunishmentParser.parseDurationSeconds("1D"));
-        assertEquals(Integer.valueOf(30 * DAY), PunishmentParser.parseDurationSeconds("1MO"));
+        assertEquals(Long.valueOf(30), PunishmentParser.parseDurationSeconds("30s"));
+        assertEquals(Long.valueOf(30), PunishmentParser.parseDurationSeconds("30sec"));
+        assertEquals(Long.valueOf(30), PunishmentParser.parseDurationSeconds("30secs"));
+        assertEquals(Long.valueOf(30), PunishmentParser.parseDurationSeconds("30second"));
+        assertEquals(Long.valueOf(30), PunishmentParser.parseDurationSeconds("30seconds"));
+        assertEquals(Long.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5m"));
+        assertEquals(Long.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5min"));
+        assertEquals(Long.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5mins"));
+        assertEquals(Long.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5minute"));
+        assertEquals(Long.valueOf(5 * MINUTE), PunishmentParser.parseDurationSeconds("5minutes"));
+        assertEquals(Long.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2h"));
+        assertEquals(Long.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2hr"));
+        assertEquals(Long.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2hrs"));
+        assertEquals(Long.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2hour"));
+        assertEquals(Long.valueOf(2 * HOUR), PunishmentParser.parseDurationSeconds("2hours"));
+        assertEquals(Long.valueOf(3 * DAY), PunishmentParser.parseDurationSeconds("3d"));
+        assertEquals(Long.valueOf(3 * DAY), PunishmentParser.parseDurationSeconds("3day"));
+        assertEquals(Long.valueOf(3 * DAY), PunishmentParser.parseDurationSeconds("3days"));
+        assertEquals(Long.valueOf(2 * 7 * DAY), PunishmentParser.parseDurationSeconds("2w"));
+        assertEquals(Long.valueOf(2 * 7 * DAY), PunishmentParser.parseDurationSeconds("2weeks"));
+        assertEquals(Long.valueOf(30 * DAY), PunishmentParser.parseDurationSeconds("1mo"));
+        assertEquals(Long.valueOf(2 * 30 * DAY), PunishmentParser.parseDurationSeconds("2months"));
+        assertEquals(Long.valueOf(365 * DAY), PunishmentParser.parseDurationSeconds("1y"));
+        assertEquals(Long.valueOf(365 * DAY), PunishmentParser.parseDurationSeconds("1year"));
+        assertEquals(Long.valueOf(DAY), PunishmentParser.parseDurationSeconds("1D"));
+        assertEquals(Long.valueOf(30 * DAY), PunishmentParser.parseDurationSeconds("1MO"));
         assertNull(PunishmentParser.parseDurationSeconds("PERMANENT"));
     }
 
     @Test
     @DisplayName("a compound token adds its parts up")
     void compoundTokens() {
-        assertEquals(Integer.valueOf(DAY + 12 * HOUR), PunishmentParser.parseDurationSeconds("1d12h"));
-        assertEquals(Integer.valueOf(DAY + 12 * HOUR + 30 * MINUTE + 5),
+        assertEquals(Long.valueOf(DAY + 12 * HOUR), PunishmentParser.parseDurationSeconds("1d12h"));
+        assertEquals(Long.valueOf(DAY + 12 * HOUR + 30 * MINUTE + 5),
                 PunishmentParser.parseDurationSeconds("1d12h30m5s"));
     }
 
     @Test
-    @DisplayName("a duration nobody can serve saturates rather than wrapping negative")
-    void absurdDurationsSaturate() {
-        assertEquals(Integer.valueOf(Integer.MAX_VALUE),
-                PunishmentParser.parseDurationSeconds("99999y"));
+    @DisplayName("a length nobody can serve is refused, not clamped")
+    void absurdDurationsAreRefused() {
+        assertFalse(PunishmentParser.looksLikeDuration("99999y"));
+        assertNull(PunishmentParser.parseDurationSeconds("99999y"));
+        assertFalse(PunishmentParser.looksLikeDuration("999999999999999999999y"),
+                "more digits than a long holds is still just a slip of the keyboard");
+
+        PunishmentParser.Parsed parsed = PunishmentParser.parse(
+                Arrays.asList("Steve", "999y", "nope"));
+        assertNull(parsed.durationSeconds);
+        assertEquals("999y nope", parsed.reason,
+                "a refused token stays visible in the reason rather than vanishing into a "
+                        + "permanent ban nobody typed");
+    }
+
+    @Test
+    @DisplayName("a zero-length punishment is refused too")
+    void zeroIsRefused() {
+        assertFalse(PunishmentParser.looksLikeDuration("0s"));
+        assertFalse(PunishmentParser.looksLikeDuration("0d0h"));
+        assertNull(PunishmentParser.parseDurationSeconds("0s"));
     }
 }

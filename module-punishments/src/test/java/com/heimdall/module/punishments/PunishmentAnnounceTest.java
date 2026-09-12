@@ -669,9 +669,9 @@ class PunishmentAnnounceTest {
         assertNull(HeimdallPunishmentsModule.secondsUntil(
                 java.time.Instant.ofEpochMilli(now - 1000).toString(), now),
                 "already expired is not a duration");
-        assertEquals(Integer.valueOf(3600), HeimdallPunishmentsModule.secondsUntil(
+        assertEquals(Long.valueOf(3600L), HeimdallPunishmentsModule.secondsUntil(
                 java.time.Instant.ofEpochMilli(now + 3_600_000L).toString(), now));
-        assertEquals(Integer.valueOf(30), HeimdallPunishmentsModule.secondsUntil(
+        assertEquals(Long.valueOf(30L), HeimdallPunishmentsModule.secondsUntil(
                 java.time.Instant.ofEpochMilli(now + 30_000L).toString(), now),
                 "half a minute is half a minute, not a minute");
     }
