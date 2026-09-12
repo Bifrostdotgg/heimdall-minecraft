@@ -5,7 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.heimdall.core.log.LogLevel;
+import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.testing.TestText;
+import java.util.List;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -159,6 +162,49 @@ class MsgTest {
         assertEquals("C:\\path and <red>",
                 TestText.plain(Msg.miniTemplate("{reason}", "reason", "C:\\path and <red>")),
                 "doubling for MiniMessage must not double what the player reads");
+    }
+
+    // ── Broken templates ────────────────────────────────────────────
+
+    @Test
+    @DisplayName("the unparseable fallback strips tags rather than printing them at the player")
+    void strippedFallbackKeepsTheWords() {
+        assertEquals("Reason » griefing",
+                Msg.stripTags("<gray>Reason</gray> » <yellow>griefing</yellow>"),
+                "a disconnect screen full of raw tags answers none of the questions it exists for");
+    }
+
+    @Test
+    @DisplayName("stripping keeps an escaped bracket, because that one is text")
+    void strippingKeepsEscapedBrackets() {
+        assertEquals("a <red> b",
+                Msg.stripTags("a \\<red\\> b"),
+                "the value was escaped on its way in, so its angle brackets are the reader's");
+        assertEquals("unclosed <tag",
+                Msg.stripTags("unclosed <tag"),
+                "an opening bracket with no partner is a character somebody typed");
+    }
+
+    @Test
+    @DisplayName("a template with a legacy code warns once, however many times it renders")
+    void sectionCodeInATemplateWarnsOnce() {
+        RecordingLogger logger = new RecordingLogger();
+        Msg.forgetReportedTemplates();
+        Msg.diagnostics(logger);
+        try {
+            String template = "<gray>Reason</gray> §c{reason}";
+            for (int i = 0; i < 3; i++) {
+                Template.fill(template, Template.values().put("reason", "griefing " + i));
+            }
+            Template.fill("<gray>{reason}</gray>", Template.values().put("reason", "clean"));
+
+            List<String> warnings = logger.messagesAt(LogLevel.WARN);
+            assertEquals(1, warnings.size(), warnings.toString());
+            assertTrue(warnings.get(0).contains("section colour code"), warnings.get(0));
+        } finally {
+            Msg.diagnostics(null);
+            Msg.forgetReportedTemplates();
+        }
     }
 
     private static String contentTree(Component component) {

@@ -70,15 +70,24 @@ public final class Template {
         if (template == null || template.isEmpty()) {
             return "";
         }
+        // The one door every guild-authored template goes through, and so the one place worth
+        // checking whether it will render as it reads. See Msg#checkTemplate.
+        Msg.checkTemplate(template);
         Values used = values == null ? new Values() : values;
         Output out = new Output();
         scan(template, used, out, true);
         return out.finish();
     }
 
-    /** {@link #fill}, then parsed as MiniMessage. A broken template renders as its own text. */
+    /**
+     * {@link #fill}, then parsed as MiniMessage. A broken template renders as its own plain text.
+     *
+     * <p>The template rather than the filled string is what the one warning is keyed on: the
+     * values differ per punishment, so keying on the finished text would report the same broken
+     * screen once per ban.
+     */
     public static Component render(String template, Values values) {
-        return Msg.mini(fill(template, values));
+        return Msg.mini(fill(template, values), template);
     }
 
     /**
