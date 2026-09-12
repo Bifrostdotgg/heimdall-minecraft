@@ -4,6 +4,8 @@ import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.punish.PunishmentIp;
+import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.punish.PunishmentText;
 import com.heimdall.core.util.Registration;
 import java.util.UUID;
 import litebans.api.Entry;
@@ -99,6 +101,20 @@ final class LiteBansEventBridge {
      *
      * <p>Seconds rather than minutes: LiteBans stores milliseconds, and rounding a short mute up
      * to the minute was losing a punishment somebody deliberately set.
+     *
+     * <h2>Past the issue ceiling, a hooked punishment is sent as permanent</h2>
+     *
+     * <p>A LiteBans row is a length somebody else's plugin already accepted, and
+     * {@code /ban Steve 100y} is a common way to spell "forever" there. The bot refuses anything
+     * over {@link PunishmentParser#MAX_ISSUE_SECONDS}, so such a row was mirrored as a rejected
+     * request and therefore not mirrored at all: the ban existed on the server and nowhere else.
+     *
+     * <p>Sending it with no length keys makes it a permanent ban on the bot's side, which is what
+     * the operator meant. It is <strong>not</strong> a clamp: the native command path still
+     * refuses a length past the ceiling rather than quietly changing it, because there a moderator
+     * is present to be told. Here nobody is, the row is already live in LiteBans, and the choice
+     * is between a permanent mirror and no mirror. One info line records that the length was
+     * dropped, and what it was.
      */
     static void putHookDuration(Payload.Builder body, long startMillis, long endMillis,
             HeimdallLogger logger) {
@@ -106,6 +122,15 @@ final class LiteBansEventBridge {
             return;
         }
         long seconds = Math.max(1L, (endMillis - startMillis) / 1000L);
+        if (seconds > PunishmentParser.MAX_ISSUE_SECONDS) {
+            if (logger != null) {
+                logger.info("LiteBans hook: a punishment set for "
+                        + PunishmentText.compactDuration(Long.valueOf(seconds)) + " (" + seconds
+                        + "s) is longer than the " + PunishmentParser.MAX_ISSUE_YEARS
+                        + " years the bot accepts, so it is mirrored as permanent");
+            }
+            return;
+        }
         HeimdallPunishmentsModule.putDuration(body, seconds);
     }
 

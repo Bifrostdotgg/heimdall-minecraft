@@ -61,6 +61,35 @@ class LiteBansHookTest {
     }
 
     @Test
+    @DisplayName("a hooked ban past the issue ceiling is mirrored as permanent, not dropped")
+    void lengthsPastTheCeilingBecomePermanent() {
+        RecordingLogger logger = new RecordingLogger();
+        long hundredYears = 100L * 365L * 86_400_000L;
+
+        Payload body = LiteBansEventBridge.issueBody(
+                entry("ban", START, START + hundredYears), "salt", logger);
+
+        assertNotNull(body);
+        assertFalse(body.has("durationSeconds"),
+                "the bot refuses anything over ten years, so a length it will reject is a "
+                        + "punishment that never mirrors at all: " + body.toJson());
+        assertFalse(body.has("durationMinutes"), body.toJson());
+        assertTrue(logger.records().toString().contains("36500d"),
+                "and the length that was dropped is named: " + logger.records());
+    }
+
+    @Test
+    @DisplayName("the ceiling itself is still sent as a length")
+    void theCeilingItselfIsAllowed() {
+        Payload body = LiteBansEventBridge.issueBody(
+                entry("ban", START, START + 10L * 365L * 86_400_000L), "salt",
+                new RecordingLogger());
+
+        assertNotNull(body);
+        assertEquals(10L * 365L * 86_400L, body.longValue("durationSeconds", -1L));
+    }
+
+    @Test
     @DisplayName("a type the bot does not mirror is not posted")
     void unmappedTypesAreDropped() {
         assertNull(LiteBansEventBridge.issueBody(
