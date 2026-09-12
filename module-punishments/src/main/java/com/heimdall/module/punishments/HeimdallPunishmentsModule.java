@@ -2083,6 +2083,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * decision made about <em>this</em> announcement - which defaults to the silence of the row
      * being lifted, because announcing "Adam unbanned Steve" on a server that was never told
      * Steve was banned discloses the very thing the silent ban was hiding.
+     *
+     * <p><strong>The rest comes off the lifted row, including when it ended.</strong> The dates
+     * used to be left unset, which made {@link PunishmentView#permanent()} true of everything and
+     * {@code type} read "Permanent ban" on every revoke line - so a guild whose template used it
+     * was told a tempban that had run for an hour had been a permanent one. A row that is being
+     * lifted is a row this server holds, so its expiry is in hand and there is no reason to guess
+     * at it. With no row at all there is nothing to read, and {@code type} resolves to empty:
+     * a segment that drops beats a sentence that is wrong.
      */
     private static PunishmentView revokeView(ActivePunishment lifted, String name, String staff,
             String reason, boolean silent, PunishmentSettings settings) {
@@ -2094,6 +2102,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .reason(reason)
                 .serverName(settings == null ? "" : settings.serverName)
                 .appealUrl(settings == null ? "" : settings.appealUrl)
+                .issuedAtMillis(lifted == null ? 0L : lifted.issuedAtMillis())
+                .expiresAtMillis(lifted == null ? null : lifted.expiresAtMillis())
+                .lengthSeconds(lifted == null ? null : lifted.durationSeconds)
                 .silent(silent)
                 .build();
     }
