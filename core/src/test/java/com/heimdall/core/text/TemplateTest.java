@@ -117,6 +117,22 @@ class TemplateTest {
     }
 
     @Test
+    @DisplayName("a backslash before anything else is a backslash, to both halves of the parser")
+    void onlyBracketsAreEscapable() {
+        // The two halves used to disagree: closingBracket skipped a backslash and whatever came
+        // after it, so it closed this segment at the FIRST bracket, while scan - which honours
+        // only \[ and \] - read the second one as escaped. The segment measured and the segment
+        // walked were different substrings.
+        assertEquals("x\\] y",
+                Template.fill("[x\\\\] y]", Template.values()),
+                "the first backslash is a backslash; the second escapes the bracket after it, so "
+                        + "the segment runs to the bracket at the end");
+        assertEquals("a\\b",
+                Template.fill("a\\b", Template.values()),
+                "and outside a segment a backslash before an ordinary character survives");
+    }
+
+    @Test
     @DisplayName("an opening bracket with no partner is printed rather than swallowing the rest")
     void unmatchedBracketIsLiteral() {
         assertEquals("[not a segment Steve",

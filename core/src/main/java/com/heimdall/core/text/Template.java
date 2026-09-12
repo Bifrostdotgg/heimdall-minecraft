@@ -151,8 +151,7 @@ public final class Template {
         int length = source.length();
         while (i < length) {
             char c = source.charAt(i);
-            if (c == '\\' && i + 1 < length
-                    && (source.charAt(i + 1) == '[' || source.charAt(i + 1) == ']')) {
+            if (c == '\\' && i + 1 < length && isBracket(source.charAt(i + 1))) {
                 out.text(String.valueOf(source.charAt(i + 1)));
                 i += 2;
                 continue;
@@ -193,11 +192,19 @@ public final class Template {
         }
     }
 
-    /** The first unescaped {@code ]} at or after {@code from}, or {@code -1}. */
+    /**
+     * The first unescaped {@code ]} at or after {@code from}, or {@code -1}.
+     *
+     * <p>"Escaped" means exactly what {@link #scan} means by it: a backslash before a bracket, and
+     * nothing else. This used to skip a backslash and whatever followed it, so the two disagreed
+     * about a backslash before any other character - {@code [x\\] y]} closed at the first bracket
+     * here and at the second there, and the segment the scanner then walked was not the substring
+     * this method had measured. One rule, in one place, so a template cannot mean two things.
+     */
     private static int closingBracket(String source, int from) {
         for (int i = from; i < source.length(); i++) {
             char c = source.charAt(i);
-            if (c == '\\' && i + 1 < source.length()) {
+            if (c == '\\' && i + 1 < source.length() && isBracket(source.charAt(i + 1))) {
                 i++;
                 continue;
             }
@@ -206,6 +213,11 @@ public final class Template {
             }
         }
         return -1;
+    }
+
+    /** The two characters a backslash escapes. Everything else is a backslash. */
+    private static boolean isBracket(char c) {
+        return c == '[' || c == ']';
     }
 
     /**
