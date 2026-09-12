@@ -22,12 +22,22 @@ import net.kyori.adventure.text.Component;
  * reason, and the Length line disappears on a permanent ban, without either template knowing that
  * the other case exists.
  *
- * <p><strong>A line left whitespace-only by that is removed.</strong> Otherwise a permanent ban
- * screen carries a blank line where its Length row used to be, and the blank lines accumulate
- * with each dropped segment. A line that was already blank in the template is kept, because that
- * one was a decision.
+ * <p><strong>A line the drop left with no words on it is removed.</strong> "No words" means: with
+ * the {@code <...>} tag shapes taken out, nothing but whitespace - so {@code <gray></gray>}, which
+ * is what {@code <gray>[Reason: {reason}]</gray>} leaves behind, goes the same way a bare blank
+ * line does. Otherwise a permanent ban screen carries an empty row where its Length used to be,
+ * and the empty rows accumulate with each dropped segment. A line that lost nothing is never
+ * considered, so a line that was already blank in the template is kept, because that one was a
+ * decision.
  *
- * <p><strong>A literal bracket is written {@code \[} or {@code \]}.</strong>
+ * <p><strong>That means a decoration on the same line as a dropped segment goes with it.</strong>
+ * Put a divider, a bullet or any other formatting-only flourish on its own line, not at the end of
+ * a row that can disappear: a line holding only a divider and a dropped Reason clause has no words
+ * left, so the divider is removed too. The defaults in
+ * {@link com.heimdall.core.punish.PunishmentScreens} are written that way on purpose.
+ *
+ * <p><strong>A literal bracket is written {@code \[} or {@code \]}.</strong> Nothing else is
+ * escapable: a backslash before any other character is a backslash.
  *
  * <p><strong>Nesting is not supported.</strong> The first unescaped {@code ]} closes a segment,
  * and a {@code [} inside one is a literal bracket. Nested optional segments would need a

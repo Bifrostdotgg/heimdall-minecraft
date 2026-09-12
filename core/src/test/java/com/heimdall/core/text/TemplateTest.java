@@ -91,6 +91,17 @@ class TemplateTest {
     }
 
     @Test
+    @DisplayName("a decoration sharing a line with a dropped segment goes with it")
+    void decorationsOnADroppedLineGoToo() {
+        String divider = "<gradient:#c278b0:#a292dc><st>      </st></gradient>";
+        assertEquals("Header",
+                Template.fill("Header\n" + divider + "[ Reason: {reason}]",
+                        Template.values().put("reason", "")),
+                "the line has no words left, so the divider is litter like anything else - which "
+                        + "is why the shipped screens put dividers on their own line");
+    }
+
+    @Test
     @DisplayName("a line with text left on it stays, however much was dropped")
     void partiallyEmptiedLinesStay() {
         assertEquals("Length: forever",
