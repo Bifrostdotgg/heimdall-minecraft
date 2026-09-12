@@ -39,7 +39,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -394,16 +393,28 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
     }
 
-    /** Adds every punished player the mirror knows about. Called after a sync reconciles. */
+    /**
+     * Adds every punished player the mirror knows about, and rebuilds the revoke-candidacy index.
+     *
+     * <p>Called after a sync reconciles, whose answer is authoritative for the whole mirror - so
+     * the index is rebuilt from scratch and swapped in rather than patched row by row. This is the
+     * one place that walks every key, and it runs on a sync rather than on a keystroke.
+     */
     private void rememberMirrorNames() {
         MirrorStore<ActivePunishment> store = this.mirror;
         if (store == null) return;
+        KnownNames.Index rebuilt = KnownNames.index();
         for (String key : store.keys()) {
             ActivePunishment p = store.get(key);
-            if (p != null) {
-                names.remember(p.targetName);
-            }
+            if (p == null) continue;
+            names.remember(p.targetName);
+            String family = revokeFamily(p.type);
+            if (family == null || p.targetName == null) continue;
+            Long ends = p.expiresAtMillis();
+            if (ends != null && ends.longValue() <= System.currentTimeMillis()) continue;
+            rebuilt.add(family, p.targetName, ends == null ? KnownNames.NEVER : ends.longValue());
         }
+        names.install(rebuilt);
     }
 
     /** Whether this module is enabled right now - {@link PunishmentAdmin}'s half of the contract. */
@@ -497,30 +508,80 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      *
      * <p>Lower-cased, because {@link KnownNames} matches that way and a moderator typing
      * {@code steve} means Steve.
+     *
+     * <p><strong>A lookup, not a scan.</strong> This used to walk every key in the punishment
+     * mirror and do a {@code get} per key - on every tab press, for every revoke verb, on the main
+     * server thread on the Bukkit family. The set is now maintained in {@link KnownNames} at the
+     * moments a punishment lands or is lifted, which are the same moments the names themselves are
+     * recorded.
      */
     private Set<String> targetFilter(String verb) {
-        String[] types;
-        if ("unban".equals(verb)) {
-            types = new String[] {"ban", "ipban"};
-        } else if ("unmute".equals(verb)) {
-            types = new String[] {"mute"};
-        } else if ("unwarn".equals(verb)) {
-            types = new String[] {"warn"};
-        } else {
+        String family = revokeFamily(verb);
+        if (family == null || !verb.startsWith("un")) {
+            // Only the three revoke verbs filter. An issue verb takes anybody, and rollback takes
+            // whoever has anything at all, which is what "every known name" already means.
             return null;
         }
-        MirrorStore<ActivePunishment> store = this.mirror;
-        Set<String> allowed = new HashSet<String>();
-        if (store == null) return allowed;
-        long now = System.currentTimeMillis();
-        List<String> wanted = Arrays.asList(types);
-        for (String key : store.keys()) {
-            ActivePunishment p = store.get(key);
-            if (p == null || p.targetName == null || p.expired(now)) continue;
-            if (!wanted.contains(p.type)) continue;
-            allowed.add(KnownNames.key(p.targetName));
+        return names.withActive(family, System.currentTimeMillis());
+    }
+
+    /**
+     * The revoke family a punishment type or a revoke verb belongs to, or {@code null}.
+     *
+     * <p>Both spellings in one table, because the two sides of this question are asked in
+     * different vocabularies: a moderator types {@code unban}, while an apply frame and a mirror
+     * row name the type ({@code ban}, {@code ipban}). A {@code kick}, a {@code geo} or a
+     * {@code subnet} has no revoke verb that names a player and belongs to no family.
+     */
+    static String revokeFamily(String typeOrVerb) {
+        if ("ban".equals(typeOrVerb) || "ipban".equals(typeOrVerb) || "unban".equals(typeOrVerb)) {
+            return "ban";
         }
-        return allowed;
+        if ("mute".equals(typeOrVerb) || "unmute".equals(typeOrVerb)) {
+            return "mute";
+        }
+        if ("warn".equals(typeOrVerb) || "unwarn".equals(typeOrVerb)) {
+            return "warn";
+        }
+        return null;
+    }
+
+    /** The mirror types one family covers. */
+    private static String[] familyTypes(String family) {
+        if ("ban".equals(family)) return new String[] {"ban", "ipban"};
+        if ("mute".equals(family)) return new String[] {"mute"};
+        if ("warn".equals(family)) return new String[] {"warn"};
+        return new String[0];
+    }
+
+    /**
+     * Recomputes one player's candidacy for one revoke family, from the mirror.
+     *
+     * <p>Called wherever a punishment lands or is lifted, which is a handful of times per
+     * punishment rather than once per keystroke - so this side may read the mirror, and the
+     * completion side may not. Recomputed rather than incremented and decremented because a family
+     * can hold two rows at once: {@code /unban} lifts a ban and an ipban together, and a player
+     * with one of each still has something to lift after the first goes.
+     */
+    private void refreshRevokeCandidacy(String family, String uuid, String name) {
+        if (family == null || uuid == null || name == null || name.isEmpty()) return;
+        List<ActivePunishment> live = activeOf(uuid, familyTypes(family));
+        long latest = 0L;
+        for (int i = 0; i < live.size(); i++) {
+            Long ends = live.get(i).expiresAtMillis();
+            if (ends == null) {
+                latest = KnownNames.NEVER;
+                break;
+            }
+            if (ends.longValue() > latest) {
+                latest = ends.longValue();
+            }
+        }
+        if (latest <= 0L) {
+            names.unpunished(family, name);
+        } else {
+            names.punished(family, name, latest);
+        }
     }
 
     private static List<String> prefixed(List<String> candidates, String partial) {
@@ -707,6 +768,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String mirrorKey = keyFor(local);
         if (mirror != null && !"kick".equals(type) && mirrorKey != null) {
             mirror.record(mirrorKey, local);
+            // After the record, because the candidacy is recomputed from the mirror.
+            refreshRevokeCandidacy(revokeFamily(type), uuid, name);
         }
         applyLive(uuid, local, settings);
         Payload.Builder body = Payload.builder()
@@ -837,6 +900,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             }
             enqueue("revoke", opId, now, body.build());
         }
+        // After every eviction rather than inside the loop: a family can hold two rows, and
+        // recomputing while the second is still in the mirror would put the name straight back.
+        for (int i = 0; i < matches.size(); i++) {
+            refreshRevokeCandidacy(revokeFamily(matches.get(i).type), uuid, name);
+        }
         source.sendMessage(Msg.legacy("§aRevoked " + matches.size() + " punishment(s) for §f" + name));
         // Once, on the verb the moderator typed, rather than once per matching row: /unban lifts a
         // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
@@ -870,10 +938,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     private static String[] revokeTypes(String type) {
-        if ("unban".equals(type)) return new String[] {"ban", "ipban"};
-        if ("unmute".equals(type)) return new String[] {"mute"};
-        if ("unwarn".equals(type)) return new String[] {"warn"};
-        return new String[] {"ban", "ipban", "mute", "warn"};
+        String family = revokeFamily(type);
+        // Anything else is rollback, which lifts whatever is newest of any kind.
+        return family == null ? new String[] {"ban", "ipban", "mute", "warn"} : familyTypes(family);
     }
 
     private static String typeLabel(String type) {
@@ -983,6 +1050,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 if (key == null) return;
                 names.remember(p.targetName);
                 mirror.record(key, p);
+                refreshRevokeCandidacy(revokeFamily(p.type), p.targetUuid, p.targetName);
                 applyLive(p.targetUuid, p, settings);
                 if (!echo) announce(announcementFor(p, settings));
             }
@@ -1214,6 +1282,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 ActivePunishment lifted = mirror.get(key);
                 mirror.evict(key);
                 if (lifted == null) return;
+                refreshRevokeCandidacy(
+                        revokeFamily(lifted.type), lifted.targetUuid, lifted.targetName);
                 if (!announceableRevoke(payload.string("revokeCause", ""))) return;
                 PunishmentSettings settings = PunishmentSettings.from(context.config());
                 announce(PunishmentAnnouncement.revoked(settings.announceRevoke, lifted.type,
@@ -1831,6 +1901,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
     }
 
+    /**
+     * Undoes one queued revoke against the mirror, after a full snapshot put its row back.
+     *
+     * <p>Does not touch the revoke-candidacy index, and does not need to: the only caller is
+     * {@link #replayPendingWrites}, which a sync runs immediately before rebuilding the whole
+     * index from the reconciled mirror. A revoke payload carries no target name to index with
+     * either.
+     */
     private void evictFromPayload(Payload payload) {
         if (mirror == null || payload == null) return;
         String type = payload.string("type", "");

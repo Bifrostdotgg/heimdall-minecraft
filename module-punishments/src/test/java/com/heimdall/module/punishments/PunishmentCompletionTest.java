@@ -126,17 +126,64 @@ class PunishmentCompletionTest {
     void expiredRowsAreNotOffered() {
         try (PunishmentsHarness harness = replacing()) {
             join(harness, "Steve");
-            ActivePunishment ban = new ActivePunishment();
-            ban.type = "ban";
-            ban.targetUuid = FakePlayer.named("Steve").uuid().toString();
-            ban.targetName = "Steve";
-            ban.expiresAt = java.time.Instant.ofEpochMilli(System.currentTimeMillis() - 1000)
-                    .toString();
-            harness.module.mirrorForTest().record("ban:" + ban.targetUuid, ban);
+            recordUntil(harness, "ban", "Steve",
+                    java.time.Instant.ofEpochMilli(System.currentTimeMillis() - 1000).toString());
 
             assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "Ste"),
                     "the name is known either way; it is the unban candidacy that expired");
             assertEquals(Collections.emptyList(), complete(harness, "unban", "Ste"));
+        }
+    }
+
+    @Test
+    @DisplayName("a revoked name leaves the family it was in")
+    void revokedNamesLeaveTheFamily() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            ban(harness, "Steve");
+            assertEquals(Arrays.asList("Steve"), complete(harness, "unban", ""));
+
+            harness.tunnel.push("punish.revoke", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", FakePlayer.named("Steve").uuid().toString())
+                    .build());
+
+            assertEquals(Collections.emptyList(), complete(harness, "unban", ""),
+                    "there is nothing left to lift, so the name is not an answer");
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "Ste"),
+                    "and the name is still known, because it is still a name");
+        }
+    }
+
+    @Test
+    @DisplayName("a name a moderator banned and then unbanned leaves the family too")
+    void nativeRoundTripLeavesTheFamily() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            harness.module.onStaffCommand(MODERATOR, "ban", Arrays.asList("Steve", "griefing"));
+            assertEquals(Arrays.asList("Steve"), complete(harness, "unban", ""));
+
+            harness.module.onStaffCommand(MODERATOR, "unban", Arrays.asList("Steve"));
+            assertEquals(Collections.emptyList(), complete(harness, "unban", ""));
+        }
+    }
+
+    @Test
+    @DisplayName("an IP ban is an unban candidate, and it is the same family as a ban")
+    void ipBansAreUnbanCandidates() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("id", "ip-1")
+                    .put("type", "ipban")
+                    .put("targetUuid", FakePlayer.named("Steve").uuid().toString())
+                    .put("targetName", "Steve")
+                    .put("ipDigest", "digest-1")
+                    .build());
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "unban", ""));
+            assertEquals(Collections.emptyList(), complete(harness, "unmute", ""));
         }
     }
 
@@ -231,6 +278,18 @@ class PunishmentCompletionTest {
 
     private static void mute(PunishmentsHarness harness, String name) {
         record(harness, "mute", name);
+    }
+
+    private static void recordUntil(PunishmentsHarness harness, String type, String name,
+            String expiresAt) {
+        harness.tunnel.push("punish.apply", Payload.builder()
+                .put("id", type + "-" + name)
+                .put("type", type)
+                .put("targetUuid", FakePlayer.named(name).uuid().toString())
+                .put("targetName", name)
+                .put("reason", "testing")
+                .put("expiresAt", expiresAt)
+                .build());
     }
 
     /** A punishment arriving from the bot, which is how a name this server never hosted gets in. */

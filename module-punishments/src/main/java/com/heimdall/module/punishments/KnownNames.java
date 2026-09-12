@@ -2,12 +2,15 @@ package com.heimdall.module.punishments;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -136,6 +139,121 @@ final class KnownNames {
                 out.put(entry.getKey(), entry.getValue());
             }
         }
+    }
+
+    // ── Who has something to lift ───────────────────────────────────────────────────────────
+
+    /**
+     * A punishment that does not end, as this index stores an end.
+     *
+     * <p>A sentinel rather than a nullable value, so the expiry comparison in {@link #withActive}
+     * is one branch and a permanent ban cannot be read as an expired one by a caller that forgot.
+     */
+    static final long NEVER = Long.MAX_VALUE;
+
+    /**
+     * Lower-cased name to when their punishment of that family ends, per revoke family.
+     *
+     * <p><strong>An index rather than a question asked at completion time.</strong> This is what
+     * {@code /unban}, {@code /unmute} and {@code /unwarn} filter their name list with, and
+     * completion runs on a keystroke, on the main server thread on the Bukkit family. The previous
+     * answer walked every key in the punishment mirror and did a lookup per key, per tab press,
+     * per revoke verb. It is written at the handful of moments a punishment lands or is lifted -
+     * which is also where the names themselves are recorded - and read as two map lookups.
+     *
+     * <p>Volatile and replaced wholesale by {@link #install}: a sync reconciles the whole mirror
+     * at once and its answer is authoritative, so it swaps a finished index in rather than
+     * clearing and refilling one that a tab press could read half-built.
+     */
+    private volatile Map<String, ConcurrentHashMap<String, Long>> punished = emptyFamilies();
+
+    /** Records that this player has something of this family to lift. */
+    void punished(String family, String name, long endsAtMillis) {
+        ConcurrentHashMap<String, Long> live = punished.get(family);
+        String key = key(name);
+        if (live == null || key.isEmpty()) return;
+        live.put(key, Long.valueOf(endsAtMillis));
+    }
+
+    /** Forgets a lifted punishment. The name itself stays known. */
+    void unpunished(String family, String name) {
+        ConcurrentHashMap<String, Long> live = punished.get(family);
+        String key = key(name);
+        if (live == null || key.isEmpty()) return;
+        live.remove(key);
+    }
+
+    /**
+     * The lower-cased names with a live punishment of this family right now.
+     *
+     * <p>Expired rows are dropped as they are noticed rather than swept: nothing tells this index
+     * that a tempban ran out, and a scheduled task for something read on a keystroke is machinery
+     * nobody needs.
+     */
+    Set<String> withActive(String family, long nowMillis) {
+        ConcurrentHashMap<String, Long> live = punished.get(family);
+        if (live == null) {
+            return Collections.emptySet();
+        }
+        Set<String> out = new HashSet<String>();
+        for (Map.Entry<String, Long> entry : live.entrySet()) {
+            if (entry.getValue().longValue() <= nowMillis) {
+                live.remove(entry.getKey(), entry.getValue());
+                continue;
+            }
+            out.add(entry.getKey());
+        }
+        return out;
+    }
+
+    /** A fresh index to fill and then {@link #install}. */
+    static Index index() {
+        return new Index();
+    }
+
+    /** Swaps a finished index in for the current one, in one assignment. */
+    void install(Index index) {
+        if (index == null) return;
+        this.punished = index.byFamily;
+    }
+
+    /** The whole live-punishment index, under construction. See {@link #install}. */
+    static final class Index {
+
+        private final Map<String, ConcurrentHashMap<String, Long>> byFamily = emptyFamilies();
+
+        private Index() {
+        }
+
+        Index add(String family, String name, long endsAtMillis) {
+            ConcurrentHashMap<String, Long> live = byFamily.get(family);
+            String key = key(name);
+            if (live == null || key.isEmpty()) return this;
+            Long existing = live.get(key);
+            // The longest of a player's rows in one family decides, because /unban lifts them
+            // together: a permanent ipban beside an expiring ban is still something to lift.
+            if (existing == null || existing.longValue() < endsAtMillis) {
+                live.put(key, Long.valueOf(endsAtMillis));
+            }
+            return this;
+        }
+    }
+
+    /**
+     * The three families, each with an empty set.
+     *
+     * <p>Fixed rather than created on demand, so a lookup for a family nobody has been punished in
+     * is a hit on an empty map instead of a null the two writers and the reader each have to
+     * remember. A type outside the three ({@code kick}, {@code geo}, {@code subnet}) has no revoke
+     * verb that names a player and is not represented here at all.
+     */
+    private static Map<String, ConcurrentHashMap<String, Long>> emptyFamilies() {
+        Map<String, ConcurrentHashMap<String, Long>> families =
+                new LinkedHashMap<String, ConcurrentHashMap<String, Long>>();
+        families.put("ban", new ConcurrentHashMap<String, Long>());
+        families.put("mute", new ConcurrentHashMap<String, Long>());
+        families.put("warn", new ConcurrentHashMap<String, Long>());
+        return Collections.unmodifiableMap(families);
     }
 
     /** How many distinct names are known, online or not. For tests and diagnostics. */
