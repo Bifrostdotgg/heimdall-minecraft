@@ -464,6 +464,30 @@ class HeimdallPunishmentsModuleTest {
         }
     }
 
+    @Test
+    @DisplayName("a punishment longer than the ceiling is refused, not clamped and not sent")
+    void durationCeiling() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+            FakeCommandSource moderator = FakeCommandSource.console();
+
+            harness.module.onStaffCommand(moderator, "ban", Arrays.asList("Steve", "50y", "bye"));
+
+            assertTrue(moderator.wasTold("10 years"), moderator.messageText().toString());
+            assertTrue(moderator.wasTold("perm"), "and says what to type instead");
+            assertNull(harness.module.mirrorForTest().get("ban:" + FakePlayer.named("Steve").uuid()),
+                    "nothing was written locally");
+            assertTrue(harness.module.outboxForTest().isEmpty(), "and nothing is queued for the bot");
+
+            moderator.clearMessages();
+            harness.module.onStaffCommand(moderator, "ban", Arrays.asList("Steve", "10y", "bye"));
+            assertFalse(moderator.wasTold("10 years"), "the ceiling itself is allowed");
+            assertNotNull(harness.module.mirrorForTest().get(
+                    "ban:" + FakePlayer.named("Steve").uuid()));
+        }
+    }
+
     private static void waitFor(java.util.function.BooleanSupplier condition, long timeoutMs)
             throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;

@@ -576,6 +576,16 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             source.sendMessage(Msg.legacy("§cA duration is required for /" + type + "."));
             return;
         }
+        if (parsed.durationSeconds != null
+                && parsed.durationSeconds.longValue() > PunishmentParser.MAX_ISSUE_SECONDS) {
+            // Refused here rather than clamped, and refused before anything is written or sent:
+            // the same ceiling the slash command and the dashboard form apply, so a moderator
+            // cannot get a length from one surface that another would have rejected.
+            source.sendMessage(Msg.legacy("§cThe longest punishment that can be issued is "
+                    + PunishmentParser.MAX_ISSUE_YEARS + " years. Use §fperm§c for one that "
+                    + "never ends."));
+            return;
+        }
         String issueType = type;
         if ("tempban".equals(type)) issueType = "ban";
         if ("tempmute".equals(type)) issueType = "mute";

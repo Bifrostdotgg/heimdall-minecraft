@@ -69,6 +69,22 @@ public final class PunishmentParser {
      */
     static final long MAX_SECONDS = 100L * SECONDS_PER_YEAR;
 
+    /** The longest punishment any surface will issue, in years. */
+    public static final int MAX_ISSUE_YEARS = 10;
+
+    /**
+     * The longest punishment any surface will issue, in seconds.
+     *
+     * <p>Stricter than {@link #MAX_SECONDS}, and deliberately a different number. The grammar
+     * accepts up to a hundred years because it also reads lengths back - an imported row from
+     * another plugin, a punishment issued before the ceiling existed - and refusing to render
+     * one would be worse than showing it. What a moderator may <em>issue</em> is ten years,
+     * which is the same ceiling the slash command and the dashboard form enforce: past that the
+     * length is indistinguishable from permanent to everyone involved, and {@code perm} says so
+     * honestly.
+     */
+    public static final long MAX_ISSUE_SECONDS = MAX_ISSUE_YEARS * SECONDS_PER_YEAR;
+
     private PunishmentParser() {
     }
 
