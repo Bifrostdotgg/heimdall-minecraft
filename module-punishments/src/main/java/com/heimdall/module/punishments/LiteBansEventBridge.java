@@ -80,7 +80,9 @@ final class LiteBansEventBridge {
         long until = entry.getDateEnd();
         long start = entry.getDateStart();
         if (until > 0 && start > 0 && until > start) {
-            body.put("durationMinutes", (int) Math.max(1L, (until - start) / 60000L));
+            // Seconds, like the native path: LiteBans stores milliseconds, and rounding a short
+            // mute up to the minute was losing a punishment somebody deliberately set.
+            body.put("durationSeconds", Math.max(1L, (until - start) / 1000L));
         }
         context.api().issuePunishment(body.build());
     }
