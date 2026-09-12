@@ -2056,8 +2056,13 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     static Component render(ActivePunishment p, PunishmentSettings settings) {
         long now = System.currentTimeMillis();
         PunishmentView view = viewOf(p, settings);
-        String base = Template.fill(settings.screenBase, view.tokens(now));
-        Template.Values values = view.tokens(now).putRaw("base", base);
+        // One token set, built once. It used to be built twice per render, and each build runs
+        // the sanitiser over every player-supplied value - a regex loop with up to eight passes,
+        // on the login thread. The base is filled before {base} is added, so it still renders
+        // with no base of its own and a self-referential base still resolves to nothing.
+        Template.Values values = view.tokens(now);
+        String base = Template.fill(settings.screenBase, values);
+        values.putRaw("base", base);
         return Template.render(settings.screenFor(familyOf(p.type), view.permanent()), values);
     }
 
