@@ -94,16 +94,29 @@ public final class PunishmentParser {
         public final String target;
         /** How long it lasts, in seconds, or {@code null} for permanent. */
         public final Long durationSeconds;
+        /**
+         * The word that was read as the duration and taken out of the reason, or {@code null}.
+         *
+         * <p>Not the same question as {@link #durationSeconds}, and the difference is the whole
+         * reason this field exists: {@code perm} is a duration token that resolves to
+         * <em>no</em> length, so a command carrying one has a null {@code durationSeconds} and
+         * has still had a word removed from what the moderator typed. A caller that wants to
+         * refuse a length - {@code /warn} and {@code /kick}, which do not have one - has to ask
+         * whether a token was taken, not whether it came to a number, or {@code /warn Steve perm
+         * spamming} warns for "spamming" and never mentions the word it ate.
+         */
+        public final String durationToken;
         public final String reason;
         /** From {@code --sender=}; hook/import may use it. Native /hd issue must ignore it. */
         public final String senderOverride;
 
         Parsed(boolean silent, boolean publicFlag, String target, Long durationSeconds,
-                String reason, String senderOverride) {
+                String durationToken, String reason, String senderOverride) {
             this.silent = silent;
             this.publicFlag = publicFlag;
             this.target = target;
             this.durationSeconds = durationSeconds;
+            this.durationToken = durationToken;
             this.reason = reason;
             this.senderOverride = senderOverride;
         }
@@ -173,18 +186,18 @@ public final class PunishmentParser {
         }
         String target = rest.get(0);
         Long duration = null;
-        boolean durationTaken = false;
+        String durationToken = null;
         List<String> reason = new ArrayList<String>();
         for (int i = 1; i < rest.size(); i++) {
             String token = rest.get(i);
-            if (!durationTaken && looksLikeDuration(token)) {
-                durationTaken = true;
+            if (durationToken == null && looksLikeDuration(token)) {
+                durationToken = token;
                 duration = parseDurationSeconds(token);
                 continue;
             }
             reason.add(token);
         }
-        return new Parsed(options.silent, options.publicFlag, target, duration,
+        return new Parsed(options.silent, options.publicFlag, target, duration, durationToken,
                 join(reason), options.senderOverride);
     }
 

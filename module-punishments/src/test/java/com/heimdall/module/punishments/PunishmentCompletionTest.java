@@ -240,6 +240,10 @@ class PunishmentCompletionTest {
 
             assertEquals(Collections.emptyList(), complete(harness, "unban", "Steve", ""));
             assertEquals(Collections.emptyList(), complete(harness, "kick", "Steve", ""));
+            assertEquals(Collections.emptyList(), complete(harness, "warn", "Steve", ""),
+                    "a warn is an event, not a state: offering a length the bot then drops is "
+                            + "worse than offering nothing");
+            assertEquals(Collections.emptyList(), complete(harness, "warn", "Steve", "1"));
             assertEquals(Collections.emptyList(), complete(harness, "history", "Steve", ""));
             assertEquals(Collections.emptyList(), complete(harness, "banlist", ""),
                     "/banlist takes no arguments at all");

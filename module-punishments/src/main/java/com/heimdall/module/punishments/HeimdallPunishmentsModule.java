@@ -343,7 +343,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private void bind(ModuleContext context, final String name, String permission, final String type) {
         Registration handle = context.registerCommand(CommandSpec.named(name)
                 .permission(permission)
-                .usage("/" + name + " <player> [duration] [reason]")
+                .usage(usage(name))
                 .description("Heimdall punishment")
                 .handler(new CommandHandler() {
                     @Override
@@ -506,10 +506,35 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         return prefixed(SILENCE_FLAGS, partial);
     }
 
-    /** Verbs that read a duration out of their arguments. A revoke and a lookup do not. */
+    /**
+     * Verbs that read a duration out of their arguments.
+     *
+     * <p>A revoke and a lookup do not, and neither do {@code kick} and {@code warn}: they are
+     * events rather than states, and the bot's {@code TIMED_PUNISHMENT_TYPES} is {@code ban},
+     * {@code ipban} and {@code mute} for the same reason. {@code warn} used to be in this list, so
+     * completion offered {@code 30m} and {@code perm} after a warn target and the parser then took
+     * the word out of the reason; the bot dropped the length on arrival and said so in its own log
+     * and nowhere the moderator could see. Offering a thing and discarding it is worse than not
+     * offering it.
+     */
     private static boolean takesDuration(String verb) {
         return "ban".equals(verb) || "tempban".equals(verb) || "ipban".equals(verb)
-                || "mute".equals(verb) || "tempmute".equals(verb) || "warn".equals(verb);
+                || "mute".equals(verb) || "tempmute".equals(verb);
+    }
+
+    /**
+     * The one-line usage for a verb, built from the same table the parser and the completer read.
+     *
+     * <p>Rather than a constant with {@code [duration]} in it, which is how {@code /warn} came to
+     * advertise a length it does not have on the root aliases while the {@code /hd} tree's own
+     * table said otherwise. One answer, so the two cannot disagree again.
+     */
+    private static String usage(String verb) {
+        if (!takesDuration(verb)) {
+            return "/" + verb + " <player> [reason]";
+        }
+        boolean required = "tempban".equals(verb) || "tempmute".equals(verb);
+        return "/" + verb + " <player> " + (required ? "<duration>" : "[duration]") + " [reason]";
     }
 
     /**
@@ -642,7 +667,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         try {
             parsed = PunishmentParser.parse(args);
         } catch (IllegalArgumentException e) {
-            source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [duration] [reason]"));
+            source.sendMessage(Msg.legacy("§cUsage: " + usage(type)));
+            return;
+        }
+        if (!takesDuration(type) && parsed.durationToken != null) {
+            // Refused rather than ignored. The parser takes the first whole duration token after
+            // the target whatever the verb is, so on a verb with no length the word was silently
+            // removed from the reason and the bot then dropped the length on arrival, logging it
+            // where only an operator reading the bot's console would ever see. A moderator who
+            // typed a length meant something by it, and the two honest answers are to apply it or
+            // to say it cannot be.
+            source.sendMessage(Msg.legacy("§cA " + type + " has no length. Put §f"
+                    + parsed.durationToken + "§c in the reason or drop it."));
             return;
         }
         if (("tempban".equals(type) || "tempmute".equals(type)) && parsed.durationSeconds == null) {

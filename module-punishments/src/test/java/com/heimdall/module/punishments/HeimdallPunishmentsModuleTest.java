@@ -524,6 +524,73 @@ class HeimdallPunishmentsModuleTest {
     }
 
     @Test
+    @DisplayName("a length on a verb that has none is refused, not quietly eaten")
+    void untimedVerbsRefuseADuration() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            FakeCommandSource moderator = FakeCommandSource.console();
+            harness.module.onStaffCommand(moderator, "warn",
+                    Arrays.asList("Steve", "7d", "spamming"));
+
+            assertTrue(moderator.wasTold("no length"), moderator.messageText().toString());
+            assertTrue(moderator.wasTold("7d"), "and names the word it will not take");
+            assertNull(harness.module.mirrorForTest().get("warn:" + FakePlayer.named("Steve").uuid()),
+                    "nothing was written locally");
+            assertTrue(harness.module.outboxForTest().isEmpty(),
+                    "and nothing was sent for the bot to drop the length off");
+
+            moderator.clearMessages();
+            harness.module.onStaffCommand(moderator, "kick",
+                    Arrays.asList("Steve", "perm", "spamming"));
+            assertTrue(moderator.wasTold("no length"),
+                    "perm is a duration token that resolves to no length, so the old check on the "
+                            + "number alone let it through and ate the word: "
+                            + moderator.messageText());
+        }
+    }
+
+    @Test
+    @DisplayName("a warn with no length still works, and keeps its whole reason")
+    void untimedVerbsStillWorkWithoutADuration() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            FakeCommandSource moderator = FakeCommandSource.console();
+            harness.module.onStaffCommand(moderator, "warn", Arrays.asList("Steve", "spamming"));
+
+            assertFalse(moderator.wasTold("no length"), moderator.messageText().toString());
+            ActivePunishment warn = harness.module.mirrorForTest()
+                    .get("warn:" + FakePlayer.named("Steve").uuid());
+            assertNotNull(warn, "the warn was issued");
+            assertEquals("spamming", warn.reason);
+            assertNull(warn.durationSeconds);
+            assertNull(warn.expiresAt);
+        }
+    }
+
+    @Test
+    @DisplayName("a reason that merely contains a duration-looking word is not a length")
+    void aWordThatIsNotAWholeDurationIsReason() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            FakeCommandSource moderator = FakeCommandSource.console();
+            harness.module.onStaffCommand(moderator, "warn",
+                    Arrays.asList("Steve", "1day-old", "account"));
+
+            assertFalse(moderator.wasTold("no length"),
+                    "the parser only takes a WHOLE duration token, so this one is reason text and "
+                            + "the refusal must not fire on it: " + moderator.messageText());
+            assertEquals("1day-old account", harness.module.mirrorForTest()
+                    .get("warn:" + FakePlayer.named("Steve").uuid()).reason);
+        }
+    }
+
+    @Test
     @DisplayName("a module turned off mid-request files nothing rather than throwing")
     void disabledMidRequestIsNotAnNpe() {
         try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)

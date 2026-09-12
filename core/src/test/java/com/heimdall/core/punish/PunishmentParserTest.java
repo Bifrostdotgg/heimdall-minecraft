@@ -187,6 +187,25 @@ class PunishmentParserTest {
     }
 
     @Test
+    @DisplayName("the word taken as the duration is reported, even when it means no length")
+    void theTakenTokenIsReported() {
+        assertEquals("7d", PunishmentParser.parse(
+                Arrays.asList("Steve", "7d", "griefing")).durationToken);
+        assertEquals("perm", PunishmentParser.parse(
+                Arrays.asList("Steve", "perm", "griefing")).durationToken,
+                "perm resolves to no length and still removes a word, which is exactly the case "
+                        + "a caller that refuses lengths has to be able to see");
+        assertNull(PunishmentParser.parse(
+                Arrays.asList("Steve", "perm", "griefing")).durationSeconds);
+        assertNull(PunishmentParser.parse(
+                Arrays.asList("Steve", "griefing")).durationToken);
+        assertNull(PunishmentParser.parse(
+                Arrays.asList("Steve", "999y", "nope")).durationToken,
+                "a token the grammar refused was never taken, so it is reason text and there is "
+                        + "nothing to report");
+    }
+
+    @Test
     @DisplayName("a zero-length punishment is refused too")
     void zeroIsRefused() {
         assertFalse(PunishmentParser.looksLikeDuration("0s"));

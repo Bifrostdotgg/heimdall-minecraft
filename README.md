@@ -277,14 +277,19 @@ Tokens can be compounded: `1d12h`, `2h30m`, `1d12h30m15s`. Lengths are kept in *
 that can be issued is ten years; past that the command refuses and tells you to use `perm`. The
 same grammar is used by `/mc-punish` in Discord and by the dashboard form, from one shared table.
 
+**Only a ban, an IP ban and a mute have a length.** A kick and a warn are events rather than
+states, so `/hd kick` and `/hd warn` take `<player> [reason]` and nothing else: they complete no
+durations, and a command that carries one anyway is refused rather than having the word quietly
+taken out of the reason. Put it in the reason or drop it.
+
 In **hook mode**, a LiteBans ban longer than ten years is mirrored as permanent rather than
 refused. Nobody is present to be told, the ban is already live in LiteBans, and `/ban Steve 100y`
 is a common way to spell "forever" there; the server log records the length that was dropped.
 
 **Tab completion** offers player names at the target position - everyone online first, then
-everyone this server has seen or punished - the flags after a `-`, and a short duration list once
-a player is named. `/hd unban`, `/hd unmute` and `/hd unwarn` only offer players who actually have
-one of those to lift.
+everyone this server has seen or punished - the flags after a `-`, and, on the verbs that have a
+length, a short duration list once a player is named. `/hd unban`, `/hd unmute` and `/hd unwarn`
+only offer players who actually have one of those to lift.
 
 **The screens** a punished player sees, and the two chat lines a punishment is announced with, are
 MiniMessage templates edited on the dashboard's Minecraft page, not in any file here. They carry
