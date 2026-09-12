@@ -125,7 +125,10 @@ public final class PunishmentAnnouncement {
             return null;
         }
         String body = view.silent() ? SILENT_PREFIX + filled : filled;
-        return new PunishmentAnnouncement(Msg.mini(body), view.silent());
+        // The template, not the filled line, is what a parse failure is reported against: the
+        // values change with every punishment, so keying on the finished text would report one
+        // broken template once per ban and exhaust the warning budget within an evening.
+        return new PunishmentAnnouncement(Msg.mini(body, template), view.silent());
     }
 
     /** The finished line, parsed once, ready to send. */

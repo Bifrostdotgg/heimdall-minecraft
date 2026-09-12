@@ -153,16 +153,22 @@ public final class Msg {
      * number is single digits. The bound is here because the map is keyed on something a guild
      * controls, and a log-once set that can grow without limit is not a log-once set.
      */
-    private static final int REPORT_LIMIT = 64;
+    static final int REPORT_LIMIT = 64;
 
     /**
      * Wires the warning sink. Called once, from the runtime that owns the logger.
      *
      * <p>Idempotent and safe to call again: the last caller wins, which is what a plugin reload
      * wants.
+     *
+     * <p><strong>Also forgets what has already been reported.</strong> Re-wiring happens on a
+     * reload or a re-enable, which is the point at which a guild that went and fixed its templates
+     * deserves a fresh budget rather than a set still full of the ones it edited. Nothing is lost:
+     * a template still broken re-reports the first time it renders.
      */
     public static void diagnostics(HeimdallLogger logger) {
         diagnostics = logger;
+        REPORTED.clear();
     }
 
     /**
@@ -207,16 +213,22 @@ public final class Msg {
             return;
         }
         Integer key = Integer.valueOf(sourceKey.hashCode());
-        if (REPORTED.size() >= REPORT_LIMIT || REPORTED.putIfAbsent(key, Boolean.TRUE) != null) {
+        // Whether this template is new is asked BEFORE the budget, not after. A template that has
+        // already been reported has to cost nothing at all - it renders again on every punishment
+        // - and checking the bound first made a full set turn every repeat into a size() call and
+        // a branch that could never log anyway.
+        if (REPORTED.putIfAbsent(key, Boolean.TRUE) != null) {
+            return;
+        }
+        if (REPORTED.size() > REPORT_LIMIT) {
+            // This one took the set past its bound. Take it back out rather than leaving it: the
+            // entry would otherwise count against a limit it is not allowed to benefit from, and
+            // enough distinct templates would grow the map past the bound it exists to enforce.
+            REPORTED.remove(key);
             return;
         }
         logger.warn("a message template will not render as written: " + problem
                 + ". Edit it on the dashboard's Minecraft page.");
-    }
-
-    /** Forgets which templates have been reported. For tests, whose JVM outlives one of them. */
-    static void forgetReportedTemplates() {
-        REPORTED.clear();
     }
 
     /**
@@ -273,7 +285,9 @@ public final class Msg {
                 filled = filled.replace("{" + key + "}", escapeMini(value));
             }
         }
-        return mini(filled);
+        // Reported against the template rather than the filled text, for the reason in
+        // #mini(String, String): the values differ per message and the template does not.
+        return mini(filled, template);
     }
 
     /**

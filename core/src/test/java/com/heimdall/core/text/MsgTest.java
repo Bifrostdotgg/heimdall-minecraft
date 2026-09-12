@@ -189,7 +189,6 @@ class MsgTest {
     @DisplayName("a template with a legacy code warns once, however many times it renders")
     void sectionCodeInATemplateWarnsOnce() {
         RecordingLogger logger = new RecordingLogger();
-        Msg.forgetReportedTemplates();
         Msg.diagnostics(logger);
         try {
             String template = "<gray>Reason</gray> §c{reason}";
@@ -203,7 +202,51 @@ class MsgTest {
             assertTrue(warnings.get(0).contains("section colour code"), warnings.get(0));
         } finally {
             Msg.diagnostics(null);
-            Msg.forgetReportedTemplates();
+        }
+    }
+
+    @Test
+    @DisplayName("the warning budget is bounded, and a repeat never spends any of it")
+    void theWarningBudgetIsBounded() {
+        RecordingLogger logger = new RecordingLogger();
+        Msg.diagnostics(logger);
+        try {
+            for (int i = 0; i < Msg.REPORT_LIMIT + 20; i++) {
+                Template.fill("<gray>§cbroken " + i + "</gray>", Template.values());
+            }
+            assertEquals(Msg.REPORT_LIMIT, logger.messagesAt(LogLevel.WARN).size(),
+                    "the set is keyed on something a guild controls, so it has to stop somewhere");
+
+            logger.clear();
+            for (int i = 0; i < 500; i++) {
+                Template.fill("<gray>§cbroken 0</gray>", Template.values());
+            }
+            assertTrue(logger.messagesAt(LogLevel.WARN).isEmpty(),
+                    "an already-reported template costs nothing, however often it renders: "
+                            + logger.messagesAt(LogLevel.WARN));
+        } finally {
+            Msg.diagnostics(null);
+        }
+    }
+
+    @Test
+    @DisplayName("re-wiring the sink gives a guild that fixed its templates a fresh budget")
+    void rewiringResetsTheBudget() {
+        RecordingLogger first = new RecordingLogger();
+        Msg.diagnostics(first);
+        try {
+            Template.fill("<gray>§cbroken</gray>", Template.values());
+            assertEquals(1, first.messagesAt(LogLevel.WARN).size());
+
+            RecordingLogger second = new RecordingLogger();
+            Msg.diagnostics(second);
+            Template.fill("<gray>§cbroken</gray>", Template.values());
+
+            assertEquals(1, second.messagesAt(LogLevel.WARN).size(),
+                    "a reload is where a guild's edits arrive, so it must not report into a set "
+                            + "still full of the templates they just fixed");
+        } finally {
+            Msg.diagnostics(null);
         }
     }
 
