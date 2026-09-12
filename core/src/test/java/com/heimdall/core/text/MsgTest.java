@@ -1,9 +1,11 @@
 package com.heimdall.core.text;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.heimdall.core.testing.TestText;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -133,6 +135,30 @@ class MsgTest {
         assertTrue(plain.contains("injected"), "the reason text still appears");
         assertEquals(NamedTextColor.RED, colourOf(parsed),
                 "a reason containing MiniMessage tags must not restyle the template");
+    }
+
+    @Test
+    @DisplayName("a value ending in a backslash cannot escape the tag that follows it")
+    void trailingBackslashCannotEscapeTheNextTag() {
+        // /hd ban Steve 1d cheating\ - the reason ends in the character MiniMessage escapes
+        // with. escapeTags does not double it, so the closing tag the template wrote became
+        // literal text and yellow stayed open for the rest of the screen.
+        Component parsed = Msg.miniTemplate(
+                "<yellow>{reason}</yellow><red>after</red>", "reason", "cheating\\");
+
+        String plain = TestText.plain(parsed);
+        assertEquals("cheating\\after", plain,
+                "the backslash is text, and the tag after it is still a tag");
+        assertFalse(plain.contains("</yellow>"),
+                "an unescaped trailing backslash prints the next tag instead of closing: " + plain);
+    }
+
+    @Test
+    @DisplayName("a backslash in a value is still only a backslash")
+    void backslashesStayLiteral() {
+        assertEquals("C:\\path and <red>",
+                TestText.plain(Msg.miniTemplate("{reason}", "reason", "C:\\path and <red>")),
+                "doubling for MiniMessage must not double what the player reads");
     }
 
     private static String contentTree(Component component) {

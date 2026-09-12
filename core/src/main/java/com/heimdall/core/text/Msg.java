@@ -124,15 +124,28 @@ public final class Msg {
         return mini(filled);
     }
 
-    /** MiniMessage-escapes untrusted text so it cannot introduce tags. */
+    /**
+     * MiniMessage-escapes untrusted text so it cannot introduce tags.
+     *
+     * <h2>The backslash goes first, because {@code escapeTags} does not touch it</h2>
+     *
+     * <p>A backslash is MiniMessage's own escape character, and {@code escapeTags} only prefixes
+     * tags with one - it never doubles the ones already in the text. So a value that ends in a
+     * backslash escapes whatever the template wrote next: {@code /hd ban Steve 1d cheating\}
+     * filled into {@code <yellow>{reason}</yellow>} produced {@code <yellow>cheating\</yellow>},
+     * which prints {@code </yellow>} as literal text and leaves yellow open for the rest of the
+     * screen. Doubling first makes the value's own backslash a backslash again, and the tag after
+     * it a tag.
+     */
     public static String escapeMini(String text) {
         if (text == null || text.isEmpty()) {
             return "";
         }
+        String escaped = text.replace("\\", "\\\\");
         try {
-            return MINI.escapeTags(text);
+            return MINI.escapeTags(escaped);
         } catch (RuntimeException e) {
-            return text.replace("<", "").replace(">", "");
+            return escaped.replace("<", "").replace(">", "");
         }
     }
 
