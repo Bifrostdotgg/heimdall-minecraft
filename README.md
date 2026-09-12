@@ -244,6 +244,50 @@ built-in v2-equivalent defaults, for a server that has not been claimed yet).
 - `/offend <player> <offense> [notes]` - record an offence against a player and apply the
   escalation tier (requires `heimdall.offend`)
 
+### Punishment Commands
+
+`/hd ban`, `/hd tempban`, `/hd ipban`, `/hd mute`, `/hd tempmute`, `/hd kick`, `/hd warn`, their
+revoke verbs and the lookups. In `replace` mode they are also registered as root commands (`/ban`,
+`/tempban`, ...) when `rootAliases` is on, and both spellings behave identically.
+
+```
+/hd ban <player> [duration] [reason] [-s|-p]
+```
+
+**The duration can be anywhere after the player, and so can the flags.** The first whole token
+that is a duration becomes the length, and everything else in any order is the reason, so
+`/hd ban Steve griefing spawn 7d` and `/hd ban Steve 7d griefing spawn` are the same ban. A word
+with a duration buried in it is a word: `abc5m` and `1day-old` stay in the reason.
+
+**Duration grammar** - case-insensitive, no spaces inside a token:
+
+| Unit | Spellings |
+| --- | --- |
+| seconds | `s`, `sec`, `secs`, `second`, `seconds` |
+| minutes | `m`, `min`, `mins`, `minute`, `minutes` |
+| hours | `h`, `hr`, `hrs`, `hour`, `hours` |
+| days | `d`, `day`, `days` |
+| weeks | `w`, `week`, `weeks` |
+| months | `mo`, `month`, `months` (30 days) |
+| years | `y`, `year`, `years` (365 days) |
+| permanent | `perm`, `permanent`, or no duration at all |
+
+Tokens can be compounded: `1d12h`, `2h30m`, `1d12h30m15s`. Lengths are kept in **seconds**, so
+`30s` is thirty seconds rather than the minute it used to round up to. The longest punishment
+that can be issued is ten years; past that the command refuses and tells you to use `perm`. The
+same grammar is used by `/mc-punish` in Discord and by the dashboard form, from one shared table.
+
+**Tab completion** offers player names at the target position - everyone online first, then
+everyone this server has seen or punished - the flags after a `-`, and a short duration list once
+a player is named. `/hd unban`, `/hd unmute` and `/hd unwarn` only offer players who actually have
+one of those to lift.
+
+**The screens** a punished player sees, and the two chat lines a punishment is announced with, are
+MiniMessage templates edited on the dashboard's Minecraft page, not in any file here. They carry
+the guild's name, the staff member, the reason, the length, the time remaining, the punishment id
+and the appeal link, and a clause whose value is empty disappears rather than printing a blank
+row.
+
 ### Admin Commands
 
 The admin tree is `/hd` (alias `/heimdall`) on Paper/Spigot backend servers, and `/hdp` (alias
