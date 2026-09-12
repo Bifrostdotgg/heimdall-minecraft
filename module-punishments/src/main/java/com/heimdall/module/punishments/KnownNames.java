@@ -172,6 +172,15 @@ final class KnownNames {
      * <p>Volatile and replaced wholesale by {@link #install}: a sync reconciles the whole mirror
      * at once and its answer is authoritative, so it swaps a finished index in rather than
      * clearing and refilling one that a tab press could read half-built.
+     *
+     * <p><strong>The swap is not lossless, and is not meant to be.</strong> A punishment that
+     * lands between the start of the rebuild's mirror walk and the {@link #install} writes into
+     * the map that is about to be discarded, so that one name is missing from the family until
+     * something touches it again: the next event for that player, or the next sync, which is four
+     * minutes away at worst. The window is one mirror walk every four minutes, the cost inside it
+     * is one moderator's tab press offering one name fewer, and it heals without anybody doing
+     * anything. Journalling writes across the rebuild to close it would add a second piece of
+     * concurrent state to a class whose whole point is that reading it is free.
      */
     private volatile Map<String, ConcurrentHashMap<String, Long>> punished = emptyFamilies();
 
@@ -244,7 +253,13 @@ final class KnownNames {
         return new Index();
     }
 
-    /** Swaps a finished index in for the current one, in one assignment. */
+    /**
+     * Swaps a finished index in for the current one, in one assignment.
+     *
+     * <p>Anything written to the outgoing index while this one was being built is discarded with
+     * it, and recovers on the next write for that name or the next sync. See the
+     * {@link #punished} field for why that is the trade taken.
+     */
     void install(Index index) {
         if (index == null) return;
         this.punished = index.byFamily;

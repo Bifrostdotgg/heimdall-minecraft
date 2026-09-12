@@ -400,6 +400,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * <p>Called after a sync reconciles, whose answer is authoritative for the whole mirror - so
      * the index is rebuilt from scratch and swapped in rather than patched row by row. This is the
      * one place that walks every key, and it runs on a sync rather than on a keystroke.
+     *
+     * <p>A punishment that lands during the walk writes into the index this is about to replace
+     * and is lost from the completion set until the next event for that player or the next sync.
+     * Deliberate: see the {@code punished} field on {@link KnownNames}.
      */
     private void rememberMirrorNames() {
         MirrorStore<ActivePunishment> store = this.mirror;
