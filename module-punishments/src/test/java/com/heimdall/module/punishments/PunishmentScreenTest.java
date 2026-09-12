@@ -52,6 +52,25 @@ class PunishmentScreenTest {
     }
 
     @Test
+    @DisplayName("a punishment filed during an outage shows no ID row at all")
+    void localIdsAreNotShown() {
+        ActivePunishment ban = ban(null);
+        ban.id = "local-6f1b0f0a-0000-0000-0000-000000000000";
+
+        String screen = plain(ban, settings(Payload.builder().build()));
+
+        assertFalse(screen.contains("local-"), screen);
+        assertFalse(screen.contains("ID"),
+                "an id only this server has ever seen cannot open an appeal, so the row goes "
+                        + "rather than asking the player to quote it: " + screen);
+        assertTrue(screen.contains("Steve"), "the rest of the header is untouched: " + screen);
+
+        ban.id = "ban-1";
+        assertTrue(plain(ban, settings(Payload.builder().build())).contains("ban-1"),
+                "and the row comes back the moment the real id syncs");
+    }
+
+    @Test
     @DisplayName("a permanent ban has no Length row, because there is no length")
     void permanentBanHasNoLength() {
         String screen = plain(ban(null), settings(Payload.builder().build()));
@@ -218,6 +237,16 @@ class PunishmentScreenTest {
         assertEquals(PunishmentScreens.ANNOUNCE_ISSUE, settings.announceIssue);
         assertEquals(PunishmentScreens.ANNOUNCE_REVOKE, settings.announceRevoke);
         assertEquals("", settings.serverName);
+    }
+
+    @Test
+    @DisplayName("the ID row of the shared default base is an optional segment")
+    void baseIdRowIsAnOptionalSegment() {
+        assertTrue(PunishmentScreens.BASE.endsWith(
+                        "[<gray>ID</gray> <dark_gray>»</dark_gray> <yellow>{id}</yellow>]"),
+                "byte-identical to DEFAULT_PUNISHMENT_SCREENS.base in the shared TypeScript, and "
+                        + "the brackets are what drop the row during a bot outage: "
+                        + PunishmentScreens.BASE);
     }
 
     @Test

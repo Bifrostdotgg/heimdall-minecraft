@@ -31,7 +31,7 @@ public final class PunishmentView {
         this.type = builder.type == null ? "" : builder.type;
         this.targetName = builder.targetName == null ? "" : builder.targetName;
         this.staffName = builder.staffName == null ? "" : builder.staffName;
-        this.id = builder.id == null ? "" : builder.id;
+        this.id = shareableId(builder.id);
         this.reason = builder.reason == null ? "" : builder.reason;
         this.serverName = builder.serverName == null ? "" : builder.serverName;
         this.appealUrl = builder.appealUrl == null ? "" : builder.appealUrl;
@@ -58,8 +58,34 @@ public final class PunishmentView {
         return staffName;
     }
 
+    /** The id to show, or {@code ""} when there is nothing worth showing. See {@link #LOCAL_ID}. */
     public String id() {
         return id;
+    }
+
+    /**
+     * The prefix the punishments module gives a row it filed without the bot.
+     *
+     * <p>A punishment issued while the bot is unreachable is written to the local mirror
+     * immediately, under an id this server invented so that the row has a key. It is replaced by
+     * the real one as soon as the queued write is acknowledged.
+     */
+    private static final String LOCAL_ID = "local-";
+
+    /**
+     * The id a player can act on, or {@code ""} for one only this server has ever seen.
+     *
+     * <p>The screen's ID row exists so a player can quote it on an appeal. A {@code local-<uuid>}
+     * is the opposite of that: nobody the player can reach has ever heard of it, and asking them
+     * to write it down is asking for a number that will be wrong by the time anyone reads it.
+     * Resolving it to empty drops the row through the optional-segment rule for the length of the
+     * outage, and the real id brings the row back when the write syncs.
+     */
+    private static String shareableId(String value) {
+        if (value == null || value.isEmpty() || value.startsWith(LOCAL_ID)) {
+            return "";
+        }
+        return value;
     }
 
     public String reason() {

@@ -23,7 +23,16 @@ public final class PunishmentScreens {
     private PunishmentScreens() {
     }
 
-    /** The block every other screen starts with. Empty renders nothing. */
+    /**
+     * The block every other screen starts with. Empty renders nothing.
+     *
+     * <p>The ID row is an optional segment, and that is not cosmetic. A punishment issued while
+     * the bot is unreachable is filed locally under an invented {@code local-<uuid>} id, and
+     * {@link PunishmentView} resolves one of those to nothing: the row therefore disappears for
+     * the length of the outage and comes back with the real id once the write syncs. An id that
+     * only this server has ever seen is not something an appeal can be opened with, and printing
+     * it asks the player to quote a number nobody can look up.
+     */
     public static final String BASE =
             "<b><gradient:#c278b0:#e08888:#e8be7e:#a0cc7c:#7cbec8:#a292dc>"
             + "{server}</gradient></b> <gray>Punishments</gray>\n"
@@ -31,7 +40,7 @@ public final class PunishmentScreens {
             + "</st></gradient>\n"
             + "[<gray>Staff</gray> <dark_gray>»</dark_gray> <yellow>{staff}</yellow>]\n"
             + "<gray>You</gray> <dark_gray>»</dark_gray> <yellow>{player}</yellow>\n"
-            + "<gray>ID</gray> <dark_gray>»</dark_gray> <yellow>{id}</yellow>";
+            + "[<gray>ID</gray> <dark_gray>»</dark_gray> <yellow>{id}</yellow>]";
 
     /** The disconnect screen for a ban, an IP ban, a country ban or a subnet ban. */
     public static final String BAN =
