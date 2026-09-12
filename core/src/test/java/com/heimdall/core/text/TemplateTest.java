@@ -68,6 +68,29 @@ class TemplateTest {
     }
 
     @Test
+    @DisplayName("a line left holding only tags is removed like a blank one")
+    void linesLeftWithOnlyTagsAreRemoved() {
+        // The shape the dashboard editor makes natural: the guild wrapped the whole row rather
+        // than only its value, so the drop leaves <gray></gray> rather than "".
+        assertEquals("Header\nFooter",
+                Template.fill("Header\n<gray>[Reason: {reason}]</gray>\nFooter",
+                        Template.values().put("reason", "")),
+                "a pair of tags with nothing between them renders as a blank line");
+        assertEquals("Header\n<gray>Reason: grief</gray>\nFooter",
+                Template.fill("Header\n<gray>[Reason: {reason}]</gray>\nFooter",
+                        Template.values().put("reason", "grief")));
+    }
+
+    @Test
+    @DisplayName("a line of pure formatting that lost nothing is a decision and stays")
+    void formattingOnlyLinesSurvive() {
+        String divider = "<gradient:#c278b0:#a292dc><st>      </st></gradient>";
+        assertEquals("Header\n" + divider + "\nFooter",
+                Template.fill("Header\n" + divider + "\nFooter", Template.values()),
+                "the rule only ever looks at a line something was dropped from");
+    }
+
+    @Test
     @DisplayName("a line with text left on it stays, however much was dropped")
     void partiallyEmptiedLinesStay() {
         assertEquals("Length: forever",

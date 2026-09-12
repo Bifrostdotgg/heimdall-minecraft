@@ -285,7 +285,7 @@ public final class Template {
             boolean first = true;
             for (int i = 0; i < lines.size(); i++) {
                 String line = lines.get(i).toString();
-                if (Boolean.TRUE.equals(emptied.get(i)) && line.trim().isEmpty()) {
+                if (Boolean.TRUE.equals(emptied.get(i)) && isBlankUnderTheTags(line)) {
                     continue;
                 }
                 if (!first) out.append('\n');
@@ -297,6 +297,23 @@ public final class Template {
 
         private StringBuilder current() {
             return lines.get(lines.size() - 1);
+        }
+
+        /**
+         * Whether a line that lost something has any words left, as opposed to only formatting.
+         *
+         * <p>Trimming alone was not enough. A guild that wraps a whole row rather than only its
+         * value - {@code <gray>[Reason: {reason}]</gray>}, which is what the dashboard's editor
+         * makes natural - leaves {@code <gray></gray>} behind when the segment drops, and a pair
+         * of tags with nothing between them renders as a blank line. That is the same litter the
+         * rule exists to remove, wearing tags.
+         *
+         * <p>"Empty" is therefore: with the tag shapes taken out, nothing but whitespace. A line
+         * that lost nothing is never considered, so a divider row made entirely of tags and
+         * padding stays exactly where the guild put it.
+         */
+        private static boolean isBlankUnderTheTags(String line) {
+            return Msg.stripTags(line).trim().isEmpty();
         }
     }
 }
