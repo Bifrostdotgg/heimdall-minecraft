@@ -1,6 +1,7 @@
 package com.heimdall.module.punishments;
 
 import com.heimdall.core.admin.PunishmentAdmin;
+import com.heimdall.core.command.CommandCompleter;
 import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
@@ -22,17 +23,20 @@ import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.punish.PunishmentView;
 import com.heimdall.core.punish.SilenceDecision;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.text.Msg;
+import com.heimdall.core.text.Template;
 import com.heimdall.core.tunnel.Capabilities;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -45,6 +49,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -78,6 +83,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     /** How many recently-issued operation ids are remembered for echo suppression. */
     static final int ECHO_MEMORY = 256;
 
+    /**
+     * The durations tab completion offers once a target is present.
+     *
+     * <p>Seven entries, not the whole grammar. The parser takes anything from {@code 45s} to
+     * {@code 2mo3d}; a completion list is for the lengths people actually pick, and one that tried
+     * to be exhaustive would be a worse menu than typing.
+     */
+    static final List<String> DURATION_SUGGESTIONS = Collections.unmodifiableList(
+            Arrays.asList("30m", "1h", "6h", "1d", "7d", "30d", "perm"));
+
+    /** The two silence options, completed only for a sender allowed to use them. */
+    private static final List<String> SILENCE_FLAGS = Collections.unmodifiableList(
+            Arrays.asList("-s", "-p"));
+
     private volatile ModuleContext context;
     private volatile MirrorStore<ActivePunishment> mirror;
     private volatile PunishmentOutbox outbox;
@@ -104,6 +123,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      */
     private final Set<String> locallyIssued = Collections.synchronizedSet(
             new LinkedHashSet<String>());
+
+    /**
+     * Every player name this instance can complete, kept current rather than looked up.
+     *
+     * <p>Populated from three places, each of which knows something the others do not: the online
+     * roster (who is here), the last-address file (everyone this gatekeeper or standalone server
+     * has ever seen, and an enforcer backend has none), and the punishment mirror (everyone with
+     * an active punishment, wherever they were punished from). See {@link KnownNames} for why it
+     * is an index rather than a question asked at completion time.
+     */
+    private final KnownNames names = new KnownNames();
 
     private final AtomicBoolean flushing = new AtomicBoolean();
     private final AtomicBoolean flushAgain = new AtomicBoolean();
@@ -177,9 +207,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         context.onPlayerJoin(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                names.joined(player.name());
                 notifyWarn(player);
             }
         });
+        context.onPlayerQuit(new PlayerSessionListener() {
+            @Override
+            public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                names.quit(player.name());
+            }
+        });
+        seedKnownNames();
         context.tunnel().subscribe("punish.apply", applyHandler());
         context.tunnel().subscribe("punish.revoke", revokeHandler());
         context.tunnel().subscribe("punish.import", importHandler());
@@ -305,7 +343,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private void bind(ModuleContext context, final String name, String permission, final String type) {
         Registration handle = context.registerCommand(CommandSpec.named(name)
                 .permission(permission)
-                .usage("/" + name + " <player> [duration] [reason]")
+                .usage(usage(name))
                 .description("Heimdall punishment")
                 .handler(new CommandHandler() {
                     @Override
@@ -313,14 +351,286 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         onStaffCommand(source, type, args);
                     }
                 })
+                // The same completer the /hd tree gets, so /ban and /hd ban cannot suggest
+                // different things. The tree filters a subcommand's answer by prefix on its way
+                // out; here there is nothing between the module and the platform, which is why
+                // complete() filters its own answer rather than leaving that to a caller.
+                .completer(new CommandCompleter() {
+                    @Override
+                    public List<String> complete(CommandSource source, List<String> args) {
+                        return HeimdallPunishmentsModule.this.complete(source, type, args);
+                    }
+                })
                 .build());
         aliasBinds.add(handle);
+    }
+
+    /**
+     * Fills the completion index from everything already on disk or in memory at enable time.
+     *
+     * <p>Without this a freshly started server completes nothing until somebody joins, which is
+     * precisely when a moderator wants to ban the player who just left.
+     *
+     * <p>The roster read is wrapped because {@code onlinePlayers()} is allowed to throw rather
+     * than claim the server is empty, and enable runs on whatever thread a config push landed on.
+     * An index that starts one join behind is a worse tab completion for a minute; an exception
+     * here is a module that failed to enable.
+     */
+    private void seedKnownNames() {
+        ModuleContext ctx = this.context;
+        if (ctx == null) return;
+        LastIpStore ips = this.lastIps;
+        if (ips != null) {
+            names.rememberAll(ips.allNames());
+        }
+        rememberMirrorNames();
+        try {
+            for (PlayerHandle player : ctx.platform().players().onlinePlayers()) {
+                names.joined(player.name());
+            }
+        } catch (RuntimeException raced) {
+            ctx.logger().debug(() -> "could not read the online list to seed name completion: "
+                    + raced);
+        }
+    }
+
+    /**
+     * Adds every punished player the mirror knows about, and rebuilds the revoke-candidacy index.
+     *
+     * <p>Called after a sync reconciles, whose answer is authoritative for the whole mirror - so
+     * the index is rebuilt from scratch and swapped in rather than patched row by row. This is the
+     * one place that walks every key, and it runs on a sync rather than on a keystroke.
+     *
+     * <p>A punishment that lands during the walk writes into the index this is about to replace
+     * and is lost from the completion set until the next event for that player or the next sync.
+     * Deliberate: see the {@code punished} field on {@link KnownNames}.
+     */
+    private void rememberMirrorNames() {
+        MirrorStore<ActivePunishment> store = this.mirror;
+        if (store == null) return;
+        KnownNames.Index rebuilt = KnownNames.index();
+        for (String key : store.keys()) {
+            ActivePunishment p = store.get(key);
+            if (p == null) continue;
+            names.remember(p.targetName);
+            String family = revokeFamily(p.type);
+            if (family == null || p.targetName == null) continue;
+            Long ends = p.expiresAtMillis();
+            if (ends != null && ends.longValue() <= System.currentTimeMillis()) continue;
+            rebuilt.add(family, p.targetName, ends == null ? KnownNames.NEVER : ends.longValue());
+        }
+        names.install(rebuilt);
     }
 
     /** Whether this module is enabled right now - {@link PunishmentAdmin}'s half of the contract. */
     @Override
     public boolean isAvailable() {
         return context != null;
+    }
+
+    /**
+     * Tab completion for every punishment verb, on {@code /hd}, on {@code /hdp} and on the root
+     * aliases alike.
+     *
+     * <h2>Position is counted in non-flag tokens</h2>
+     *
+     * <p>{@code -s} and {@code -p} are accepted anywhere, so "the target" cannot be "the first
+     * argument" - {@code /ban -s Ste} with a tab after it is still completing a name. The flags
+     * are dropped and the remaining words counted, which is the same rule
+     * {@link com.heimdall.core.punish.PunishmentParser} applies when the command actually runs. A
+     * completer that disagreed with the parser about which word is the target would suggest names
+     * into the reason.
+     *
+     * <h2>What is offered where</h2>
+     *
+     * <ul>
+     *   <li>A word starting with {@code -} completes the flags, and only for a sender who may use
+     *       them. Offering {@code -s} to somebody the command will then refuse is a worse answer
+     *       than offering nothing.
+     *   <li>The target position completes names. For {@code unban}, {@code unmute} and
+     *       {@code unwarn} only players with an active punishment of that family, because a name
+     *       with nothing to lift is never the answer.
+     *   <li>After the target, while no duration has been typed and the verb takes one, a short
+     *       duration vocabulary.
+     *   <li>Inside the reason, nothing. There is no vocabulary for free text, and suggesting
+     *       player names there is how a name ends up in the reason of a ban on somebody else.
+     * </ul>
+     */
+    @Override
+    public List<String> complete(CommandSource source, String verb, List<String> args) {
+        if (context == null || args == null) {
+            return Collections.emptyList();
+        }
+        // An empty list is the target position with nothing typed yet, not "no completion". Bukkit
+        // supplies a trailing "" for the word being typed and the /hd tree does too, but that is a
+        // convention of two callers rather than a guarantee of the interface, and a completer that
+        // returned nothing for an empty list offered nothing at all on whichever one stopped.
+        String partial = args.isEmpty() ? "" : args.get(args.size() - 1);
+        if (partial == null) partial = "";
+        if (partial.startsWith("-")) {
+            return flagSuggestions(source, partial);
+        }
+        if ("banlist".equals(verb)) {
+            return Collections.emptyList();
+        }
+        int typedBefore = 0;
+        boolean durationTyped = false;
+        for (int i = 0; i < args.size() - 1; i++) {
+            String token = args.get(i) == null ? "" : args.get(i).trim();
+            if (token.isEmpty() || isFlag(token)) continue;
+            typedBefore++;
+            if (typedBefore > 1 && PunishmentParser.looksLikeDuration(token)) {
+                durationTyped = true;
+            }
+        }
+        if (typedBefore == 0) {
+            return names.matching(partial, COMPLETION_LIMIT, targetFilter(verb));
+        }
+        if (durationTyped || !takesDuration(verb)) {
+            return Collections.emptyList();
+        }
+        return prefixed(DURATION_SUGGESTIONS, partial);
+    }
+
+    /** Whether a token is one of the options rather than a word of the command. */
+    private static boolean isFlag(String token) {
+        return "-s".equalsIgnoreCase(token)
+                || "-p".equalsIgnoreCase(token)
+                || token.toLowerCase(Locale.ROOT).startsWith("--sender=");
+    }
+
+    private static List<String> flagSuggestions(CommandSource source, String partial) {
+        if (!mayOverrideSilence(source)) {
+            return Collections.emptyList();
+        }
+        return prefixed(SILENCE_FLAGS, partial);
+    }
+
+    /**
+     * Verbs that read a duration out of their arguments.
+     *
+     * <p>A revoke and a lookup do not, and neither do {@code kick} and {@code warn}: they are
+     * events rather than states, and the bot's {@code TIMED_PUNISHMENT_TYPES} is {@code ban},
+     * {@code ipban} and {@code mute} for the same reason. {@code warn} used to be in this list, so
+     * completion offered {@code 30m} and {@code perm} after a warn target and the parser then took
+     * the word out of the reason; the bot dropped the length on arrival and said so in its own log
+     * and nowhere the moderator could see. Offering a thing and discarding it is worse than not
+     * offering it.
+     */
+    private static boolean takesDuration(String verb) {
+        return "ban".equals(verb) || "tempban".equals(verb) || "ipban".equals(verb)
+                || "mute".equals(verb) || "tempmute".equals(verb);
+    }
+
+    /**
+     * The one-line usage for a verb, built from the same table the parser and the completer read.
+     *
+     * <p>Rather than a constant with {@code [duration]} in it, which is how {@code /warn} came to
+     * advertise a length it does not have on the root aliases while the {@code /hd} tree's own
+     * table said otherwise. One answer, so the two cannot disagree again.
+     */
+    private static String usage(String verb) {
+        if (!takesDuration(verb)) {
+            return "/" + verb + " <player> [reason]";
+        }
+        boolean required = "tempban".equals(verb) || "tempmute".equals(verb);
+        return "/" + verb + " <player> " + (required ? "<duration>" : "[duration]") + " [reason]";
+    }
+
+    /**
+     * The names a revoke verb may complete, or {@code null} when every known name is fair game.
+     *
+     * <p>Lower-cased, because {@link KnownNames} matches that way and a moderator typing
+     * {@code steve} means Steve.
+     *
+     * <p><strong>A question, not a list.</strong> This used to walk every key in the punishment
+     * mirror and do a {@code get} per key - on every tab press, for every revoke verb, on the main
+     * server thread on the Bukkit family. The answer is now a predicate over an index
+     * {@link KnownNames} maintains at the moments a punishment lands or is lifted, which are the
+     * same moments the names themselves are recorded, and it is asked only of the names the prefix
+     * scan reaches. Materialising the family instead would have swapped a scan of every mirror key
+     * for an allocation the size of every active punishment, still per keystroke, to answer at
+     * most {@link PunishmentAdmin#COMPLETION_LIMIT} questions of it.
+     */
+    private Predicate<String> targetFilter(String verb) {
+        String family = revokeFamily(verb);
+        if (family == null || !verb.startsWith("un")) {
+            // Only the three revoke verbs filter. An issue verb takes anybody, and rollback takes
+            // whoever has anything at all, which is what "every known name" already means.
+            return null;
+        }
+        return names.withActive(family, System.currentTimeMillis());
+    }
+
+    /**
+     * The revoke family a punishment type or a revoke verb belongs to, or {@code null}.
+     *
+     * <p>Both spellings in one table, because the two sides of this question are asked in
+     * different vocabularies: a moderator types {@code unban}, while an apply frame and a mirror
+     * row name the type ({@code ban}, {@code ipban}). A {@code kick}, a {@code geo} or a
+     * {@code subnet} has no revoke verb that names a player and belongs to no family.
+     */
+    static String revokeFamily(String typeOrVerb) {
+        if ("ban".equals(typeOrVerb) || "ipban".equals(typeOrVerb) || "unban".equals(typeOrVerb)) {
+            return "ban";
+        }
+        if ("mute".equals(typeOrVerb) || "unmute".equals(typeOrVerb)) {
+            return "mute";
+        }
+        if ("warn".equals(typeOrVerb) || "unwarn".equals(typeOrVerb)) {
+            return "warn";
+        }
+        return null;
+    }
+
+    /** The mirror types one family covers. */
+    private static String[] familyTypes(String family) {
+        if ("ban".equals(family)) return new String[] {"ban", "ipban"};
+        if ("mute".equals(family)) return new String[] {"mute"};
+        if ("warn".equals(family)) return new String[] {"warn"};
+        return new String[0];
+    }
+
+    /**
+     * Recomputes one player's candidacy for one revoke family, from the mirror.
+     *
+     * <p>Called wherever a punishment lands or is lifted, which is a handful of times per
+     * punishment rather than once per keystroke - so this side may read the mirror, and the
+     * completion side may not. Recomputed rather than incremented and decremented because a family
+     * can hold two rows at once: {@code /unban} lifts a ban and an ipban together, and a player
+     * with one of each still has something to lift after the first goes.
+     */
+    private void refreshRevokeCandidacy(String family, String uuid, String name) {
+        if (family == null || uuid == null || name == null || name.isEmpty()) return;
+        List<ActivePunishment> live = activeOf(uuid, familyTypes(family));
+        long latest = 0L;
+        for (int i = 0; i < live.size(); i++) {
+            Long ends = live.get(i).expiresAtMillis();
+            if (ends == null) {
+                latest = KnownNames.NEVER;
+                break;
+            }
+            if (ends.longValue() > latest) {
+                latest = ends.longValue();
+            }
+        }
+        if (latest <= 0L) {
+            names.unpunished(family, name);
+        } else {
+            names.punished(family, name, latest);
+        }
+    }
+
+    private static List<String> prefixed(List<String> candidates, String partial) {
+        String needle = partial.toLowerCase(Locale.ROOT);
+        List<String> out = new ArrayList<String>();
+        for (int i = 0; i < candidates.size(); i++) {
+            String candidate = candidates.get(i);
+            if (candidate.toLowerCase(Locale.ROOT).startsWith(needle)) {
+                out.add(candidate);
+            }
+        }
+        return out;
     }
 
     @Override
@@ -357,11 +667,32 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         try {
             parsed = PunishmentParser.parse(args);
         } catch (IllegalArgumentException e) {
-            source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [duration] [reason]"));
+            source.sendMessage(Msg.legacy("§cUsage: " + usage(type)));
             return;
         }
-        if (("tempban".equals(type) || "tempmute".equals(type)) && parsed.durationMinutes == null) {
+        if (!takesDuration(type) && parsed.durationToken != null) {
+            // Refused rather than ignored. The parser takes the first whole duration token after
+            // the target whatever the verb is, so on a verb with no length the word was silently
+            // removed from the reason and the bot then dropped the length on arrival, logging it
+            // where only an operator reading the bot's console would ever see. A moderator who
+            // typed a length meant something by it, and the two honest answers are to apply it or
+            // to say it cannot be.
+            source.sendMessage(Msg.legacy("§cA " + type + " has no length. Put §f"
+                    + parsed.durationToken + "§c in the reason or drop it."));
+            return;
+        }
+        if (("tempban".equals(type) || "tempmute".equals(type)) && parsed.durationSeconds == null) {
             source.sendMessage(Msg.legacy("§cA duration is required for /" + type + "."));
+            return;
+        }
+        if (parsed.durationSeconds != null
+                && parsed.durationSeconds.longValue() > PunishmentParser.MAX_ISSUE_SECONDS) {
+            // Refused here rather than clamped, and refused before anything is written or sent:
+            // the same ceiling the slash command and the dashboard form apply, so a moderator
+            // cannot get a length from one surface that another would have rejected.
+            source.sendMessage(Msg.legacy("§cThe longest punishment that can be issued is "
+                    + PunishmentParser.MAX_ISSUE_YEARS + " years. Use §fperm§c for one that "
+                    + "never ends."));
             return;
         }
         String issueType = type;
@@ -429,9 +760,22 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         });
     }
 
-    private void submitIssue(CommandSource source, String type, String uuid, String name,
+    /**
+     * Files an issued punishment, applies it locally and announces it.
+     *
+     * <p>Package-private rather than private so a test can call it with the module already
+     * disabled, which is the one condition the guard below exists for and the one an end-to-end
+     * test cannot stage: the NPE it prevents happens inside a {@code whenComplete} callback, where
+     * nothing observes it.
+     */
+    void submitIssue(CommandSource source, String type, String uuid, String name,
             PunishmentParser.Parsed parsed, boolean silent) {
         ModuleContext ctx = this.context;
+        // Reached from inside the resolveName future as well as synchronously, so the module can
+        // be disabled between the command and this. Every other context read in this file guards;
+        // these two did not, and a config push that turned the module off mid-resolve threw inside
+        // a CompletableFuture, where the exception is swallowed and the moderator is told nothing.
+        if (ctx == null) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
         String ipDigest = null;
         if ("ipban".equals(type)) {
@@ -463,13 +807,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         local.issuedAt = Instant.ofEpochMilli(now).toString();
         local.issuedByName = source.name();
         local.issuedByUuid = source.uuid() == null ? null : source.uuid().toString();
-        if (parsed.durationMinutes != null) {
+        if (parsed.durationSeconds != null) {
+            local.durationSeconds = parsed.durationSeconds;
             local.expiresAt = Instant.ofEpochMilli(now)
-                    .plusSeconds(parsed.durationMinutes.intValue() * 60L).toString();
+                    .plusSeconds(parsed.durationSeconds.longValue()).toString();
         }
+        names.remember(name);
         String mirrorKey = keyFor(local);
         if (mirror != null && !"kick".equals(type) && mirrorKey != null) {
             mirror.record(mirrorKey, local);
+            // After the record, because the candidacy is recomputed from the mirror.
+            refreshRevokeCandidacy(revokeFamily(type), uuid, name);
         }
         applyLive(uuid, local, settings);
         Payload.Builder body = Payload.builder()
@@ -481,8 +829,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .put("source", "command")
                 .put("opId", opId)
                 .put("issuedAt", now);
-        if (parsed.durationMinutes != null) {
-            body.put("durationMinutes", parsed.durationMinutes.intValue());
+        if (parsed.durationSeconds != null) {
+            putDuration(body, parsed.durationSeconds.longValue());
         }
         if (ipDigest != null) {
             body.put("ipDigest", ipDigest);
@@ -496,7 +844,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         enqueue("issue", opId, now, body.build());
         source.sendMessage(Msg.legacy("§a" + type + " issued for §f" + name));
         announce(PunishmentAnnouncement.issued(
-                type, source.name(), name, parsed.durationMinutes, parsed.reason, silent));
+                settings.announceIssue, viewOf(local, settings), now));
         flushSoon();
     }
 
@@ -547,9 +895,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * <p>The first match decides when a verb lifts several rows at once ({@code /unban} takes a
      * ban and an ipban together). They are one player's punishments and the announcement is one
      * line, so there is one flag to read and the primary row is the one to read it from.
+     *
+     * <p>Package-private for the same reason as {@link #submitIssue}: the disabled-mid-request
+     * case is only reachable from a test that calls it directly.
      */
-    private void submitRevoke(CommandSource source, String type, String uuid, String name,
+    void submitRevoke(CommandSource source, String type, String uuid, String name,
             String reason, boolean silentFlag, boolean publicFlag) {
+        ModuleContext ctx = this.context;
+        // See submitIssue. Reached from inside the resolveName future, so the module can be gone
+        // by the time this runs, and the settings read at the end of it would NPE inside a
+        // CompletableFuture where nobody sees it.
+        if (ctx == null) return;
         List<ActivePunishment> matches;
         if ("rollback".equals(type)) {
             ActivePunishment latest = latestActive(uuid);
@@ -592,19 +948,47 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             }
             enqueue("revoke", opId, now, body.build());
         }
+        // After every eviction rather than inside the loop: a family can hold two rows, and
+        // recomputing while the second is still in the mirror would put the name straight back.
+        for (int i = 0; i < matches.size(); i++) {
+            refreshRevokeCandidacy(revokeFamily(matches.get(i).type), uuid, name);
+        }
         source.sendMessage(Msg.legacy("§aRevoked " + matches.size() + " punishment(s) for §f" + name));
         // Once, on the verb the moderator typed, rather than once per matching row: /unban lifts a
         // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
-        announce(PunishmentAnnouncement.revoked(type, source.name(), name, reason,
-                decision.silent()));
+        PunishmentSettings settings = PunishmentSettings.from(ctx.config());
+        announce(PunishmentAnnouncement.revoked(settings.announceRevoke, type,
+                revokeView(matches.get(0), name, source.name(), reason, decision.silent(), settings),
+                now));
         flushSoon();
     }
 
+    /**
+     * Writes the length of an outgoing punishment, in both units.
+     *
+     * <p>Seconds are the real field: a 30 second mute is a thing moderators ask for, and the old
+     * minute-granular key rounded it up to a minute.
+     *
+     * <p><strong>{@code durationMinutes} is kept for exactly one release, then deleted.</strong>
+     * A bot deployed before the seconds field existed reads only the minutes key, and a payload
+     * carrying neither reads to it as no length at all - which turns every temporary ban and mute
+     * issued from a server that updated first into a permanent one. The two halves of a deploy
+     * are never simultaneous, so the plugin sends both until the bot side is out everywhere.
+     * Remove this method and both call sites in the release after that.
+     *
+     * <p>Rounded up rather than down, for the same reason: an older bot reading a floored
+     * {@code 0} would apply no length at all, and a 30 second mute arriving there as a minute is
+     * the behaviour that surface already had.
+     */
+    static void putDuration(Payload.Builder body, long seconds) {
+        body.put("durationSeconds", seconds);
+        body.put("durationMinutes", (seconds + 59L) / 60L);
+    }
+
     private static String[] revokeTypes(String type) {
-        if ("unban".equals(type)) return new String[] {"ban", "ipban"};
-        if ("unmute".equals(type)) return new String[] {"mute"};
-        if ("unwarn".equals(type)) return new String[] {"warn"};
-        return new String[] {"ban", "ipban", "mute", "warn"};
+        String family = revokeFamily(type);
+        // Anything else is rollback, which lifts whatever is newest of any kind.
+        return family == null ? new String[] {"ban", "ipban", "mute", "warn"} : familyTypes(family);
     }
 
     private static String typeLabel(String type) {
@@ -616,6 +1000,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     private Verdict onLogin(LoginAttempt attempt) {
+        // Before the gate rather than after it: a player who is about to be denied is exactly the
+        // one a moderator is about to type the name of, and a login is the first moment a proxy
+        // learns a name at all.
+        names.remember(attempt.username());
         if (lastIps != null && attempt.ipAddress() != null && !attempt.ipAddress().isEmpty()) {
             lastIps.record(attempt.uuid().toString(), attempt.username(), attempt.ipAddress(),
                     System.currentTimeMillis());
@@ -625,14 +1013,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (!settings.replaceMode()) return Verdict.abstain();
         ActivePunishment ban = mirror.get("ban:" + attempt.uuid().toString());
         if (ban != null && !ban.expired(System.currentTimeMillis())) {
-            return Verdict.deny(render(settings.banScreen, ban, settings));
+            return Verdict.deny(render(ban, settings));
         }
         if (shouldCheckIpBan() && attempt.ipAddress() != null && !attempt.ipAddress().isEmpty()
                 && !settings.ipSalt.isEmpty()) {
             String digest = PunishmentIp.hash(attempt.ipAddress(), settings.ipSalt);
             ActivePunishment ipban = mirror.get("ipban:" + digest);
             if (ipban != null && !ipban.expired(System.currentTimeMillis())) {
-                return Verdict.deny(render(settings.banScreen, ipban, settings));
+                return Verdict.deny(render(ipban, settings));
             }
         }
         ServerRole role = context.platform().role();
@@ -663,7 +1051,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         ActivePunishment mute = mirror.get("mute:" + message.senderUuid());
         if (mute != null && !mute.expired(System.currentTimeMillis())) {
-            return Verdict.deny(render(settings.muteScreen, mute, settings));
+            return Verdict.deny(render(mute, settings));
         }
         return Verdict.abstain();
     }
@@ -678,7 +1066,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         ActivePunishment mute = mirror.get("mute:" + attempt.senderUuid());
         if (mute == null || mute.expired(System.currentTimeMillis())) return Verdict.abstain();
         if (settings.blockedCommands.contains(attempt.label())) {
-            return Verdict.deny(render(settings.muteScreen, mute, settings));
+            return Verdict.deny(render(mute, settings));
         }
         return Verdict.abstain();
     }
@@ -689,7 +1077,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (!settings.replaceMode()) return;
         ActivePunishment warn = mirror.get("warn:" + player.uuid());
         if (warn == null || warn.expired(System.currentTimeMillis())) return;
-        player.sendMessage(render(settings.warnScreen, warn, settings));
+        player.sendMessage(render(warn, settings));
     }
 
     private TunnelMessageHandler applyHandler() {
@@ -700,16 +1088,19 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 ActivePunishment p = fromPayload(payload);
                 if (p == null || mirror == null) return;
                 boolean echo = isOwnEcho(payload.string("opId", ""));
+                PunishmentSettings settings = PunishmentSettings.from(context.config());
                 if ("kick".equals(p.type)) {
-                    applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
-                    if (!echo) announce(announcementFor(p));
+                    applyLive(p.targetUuid, p, settings);
+                    if (!echo) announce(announcementFor(p, settings));
                     return;
                 }
                 String key = keyFor(p);
                 if (key == null) return;
+                names.remember(p.targetName);
                 mirror.record(key, p);
-                applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
-                if (!echo) announce(announcementFor(p));
+                refreshRevokeCandidacy(revokeFamily(p.type), p.targetUuid, p.targetName);
+                applyLive(p.targetUuid, p, settings);
+                if (!echo) announce(announcementFor(p, settings));
             }
         };
     }
@@ -782,22 +1173,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * set for a week two days ago has five days left, which is the true answer to the question
      * the line is asking.
      */
-    private static PunishmentAnnouncement announcementFor(ActivePunishment p) {
-        return PunishmentAnnouncement.issued(p.type, p.issuedByName, p.targetName,
-                minutesUntil(p.expiresAt, System.currentTimeMillis()), p.reason, p.silent);
-    }
-
-    /** Whole minutes from {@code now} to an ISO instant, or {@code null} for no expiry. */
-    static Integer minutesUntil(String expiresAt, long nowMillis) {
-        if (expiresAt == null || expiresAt.isEmpty()) return null;
-        try {
-            long remaining = Instant.parse(expiresAt).toEpochMilli() - nowMillis;
-            if (remaining <= 0) return null;
-            long minutes = remaining / TimeUnit.MINUTES.toMillis(1);
-            return Integer.valueOf((int) Math.max(1L, Math.min(Integer.MAX_VALUE, minutes)));
-        } catch (RuntimeException unparseable) {
-            return null;
-        }
+    private static PunishmentAnnouncement announcementFor(ActivePunishment p,
+            PunishmentSettings settings) {
+        return PunishmentAnnouncement.issued(
+                settings.announceIssue, viewOf(p, settings), System.currentTimeMillis());
     }
 
     private TunnelMessageHandler importHandler() {
@@ -939,10 +1318,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 ActivePunishment lifted = mirror.get(key);
                 mirror.evict(key);
                 if (lifted == null) return;
+                refreshRevokeCandidacy(
+                        revokeFamily(lifted.type), lifted.targetUuid, lifted.targetName);
                 if (!announceableRevoke(payload.string("revokeCause", ""))) return;
-                announce(PunishmentAnnouncement.revoked(lifted.type,
-                        payload.string("revokedBy", ""), lifted.targetName,
-                        payload.string("reason", ""), lifted.silent));
+                PunishmentSettings settings = PunishmentSettings.from(context.config());
+                announce(PunishmentAnnouncement.revoked(settings.announceRevoke, lifted.type,
+                        revokeView(lifted, lifted.targetName, payload.string("revokedBy", ""),
+                                payload.string("reason", ""), lifted.silent, settings),
+                        System.currentTimeMillis()));
             }
         };
     }
@@ -1029,7 +1412,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                     + raced);
             return;
         }
-        Component line = Msg.legacy(announcement.line());
+        Component line = announcement.message();
         for (PlayerHandle player : online) {
             boolean visible;
             try {
@@ -1217,6 +1600,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 }
                 lastFullSyncAt = System.currentTimeMillis();
                 replayPendingWrites();
+                rememberMirrorNames();
             } catch (RuntimeException e) {
                 ctx.logger().error("punishment sync apply failed", e);
             }
@@ -1228,7 +1612,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         PlayerHandle player = context.platform().players().byUuid(parseUuid(uuid)).orElse(null);
         if (player == null) return;
         if ("warn".equals(punishment.type)) {
-            player.sendMessage(render(settings.warnScreen, punishment, settings));
+            player.sendMessage(render(punishment, settings));
             return;
         }
         if (!"ban".equals(punishment.type) && !"ipban".equals(punishment.type)
@@ -1239,8 +1623,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (role == ServerRole.ENFORCER && !"kick".equals(punishment.type)) {
             return;
         }
-        String screen = "kick".equals(punishment.type) ? settings.kickScreen : settings.banScreen;
-        player.kick(render(screen, punishment, settings));
+        player.kick(render(punishment, settings));
     }
 
     private void lookup(final CommandSource source, final String type, final List<String> args) {
@@ -1554,6 +1937,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
     }
 
+    /**
+     * Undoes one queued revoke against the mirror, after a full snapshot put its row back.
+     *
+     * <p>Does not touch the revoke-candidacy index, and does not need to: the only caller is
+     * {@link #replayPendingWrites}, which a sync runs immediately before rebuilding the whole
+     * index from the reconciled mirror. A revoke payload carries no target name to index with
+     * either.
+     */
     private void evictFromPayload(Payload payload) {
         if (mirror == null || payload == null) return;
         String type = payload.string("type", "");
@@ -1573,7 +1964,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (country == null || country.isEmpty()) return null;
         ActivePunishment geoBan = mirror.get("geo:" + country.toUpperCase(Locale.ROOT));
         if (geoBan != null && !geoBan.expired(System.currentTimeMillis())) {
-            return Verdict.deny(render(settings.banScreen, geoBan, settings));
+            return Verdict.deny(render(geoBan, settings));
         }
         return null;
     }
@@ -1586,7 +1977,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             ActivePunishment p = mirror.get(key);
             if (p == null || p.expired(now)) continue;
             if (Cidr.matches(p.cidr, ip)) {
-                return Verdict.deny(render(settings.banScreen, p, settings));
+                return Verdict.deny(render(p, settings));
             }
         }
         return null;
@@ -1651,6 +2042,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         p.ipDigest = payload.string("ipDigest", null);
         p.reason = payload.string("reason", "");
         p.expiresAt = payload.string("expiresAt", null);
+        long seconds = payload.longValue("durationSeconds", 0L);
+        p.durationSeconds = seconds > 0L ? Long.valueOf(seconds) : null;
         p.issuedAt = issuedAtOf(payload);
         p.issuedByName = payload.string("issuedByName", null);
         p.issuedByUuid = payload.string("issuedByUuid", null);
@@ -1674,14 +2067,104 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
     }
 
-    static Component render(String template, ActivePunishment p, PunishmentSettings settings) {
-        String reason = p.reason == null ? "" : p.reason;
-        String player = p.targetName == null ? "" : p.targetName;
-        String appeal = settings == null || settings.appealUrl == null ? "" : settings.appealUrl;
-        return Msg.miniTemplate(template,
-                "reason", reason,
-                "player", player,
-                "appeal_url", appeal);
+    /**
+     * The screen a player is shown for one punishment.
+     *
+     * <p>Four decisions, in this order.
+     *
+     * <p><strong>Which template.</strong> By family - a country ban and a subnet ban are shown
+     * the ban screen, because from the player's side that is what happened - and then by whether
+     * it ends. An empty permanent variant means the temporary template is used for both, which
+     * is the default and is correct rather than lazy: the optional-segment rule already drops
+     * the Length row when there is no length.
+     *
+     * <p><strong>The base.</strong> Rendered first, with the same tokens, and inserted into
+     * {@code {base}} as already-parsed MiniMessage. It is rendered with a value set that has no
+     * {@code base} in it, so a base that refers to itself resolves to nothing rather than
+     * needing a recursion limit somebody has to defend.
+     *
+     * <p><strong>The tokens.</strong> {@link PunishmentView} owns them, so the disconnect screen
+     * and the chat announcement cannot disagree about what "Permanent ban" or "3d 4h" means.
+     *
+     * <p><strong>Parsing.</strong> Once, at the end, over the finished string. Values were
+     * escaped on their way in, so a reason cannot restyle the screen it appears on.
+     */
+    static Component render(ActivePunishment p, PunishmentSettings settings) {
+        long now = System.currentTimeMillis();
+        PunishmentView view = viewOf(p, settings);
+        // One token set, built once. It used to be built twice per render, and each build runs
+        // the sanitiser over every player-supplied value - a regex loop with up to eight passes,
+        // on the login thread. The base is filled before {base} is added, so it still renders
+        // with no base of its own and a self-referential base still resolves to nothing.
+        Template.Values values = view.tokens(now);
+        String base = Template.fill(settings.screenBase, values);
+        values.putRaw("base", base);
+        return Template.render(settings.screenFor(familyOf(p.type), view.permanent()), values);
+    }
+
+    /** The mirror row, as the shared renderer reads a punishment. */
+    private static PunishmentView viewOf(ActivePunishment p, PunishmentSettings settings) {
+        return PunishmentView.builder()
+                .type(p.type)
+                .targetName(p.targetName)
+                .staffName(p.issuedByName)
+                .id(p.id)
+                .reason(p.reason)
+                .serverName(settings == null ? "" : settings.serverName)
+                .appealUrl(settings == null ? "" : settings.appealUrl)
+                .issuedAtMillis(p.issuedAtMillis())
+                .expiresAtMillis(p.expiresAtMillis())
+                .lengthSeconds(p.durationSeconds)
+                .silent(p.silent)
+                .build();
+    }
+
+    /**
+     * A lifted punishment, as the revoke announcement reads it.
+     *
+     * <p>Three fields come from the lifting rather than from the row: the staff name is whoever
+     * revoked it, the reason is the reason they gave for revoking it, and the silence is the
+     * decision made about <em>this</em> announcement - which defaults to the silence of the row
+     * being lifted, because announcing "Adam unbanned Steve" on a server that was never told
+     * Steve was banned discloses the very thing the silent ban was hiding.
+     *
+     * <p><strong>The rest comes off the lifted row, including when it ended.</strong> The dates
+     * used to be left unset, which made {@link PunishmentView#permanent()} true of everything and
+     * {@code type} read "Permanent ban" on every revoke line - so a guild whose template used it
+     * was told a tempban that had run for an hour had been a permanent one. A row that is being
+     * lifted is a row this server holds, so its expiry is in hand and there is no reason to guess
+     * at it. With no row at all there is nothing to read, and {@code type} resolves to empty:
+     * a segment that drops beats a sentence that is wrong.
+     */
+    private static PunishmentView revokeView(ActivePunishment lifted, String name, String staff,
+            String reason, boolean silent, PunishmentSettings settings) {
+        return PunishmentView.builder()
+                .type(lifted == null ? "" : lifted.type)
+                .targetName(name)
+                .staffName(staff)
+                .id(lifted == null ? "" : lifted.id)
+                .reason(reason)
+                .serverName(settings == null ? "" : settings.serverName)
+                .appealUrl(settings == null ? "" : settings.appealUrl)
+                .issuedAtMillis(lifted == null ? 0L : lifted.issuedAtMillis())
+                .expiresAtMillis(lifted == null ? null : lifted.expiresAtMillis())
+                .lengthSeconds(lifted == null ? null : lifted.durationSeconds)
+                .silent(silent)
+                .build();
+    }
+
+    /**
+     * Which of the four screens a punishment type is shown on.
+     *
+     * <p>{@code geo} and {@code subnet} are bans as far as the player is concerned: they were
+     * refused at login for where they connected from, and there is no separate screen for either
+     * because writing two more templates to say "you are banned" differently helps nobody.
+     */
+    private static String familyOf(String type) {
+        if ("mute".equals(type)) return "mute";
+        if ("kick".equals(type)) return "kick";
+        if ("warn".equals(type)) return "warn";
+        return "ban";
     }
 
     private static String formatLocal(ActivePunishment p) {

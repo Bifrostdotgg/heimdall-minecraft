@@ -383,6 +383,38 @@ class AdminCommandTest {
         }
 
         @Test
+        @DisplayName("completion reaches the module too, with the partial word last")
+        void completionReachesTheModule() {
+            RecordingPunishments punishments = new RecordingPunishments();
+            install(context().punishments(punishments));
+
+            List<String> suggestions = commands().complete(admin, "hd", "ban", "-s", "Ste");
+
+            assertEquals(Arrays.asList("ban"), punishments.completedVerbs);
+            assertEquals(Arrays.asList("-s", "Ste"), punishments.completedArgs.get(0),
+                    "the flags travel, because the module counts them to find the target");
+            assertEquals(Collections.singletonList("Steve"), suggestions,
+                    "the tree filters the module's answer by the partial word, as it does for "
+                            + "every other subcommand");
+        }
+
+        @Test
+        @DisplayName("a module with nothing to say completes nothing, rather than failing")
+        void completionWithoutTheModule() {
+            install();
+
+            assertTrue(commands().complete(admin, "hd", "ban", "Ste").isEmpty());
+        }
+
+        @Test
+        @DisplayName("a completer that throws costs a suggestion, not the command")
+        void completionFailureIsContained() {
+            install(context().punishments(new ThrowingPunishments()));
+
+            assertTrue(commands().complete(admin, "hd", "ban", "Ste").isEmpty());
+        }
+
+        @Test
         @DisplayName("a dispatch failure names the exception type, never a bare word")
         void failureIsLegible() {
             install(context().punishments(new ThrowingPunishments()));
@@ -612,6 +644,8 @@ class AdminCommandTest {
 
         private final List<String> verbs = new ArrayList<String>();
         private final List<List<String>> args = new ArrayList<List<String>>();
+        private final List<String> completedVerbs = new ArrayList<String>();
+        private final List<List<String>> completedArgs = new ArrayList<List<String>>();
 
         @Override
         public boolean isAvailable() {
@@ -622,6 +656,13 @@ class AdminCommandTest {
         public void onStaffCommand(CommandSource source, String verb, List<String> arguments) {
             verbs.add(verb);
             args.add(new ArrayList<String>(arguments));
+        }
+
+        @Override
+        public List<String> complete(CommandSource source, String verb, List<String> arguments) {
+            completedVerbs.add(verb);
+            completedArgs.add(new ArrayList<String>(arguments));
+            return Arrays.asList("Steve", "Alex");
         }
     }
 
@@ -636,6 +677,11 @@ class AdminCommandTest {
         @Override
         public void onStaffCommand(CommandSource source, String verb, List<String> args) {
             throw new IllegalStateException("the outbox is closed");
+        }
+
+        @Override
+        public List<String> complete(CommandSource source, String verb, List<String> args) {
+            throw new IllegalStateException("the mirror is closed");
         }
     }
 

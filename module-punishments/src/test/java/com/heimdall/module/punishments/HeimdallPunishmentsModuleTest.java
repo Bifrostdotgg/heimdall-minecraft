@@ -13,6 +13,7 @@ import com.heimdall.core.pipeline.ChatMessage;
 import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.punish.PunishmentIp;
+import com.heimdall.core.punish.PunishmentParser;
 import com.heimdall.core.testing.FakeCommandSource;
 import com.heimdall.core.testing.FakePlayer;
 import com.heimdall.core.testing.TestText;
@@ -462,6 +463,162 @@ class HeimdallPunishmentsModuleTest {
                     .build());
             assertTrue(harness.platform.commandRegistry().has("ban"));
         }
+    }
+
+    @Test
+    @DisplayName("a punishment longer than the ceiling is refused, not clamped and not sent")
+    void durationCeiling() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+            FakeCommandSource moderator = FakeCommandSource.console();
+
+            harness.module.onStaffCommand(moderator, "ban", Arrays.asList("Steve", "50y", "bye"));
+
+            assertTrue(moderator.wasTold("10 years"), moderator.messageText().toString());
+            assertTrue(moderator.wasTold("perm"), "and says what to type instead");
+            assertNull(harness.module.mirrorForTest().get("ban:" + FakePlayer.named("Steve").uuid()),
+                    "nothing was written locally");
+            assertTrue(harness.module.outboxForTest().isEmpty(), "and nothing is queued for the bot");
+
+            moderator.clearMessages();
+            harness.module.onStaffCommand(moderator, "ban", Arrays.asList("Steve", "10y", "bye"));
+            assertFalse(moderator.wasTold("10 years"), "the ceiling itself is allowed");
+            assertNotNull(harness.module.mirrorForTest().get(
+                    "ban:" + FakePlayer.named("Steve").uuid()));
+        }
+    }
+
+    @Test
+    @DisplayName("a native tempban carries its length in both units, for one release")
+    void nativeIssueCarriesBothDurationUnits() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(FakeCommandSource.console(), "tempban",
+                    Arrays.asList("Steve", "7d", "griefing"));
+
+            Payload body = queuedBody(harness);
+            assertEquals(7L * 86_400L, body.longValue("durationSeconds", -1L));
+            assertEquals(7L * 1440L, body.longValue("durationMinutes", -1L),
+                    "a bot deployed before the seconds field reads only the minutes key, and a "
+                            + "payload carrying neither makes every temporary ban permanent");
+        }
+    }
+
+    @Test
+    @DisplayName("a native permanent ban carries no length keys at all")
+    void nativePermanentCarriesNoDuration() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(FakeCommandSource.console(), "ban",
+                    Arrays.asList("Steve", "griefing"));
+
+            Payload body = queuedBody(harness);
+            assertFalse(body.has("durationSeconds"), body.toJson());
+            assertFalse(body.has("durationMinutes"), body.toJson());
+        }
+    }
+
+    @Test
+    @DisplayName("a length on a verb that has none is refused, not quietly eaten")
+    void untimedVerbsRefuseADuration() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            FakeCommandSource moderator = FakeCommandSource.console();
+            harness.module.onStaffCommand(moderator, "warn",
+                    Arrays.asList("Steve", "7d", "spamming"));
+
+            assertTrue(moderator.wasTold("no length"), moderator.messageText().toString());
+            assertTrue(moderator.wasTold("7d"), "and names the word it will not take");
+            assertNull(harness.module.mirrorForTest().get("warn:" + FakePlayer.named("Steve").uuid()),
+                    "nothing was written locally");
+            assertTrue(harness.module.outboxForTest().isEmpty(),
+                    "and nothing was sent for the bot to drop the length off");
+
+            moderator.clearMessages();
+            harness.module.onStaffCommand(moderator, "kick",
+                    Arrays.asList("Steve", "perm", "spamming"));
+            assertTrue(moderator.wasTold("no length"),
+                    "perm is a duration token that resolves to no length, so the old check on the "
+                            + "number alone let it through and ate the word: "
+                            + moderator.messageText());
+        }
+    }
+
+    @Test
+    @DisplayName("a warn with no length still works, and keeps its whole reason")
+    void untimedVerbsStillWorkWithoutADuration() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            FakeCommandSource moderator = FakeCommandSource.console();
+            harness.module.onStaffCommand(moderator, "warn", Arrays.asList("Steve", "spamming"));
+
+            assertFalse(moderator.wasTold("no length"), moderator.messageText().toString());
+            ActivePunishment warn = harness.module.mirrorForTest()
+                    .get("warn:" + FakePlayer.named("Steve").uuid());
+            assertNotNull(warn, "the warn was issued");
+            assertEquals("spamming", warn.reason);
+            assertNull(warn.durationSeconds);
+            assertNull(warn.expiresAt);
+        }
+    }
+
+    @Test
+    @DisplayName("a reason that merely contains a duration-looking word is not a length")
+    void aWordThatIsNotAWholeDurationIsReason() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            FakeCommandSource moderator = FakeCommandSource.console();
+            harness.module.onStaffCommand(moderator, "warn",
+                    Arrays.asList("Steve", "1day-old", "account"));
+
+            assertFalse(moderator.wasTold("no length"),
+                    "the parser only takes a WHOLE duration token, so this one is reason text and "
+                            + "the refusal must not fire on it: " + moderator.messageText());
+            assertEquals("1day-old account", harness.module.mirrorForTest()
+                    .get("warn:" + FakePlayer.named("Steve").uuid()).reason);
+        }
+    }
+
+    @Test
+    @DisplayName("a module turned off mid-request files nothing rather than throwing")
+    void disabledMidRequestIsNotAnNpe() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+            String steve = FakePlayer.named("Steve").uuid().toString();
+            // Both are reached from inside the resolveName future, so a config push that turns
+            // the module off between the command and the reply lands here with no context. The
+            // throw that used to follow happened inside a CompletableFuture, where it was
+            // swallowed and the moderator was told nothing at all.
+            harness.disableModule();
+
+            FakeCommandSource console = FakeCommandSource.console();
+            harness.module.submitIssue(console, "ban", steve, "Steve",
+                    PunishmentParser.parse(Arrays.asList("Steve", "7d", "griefing")), false);
+            harness.module.submitRevoke(console, "unban", steve, "Steve", "", false, false);
+
+            assertTrue(console.messageText().isEmpty(),
+                    "nothing is filed and nothing is claimed: " + console.messageText());
+        }
+    }
+
+    /** The payload of the only write queued for the bot. */
+    private static Payload queuedBody(PunishmentsHarness harness) {
+        java.util.List<PunishmentOutbox.Entry> queued =
+                harness.module.outboxForTest().snapshot();
+        assertEquals(1, queued.size(), "expected exactly one queued write");
+        return queued.get(0).payload;
     }
 
     private static void waitFor(java.util.function.BooleanSupplier condition, long timeoutMs)

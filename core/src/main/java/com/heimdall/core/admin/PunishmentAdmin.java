@@ -1,6 +1,7 @@
 package com.heimdall.core.admin;
 
 import com.heimdall.core.command.CommandSource;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -28,6 +29,10 @@ import java.util.List;
  * <p>{@link #onStaffCommand} is called on whatever thread the platform dispatched the command on,
  * which on the Bukkit family is the main server thread. It must not block; the implementation hands
  * anything that does off to {@code heimdall-io} itself.
+ *
+ * <p>{@link #complete} is stricter still. It runs on a keystroke, and on the proxies it runs off
+ * the server thread entirely, so it must be a read of something already in memory: no bot call, no
+ * roster snapshot, no lock a command handler also takes.
  */
 public interface PunishmentAdmin {
 
@@ -44,6 +49,9 @@ public interface PunishmentAdmin {
         }
     };
 
+    /** How many suggestions any one completion may return. */
+    int COMPLETION_LIMIT = 100;
+
     /** Whether the module is enabled right now. */
     boolean isAvailable();
 
@@ -56,4 +64,23 @@ public interface PunishmentAdmin {
      * @param args everything after the verb, flags included and unparsed
      */
     void onStaffCommand(CommandSource source, String verb, List<String> args);
+
+    /**
+     * Suggestions for the word a moderator is part-way through typing.
+     *
+     * <p>Takes the sender for the same reason {@link #onStaffCommand} does: {@code -s} and
+     * {@code -p} are gated on {@code heimdall.punishments.silent}, and a completer that offered
+     * them to everybody would advertise a flag the command then refuses.
+     *
+     * <p>Defaulted to nothing so an implementation that has no names to offer - {@link #NONE}, and
+     * anything else that ever implements this - keeps compiling and keeps answering coherently.
+     *
+     * @param source whoever is typing
+     * @param verb the canonical verb, as {@link #onStaffCommand} takes it
+     * @param args everything after the verb, flags included, with the partial word last
+     * @return at most {@link #COMPLETION_LIMIT} suggestions, already filtered to the partial word
+     */
+    default List<String> complete(CommandSource source, String verb, List<String> args) {
+        return Collections.emptyList();
+    }
 }

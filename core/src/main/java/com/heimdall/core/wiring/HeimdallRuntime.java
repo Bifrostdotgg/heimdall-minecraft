@@ -21,6 +21,7 @@ import com.heimdall.core.remoteconfig.ConfigDocument;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.RemoteConfig;
 import com.heimdall.core.session.PlayerSessionEvents;
+import com.heimdall.core.text.Msg;
 import com.heimdall.core.tunnel.HealthSnapshotSource;
 import com.heimdall.core.tunnel.IdentitySource;
 import com.heimdall.core.tunnel.ServerIdentity;
@@ -223,6 +224,10 @@ public final class HeimdallRuntime implements AutoCloseable {
         this.guildId = supplied.isEmpty() ? bootstrap.guildId() : supplied;
 
         logger.setDebugEnabled(bootstrap.debug());
+        // Msg is static, and every template render is several layers below anything holding a
+        // logger. This is the one place that has both, so it is where the "that screen would not
+        // parse" warning gets somewhere to go.
+        Msg.diagnostics(logger);
 
         this.executors = builder.executors == null
                 ? new HeimdallExecutors(logger)
