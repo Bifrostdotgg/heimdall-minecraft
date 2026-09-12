@@ -1,6 +1,7 @@
 package com.heimdall.module.punishments;
 
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.util.Registration;
@@ -48,9 +49,21 @@ final class LiteBansEventBridge {
     private static void postIssue(ModuleContext context, Entry entry) {
         if (entry == null || !context.api().isUsable()) return;
         PunishmentSettings settings = PunishmentSettings.from(context.config());
-        String salt = settings.ipSalt;
+        Payload body = issueBody(entry, settings.ipSalt, context.logger());
+        if (body == null) return;
+        context.api().issuePunishment(body);
+    }
+
+    /**
+     * The issue payload for one LiteBans entry, or {@code null} when there is nothing to send.
+     *
+     * <p>Split out of {@link #postIssue} so the wire shape can be asserted without a running
+     * LiteBans or a socket. What is most likely to be wrong here is the duration, and reading a
+     * length back off a payload needs neither a server nor a network.
+     */
+    static Payload issueBody(Entry entry, String salt, HeimdallLogger logger) {
         String type = mapType(entry);
-        if (type == null) return;
+        if (type == null) return null;
         Payload.Builder body = Payload.builder()
                 .put("type", type)
                 .put("source", "hook")
@@ -69,22 +82,31 @@ final class LiteBansEventBridge {
         }
         if ("ipban".equals(type)) {
             if (salt == null || salt.isEmpty()) {
-                context.logger().warn("LiteBans hook skipped IP hash: ip salt has not been pushed");
-                return;
+                logger.warn("LiteBans hook skipped IP hash: ip salt has not been pushed");
+                return null;
             }
             String ip = entry.getIp();
             if (ip != null && !ip.isEmpty()) {
                 body.put("ipDigest", PunishmentIp.hash(ip, salt));
             }
         }
-        long until = entry.getDateEnd();
-        long start = entry.getDateStart();
-        if (until > 0 && start > 0 && until > start) {
-            // Seconds, like the native path: LiteBans stores milliseconds, and rounding a short
-            // mute up to the minute was losing a punishment somebody deliberately set.
-            body.put("durationSeconds", Math.max(1L, (until - start) / 1000L));
+        putHookDuration(body, entry.getDateStart(), entry.getDateEnd(), logger);
+        return body.build();
+    }
+
+    /**
+     * Writes the length of a hooked LiteBans punishment, in seconds, or nothing at all.
+     *
+     * <p>Seconds rather than minutes: LiteBans stores milliseconds, and rounding a short mute up
+     * to the minute was losing a punishment somebody deliberately set.
+     */
+    static void putHookDuration(Payload.Builder body, long startMillis, long endMillis,
+            HeimdallLogger logger) {
+        if (endMillis <= 0L || startMillis <= 0L || endMillis <= startMillis) {
+            return;
         }
-        context.api().issuePunishment(body.build());
+        long seconds = Math.max(1L, (endMillis - startMillis) / 1000L);
+        HeimdallPunishmentsModule.putDuration(body, seconds);
     }
 
     private static void postRevoke(ModuleContext context, Entry entry) {

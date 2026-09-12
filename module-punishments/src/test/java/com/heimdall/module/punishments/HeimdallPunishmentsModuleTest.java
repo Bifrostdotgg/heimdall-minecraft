@@ -488,6 +488,48 @@ class HeimdallPunishmentsModuleTest {
         }
     }
 
+    @Test
+    @DisplayName("a native tempban carries its length in both units, for one release")
+    void nativeIssueCarriesBothDurationUnits() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(FakeCommandSource.console(), "tempban",
+                    Arrays.asList("Steve", "7d", "griefing"));
+
+            Payload body = queuedBody(harness);
+            assertEquals(7L * 86_400L, body.longValue("durationSeconds", -1L));
+            assertEquals(7L * 1440L, body.longValue("durationMinutes", -1L),
+                    "a bot deployed before the seconds field reads only the minutes key, and a "
+                            + "payload carrying neither makes every temporary ban permanent");
+        }
+    }
+
+    @Test
+    @DisplayName("a native permanent ban carries no length keys at all")
+    void nativePermanentCarriesNoDuration() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(FakeCommandSource.console(), "ban",
+                    Arrays.asList("Steve", "griefing"));
+
+            Payload body = queuedBody(harness);
+            assertFalse(body.has("durationSeconds"), body.toJson());
+            assertFalse(body.has("durationMinutes"), body.toJson());
+        }
+    }
+
+    /** The payload of the only write queued for the bot. */
+    private static Payload queuedBody(PunishmentsHarness harness) {
+        java.util.List<PunishmentOutbox.Entry> queued =
+                harness.module.outboxForTest().snapshot();
+        assertEquals(1, queued.size(), "expected exactly one queued write");
+        return queued.get(0).payload;
+    }
+
     private static void waitFor(java.util.function.BooleanSupplier condition, long timeoutMs)
             throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;

@@ -706,9 +706,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .put("opId", opId)
                 .put("issuedAt", now);
         if (parsed.durationSeconds != null) {
-            // Seconds, not minutes: a 30 second mute is a thing moderators ask for, and the
-            // minute-granular key rounded it up to one. The bot reads both for one release.
-            body.put("durationSeconds", parsed.durationSeconds.longValue());
+            putDuration(body, parsed.durationSeconds.longValue());
         }
         if (ipDigest != null) {
             body.put("ipDigest", ipDigest);
@@ -827,6 +825,28 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 revokeView(matches.get(0), name, source.name(), reason, decision.silent(), settings),
                 now));
         flushSoon();
+    }
+
+    /**
+     * Writes the length of an outgoing punishment, in both units.
+     *
+     * <p>Seconds are the real field: a 30 second mute is a thing moderators ask for, and the old
+     * minute-granular key rounded it up to a minute.
+     *
+     * <p><strong>{@code durationMinutes} is kept for exactly one release, then deleted.</strong>
+     * A bot deployed before the seconds field existed reads only the minutes key, and a payload
+     * carrying neither reads to it as no length at all - which turns every temporary ban and mute
+     * issued from a server that updated first into a permanent one. The two halves of a deploy
+     * are never simultaneous, so the plugin sends both until the bot side is out everywhere.
+     * Remove this method and both call sites in the release after that.
+     *
+     * <p>Rounded up rather than down, for the same reason: an older bot reading a floored
+     * {@code 0} would apply no length at all, and a 30 second mute arriving there as a minute is
+     * the behaviour that surface already had.
+     */
+    static void putDuration(Payload.Builder body, long seconds) {
+        body.put("durationSeconds", seconds);
+        body.put("durationMinutes", (seconds + 59L) / 60L);
     }
 
     private static String[] revokeTypes(String type) {
