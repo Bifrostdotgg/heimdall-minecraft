@@ -158,6 +158,23 @@ final class LastIpStore {
         return null;
     }
 
+    /**
+     * Every name this store has recorded, in insertion order, for tab completion.
+     *
+     * <p>A copy taken under the monitor, and Strings are immutable, so the caller can hold it.
+     * Names only - an address never leaves this class except through
+     * {@link #obfuscate(String)}.
+     */
+    synchronized List<String> allNames() {
+        List<String> out = new ArrayList<String>(byUuid.size());
+        for (PlayerIps row : byUuid.values()) {
+            if (row.name != null && !row.name.isEmpty()) {
+                out.add(row.name);
+            }
+        }
+        return out;
+    }
+
     /** The stored uuid for a name, or {@code null}. A String is immutable, so this is a safe copy. */
     synchronized String uuidByName(String name) {
         PlayerIps row = byName(name);

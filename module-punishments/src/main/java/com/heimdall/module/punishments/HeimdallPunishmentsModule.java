@@ -1,6 +1,7 @@
 package com.heimdall.module.punishments;
 
 import com.heimdall.core.admin.PunishmentAdmin;
+import com.heimdall.core.command.CommandCompleter;
 import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
@@ -33,8 +34,10 @@ import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -78,6 +81,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     /** How many recently-issued operation ids are remembered for echo suppression. */
     static final int ECHO_MEMORY = 256;
 
+    /**
+     * The durations tab completion offers once a target is present.
+     *
+     * <p>Seven entries, not the whole grammar. The parser takes anything from {@code 45s} to
+     * {@code 2mo3d}; a completion list is for the lengths people actually pick, and one that tried
+     * to be exhaustive would be a worse menu than typing.
+     */
+    static final List<String> DURATION_SUGGESTIONS = Collections.unmodifiableList(
+            Arrays.asList("30m", "1h", "6h", "1d", "7d", "30d", "perm"));
+
+    /** The two silence options, completed only for a sender allowed to use them. */
+    private static final List<String> SILENCE_FLAGS = Collections.unmodifiableList(
+            Arrays.asList("-s", "-p"));
+
     private volatile ModuleContext context;
     private volatile MirrorStore<ActivePunishment> mirror;
     private volatile PunishmentOutbox outbox;
@@ -104,6 +121,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      */
     private final Set<String> locallyIssued = Collections.synchronizedSet(
             new LinkedHashSet<String>());
+
+    /**
+     * Every player name this instance can complete, kept current rather than looked up.
+     *
+     * <p>Populated from three places, each of which knows something the others do not: the online
+     * roster (who is here), the last-address file (everyone this gatekeeper or standalone server
+     * has ever seen, and an enforcer backend has none), and the punishment mirror (everyone with
+     * an active punishment, wherever they were punished from). See {@link KnownNames} for why it
+     * is an index rather than a question asked at completion time.
+     */
+    private final KnownNames names = new KnownNames();
 
     private final AtomicBoolean flushing = new AtomicBoolean();
     private final AtomicBoolean flushAgain = new AtomicBoolean();
@@ -177,9 +205,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         context.onPlayerJoin(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                names.joined(player.name());
                 notifyWarn(player);
             }
         });
+        context.onPlayerQuit(new PlayerSessionListener() {
+            @Override
+            public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                names.quit(player.name());
+            }
+        });
+        seedKnownNames();
         context.tunnel().subscribe("punish.apply", applyHandler());
         context.tunnel().subscribe("punish.revoke", revokeHandler());
         context.tunnel().subscribe("punish.import", importHandler());
@@ -313,14 +349,188 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         onStaffCommand(source, type, args);
                     }
                 })
+                // The same completer the /hd tree gets, so /ban and /hd ban cannot suggest
+                // different things. The tree filters a subcommand's answer by prefix on its way
+                // out; here there is nothing between the module and the platform, which is why
+                // complete() filters its own answer rather than leaving that to a caller.
+                .completer(new CommandCompleter() {
+                    @Override
+                    public List<String> complete(CommandSource source, List<String> args) {
+                        return HeimdallPunishmentsModule.this.complete(source, type, args);
+                    }
+                })
                 .build());
         aliasBinds.add(handle);
+    }
+
+    /**
+     * Fills the completion index from everything already on disk or in memory at enable time.
+     *
+     * <p>Without this a freshly started server completes nothing until somebody joins, which is
+     * precisely when a moderator wants to ban the player who just left.
+     *
+     * <p>The roster read is wrapped because {@code onlinePlayers()} is allowed to throw rather
+     * than claim the server is empty, and enable runs on whatever thread a config push landed on.
+     * An index that starts one join behind is a worse tab completion for a minute; an exception
+     * here is a module that failed to enable.
+     */
+    private void seedKnownNames() {
+        ModuleContext ctx = this.context;
+        if (ctx == null) return;
+        LastIpStore ips = this.lastIps;
+        if (ips != null) {
+            names.rememberAll(ips.allNames());
+        }
+        rememberMirrorNames();
+        try {
+            for (PlayerHandle player : ctx.platform().players().onlinePlayers()) {
+                names.joined(player.name());
+            }
+        } catch (RuntimeException raced) {
+            ctx.logger().debug(() -> "could not read the online list to seed name completion: "
+                    + raced);
+        }
+    }
+
+    /** Adds every punished player the mirror knows about. Called after a sync reconciles. */
+    private void rememberMirrorNames() {
+        MirrorStore<ActivePunishment> store = this.mirror;
+        if (store == null) return;
+        for (String key : store.keys()) {
+            ActivePunishment p = store.get(key);
+            if (p != null) {
+                names.remember(p.targetName);
+            }
+        }
     }
 
     /** Whether this module is enabled right now - {@link PunishmentAdmin}'s half of the contract. */
     @Override
     public boolean isAvailable() {
         return context != null;
+    }
+
+    /**
+     * Tab completion for every punishment verb, on {@code /hd}, on {@code /hdp} and on the root
+     * aliases alike.
+     *
+     * <h2>Position is counted in non-flag tokens</h2>
+     *
+     * <p>{@code -s} and {@code -p} are accepted anywhere, so "the target" cannot be "the first
+     * argument" - {@code /ban -s Ste} with a tab after it is still completing a name. The flags
+     * are dropped and the remaining words counted, which is the same rule
+     * {@link com.heimdall.core.punish.PunishmentParser} applies when the command actually runs. A
+     * completer that disagreed with the parser about which word is the target would suggest names
+     * into the reason.
+     *
+     * <h2>What is offered where</h2>
+     *
+     * <ul>
+     *   <li>A word starting with {@code -} completes the flags, and only for a sender who may use
+     *       them. Offering {@code -s} to somebody the command will then refuse is a worse answer
+     *       than offering nothing.
+     *   <li>The target position completes names. For {@code unban}, {@code unmute} and
+     *       {@code unwarn} only players with an active punishment of that family, because a name
+     *       with nothing to lift is never the answer.
+     *   <li>After the target, while no duration has been typed and the verb takes one, a short
+     *       duration vocabulary.
+     *   <li>Inside the reason, nothing. There is no vocabulary for free text, and suggesting
+     *       player names there is how a name ends up in the reason of a ban on somebody else.
+     * </ul>
+     */
+    @Override
+    public List<String> complete(CommandSource source, String verb, List<String> args) {
+        if (context == null || args == null || args.isEmpty()) {
+            return Collections.emptyList();
+        }
+        String partial = args.get(args.size() - 1);
+        if (partial == null) partial = "";
+        if (partial.startsWith("-")) {
+            return flagSuggestions(source, partial);
+        }
+        if ("banlist".equals(verb)) {
+            return Collections.emptyList();
+        }
+        int typedBefore = 0;
+        boolean durationTyped = false;
+        for (int i = 0; i < args.size() - 1; i++) {
+            String token = args.get(i) == null ? "" : args.get(i).trim();
+            if (token.isEmpty() || isFlag(token)) continue;
+            typedBefore++;
+            if (typedBefore > 1 && PunishmentParser.looksLikeDuration(token)) {
+                durationTyped = true;
+            }
+        }
+        if (typedBefore == 0) {
+            return names.matching(partial, COMPLETION_LIMIT, targetFilter(verb));
+        }
+        if (durationTyped || !takesDuration(verb)) {
+            return Collections.emptyList();
+        }
+        return prefixed(DURATION_SUGGESTIONS, partial);
+    }
+
+    /** Whether a token is one of the options rather than a word of the command. */
+    private static boolean isFlag(String token) {
+        return "-s".equalsIgnoreCase(token)
+                || "-p".equalsIgnoreCase(token)
+                || token.toLowerCase(Locale.ROOT).startsWith("--sender=");
+    }
+
+    private static List<String> flagSuggestions(CommandSource source, String partial) {
+        if (!mayOverrideSilence(source)) {
+            return Collections.emptyList();
+        }
+        return prefixed(SILENCE_FLAGS, partial);
+    }
+
+    /** Verbs that read a duration out of their arguments. A revoke and a lookup do not. */
+    private static boolean takesDuration(String verb) {
+        return "ban".equals(verb) || "tempban".equals(verb) || "ipban".equals(verb)
+                || "mute".equals(verb) || "tempmute".equals(verb) || "warn".equals(verb);
+    }
+
+    /**
+     * The names a revoke verb may complete, or {@code null} when every known name is fair game.
+     *
+     * <p>Lower-cased, because {@link KnownNames} matches that way and a moderator typing
+     * {@code steve} means Steve.
+     */
+    private Set<String> targetFilter(String verb) {
+        String[] types;
+        if ("unban".equals(verb)) {
+            types = new String[] {"ban", "ipban"};
+        } else if ("unmute".equals(verb)) {
+            types = new String[] {"mute"};
+        } else if ("unwarn".equals(verb)) {
+            types = new String[] {"warn"};
+        } else {
+            return null;
+        }
+        MirrorStore<ActivePunishment> store = this.mirror;
+        Set<String> allowed = new HashSet<String>();
+        if (store == null) return allowed;
+        long now = System.currentTimeMillis();
+        List<String> wanted = Arrays.asList(types);
+        for (String key : store.keys()) {
+            ActivePunishment p = store.get(key);
+            if (p == null || p.targetName == null || p.expired(now)) continue;
+            if (!wanted.contains(p.type)) continue;
+            allowed.add(KnownNames.key(p.targetName));
+        }
+        return allowed;
+    }
+
+    private static List<String> prefixed(List<String> candidates, String partial) {
+        String needle = partial.toLowerCase(Locale.ROOT);
+        List<String> out = new ArrayList<String>();
+        for (int i = 0; i < candidates.size(); i++) {
+            String candidate = candidates.get(i);
+            if (candidate.toLowerCase(Locale.ROOT).startsWith(needle)) {
+                out.add(candidate);
+            }
+        }
+        return out;
     }
 
     @Override
@@ -467,6 +677,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             local.expiresAt = Instant.ofEpochMilli(now)
                     .plusSeconds(parsed.durationSeconds.intValue()).toString();
         }
+        names.remember(name);
         String mirrorKey = keyFor(local);
         if (mirror != null && !"kick".equals(type) && mirrorKey != null) {
             mirror.record(mirrorKey, local);
@@ -618,6 +829,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     private Verdict onLogin(LoginAttempt attempt) {
+        // Before the gate rather than after it: a player who is about to be denied is exactly the
+        // one a moderator is about to type the name of, and a login is the first moment a proxy
+        // learns a name at all.
+        names.remember(attempt.username());
         if (lastIps != null && attempt.ipAddress() != null && !attempt.ipAddress().isEmpty()) {
             lastIps.record(attempt.uuid().toString(), attempt.username(), attempt.ipAddress(),
                     System.currentTimeMillis());
@@ -709,6 +924,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 }
                 String key = keyFor(p);
                 if (key == null) return;
+                names.remember(p.targetName);
                 mirror.record(key, p);
                 applyLive(p.targetUuid, p, PunishmentSettings.from(context.config()));
                 if (!echo) announce(announcementFor(p));
@@ -1219,6 +1435,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 }
                 lastFullSyncAt = System.currentTimeMillis();
                 replayPendingWrites();
+                rememberMirrorNames();
             } catch (RuntimeException e) {
                 ctx.logger().error("punishment sync apply failed", e);
             }
