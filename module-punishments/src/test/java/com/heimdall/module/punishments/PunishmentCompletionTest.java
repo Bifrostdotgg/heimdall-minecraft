@@ -49,6 +49,19 @@ class PunishmentCompletionTest {
     }
 
     @Test
+    @DisplayName("no arguments at all is the target position, not the end of the world")
+    void emptyArgumentListCompletesNames() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertEquals(Arrays.asList("Steve"),
+                    harness.module.complete(MODERATOR, "ban", Collections.<String>emptyList()),
+                    "the trailing empty word is a convention of the two callers, not a promise of "
+                            + "the interface, and without it this offered nothing at all");
+        }
+    }
+
+    @Test
     @DisplayName("the target is the first non-flag word, however many flags came first")
     void flagsDoNotMoveTheTarget() {
         try (PunishmentsHarness harness = replacing()) {

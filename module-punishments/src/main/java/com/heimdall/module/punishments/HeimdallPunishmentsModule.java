@@ -453,10 +453,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      */
     @Override
     public List<String> complete(CommandSource source, String verb, List<String> args) {
-        if (context == null || args == null || args.isEmpty()) {
+        if (context == null || args == null) {
             return Collections.emptyList();
         }
-        String partial = args.get(args.size() - 1);
+        // An empty list is the target position with nothing typed yet, not "no completion". Bukkit
+        // supplies a trailing "" for the word being typed and the /hd tree does too, but that is a
+        // convention of two callers rather than a guarantee of the interface, and a completer that
+        // returned nothing for an empty list offered nothing at all on whichever one stopped.
+        String partial = args.isEmpty() ? "" : args.get(args.size() - 1);
         if (partial == null) partial = "";
         if (partial.startsWith("-")) {
             return flagSuggestions(source, partial);
