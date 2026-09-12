@@ -1135,18 +1135,6 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 settings.announceIssue, viewOf(p, settings), System.currentTimeMillis());
     }
 
-    /** Whole seconds from {@code now} to an ISO instant, or {@code null} for no expiry. */
-    static Long secondsUntil(String expiresAt, long nowMillis) {
-        if (expiresAt == null || expiresAt.isEmpty()) return null;
-        try {
-            long remaining = Instant.parse(expiresAt).toEpochMilli() - nowMillis;
-            if (remaining <= 0) return null;
-            return Long.valueOf(Math.max(1L, remaining / TimeUnit.SECONDS.toMillis(1)));
-        } catch (RuntimeException unparseable) {
-            return null;
-        }
-    }
-
     private TunnelMessageHandler importHandler() {
         return new TunnelMessageHandler() {
             @Override
