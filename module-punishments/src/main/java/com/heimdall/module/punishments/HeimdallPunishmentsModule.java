@@ -347,6 +347,15 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [reason]"));
                 return;
             }
+            // Rejected rather than ignored, and rejected before the silence it implies can be read.
+            // There is nothing for -h to mean here: whether lifting a punishment is hidden is a
+            // fact about the row being lifted. Letting the flag through would silently mean -s, and
+            // could then refuse the command for a silence override the sender never asked for.
+            if (options.hidden) {
+                source.sendMessage(Msg.legacy(
+                        "§c-h only applies when issuing a punishment."));
+                return;
+            }
             // The flags travel rather than being resolved here: a revoke's default is the
             // silence of the row it lifts, and which row that is is not known until the target
             // has been resolved and matched. See submitRevoke.
@@ -525,7 +534,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         enqueue("issue", opId, now, body.build());
         source.sendMessage(Msg.legacy("§a" + type + " issued for §f" + name));
         announce(PunishmentAnnouncement.issued(
-                type, source.name(), name, parsed.durationMinutes, parsed.reason, silent));
+                type, source.name(), name, parsed.durationMinutes, parsed.reason, silent, hidden));
         flushSoon();
     }
 
@@ -604,11 +613,22 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             source.sendMessage(Msg.legacy("§eNo active " + typeLabel(type) + " for §f" + name));
             return;
         }
-        SilenceDecision decision = SilenceDecision.decide(silentFlag, publicFlag,
-                matches.get(0).silent, mayOverrideSilence(source));
-        if (decision.refused()) {
-            source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
-            return;
+        // A hidden row takes the silence decision out of play, in the same way issuing one does.
+        // -p plus the silence override would otherwise publish "Adam unbanned Steve" to a server
+        // that was never told about the ban: the disclosure hiding it was for, made later and out
+        // of context. The flag is not refused, it simply cannot widen this.
+        boolean liftedHidden = anyHidden(matches);
+        boolean announceSilently;
+        if (liftedHidden) {
+            announceSilently = true;
+        } else {
+            SilenceDecision decision = SilenceDecision.decide(silentFlag, publicFlag,
+                    matches.get(0).silent, mayOverrideSilence(source));
+            if (decision.refused()) {
+                source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
+                return;
+            }
+            announceSilently = decision.silent();
         }
         long now = System.currentTimeMillis();
         for (int i = 0; i < matches.size(); i++) {
@@ -637,8 +657,16 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         // Once, on the verb the moderator typed, rather than once per matching row: /unban lifts a
         // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
         announce(PunishmentAnnouncement.revoked(type, source.name(), name, reason,
-                decision.silent()));
+                announceSilently, liftedHidden));
         flushSoon();
+    }
+
+    /** Whether any row a revoke verb matched was hidden. One hidden row hides the whole line. */
+    private static boolean anyHidden(List<ActivePunishment> matches) {
+        for (int i = 0; i < matches.size(); i++) {
+            if (matches.get(i).hidden) return true;
+        }
+        return false;
     }
 
     private static String[] revokeTypes(String type) {
@@ -824,8 +852,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * the line is asking.
      */
     private static PunishmentAnnouncement announcementFor(ActivePunishment p) {
+        // p.silent || p.hidden rather than p.silent: a bot row could carry hidden without silent
+        // (an older issue path, a hand-edited document, a future bot that stops coercing one from
+        // the other), and the broadcast is the one place where reading that row too generously
+        // cannot be taken back. Same reasoning as visibleRows filtering what the bot already
+        // should not have sent.
         return PunishmentAnnouncement.issued(p.type, p.issuedByName, p.targetName,
-                minutesUntil(p.expiresAt, System.currentTimeMillis()), p.reason, p.silent);
+                minutesUntil(p.expiresAt, System.currentTimeMillis()), p.reason,
+                p.silent || p.hidden, p.hidden);
     }
 
     /** Whole minutes from {@code now} to an ISO instant, or {@code null} for no expiry. */
@@ -983,7 +1017,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 if (!announceableRevoke(payload.string("revokeCause", ""))) return;
                 announce(PunishmentAnnouncement.revoked(lifted.type,
                         payload.string("revokedBy", ""), lifted.targetName,
-                        payload.string("reason", ""), lifted.silent));
+                        payload.string("reason", ""), lifted.silent || lifted.hidden,
+                        lifted.hidden));
             }
         };
     }
@@ -1076,7 +1111,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             try {
                 visible = announcement.visibleTo(
                         player.hasPermission(PunishmentAnnouncement.NOTIFY_PERMISSION),
-                        player.hasPermission(PunishmentAnnouncement.ADMIN_PERMISSION));
+                        player.hasPermission(PunishmentAnnouncement.ADMIN_PERMISSION),
+                        player.hasPermission(HiddenPunishments.PERMISSION));
             } catch (RuntimeException gone) {
                 // Asking a player who left between the snapshot and the check. Silence is the
                 // right answer: they are not online to be told.
@@ -1677,13 +1713,36 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         return mute != null && !mute.expired(System.currentTimeMillis());
     }
 
+    /** Whether the active mute on this player is a hidden one. False when there is no mute. */
+    public boolean isMuteHidden(UUID uuid) {
+        if (uuid == null || mirror == null) return false;
+        ActivePunishment mute = mirror.get("mute:" + uuid);
+        return mute != null && !mute.expired(System.currentTimeMillis()) && mute.hidden;
+    }
+
     public void notifyStaff(String line) {
+        notifyStaff(line, false);
+    }
+
+    /**
+     * A staff notice about something a punished player did.
+     *
+     * <p>{@code hiddenOnly} narrows the audience to holders of
+     * {@link HiddenPunishments#PERMISSION}, and it has to, because the notice names the player and
+     * the punishment together: "Steve tried to edit a sign while muted" tells every mute-node
+     * holder that Steve is muted, which is the one fact a hidden mute keeps from them. The mute
+     * node is not the hidden node and {@code heimdall.admin} does not imply it.
+     */
+    public void notifyStaff(String line, boolean hiddenOnly) {
         ModuleContext ctx = this.context;
         if (ctx == null || line == null) return;
         Component message = Msg.legacy(line);
         for (PlayerHandle player : ctx.platform().players().onlinePlayers()) {
-            if (player.hasPermission("heimdall.punishments.mute")
-                    || player.hasPermission("heimdall.admin")) {
+            boolean allowed = hiddenOnly
+                    ? player.hasPermission(HiddenPunishments.PERMISSION)
+                    : player.hasPermission("heimdall.punishments.mute")
+                            || player.hasPermission("heimdall.admin");
+            if (allowed) {
                 player.sendMessage(message);
             }
         }

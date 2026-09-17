@@ -98,12 +98,17 @@ class HiddenPunishmentTest {
     }
 
     @Test
-    @DisplayName("a hidden punishment is still enforced, and still announced to holders of the node")
+    @DisplayName("a hidden punishment is enforced, and announced only to hidden-node holders")
     void hiddenIsStillEnforced() {
         try (PunishmentsHarness harness = announcing()) {
             FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
             FakePlayer notify = harness.platform.join(
                     FakePlayer.named("Mod").grant(PunishmentAnnouncement.NOTIFY_PERMISSION));
+            FakePlayer admin = harness.platform.join(
+                    FakePlayer.named("Owner").grant(PunishmentAnnouncement.ADMIN_PERMISSION));
+            FakePlayer holder = harness.platform.join(
+                    FakePlayer.named("Boss").grant(HiddenPunishments.PERMISSION));
             FakeCommandSource moderator = FakeCommandSource.player("Adam")
                     .grant(HiddenPunishments.PERMISSION);
 
@@ -111,9 +116,169 @@ class HiddenPunishmentTest {
 
             assertEquals(1, steve.kickReasons().size(),
                     "hiding a punishment is about who reads about it, never about whether it lands");
-            assertTrue(notify.messageText().toString().contains("(silent)"),
-                    "hidden is silent, and silent still reaches the notify audience in chat; the "
-                            + "hiding this feature adds is of the lookup rows");
+            assertTrue(ordinary.messageText().isEmpty(), ordinary.messageText().toString());
+            assertTrue(notify.messageText().isEmpty(),
+                    "the silent audience is the staff a hidden row is being kept from, so one "
+                            + "chat line to them would give away everything the lookup filter "
+                            + "withholds: " + notify.messageText());
+            assertTrue(admin.messageText().isEmpty(),
+                    "and heimdall.admin does not imply the hidden node anywhere else either: "
+                            + admin.messageText());
+            assertTrue(holder.messageText().toString().contains("(hidden)"),
+                    "a holder is told, with the same marker the lookups use: "
+                            + holder.messageText());
+            assertTrue(holder.messageText().toString().contains("alting"));
+        }
+    }
+
+    @Test
+    @DisplayName("lifting a hidden ban stays hidden, even with -p and the silence override")
+    void revokingAHiddenBanCannotBePublished() {
+        try (PunishmentsHarness harness = announcing()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
+            FakePlayer notify = harness.platform.join(
+                    FakePlayer.named("Mod").grant(PunishmentAnnouncement.NOTIFY_PERMISSION));
+            FakePlayer holder = harness.platform.join(
+                    FakePlayer.named("Boss").grant(HiddenPunishments.PERMISSION));
+            banInMirror(harness, "Steve", true, "alting");
+            FakeCommandSource privileged = FakeCommandSource.player("Adam")
+                    .grant(HiddenPunishments.PERMISSION)
+                    .grant(SilenceDecision.OVERRIDE_PERMISSION);
+
+            harness.module.onStaffCommand(privileged, "unban", Arrays.asList("Steve", "-p"));
+
+            assertNull(harness.module.mirrorForTest().get("ban:" + uuidOf("Steve")),
+                    "the lift itself happens, exactly as -p asked");
+            assertTrue(ordinary.messageText().isEmpty(),
+                    "but -p cannot publish it: \"Adam unbanned Steve\" on a server never told "
+                            + "about the ban is the disclosure hiding it was for: "
+                            + ordinary.messageText());
+            assertTrue(notify.messageText().isEmpty(), notify.messageText().toString());
+            assertTrue(holder.messageText().toString().contains("(hidden)"),
+                    holder.messageText().toString());
+            assertTrue(holder.messageText().toString().contains("unbanned"));
+        }
+    }
+
+    @Test
+    @DisplayName("a hidden apply frame is announced to holders only, even if the row is not silent")
+    void hiddenApplyFrameIsNeverBroadcast() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
+            FakePlayer holder = harness.platform.join(
+                    FakePlayer.named("Boss").grant(HiddenPunishments.PERMISSION));
+
+            // hidden without silent: the bot coerces one from the other, but a row that arrives
+            // saying otherwise must not be read as a server-wide announcement. Nothing takes a
+            // broadcast back.
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Steve"))
+                    .put("targetName", "Steve")
+                    .put("reason", "alting")
+                    .put("issuedByName", "Adam")
+                    .put("silent", false)
+                    .put("hidden", true)
+                    .build());
+
+            assertTrue(ordinary.messageText().isEmpty(), ordinary.messageText().toString());
+            assertTrue(holder.messageText().toString().contains("(hidden)"),
+                    holder.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("a hidden revoke frame from the bot is announced to holders only")
+    void hiddenRevokeFrameIsNeverBroadcast() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer ordinary = harness.platform.join(FakePlayer.named("Notch"));
+            FakePlayer holder = harness.platform.join(
+                    FakePlayer.named("Boss").grant(HiddenPunishments.PERMISSION));
+            banInMirror(harness, "Steve", true, "alting");
+
+            harness.tunnel.push("punish.revoke", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", uuidOf("Steve"))
+                    .put("revokedBy", "Adam")
+                    .put("revokeCause", "manual")
+                    .build());
+
+            assertTrue(ordinary.messageText().isEmpty(), ordinary.messageText().toString());
+            assertTrue(holder.messageText().toString().contains("(hidden)"),
+                    holder.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("-h on a revoke verb is rejected rather than read as an implied -s")
+    void hiddenFlagIsRejectedOnRevokeVerbs() {
+        try (PunishmentsHarness harness = announcing()) {
+            harness.platform.join(FakePlayer.named("Steve"));
+            banInMirror(harness, "Steve", false, "griefing");
+            // No silence override: the implied -s would have refused this command for a flag the
+            // sender never typed, which is a confusing way to say "that flag does not apply here".
+            FakeCommandSource moderator = FakeCommandSource.player("Adam");
+
+            harness.module.onStaffCommand(moderator, "unban", Arrays.asList("Steve", "-h"));
+
+            assertTrue(moderator.wasTold("-h only applies when issuing"),
+                    moderator.messageText().toString());
+            assertFalse(moderator.wasTold(SilenceDecision.REFUSAL_MESSAGE),
+                    "and not the silence refusal, which is about a different flag");
+            assertNotNull(harness.module.mirrorForTest().get("ban:" + uuidOf("Steve")),
+                    "the revoke did not happen either; the command was refused whole");
+        }
+    }
+
+    @Test
+    @DisplayName("the muted-sign staff notice narrows to hidden holders for a hidden mute")
+    void mutedSignNoticeFollowsTheMute() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer muteNode = harness.platform.join(
+                    FakePlayer.named("Mod").grant("heimdall.punishments.mute"));
+            FakePlayer holder = harness.platform.join(
+                    FakePlayer.named("Boss").grant(HiddenPunishments.PERMISSION));
+            ActivePunishment mute = new ActivePunishment();
+            mute.type = "mute";
+            mute.targetUuid = uuidOf("Steve");
+            mute.targetName = "Steve";
+            mute.hidden = true;
+            mute.silent = true;
+            harness.module.mirrorForTest().record("mute:" + uuidOf("Steve"), mute);
+
+            assertTrue(harness.module.isMuteHidden(
+                    java.util.UUID.fromString(uuidOf("Steve"))));
+            harness.module.notifyStaff("\u00a7eSteve\u00a77 tried to edit a sign while muted.",
+                    harness.module.isMuteHidden(java.util.UUID.fromString(uuidOf("Steve"))));
+
+            assertTrue(muteNode.messageText().isEmpty(),
+                    "the notice names the player and the mute together, so the mute node is the "
+                            + "wrong audience for a hidden one: " + muteNode.messageText());
+            assertTrue(holder.messageText().toString().contains("Steve"),
+                    holder.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("an ordinary mute's staff notice keeps its usual audience")
+    void mutedSignNoticeIsUnchangedForAVisibleMute() {
+        try (PunishmentsHarness harness = announcing()) {
+            FakePlayer muteNode = harness.platform.join(
+                    FakePlayer.named("Mod").grant("heimdall.punishments.mute"));
+            ActivePunishment mute = new ActivePunishment();
+            mute.type = "mute";
+            mute.targetUuid = uuidOf("Steve");
+            mute.targetName = "Steve";
+            harness.module.mirrorForTest().record("mute:" + uuidOf("Steve"), mute);
+
+            assertFalse(harness.module.isMuteHidden(
+                    java.util.UUID.fromString(uuidOf("Steve"))));
+            harness.module.notifyStaff("\u00a7eSteve\u00a77 tried to edit a sign while muted.",
+                    false);
+
+            assertTrue(muteNode.messageText().toString().contains("Steve"),
+                    muteNode.messageText().toString());
         }
     }
 
