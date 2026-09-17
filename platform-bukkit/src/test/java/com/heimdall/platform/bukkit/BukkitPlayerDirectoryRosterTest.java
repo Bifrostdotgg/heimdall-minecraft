@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.platform.PlayerHandle;
 import java.util.Collection;
 import java.util.Collections;
@@ -63,7 +64,7 @@ class BukkitPlayerDirectoryRosterTest {
     }
 
     private static BukkitPlayerDirectory directoryOver(BukkitPlayerDirectory.RosterSource roster) {
-        return new BukkitPlayerDirectory(InlineScheduler.INSTANCE, null, roster);
+        return new BukkitPlayerDirectory(new RecordingLogger(true), InlineScheduler.INSTANCE, null, roster);
     }
 
     @Test

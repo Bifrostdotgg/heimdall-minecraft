@@ -17,6 +17,7 @@ import com.heimdall.core.pipeline.ChatPipeline;
 import com.heimdall.core.pipeline.CommandPipeline;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.platform.PlatformFacade;
+import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.remoteconfig.ConfigDocument;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.RemoteConfig;
@@ -268,7 +269,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         // on the feature modules. Registered in the constructor — not in start() — because the
         // declared capability set is about what is REGISTERED (departure D55), and a platform
         // registers its modules in the gap between build() and start().
-        this.modules.register(new HealthModule(tunnel));
+        this.modules.register(new HealthModule(tunnel, reportsVanish(platform)));
 
         // Set after the manager exists: the dependency genuinely runs both ways — the manager hands
         // each module a bus backed by the client, and the client asks the manager what to declare.
@@ -279,6 +280,27 @@ public final class HeimdallRuntime implements AutoCloseable {
         // Deliberately without the side effects: nothing is written and nothing is logged until
         // start() runs the same evaluation through applyIdentityGuard().
         this.identity = IdentityGuard.evaluate(bootstrap, fingerprint);
+    }
+
+    /**
+     * Whether this platform can see vanish state, asked once at construction.
+     *
+     * <p>It decides whether {@code identify} declares {@code vanish@1}, and a capability set is a
+     * snapshot the handshake reads: asking again later could only produce a jar that declares
+     * something different on its second connection than on its first. The answer is a property of the
+     * platform binding rather than of anything configurable, so once is right.
+     *
+     * <p>A directory that is missing or throws answers "no". Over-declaring is the expensive
+     * direction: it tells the bot that a row with no {@code vanished} key is a player everyone can
+     * see, which is exactly the mistake that would publish a hidden staff member.
+     */
+    private static boolean reportsVanish(PlatformFacade platform) {
+        try {
+            PlayerDirectory players = platform.players();
+            return players != null && players.reportsVanish();
+        } catch (RuntimeException notReady) {
+            return false;
+        }
     }
 
     /**

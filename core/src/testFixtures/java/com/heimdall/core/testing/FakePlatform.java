@@ -66,6 +66,7 @@ public final class FakePlatform implements PlatformFacade {
     private volatile LuckPermsBridge luckPerms;
     private volatile BedrockIdentityProvider floodgate = BedrockIdentityProvider.NONE;
     private volatile Function<PlayerHandle, Payload> describer;
+    private volatile boolean reportsVanish;
     private volatile CompletableFuture<Payload> traceProbe;
     private volatile boolean deferLater;
     private volatile boolean deferMainThread;
@@ -117,6 +118,18 @@ public final class FakePlatform implements PlatformFacade {
      */
     public FakePlatform describingPlayers(Function<PlayerHandle, Payload> function) {
         this.describer = function;
+        return this;
+    }
+
+    /**
+     * Makes this platform claim it can see vanish state, the way the Bukkit family does.
+     *
+     * <p>{@code false} by default, which is the proxy's answer and the safe one: it is what decides
+     * whether {@code identify} declares {@code vanish@1}, and a fake that claimed the capability
+     * without ever writing the key would pin the exact lie the flag exists to prevent.
+     */
+    public FakePlatform reportingVanish(boolean value) {
+        this.reportsVanish = value;
         return this;
     }
 
@@ -411,6 +424,11 @@ public final class FakePlatform implements PlatformFacade {
                 }
                 Payload described = function.apply(player);
                 return described == null ? Payload.empty() : described;
+            }
+
+            @Override
+            public boolean reportsVanish() {
+                return reportsVanish;
             }
         };
     }

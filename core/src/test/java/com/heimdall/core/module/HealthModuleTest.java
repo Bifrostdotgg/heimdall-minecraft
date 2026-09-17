@@ -1,6 +1,7 @@
 package com.heimdall.core.module;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.log.RecordingLogger;
@@ -34,7 +35,7 @@ class HealthModuleTest {
         executors = new HeimdallExecutors(logger, 1);
         TunnelClient tunnel = TunnelClient.builder(logger, executors).build();
         try {
-            HealthModule module = new HealthModule(tunnel);
+            HealthModule module = new HealthModule(tunnel, false);
 
             assertEquals(HealthModule.ID, module.id());
             assertEquals("health", module.id());
@@ -44,6 +45,28 @@ class HealthModuleTest {
             assertEquals(expected, module.capabilities());
             assertEquals(Collections.emptySet(), module.roles(),
                     "health (and therefore status) runs under every role");
+        } finally {
+            tunnel.shutdown();
+        }
+    }
+
+    @Test
+    @DisplayName("vanish@1 is declared only by a platform that can see vanish state")
+    void vanishIsDeclaredOnlyWhenTheFlagIsSet() {
+        executors = new HeimdallExecutors(logger, 1);
+        TunnelClient tunnel = TunnelClient.builder(logger, executors).build();
+        try {
+            assertFalse(new HealthModule(tunnel, false).capabilities().contains(Capabilities.VANISH),
+                    "a proxy sends neither vanish key, so declaring the capability would tell the "
+                            + "bot that a row with no 'vanished' flag is a player everyone can see");
+
+            Set<String> expected = new LinkedHashSet<String>();
+            expected.add(Capabilities.HEALTH);
+            expected.add(Capabilities.STATUS);
+            expected.add(Capabilities.VANISH);
+            assertEquals(expected, new HealthModule(tunnel, true).capabilities());
+            assertEquals("vanish@1", Capabilities.VANISH,
+                    "the wire string is a contract with the bot, not an internal name");
         } finally {
             tunnel.shutdown();
         }

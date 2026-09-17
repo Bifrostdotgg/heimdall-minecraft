@@ -143,7 +143,7 @@ final class BukkitBootstrap {
                 .bootstrapStore(store)
                 .identitySource(new BukkitIdentitySource(role, startedAtMs))
                 .commandLabel("hd")
-                .healthSource(new BukkitHealthSource(ticks))
+                .healthSource(new BukkitHealthSource(logger, ticks))
                 .bedrockIdentityProvider(FloodgateIdentityProvider.create())
                 .build();
 

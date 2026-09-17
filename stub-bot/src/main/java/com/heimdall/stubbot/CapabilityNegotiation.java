@@ -45,6 +45,13 @@ final class CapabilityNegotiation {
      * config document, so nothing is ever pushed for them. {@code status} is the same shape: the
      * plugin advertises {@code status@1} on the health module, the bot accepts it, and no config
      * document has a {@code status} key.
+     *
+     * <p>{@code vanish} is the second of that shape, and the only entry here that is ahead of the
+     * bot rather than behind it: a Bukkit-family plugin declares {@code vanish@1} to say it can see
+     * who is hidden, and a bot that does not list it drops the capability silently and makes the
+     * plugin log "the bot does not support [vanish@1]" on every connect. It is listed so the stub
+     * keeps matching what a plugin built against this contract will meet in production; if the bot
+     * ever decides otherwise, this line is what has to move.
      */
     private static final Map<String, Integer> SUPPORTED_MAJORS;
 
@@ -64,6 +71,7 @@ final class CapabilityNegotiation {
         majors.put("console", 1);
         majors.put("health", 1);
         majors.put("status", 1);
+        majors.put("vanish", 1);
         majors.put("bridge", 1);
         majors.put("modules", 1);
         majors.put("config", 1);
