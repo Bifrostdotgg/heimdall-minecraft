@@ -1,13 +1,14 @@
 package com.heimdall.platform.bukkit;
 
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.tunnel.HealthSnapshotSource;
 import com.heimdall.platform.bukkit.adapter.TickSource;
 import com.heimdall.platform.common.JvmHealth;
 import com.heimdall.platform.common.StatusHealth;
 import java.io.File;
 import java.lang.reflect.Method;
-import java.util.Collection;
+import java.util.List;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
@@ -29,30 +30,42 @@ import org.bukkit.entity.Player;
  * cannot read. A bot reading a snapshot with no {@code vanishedPlayers} at all is talking to a proxy
  * or to an older jar, which is a different fact and is why {@code vanish@1} exists to say so.
  *
+ * <p><strong>The two player counts travel together or not at all.</strong> They come from one
+ * race-tolerant copy of the online list, because a bot subtracting one from the other to get a
+ * publishable figure would, given {@code onlinePlayers} alone, quietly publish a number that still
+ * includes hidden staff. Degrading to "the total, minus nothing" is the one degradation here that is
+ * worse than sending nothing, so when the copy cannot be taken both counts are dropped and only
+ * {@code maxPlayers} goes.
+ *
  * <p>Called on {@code heimdall-ws} every heartbeat, and reads only counters, a string getter, a
- * cached file and, for the vanish count, one pass over the online list - no Bukkit call here blocks
- * or needs the main thread. {@link TickSource} is what makes the tick figures optional; see it for
- * why Spigot cannot be asked directly.
+ * cached file and, for the vanish count, one pass over a copy of the online list - no Bukkit call
+ * here blocks or needs the main thread. {@link TickSource} is what makes the tick figures optional;
+ * see it for why Spigot cannot be asked directly.
  */
 final class BukkitHealthSource implements HealthSnapshotSource {
 
+    private final HeimdallLogger logger;
     private final TickSource ticks;
     private final MotdFaviconSource status;
     private final BukkitPlayerDirectory.RosterSource roster;
     private StatusHealth.IconFile iconCache;
 
-    BukkitHealthSource(TickSource ticks) {
-        this(ticks, LiveBukkitStatus.INSTANCE);
+    BukkitHealthSource(HeimdallLogger logger, TickSource ticks) {
+        this(logger, ticks, LiveBukkitStatus.INSTANCE);
     }
 
     /** Package-visible so tests can stub MOTD and the icon file without a running server. */
-    BukkitHealthSource(TickSource ticks, MotdFaviconSource status) {
-        this(ticks, status, LIVE_ROSTER);
+    BukkitHealthSource(HeimdallLogger logger, TickSource ticks, MotdFaviconSource status) {
+        this(logger, ticks, status, BukkitPlayerDirectory.LIVE);
     }
 
     /** And this one so they can stub the online list, which is the only way to count vanish. */
     BukkitHealthSource(
-            TickSource ticks, MotdFaviconSource status, BukkitPlayerDirectory.RosterSource roster) {
+            HeimdallLogger logger,
+            TickSource ticks,
+            MotdFaviconSource status,
+            BukkitPlayerDirectory.RosterSource roster) {
+        this.logger = logger;
         this.ticks = ticks;
         this.status = status;
         this.roster = roster;
@@ -71,28 +84,29 @@ final class BukkitHealthSource implements HealthSnapshotSource {
             builder.put("mspt", mspt.doubleValue());
         }
 
-        Collection<? extends Player> online = null;
+        // One copy, both counts. They have to describe the same instant and they have to travel
+        // together: a bot subtracting vanishedPlayers to get a publishable figure would, given
+        // onlinePlayers on its own, silently publish a number that still includes hidden staff. So
+        // the copy failing costs both of them rather than just the one that needed the walk.
+        List<Player> online = null;
         try {
-            online = roster.onlinePlayers();
+            online = BukkitPlayerDirectory.raceTolerantCopy(roster);
+        } catch (RuntimeException unavailable) {
+            // Either the server is not in a state to be asked at all, or five consecutive reads all
+            // raced. A one-tick gap in the dashboard's chart beats a one-tick leak, and the next
+            // heartbeat is seconds away.
+        }
+
+        try {
             if (online != null) {
                 builder.put("onlinePlayers", online.size());
+                builder.put("vanishedPlayers", BukkitVanish.count(logger, online));
             }
             builder.put("maxPlayers", Bukkit.getMaxPlayers());
         } catch (RuntimeException notReady) {
-            // Asked before the server has finished starting or while it is stopping. The counts are
-            // left out; the heartbeat still goes, which is what keeps the connection alive.
-        }
-
-        if (online != null) {
-            try {
-                builder.put("vanishedPlayers", BukkitVanish.count(online));
-            } catch (RuntimeException raced) {
-                // Its own block because it is the only read here that walks the live view rather
-                // than asking it for a number, so it is the only one a join or a quit can raise a
-                // ConcurrentModificationException out of. Sharing the block above would let that
-                // race cost the player counts as well, and one missing field on one heartbeat is a
-                // field the next tick supplies seconds later.
-            }
+            // Asked before the server has finished starting or while it is stopping. Whatever was
+            // already written stays; the heartbeat still goes, which is what keeps the connection
+            // alive.
         }
 
         String motd = "";
@@ -147,15 +161,6 @@ final class BukkitHealthSource implements HealthSnapshotSource {
         }
         return null;
     }
-
-    /** The server's own online list. Static on Bukkit, which is the whole reason for the seam. */
-    private static final BukkitPlayerDirectory.RosterSource LIVE_ROSTER =
-            new BukkitPlayerDirectory.RosterSource() {
-                @Override
-                public Collection<? extends Player> onlinePlayers() {
-                    return Bukkit.getOnlinePlayers();
-                }
-            };
 
     /** MOTD string and server-icon.png location. The live impl talks to Bukkit. */
     interface MotdFaviconSource {

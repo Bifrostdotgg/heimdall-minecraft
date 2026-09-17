@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.platform.bukkit.adapter.TickSource;
 import com.heimdall.platform.common.StatusHealth;
 import java.io.File;
@@ -19,6 +20,7 @@ import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
+import java.util.List;
 import org.bukkit.entity.Player;
 import org.bukkit.metadata.MetadataValue;
 import org.junit.jupiter.api.DisplayName;
@@ -43,6 +45,9 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class BukkitHealthSourceTest {
 
+    /** Debug on, so the vanish guard's log line is executed rather than skipped by a level check. */
+    private static final RecordingLogger LOGGER = new RecordingLogger(true);
+
     /** No MOTD and no icon, without a server to fail to read one from. */
     private static final BukkitHealthSource.MotdFaviconSource MISSING_STATUS =
             new BukkitHealthSource.MotdFaviconSource() {
@@ -59,7 +64,7 @@ class BukkitHealthSourceTest {
 
     /** A source reading a fixed roster. {@code maxPlayers} is still absent: that one needs a server. */
     private static BukkitHealthSource withRoster(final Player... online) {
-        return new BukkitHealthSource(TickSource.UNAVAILABLE, MISSING_STATUS,
+        return new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE, MISSING_STATUS,
                 new BukkitPlayerDirectory.RosterSource() {
                     @Override
                     public Collection<? extends Player> onlinePlayers() {
@@ -105,7 +110,7 @@ class BukkitHealthSourceTest {
     @Test
     @DisplayName("memory is always reported — it is a JVM question, not a server one")
     void memoryIsAlwaysThere() {
-        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot();
+        Payload snapshot = new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE).snapshot();
         assertTrue(snapshot.has("usedMemMb"));
         assertTrue(snapshot.has("maxMemMb"));
         assertTrue(snapshot.longValue("maxMemMb", 0L) > 0L, "a JVM always has a heap ceiling");
@@ -114,7 +119,7 @@ class BukkitHealthSourceTest {
     @Test
     @DisplayName("a server that cannot report a tick rate sends no tps field at all")
     void unavailableTicksAreOmitted() {
-        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot();
+        Payload snapshot = new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE).snapshot();
         assertFalse(snapshot.has("tps"), "an unmeasurable tps must be absent, never zero");
         assertFalse(snapshot.has("mspt"));
     }
@@ -122,7 +127,7 @@ class BukkitHealthSourceTest {
     @Test
     @DisplayName("a source with tps but no mspt sends one field, not two")
     void partialTicks() {
-        Payload snapshot = new BukkitHealthSource(ticks(19.98, null)).snapshot();
+        Payload snapshot = new BukkitHealthSource(LOGGER, ticks(19.98, null)).snapshot();
         assertEquals(19.98, snapshot.doubleValue("tps", -1.0), 0.0001);
         assertFalse(snapshot.has("mspt"), "old Paper reports tps and not mspt; say so by omission");
     }
@@ -130,7 +135,7 @@ class BukkitHealthSourceTest {
     @Test
     @DisplayName("both fields survive when both can be measured")
     void fullTicks() {
-        Payload snapshot = new BukkitHealthSource(ticks(20.0, 4.21)).snapshot();
+        Payload snapshot = new BukkitHealthSource(LOGGER, ticks(20.0, 4.21)).snapshot();
         assertEquals(20.0, snapshot.doubleValue("tps", -1.0), 0.0001);
         assertEquals(4.21, snapshot.doubleValue("mspt", -1.0), 0.0001);
     }
@@ -140,7 +145,7 @@ class BukkitHealthSourceTest {
     void withoutAServerTheCountsAreOmitted() {
         // The snapshot is taken on heimdall-ws every heartbeat. Throwing there costs the tick its
         // health AND its liveness refresh, so the counts are dropped instead.
-        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot();
+        Payload snapshot = new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE).snapshot();
         assertFalse(snapshot.has("onlinePlayers"));
         assertFalse(snapshot.has("maxPlayers"));
     }
@@ -148,7 +153,7 @@ class BukkitHealthSourceTest {
     @Test
     @DisplayName("no server behind it means no vanish count either")
     void withoutAServerTheVanishCountIsOmitted() {
-        assertFalse(new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot().has("vanishedPlayers"),
+        assertFalse(new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE).snapshot().has("vanishedPlayers"),
                 "a count nobody could take is absent, exactly like onlinePlayers beside it");
     }
 
@@ -173,27 +178,32 @@ class BukkitHealthSourceTest {
     }
 
     @Test
-    @DisplayName("a metadata value that throws counts as not vanished")
-    void aThrowingMetadataValueIsNotCounted() {
-        // The snapshot rides the heartbeat, and the heartbeat is this server's liveness signal. A
-        // third-party value throwing must not cost a tick its health frame.
-        Player explosive = mock(Player.class);
+    @DisplayName("a metadata value that throws counts the player as vanished")
+    void aThrowingMetadataValueIsCountedAsVanished() {
+        // Fail closed. This server declared vanish@1, so the bot reads an uncounted player as one it
+        // may publish; guessing "not vanished" leaks a hidden staff member, and guessing "vanished"
+        // costs one name off one refresh. Only the first mistake is irreversible.
         MetadataValue value = mock(MetadataValue.class);
         when(value.asBoolean()).thenThrow(new IllegalStateException("not my thread"));
-        when(explosive.getMetadata("vanished")).thenReturn(Collections.singletonList(value));
+        List<MetadataValue> values = Collections.singletonList(value);
+        Player explosive = mock(Player.class);
+        when(explosive.getMetadata("vanished")).thenReturn(values);
 
-        Payload snapshot = withRoster(explosive, player(true)).snapshot();
+        Payload snapshot = withRoster(explosive, player(true), player(false)).snapshot();
 
-        assertEquals(1, snapshot.intValue("vanishedPlayers", -1));
+        assertEquals(2, snapshot.intValue("vanishedPlayers", -1));
+        assertEquals(3, snapshot.intValue("onlinePlayers", -1));
         assertTrue(snapshot.has("usedMemMb"), "the rest of the snapshot still goes");
     }
 
     @Test
-    @DisplayName("a roster that races is still worth a snapshot, minus the one field")
-    void aRacingRosterKeepsTheOtherCounts() {
-        // Iterating the server's live view is the only read here a join or a quit can throw out of,
-        // which is why it is done last: the counts already on the builder survive it.
-        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE, MISSING_STATUS,
+    @DisplayName("a roster that keeps racing costs both counts, not just the vanish one")
+    void aRosterThatKeepsRacingSendsNeitherCount() {
+        // Five consecutive races is no longer a race. The important half is that onlinePlayers goes
+        // with it: a bot subtracting vanishedPlayers to get a publishable figure would, handed the
+        // total alone, publish a number that still includes hidden staff. A one-tick gap in the
+        // chart beats a one-tick leak.
+        Payload snapshot = new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE, MISSING_STATUS,
                 new BukkitPlayerDirectory.RosterSource() {
                     @Override
                     public Collection<? extends Player> onlinePlayers() {
@@ -211,16 +221,39 @@ class BukkitHealthSourceTest {
                     }
                 }).snapshot();
 
-        assertEquals(2, snapshot.intValue("onlinePlayers", -1));
-        assertFalse(snapshot.has("vanishedPlayers"),
-                "one missing field on one heartbeat is a field the next tick supplies seconds later");
+        assertFalse(snapshot.has("onlinePlayers"),
+                "the total on its own is the one degradation worse than sending nothing");
+        assertFalse(snapshot.has("vanishedPlayers"));
         assertTrue(snapshot.has("usedMemMb"));
+    }
+
+    @Test
+    @DisplayName("a single race is retried away and both counts still go")
+    void oneRaceIsRetriedAway() {
+        // A race needs a join or a quit inside the microseconds a copy takes, so the second attempt
+        // essentially always wins. Giving up on the first would drop the counts off a healthy server
+        // every time somebody logged in.
+        final int[] attempts = {0};
+        Payload snapshot = new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE, MISSING_STATUS,
+                new BukkitPlayerDirectory.RosterSource() {
+                    @Override
+                    public Collection<? extends Player> onlinePlayers() {
+                        if (attempts[0]++ == 0) {
+                            throw new ConcurrentModificationException("somebody joined");
+                        }
+                        return Arrays.asList(player(true), player(false));
+                    }
+                }).snapshot();
+
+        assertEquals(2, attempts[0], "the second attempt is the one that answered");
+        assertEquals(2, snapshot.intValue("onlinePlayers", -1));
+        assertEquals(1, snapshot.intValue("vanishedPlayers", -1));
     }
 
     @Test
     @DisplayName("without a server the MOTD is empty and the icon is missing")
     void withoutAServerStatusFieldsDegrade() {
-        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot();
+        Payload snapshot = new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE).snapshot();
         assertEquals("", snapshot.string("motdClean", "missing"));
         assertFalse(snapshot.has("motdRaw"));
         assertFalse(snapshot.has("iconPngBase64"));
@@ -235,7 +268,7 @@ class BukkitHealthSourceTest {
         byte[] png = "bukkit-icon".getBytes(StandardCharsets.US_ASCII);
         Files.write(icon.toPath(), png);
 
-        Payload snapshot = new BukkitHealthSource(ticks(20.0, 4.21), new BukkitHealthSource.MotdFaviconSource() {
+        Payload snapshot = new BukkitHealthSource(LOGGER, ticks(20.0, 4.21), new BukkitHealthSource.MotdFaviconSource() {
             @Override
             public String motd() {
                 return "\u00A7cHello \u00A7aWorld";
@@ -260,7 +293,7 @@ class BukkitHealthSourceTest {
     @Test
     @DisplayName("an unreadable stub MOTD still sends motdClean empty")
     void unreadMotdIsEmptyString() {
-        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE, new BukkitHealthSource.MotdFaviconSource() {
+        Payload snapshot = new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE, new BukkitHealthSource.MotdFaviconSource() {
             @Override
             public String motd() {
                 throw new IllegalStateException("not ready");
@@ -283,7 +316,7 @@ class BukkitHealthSourceTest {
         File icon = new File(dir, "server-icon.png");
         Files.write(icon.toPath(), new byte[StatusHealth.MAX_ICON_BYTES + 1]);
 
-        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE, new BukkitHealthSource.MotdFaviconSource() {
+        Payload snapshot = new BukkitHealthSource(LOGGER, TickSource.UNAVAILABLE, new BukkitHealthSource.MotdFaviconSource() {
             @Override
             public String motd() {
                 return "ok";
