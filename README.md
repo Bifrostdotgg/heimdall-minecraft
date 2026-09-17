@@ -199,9 +199,9 @@ dashboard until cleared (see [Admin Commands](#admin-commands)).
 | `offenses` | `/offend` and the escalation tiers the dashboard defines | every role | on |
 | `console` | Streams the server console to the dashboard and runs commands from it | every role | off — it streams every log line |
 | `bridge` | Relays Minecraft chat and join/leave/death into Discord, and mapped Discord channels back in-game | every role | on, and inert until channels are mapped |
-| `health` | The TPS/memory/player-count snapshots that ride the heartbeat | every role | on |
+| `health` | The TPS/memory/player-count snapshots that ride the heartbeat, including how many of those players are vanished | every role | on |
 
-Two notes worth having before you turn something on:
+Three notes worth having before you turn something on:
 
 - **The chat bridge stores nothing.** Chat passes through memory and is gone — there is no history,
   no buffer beyond a small bounded relay queue, and no log line anywhere carries a message. It also
@@ -225,6 +225,13 @@ Two notes worth having before you turn something on:
   - Deaths are the exception to any proxy-origin plan: no proxy has a death event, so those only
     ever come from backends.
   - Both take effect the moment you save — no restart, and no switching the module off and on.
+- **Vanished players are flagged, not hidden.** On a Bukkit-family server Heimdall marks anyone a
+  vanish plugin is hiding, in the player list it answers the dashboard with and as a count on the
+  health snapshot. It reads the `vanished` marker that EssentialsX, SuperVanish, PremiumVanish, CMI
+  and VanishNoPacket all set, so it needs no configuration and no extra plugin. It never drops those
+  players from the list it sends: whether a given person sees them is a permission on the Discord
+  side, which is the only side that knows who is asking. A proxy cannot see vanish state at all, so
+  a network running the plugin only on its BungeeCord or Velocity proxy reports nobody as hidden.
 
 ### WebSocket Tunnel
 

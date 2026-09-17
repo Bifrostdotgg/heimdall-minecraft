@@ -1835,6 +1835,45 @@ operator always can.
 a `serverId` it already knows is now being presented by a different one, without ever being told a
 hostname or a filesystem path.
 
+### D85 - vanish state is reported, never filtered, and only by a platform that can see it
+
+**v2:** nothing. A roster reply and a health snapshot said the same thing about a vanished staff
+member as about anybody else, so the dashboard's Online Players panel and every Discord-side player
+count published a hidden player to whoever was looking.
+**v3:** a Bukkit-family server adds `vanished: true` to the `player_list` rows it is true of, adds
+`vanishedPlayers` to each health snapshot, and declares `vanish@1` on `identify` to say it can see
+the difference.
+
+**The plugin reports; the bot decides.** Filtering here was the obvious design and is the wrong one:
+who may see a hidden player is a permission, permissions live on the bot, and the plugin has no idea
+who is about to read the answer it is building. A roster that dropped the row would have taken that
+decision in the one place with no way to make it, and taken it the same way for a server owner and
+for a stranger in a public channel.
+
+**The key is written only when it is true.** An explicit `vanished: false` would have been the same
+information and a worse wire: every bot built before this reads a row without the key exactly as it
+always did, and there is nothing new for an old one to ignore. `vanishedPlayers` is the deliberate
+exception to `HealthSnapshotSource`'s omit-what-you-cannot-measure rule, because zero hidden players
+is something the server measured, unlike a TPS a Spigot cannot read.
+
+**`vanish@1` is what makes the absence of the key readable.** "Nobody is hidden" and "this server
+cannot tell" are identical bytes - every row simply lacks the flag - and only one of them means the
+roster is safe to publish unfiltered. A proxy has no metadata store and no vanish plugin, so
+BungeeCord and Velocity declare nothing and send neither key;
+`PlayerDirectory.reportsVanish()` is the single question that decides it, defaulting to `false` so a
+platform that has not thought about vanish cannot claim to report it. `HealthModule` carries the
+capability for the same reason it carries `status@1`: it is a second thing the same jar can do, not a
+dashboard toggle of its own. The roster half is answered by core's request wiring rather than by the
+heartbeat, so it keeps working when health is switched off, and the capability describes the build
+either way.
+
+**No dependency on any vanish plugin.** EssentialsX, SuperVanish, PremiumVanish, CMI and
+VanishNoPacket all mark a hidden player with the same `vanished` metadata key, and every plugin that
+respects vanish reads exactly that. One read supports all five, and a soft-depend would have decided
+at load time which one an operator is allowed to use. A `MetadataValue` is the setting plugin's own
+object and `asBoolean()` runs its code on Heimdall's thread, so a throw counts as not vanished: the
+same answer a server with no vanish plugin gives, and the one that costs the reply nothing.
+
 ---
 
 ## Structure
