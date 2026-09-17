@@ -1870,9 +1870,34 @@ either way.
 **No dependency on any vanish plugin.** EssentialsX, SuperVanish, PremiumVanish, CMI and
 VanishNoPacket all mark a hidden player with the same `vanished` metadata key, and every plugin that
 respects vanish reads exactly that. One read supports all five, and a soft-depend would have decided
-at load time which one an operator is allowed to use. A `MetadataValue` is the setting plugin's own
-object and `asBoolean()` runs its code on Heimdall's thread, so a throw counts as not vanished: the
-same answer a server with no vanish plugin gives, and the one that costs the reply nothing.
+at load time which one an operator is allowed to use.
+
+**Every guess here fails closed, which is the opposite of the rest of this file.** A `MetadataValue`
+belongs to the plugin that set it and `asBoolean()` runs that plugin's code on Heimdall's thread, so
+it can throw. When it does, the player counts as vanished. The two outcomes are not symmetric: a
+server that declared `vanish@1` has told the bot it can see who is hidden, so an unflagged row reads
+as a player who may be published. Guessing "not vanished" leaks a hidden staff member into a Discord
+roster; guessing "vanished" costs one name off one refresh, and only the first is irreversible. The
+guess is also rare rather than routine, because `MetadataStoreBase.getMetadata` is synchronised and
+returns an empty list for a key nobody set: a server with no vanish plugin never reaches the catch,
+so "no vanish plugin" and "a vanish plugin whose value blew up" stay distinguishable.
+
+The same asymmetry decides the heartbeat. `onlinePlayers` and `vanishedPlayers` come from one
+race-tolerant copy of the online list and travel together or not at all, because a bot subtracting
+one from the other to get a publishable figure would, handed the total alone, publish a number that
+still includes hidden staff. When the copy cannot be taken - five consecutive races, or a server
+mid-start - both counts are dropped and only `maxPlayers` goes. A one-tick gap in the dashboard's
+chart beats a one-tick leak.
+
+**One residual risk, stated rather than papered over.** VanishNoPacket stores a `LazyMetadataValue`
+whose `asBoolean()` calls back into `VanishManager.isVanished`, which looks the player up through
+`getServer().getPlayer(name)`: a main-thread read, re-entered from the tunnel thread. Its own
+`VanishCheck` catches `Exception` and answers `false`, so a race there does not arrive as an
+exception Heimdall can fail closed on. It arrives as a clean "not vanished", and on a VanishNoPacket
+server a hidden player can therefore be reported unflagged for the one reply that lost that race.
+Closing it would mean hopping to the main thread for every roster row, which is exactly the blocking
+`BukkitPlayerDirectory` exists to avoid. The next refresh corrects it, and the heartbeat count is
+re-sent every tick.
 
 ---
 
