@@ -134,6 +134,11 @@ permissions:
     # /staffhistory only to holders of this node. Enforcement is unaffected - the
     # target still meets the ban screen - so what this gates is who knows.
     #
+    # It gates the chat line too. A hidden punishment is forced silent, and the
+    # silent audience is heimdall.punishments.notify, which is exactly the staff a
+    # hidden row is being kept from - so a hidden announcement goes to holders of
+    # THIS node and nobody else, prefixed (hidden).
+    #
     # Deliberately NOT a child of heimdall.admin, unlike notify and silent.
     # Keeping a moderation record from the rest of the staff team is a stronger
     # act than administering the plugin, and a server granting the admin node has

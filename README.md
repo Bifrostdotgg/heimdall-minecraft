@@ -318,8 +318,14 @@ Three more decide who hears about a punishment, rather than only who may issue o
   who can hide a punishment and then cannot find it again is worse than either. A hidden punishment
   is enforced exactly like any other - the target meets the same ban or mute screen - but it is kept
   out of in-game staff lookups for everybody else, and `-h` is refused without the node rather than
-  run as a visible punishment. Hidden implies silent, and this node alone is enough for that: the
-  `silent` override is not additionally required. Unlike `notify` and `silent` this is **not** implied
+  run as a visible punishment. The chat line follows the same rule: a hidden punishment (and the
+  lifting of one, and a hidden punishment arriving from the bot) is announced to holders of this
+  node **only**, prefixed `(hidden)` - not to `heimdall.punishments.notify`, which is the staff
+  audience the row is being kept from. `-p` cannot publish the lifting of a hidden ban, and the
+  "tried to edit a sign while muted" staff notice narrows to this node when the mute is hidden.
+  `-h` is refused on `/unban`, `/unmute`, `/unwarn` and `/rollback`: whether lifting a punishment is
+  hidden is a fact about the row being lifted. Hidden implies silent, and this node alone is enough
+  for that: the `silent` override is not additionally required. Unlike `notify` and `silent` this is **not** implied
   by `heimdall.admin`, because keeping a record from the rest of the staff team is not the same
   decision as administering the plugin
 - `heimdall.punishments.silent` - override the guild's `silentByDefault` setting with `-s` or `-p`
