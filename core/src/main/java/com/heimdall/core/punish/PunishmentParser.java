@@ -23,16 +23,23 @@ public final class PunishmentParser {
     public static final class Parsed {
         public final boolean silent;
         public final boolean publicFlag;
+        /**
+         * From {@code -h}. A hidden punishment is enforced as usual but kept out of in-game staff
+         * lookups, so it is always {@link #silent} as well - one flag cannot hide a punishment from
+         * the lookups while a chat line announces it.
+         */
+        public final boolean hidden;
         public final String target;
         public final Integer durationMinutes;
         public final String reason;
         /** From {@code --sender=}; hook/import may use it. Native /hd issue must ignore it. */
         public final String senderOverride;
 
-        Parsed(boolean silent, boolean publicFlag, String target, Integer durationMinutes,
-                String reason, String senderOverride) {
+        Parsed(boolean silent, boolean publicFlag, boolean hidden, String target,
+                Integer durationMinutes, String reason, String senderOverride) {
             this.silent = silent;
             this.publicFlag = publicFlag;
+            this.hidden = hidden;
             this.target = target;
             this.durationMinutes = durationMinutes;
             this.reason = reason;
@@ -46,19 +53,23 @@ public final class PunishmentParser {
      * <p>Its own type because the revoke verbs need exactly this and nothing more:
      * {@code /unban Steve 3d ban evasion} has no duration, so running it through {@link #parse}
      * would swallow {@code 3d} as one and hand back a truncated reason. One place decides how
-     * {@code -s}, {@code -p} and {@code --sender=} are spelled, and two callers read it
+     * {@code -s}, {@code -p}, {@code -h} and {@code --sender=} are spelled, and two callers read it
      * differently on purpose.
      */
     public static final class Flags {
         public final boolean silent;
         public final boolean publicFlag;
+        /** From {@code -h}; implies {@link #silent}. */
+        public final boolean hidden;
         public final String senderOverride;
         /** Every argument that was not an option, in order. */
         public final List<String> rest;
 
-        Flags(boolean silent, boolean publicFlag, String senderOverride, List<String> rest) {
+        Flags(boolean silent, boolean publicFlag, boolean hidden, String senderOverride,
+                List<String> rest) {
             this.silent = silent;
             this.publicFlag = publicFlag;
+            this.hidden = hidden;
             this.senderOverride = senderOverride;
             this.rest = rest;
         }
@@ -68,10 +79,11 @@ public final class PunishmentParser {
     public static Flags flags(List<String> args) {
         boolean silent = false;
         boolean pub = false;
+        boolean hidden = false;
         String senderOverride = null;
         List<String> rest = new ArrayList<String>();
         if (args == null) {
-            return new Flags(false, false, null, rest);
+            return new Flags(false, false, false, null, rest);
         }
         for (String raw : args) {
             if (raw == null) continue;
@@ -84,13 +96,20 @@ public final class PunishmentParser {
                 pub = true;
                 continue;
             }
+            if ("-h".equalsIgnoreCase(token)) {
+                // Hidden implies silent here rather than at the call sites, so no caller can read
+                // one without the other and announce a punishment it is also hiding from lookups.
+                hidden = true;
+                silent = true;
+                continue;
+            }
             if (token.length() > 9 && token.toLowerCase(Locale.ROOT).startsWith("--sender=")) {
                 senderOverride = token.substring(9);
                 continue;
             }
             rest.add(token);
         }
-        return new Flags(silent, pub, senderOverride, rest);
+        return new Flags(silent, pub, hidden, senderOverride, rest);
     }
 
     public static Parsed parse(List<String> args) {
@@ -100,6 +119,7 @@ public final class PunishmentParser {
         Flags options = flags(args);
         boolean silent = options.silent;
         boolean pub = options.publicFlag;
+        boolean hidden = options.hidden;
         String senderOverride = options.senderOverride;
         List<String> rest = options.rest;
         if (rest.isEmpty()) {
@@ -113,7 +133,7 @@ public final class PunishmentParser {
             reasonFrom = 2;
         }
         String reason = join(rest, reasonFrom);
-        return new Parsed(silent, pub, target, duration, reason, senderOverride);
+        return new Parsed(silent, pub, hidden, target, duration, reason, senderOverride);
     }
 
     public static boolean looksLikeDuration(String token) {

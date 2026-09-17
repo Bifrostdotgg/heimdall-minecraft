@@ -265,13 +265,28 @@ public final class ApiClient {
     public CompletableFuture<JsonObject> issuePunishment(
             String type, String uuid, String name, String reason, Integer durationMinutes,
             boolean silent, String issuerUuid, String issuerName) {
+        return issuePunishment(type, uuid, name, reason, durationMinutes, silent, false,
+                issuerUuid, issuerName);
+    }
+
+    /**
+     * {@code POST punishments}, with {@code hidden}.
+     *
+     * <p>A hidden punishment is kept out of in-game staff lookups; the bot forces
+     * {@code silent} when it sees it, and the caller is expected to have forced it too, so the
+     * two agree on the wire rather than only after the bot has corrected one of them.
+     */
+    public CompletableFuture<JsonObject> issuePunishment(
+            String type, String uuid, String name, String reason, Integer durationMinutes,
+            boolean silent, boolean hidden, String issuerUuid, String issuerName) {
         JsonObject body = new JsonObject();
         body.addProperty("type", type);
         if (uuid != null) body.addProperty("targetUuid", uuid);
         if (name != null) body.addProperty("targetName", name);
         body.addProperty("reason", reason == null ? "" : reason);
         if (durationMinutes != null) body.addProperty("durationMinutes", durationMinutes);
-        body.addProperty("silent", silent);
+        body.addProperty("silent", silent || hidden);
+        body.addProperty("hidden", hidden);
         body.addProperty("source", "command");
         if (issuerUuid != null) body.addProperty("issuedByUuid", issuerUuid);
         if (issuerName != null) body.addProperty("issuedByName", issuerName);
@@ -355,6 +370,19 @@ public final class ApiClient {
 
     public CompletableFuture<RawResponse> listPunishments(
             String type, String uuid, Boolean active, int limit) {
+        return listPunishments(type, uuid, active, limit, false);
+    }
+
+    /**
+     * {@code GET punishments}, optionally asking for hidden rows as well.
+     *
+     * <p>{@code includeHidden} is sent only when it is true, and only ever because the player who
+     * typed the lookup holds {@code heimdall.punishments.hidden}. Omitted, the bot leaves hidden
+     * rows out, which is also what an older bot that has never heard of the flag does - so the
+     * parameter can only ever widen an answer, never accidentally be the thing that hides one.
+     */
+    public CompletableFuture<RawResponse> listPunishments(
+            String type, String uuid, Boolean active, int limit, boolean includeHidden) {
         return async(() -> {
             ApiSettings current = settings;
             StringBuilder path = new StringBuilder("punishments?limit=");
@@ -368,20 +396,31 @@ public final class ApiClient {
             if (active != null) {
                 path.append("&active=").append(active.booleanValue());
             }
+            if (includeHidden) {
+                path.append("&includeHidden=true");
+            }
             return requests.execute(current,
                     HttpCall.get(guildPath(current, path.toString()), current.timeoutMs()));
         });
     }
 
     public CompletableFuture<RawResponse> playerPunishments(String uuid) {
+        return playerPunishments(uuid, false);
+    }
+
+    /** {@code GET punishments/player/:uuid}, optionally asking for hidden rows as well. */
+    public CompletableFuture<RawResponse> playerPunishments(String uuid, boolean includeHidden) {
         if (Strings.isBlank(uuid)) {
             throw new IllegalArgumentException("uuid is required");
         }
         return async(() -> {
             ApiSettings current = settings;
+            String path = "punishments/player/" + encodePath(uuid.trim());
+            if (includeHidden) {
+                path = path + "?includeHidden=true";
+            }
             return requests.execute(current,
-                    HttpCall.get(guildPath(current, "punishments/player/" + encodePath(uuid.trim())),
-                            current.timeoutMs()));
+                    HttpCall.get(guildPath(current, path), current.timeoutMs()));
         });
     }
 

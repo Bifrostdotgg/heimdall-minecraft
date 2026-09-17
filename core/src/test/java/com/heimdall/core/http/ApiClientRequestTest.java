@@ -227,6 +227,58 @@ class ApiClientRequestTest {
         }
 
         @Test
+        @DisplayName("an issued punishment carries hidden, and hidden forces silent on the wire")
+        void issueCarriesHidden() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"id\":\"mongo-1\"}}");
+
+            await(client.issuePunishment("ban", UUID, "Steve", "alting", null, false, true,
+                    null, "Adam"));
+
+            JsonObject sent = bodyOf(server.lastRequest());
+            assertTrue(sent.get("hidden").getAsBoolean());
+            assertTrue(sent.get("silent").getAsBoolean(),
+                    "a hidden punishment announced in chat would defeat itself, so the two fields "
+                            + "agree before the bot has to correct either of them");
+        }
+
+        @Test
+        @DisplayName("a punishment issued without the flag says so rather than leaving it to a default")
+        void issueSaysNotHidden() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"id\":\"mongo-1\"}}");
+
+            await(client.issuePunishment("ban", UUID, "Steve", "griefing", null, false,
+                    null, "Adam"));
+
+            JsonObject sent = bodyOf(server.lastRequest());
+            assertFalse(sent.get("hidden").getAsBoolean());
+            assertFalse(sent.get("silent").getAsBoolean());
+        }
+
+        @Test
+        @DisplayName("includeHidden appears on a lookup only when it was asked for")
+        void lookupsOnlyAskForHiddenWhenTold() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"punishments\":[]}}");
+            await(client.playerPunishments(UUID));
+            assertFalse(server.lastRequest().path.contains("includeHidden"),
+                    server.lastRequest().path);
+
+            server.respond(200, "{\"success\":true,\"data\":{\"punishments\":[]}}");
+            await(client.playerPunishments(UUID, true));
+            assertTrue(server.lastRequest().path.endsWith("?includeHidden=true"),
+                    server.lastRequest().path);
+
+            server.respond(200, "{\"success\":true,\"data\":{\"punishments\":[]}}");
+            await(client.listPunishments("ban", null, Boolean.TRUE, 50, true));
+            assertTrue(server.lastRequest().path.contains("includeHidden=true"),
+                    server.lastRequest().path);
+            assertTrue(Hmac.verify(SECRET, "GET", server.lastRequest().path, "",
+                    server.lastRequest().header("X-Signature"),
+                    server.lastRequest().header("X-Timestamp")),
+                    "the parameter is inside the signed path, so a bot verifying the signature "
+                            + "cannot be handed a widened lookup by a rewriting proxy");
+        }
+
+        @Test
         @DisplayName("a GET signs over the empty-body hash")
         void getRequestsAreSignedToo() throws Exception {
             server.respond(200, "{\"success\":true,\"data\":[]}");
