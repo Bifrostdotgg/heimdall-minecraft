@@ -251,7 +251,7 @@ revoke verbs and the lookups. In `replace` mode they are also registered as root
 `/tempban`, ...) when `rootAliases` is on, and both spellings behave identically.
 
 ```
-/hd ban <player> [duration] [reason] [-s|-p]
+/hd ban <player> [duration] [reason] [-s|-p] [-h]
 ```
 
 **The duration can be anywhere after the player, and so can the flags.** The first whole token
@@ -288,11 +288,14 @@ is a common way to spell "forever" there; the server log records the length that
 
 **Tab completion** offers player names at the target position - everyone online first, then
 everyone this server has seen or punished - the flags after a `-`, and, on the verbs that have a
-length, a short duration list once a player is named. Each flag is offered only to a sender who may
-use it: `-s` and `-p` need `heimdall.punishments.silent`, `-h` needs
-`heimdall.punishments.hidden`. `/hd unban`, `/hd unmute` and `/hd unwarn` only offer players who
-actually have one of those to lift, and a hidden punishment is a candidate only for a holder of the
-hidden node: offering the name to anybody else would disclose the punishment the flag hides.
+length, a short duration list once a player is named. A flag is offered only where it would
+actually be accepted, which is a question about the node **and** about the verb: `-s` and `-p` need
+`heimdall.punishments.silent` and work on the issuing and revoke verbs alike, `-h` needs
+`heimdall.punishments.hidden` and is issue-only (a revoke reads hidden off the row it lifts, so
+`/hd unban -h` is refused), and the lookups take no flags at all. `/hd unban`, `/hd unmute` and
+`/hd unwarn` only offer players who actually have one of those to lift, and a hidden punishment is
+a candidate only for a holder of the hidden node: offering the name to anybody else would disclose
+the punishment the flag hides.
 
 **The screens** a punished player sees, and the two chat lines a punishment is announced with, are
 MiniMessage templates edited on the dashboard's Minecraft page, not in any file here. They carry
