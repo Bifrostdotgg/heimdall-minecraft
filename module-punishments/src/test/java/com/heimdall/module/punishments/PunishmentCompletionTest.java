@@ -244,6 +244,65 @@ class PunishmentCompletionTest {
     }
 
     @Test
+    @DisplayName("-h is issue-only, so a revoke verb does not offer it even to the node")
+    void hiddenFlagIsNotOfferedOnRevokeVerbs() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            FakeCommandSource both = FakeCommandSource.player("Both")
+                    .grant(SilenceDecision.OVERRIDE_PERMISSION)
+                    .grant(HiddenPunishments.PERMISSION);
+
+            for (String verb : Arrays.asList("unban", "unmute", "unwarn", "rollback")) {
+                assertEquals(Arrays.asList("-s", "-p"),
+                        harness.module.complete(both, verb, Arrays.asList("-")),
+                        verb + " refuses -h with a sentence, so completing it is a lie the sender "
+                                + "has every reason to read as a bug: they do hold the node");
+                assertEquals(Collections.emptyList(),
+                        harness.module.complete(both, verb, Arrays.asList("-h")));
+            }
+            assertEquals(Arrays.asList("-s", "-p", "-h"),
+                    harness.module.complete(both, "ban", Arrays.asList("-")),
+                    "and the issuing verbs are unchanged by the narrowing");
+        }
+    }
+
+    @Test
+    @DisplayName("a lookup takes no flags, so none are offered however many nodes are held")
+    void lookupVerbsOfferNoFlags() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            FakeCommandSource both = FakeCommandSource.player("Both")
+                    .grant(SilenceDecision.OVERRIDE_PERMISSION)
+                    .grant(HiddenPunishments.PERMISSION);
+
+            for (String verb : Arrays.asList("history", "banlist", "staffhistory", "dupeip",
+                    "iphistory")) {
+                assertEquals(Collections.emptyList(),
+                        harness.module.complete(both, verb, Arrays.asList("-")),
+                        verb + " reads; none of -s, -p or -h means anything to a read, and the "
+                                + "lookup path drops them");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("the -h offer follows the node on an issuing verb, and only the node")
+    void hiddenFlagFollowsTheNodeOnIssuingVerbs() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            FakeCommandSource hider = FakeCommandSource.player("Hider")
+                    .grant(HiddenPunishments.PERMISSION);
+
+            for (String verb : Arrays.asList("ban", "tempban", "ipban", "mute", "kick", "warn")) {
+                assertEquals(Arrays.asList("-h"),
+                        harness.module.complete(hider, verb, Arrays.asList("-")), verb);
+                assertFalse(complete(harness, verb, "-").contains("-h"),
+                        verb + " must not offer -h to the silence override alone");
+            }
+        }
+    }
+
+    @Test
     @DisplayName("-h does not move the target either, or the reason takes the name")
     void hiddenFlagDoesNotMoveTheTarget() {
         try (PunishmentsHarness harness = replacing()) {

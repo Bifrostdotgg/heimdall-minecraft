@@ -462,11 +462,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * <h2>What is offered where</h2>
      *
      * <ul>
-     *   <li>A word starting with {@code -} completes the flags, and each one only for a sender
-     *       who may use it: {@code -s} and {@code -p} need the silence override, {@code -h} needs
-     *       {@link HiddenPunishments#PERMISSION}, and neither node implies the other. Offering
-     *       {@code -s} to somebody the command will then refuse is a worse answer than offering
-     *       nothing.
+     *   <li>A word starting with {@code -} completes the flags, and each one only where it would
+     *       actually be accepted - by node and by verb both. {@code -s} and {@code -p} need the
+     *       silence override and work on issue and revoke verbs alike; {@code -h} needs
+     *       {@link HiddenPunishments#PERMISSION} and is issue-only, because a revoke reads hidden
+     *       off the row it lifts. A lookup takes no flags. Offering one the command will then
+     *       refuse is a worse answer than offering nothing.
      *   <li>The target position completes names. For {@code unban}, {@code unmute} and
      *       {@code unwarn} only players with an active punishment of that family, because a name
      *       with nothing to lift is never the answer.
@@ -488,7 +489,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String partial = args.isEmpty() ? "" : args.get(args.size() - 1);
         if (partial == null) partial = "";
         if (partial.startsWith("-")) {
-            return flagSuggestions(source, partial);
+            return flagSuggestions(source, verb, partial);
         }
         if ("banlist".equals(verb)) {
             return Collections.emptyList();
@@ -527,18 +528,53 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 || token.toLowerCase(Locale.ROOT).startsWith("--sender=");
     }
 
-    private static List<String> flagSuggestions(CommandSource source, String partial) {
+    /**
+     * The flags this sender may use <em>on this verb</em>, which is two questions rather than one.
+     *
+     * <p><strong>The node is not the whole answer.</strong> A holder of
+     * {@link HiddenPunishments#PERMISSION} may use {@code -h}, but not on {@code /unban}: whether
+     * lifting a punishment is hidden is a fact about the row being lifted, and
+     * {@link #onStaffCommand} refuses the flag there in one sentence. Offering it anyway is the
+     * same lie as offering {@code -s} to somebody without the silence override - a suggestion the
+     * command then rejects - and it is worse here, because the sender does hold the node and has
+     * no reason to read the refusal as anything but a bug.
+     *
+     * <p>A lookup takes no flags at all. {@code /history}, {@code /banlist}, {@code /staffhistory},
+     * {@code /dupeip} and {@code /iphistory} read; none of {@code -s}, {@code -p} or {@code -h}
+     * means anything to a read, and {@link #lookup} drops them on the floor.
+     *
+     * <p>{@code -s} and {@code -p} <em>do</em> survive on a revoke verb, because the revoke path
+     * honours them: they override the silence the lifted row defaults to. Only {@code -h} is the
+     * issue-only one.
+     */
+    private static List<String> flagSuggestions(CommandSource source, String verb, String partial) {
+        if (isLookup(verb)) {
+            return Collections.emptyList();
+        }
         List<String> offered = new ArrayList<String>();
         if (mayOverrideSilence(source)) {
             offered.addAll(SILENCE_FLAGS);
         }
-        if (maySeeHidden(source)) {
+        if (maySeeHidden(source) && !isRevokeVerb(verb)) {
             offered.addAll(HIDDEN_FLAGS);
         }
         if (offered.isEmpty()) {
             return Collections.emptyList();
         }
         return prefixed(offered, partial);
+    }
+
+    /**
+     * The verbs that lift a punishment rather than issue one.
+     *
+     * <p>The same four {@link #onStaffCommand} routes down the revoke path, written once so the
+     * completer and the command cannot disagree about which verbs refuse {@code -h}.
+     * {@link #revokeFamily} is the wrong question: it answers {@code null} for {@code rollback},
+     * which is a revoke verb, and answers {@code "ban"} for {@code ban}, which is not.
+     */
+    static boolean isRevokeVerb(String verb) {
+        return "unban".equals(verb) || "unmute".equals(verb) || "unwarn".equals(verb)
+                || "rollback".equals(verb);
     }
 
     /**
