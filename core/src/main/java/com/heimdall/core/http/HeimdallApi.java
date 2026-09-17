@@ -187,12 +187,24 @@ public final class HeimdallApi {
 
     public CompletableFuture<Payload> listPunishments(
             final String type, final String uuid, final Boolean active) {
-        return gated(() -> client.listPunishments(type, uuid, active, 200)
+        return listPunishments(type, uuid, active, false);
+    }
+
+    /** @param includeHidden only ever true for a reader holding {@code heimdall.punishments.hidden} */
+    public CompletableFuture<Payload> listPunishments(
+            final String type, final String uuid, final Boolean active, final boolean includeHidden) {
+        return gated(() -> client.listPunishments(type, uuid, active, 200, includeHidden)
                 .thenApply(HeimdallApi::unwrapPayload));
     }
 
     public CompletableFuture<Payload> playerPunishments(final String uuid) {
-        return gated(() -> client.playerPunishments(uuid).thenApply(HeimdallApi::unwrapPayload));
+        return playerPunishments(uuid, false);
+    }
+
+    /** @param includeHidden only ever true for a reader holding {@code heimdall.punishments.hidden} */
+    public CompletableFuture<Payload> playerPunishments(final String uuid, final boolean includeHidden) {
+        return gated(() -> client.playerPunishments(uuid, includeHidden)
+                .thenApply(HeimdallApi::unwrapPayload));
     }
 
     public CompletableFuture<Boolean> importPunishmentRows(final java.util.List<PunishmentImportRow> rows) {

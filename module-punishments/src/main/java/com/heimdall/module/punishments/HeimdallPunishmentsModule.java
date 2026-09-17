@@ -20,6 +20,7 @@ import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.platform.PlayerHandle;
+import com.heimdall.core.punish.HiddenPunishments;
 import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
@@ -96,6 +97,16 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     /** The two silence options, completed only for a sender allowed to use them. */
     private static final List<String> SILENCE_FLAGS = Collections.unmodifiableList(
             Arrays.asList("-s", "-p"));
+
+    /**
+     * The hidden option, completed only for a holder of {@link HiddenPunishments#PERMISSION}.
+     *
+     * <p>Its own list rather than an entry in {@link #SILENCE_FLAGS}, because the two are gated on
+     * different nodes and neither implies the other: a moderator may be allowed to announce a
+     * silent ban loudly without being allowed to keep one from the rest of the staff.
+     */
+    private static final List<String> HIDDEN_FLAGS = Collections.unmodifiableList(
+            Arrays.asList("-h"));
 
     private volatile ModuleContext context;
     private volatile MirrorStore<ActivePunishment> mirror;
@@ -417,7 +428,13 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             if (family == null || p.targetName == null) continue;
             Long ends = p.expiresAtMillis();
             if (ends != null && ends.longValue() <= System.currentTimeMillis()) continue;
-            rebuilt.add(family, p.targetName, ends == null ? KnownNames.NEVER : ends.longValue());
+            long endsAt = ends == null ? KnownNames.NEVER : ends.longValue();
+            rebuilt.add(family, p.targetName, endsAt);
+            // A hidden row lands in the full family only, so completion for a reader without the
+            // node never offers a name whose only punishment they may not know about.
+            if (!p.hidden) {
+                rebuilt.add(KnownNames.visible(family), p.targetName, endsAt);
+            }
         }
         names.install(rebuilt);
     }
@@ -434,8 +451,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      *
      * <h2>Position is counted in non-flag tokens</h2>
      *
-     * <p>{@code -s} and {@code -p} are accepted anywhere, so "the target" cannot be "the first
-     * argument" - {@code /ban -s Ste} with a tab after it is still completing a name. The flags
+     * <p>{@code -s}, {@code -p} and {@code -h} are accepted anywhere, so "the target" cannot be
+     * "the first argument" - {@code /ban -s Ste} with a tab after it is still completing a name.
+     * The flags
      * are dropped and the remaining words counted, which is the same rule
      * {@link com.heimdall.core.punish.PunishmentParser} applies when the command actually runs. A
      * completer that disagreed with the parser about which word is the target would suggest names
@@ -444,9 +462,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * <h2>What is offered where</h2>
      *
      * <ul>
-     *   <li>A word starting with {@code -} completes the flags, and only for a sender who may use
-     *       them. Offering {@code -s} to somebody the command will then refuse is a worse answer
-     *       than offering nothing.
+     *   <li>A word starting with {@code -} completes the flags, and each one only for a sender
+     *       who may use it: {@code -s} and {@code -p} need the silence override, {@code -h} needs
+     *       {@link HiddenPunishments#PERMISSION}, and neither node implies the other. Offering
+     *       {@code -s} to somebody the command will then refuse is a worse answer than offering
+     *       nothing.
      *   <li>The target position completes names. For {@code unban}, {@code unmute} and
      *       {@code unwarn} only players with an active punishment of that family, because a name
      *       with nothing to lift is never the answer.
@@ -484,7 +504,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             }
         }
         if (typedBefore == 0) {
-            return names.matching(partial, COMPLETION_LIMIT, targetFilter(verb));
+            return names.matching(partial, COMPLETION_LIMIT, targetFilter(verb, source));
         }
         if (durationTyped || !takesDuration(verb)) {
             return Collections.emptyList();
@@ -492,18 +512,33 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         return prefixed(DURATION_SUGGESTIONS, partial);
     }
 
-    /** Whether a token is one of the options rather than a word of the command. */
+    /**
+     * Whether a token is one of the options rather than a word of the command.
+     *
+     * <p>Every spelling {@link com.heimdall.core.punish.PunishmentParser#flags} strips, and for
+     * the reason in the completion javadoc: a flag this did not recognise would be counted as the
+     * target, so {@code /ban -h Ste} with a tab after it would offer durations instead of names
+     * while the parser went on treating {@code Ste} as the target.
+     */
     private static boolean isFlag(String token) {
         return "-s".equalsIgnoreCase(token)
                 || "-p".equalsIgnoreCase(token)
+                || "-h".equalsIgnoreCase(token)
                 || token.toLowerCase(Locale.ROOT).startsWith("--sender=");
     }
 
     private static List<String> flagSuggestions(CommandSource source, String partial) {
-        if (!mayOverrideSilence(source)) {
+        List<String> offered = new ArrayList<String>();
+        if (mayOverrideSilence(source)) {
+            offered.addAll(SILENCE_FLAGS);
+        }
+        if (maySeeHidden(source)) {
+            offered.addAll(HIDDEN_FLAGS);
+        }
+        if (offered.isEmpty()) {
             return Collections.emptyList();
         }
-        return prefixed(SILENCE_FLAGS, partial);
+        return prefixed(offered, partial);
     }
 
     /**
@@ -552,14 +587,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * for an allocation the size of every active punishment, still per keystroke, to answer at
      * most {@link PunishmentAdmin#COMPLETION_LIMIT} questions of it.
      */
-    private Predicate<String> targetFilter(String verb) {
+    private Predicate<String> targetFilter(String verb, CommandSource source) {
         String family = revokeFamily(verb);
         if (family == null || !verb.startsWith("un")) {
             // Only the three revoke verbs filter. An issue verb takes anybody, and rollback takes
             // whoever has anything at all, which is what "every known name" already means.
             return null;
         }
-        return names.withActive(family, System.currentTimeMillis());
+        // A reader without the hidden node reads the visible half of the family. Offering a name
+        // whose only ban is hidden discloses the ban, and submitRevoke would then refuse the
+        // command it had just suggested. See KnownNames#visible.
+        String read = maySeeHidden(source) ? family : KnownNames.visible(family);
+        return names.withActive(read, System.currentTimeMillis());
     }
 
     /**
@@ -604,20 +643,31 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (family == null || uuid == null || name == null || name.isEmpty()) return;
         List<ActivePunishment> live = activeOf(uuid, familyTypes(family));
         long latest = 0L;
+        long latestVisible = 0L;
         for (int i = 0; i < live.size(); i++) {
-            Long ends = live.get(i).expiresAtMillis();
-            if (ends == null) {
-                latest = KnownNames.NEVER;
-                break;
+            ActivePunishment row = live.get(i);
+            Long ends = row.expiresAtMillis();
+            long endsAt = ends == null ? KnownNames.NEVER : ends.longValue();
+            if (endsAt > latest) {
+                latest = endsAt;
             }
-            if (ends.longValue() > latest) {
-                latest = ends.longValue();
+            // The visible half counts only the rows an ordinary reader is allowed to know about,
+            // so a player whose one ban is hidden is a candidate for a node holder and for nobody
+            // else. See KnownNames#visible.
+            if (!row.hidden && endsAt > latestVisible) {
+                latestVisible = endsAt;
             }
         }
-        if (latest <= 0L) {
-            names.unpunished(family, name);
+        write(family, name, latest);
+        write(KnownNames.visible(family), name, latestVisible);
+    }
+
+    /** One family key, set to the latest end or cleared when nothing is left in it. */
+    private void write(String familyKey, String name, long latestEnd) {
+        if (latestEnd <= 0L) {
+            names.unpunished(familyKey, name);
         } else {
-            names.punished(family, name, latest);
+            names.punished(familyKey, name, latestEnd);
         }
     }
 
@@ -654,6 +704,15 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             PunishmentParser.Flags options = PunishmentParser.flags(args);
             if (options.rest.isEmpty()) {
                 source.sendMessage(Msg.legacy("§cUsage: /" + type + " <player> [reason]"));
+                return;
+            }
+            // Rejected rather than ignored, and rejected before the silence it implies can be read.
+            // There is nothing for -h to mean here: whether lifting a punishment is hidden is a
+            // fact about the row being lifted. Letting the flag through would silently mean -s, and
+            // could then refuse the command for a silence override the sender never asked for.
+            if (options.hidden) {
+                source.sendMessage(Msg.legacy(
+                        "§c-h only applies when issuing a punishment."));
                 return;
             }
             // The flags travel rather than being resolved here: a revoke's default is the
@@ -698,12 +757,26 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String issueType = type;
         if ("tempban".equals(type)) issueType = "ban";
         if ("tempmute".equals(type)) issueType = "mute";
-        SilenceDecision decision = silence(source, parsed.silent, parsed.publicFlag, settings);
-        if (decision.refused()) {
-            source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
+        if (parsed.hidden && !source.hasPermission(HiddenPunishments.PERMISSION)) {
+            source.sendMessage(Msg.legacy("§c" + HiddenPunishments.REFUSAL_MESSAGE));
             return;
         }
-        issue(source, issueType, parsed, decision.silent());
+        // Hidden takes the silence decision out of play rather than feeding a forced -s into it.
+        // Hidden implies silent, and the hidden node alone grants the stronger act, so running the
+        // implied silence through SilenceDecision would refuse a permitted sender for lacking the
+        // weaker node - and refuse them after they had already been allowed to hide the row.
+        boolean silent;
+        if (parsed.hidden) {
+            silent = true;
+        } else {
+            SilenceDecision decision = silence(source, parsed.silent, parsed.publicFlag, settings);
+            if (decision.refused()) {
+                source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
+                return;
+            }
+            silent = decision.silent();
+        }
+        issue(source, issueType, parsed, silent, parsed.hidden);
     }
 
     /**
@@ -731,22 +804,34 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 source.hasPermission(SilenceDecision.ADMIN_PERMISSION));
     }
 
+    /**
+     * Whether this reader is allowed to see hidden punishments at all.
+     *
+     * <p>One place, so the mirror-backed lookups and the bot-backed ones cannot disagree about who
+     * a hidden row exists for. Both halves need it: {@code /banlist} and the offline fallbacks read
+     * the local mirror, while {@code /history} and {@code /staffhistory} ask the bot, and the same
+     * answer has to gate the filter here and the {@code includeHidden} parameter there.
+     */
+    private static boolean maySeeHidden(CommandSource source) {
+        return source != null && source.hasPermission(HiddenPunishments.PERMISSION);
+    }
+
     private static boolean isLookup(String type) {
         return "history".equals(type) || "banlist".equals(type) || "staffhistory".equals(type)
                 || "dupeip".equals(type) || "iphistory".equals(type);
     }
 
     private void issue(final CommandSource source, final String type, final PunishmentParser.Parsed parsed,
-            final boolean silent) {
+            final boolean silent, final boolean hidden) {
         final ModuleContext ctx = this.context;
         final PlayerHandle online = ctx.platform().players().byName(parsed.target).orElse(null);
         if (online != null) {
-            submitIssue(source, type, online.uuid().toString(), online.name(), parsed, silent);
+            submitIssue(source, type, online.uuid().toString(), online.name(), parsed, silent, hidden);
             return;
         }
         LastIpStore.PlayerIps seen = lastIps == null ? null : lastIps.byName(parsed.target);
         if (seen != null) {
-            submitIssue(source, type, seen.uuid, seen.name, parsed, silent);
+            submitIssue(source, type, seen.uuid, seen.name, parsed, silent, hidden);
             return;
         }
         source.sendMessage(Msg.legacy("§eResolving §f" + parsed.target + "§e..."));
@@ -756,7 +841,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         + "§c. Offline never-seen names need the bot."));
                 return;
             }
-            submitIssue(source, type, resolved.uuid(), resolved.username(), parsed, silent);
+            submitIssue(source, type, resolved.uuid(), resolved.username(), parsed, silent, hidden);
         });
     }
 
@@ -769,7 +854,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * nothing observes it.
      */
     void submitIssue(CommandSource source, String type, String uuid, String name,
-            PunishmentParser.Parsed parsed, boolean silent) {
+            PunishmentParser.Parsed parsed, boolean silent, boolean hidden) {
         ModuleContext ctx = this.context;
         // Reached from inside the resolveName future as well as synchronously, so the module can
         // be disabled between the command and this. Every other context read in this file guards;
@@ -804,6 +889,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         local.ipDigest = ipDigest;
         local.reason = parsed.reason;
         local.silent = silent;
+        local.hidden = hidden;
         local.issuedAt = Instant.ofEpochMilli(now).toString();
         local.issuedByName = source.name();
         local.issuedByUuid = source.uuid() == null ? null : source.uuid().toString();
@@ -826,6 +912,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .put("targetName", name)
                 .put("reason", parsed.reason == null ? "" : parsed.reason)
                 .put("silent", silent)
+                .put("hidden", hidden)
                 .put("source", "command")
                 .put("opId", opId)
                 .put("issuedAt", now);
@@ -915,15 +1002,38 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         } else {
             matches = activeOf(uuid, revokeTypes(type));
         }
+        // A hidden row is not liftable by somebody it does not exist for. Lifting it would announce
+        // "Adam unbanned Steve" to a server that was never told about the ban, which is the
+        // disclosure hiding it was for, and it would tell the moderator who typed the command that
+        // a punishment they are not allowed to see is there.
+        if (!maySeeHidden(source)) {
+            List<ActivePunishment> visible = new ArrayList<ActivePunishment>();
+            for (int i = 0; i < matches.size(); i++) {
+                if (matches.get(i).hidden) continue;
+                visible.add(matches.get(i));
+            }
+            matches = visible;
+        }
         if (matches.isEmpty()) {
             source.sendMessage(Msg.legacy("§eNo active " + typeLabel(type) + " for §f" + name));
             return;
         }
-        SilenceDecision decision = SilenceDecision.decide(silentFlag, publicFlag,
-                matches.get(0).silent, mayOverrideSilence(source));
-        if (decision.refused()) {
-            source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
-            return;
+        // A hidden row takes the silence decision out of play, in the same way issuing one does.
+        // -p plus the silence override would otherwise publish "Adam unbanned Steve" to a server
+        // that was never told about the ban: the disclosure hiding it was for, made later and out
+        // of context. The flag is not refused, it simply cannot widen this.
+        boolean liftedHidden = anyHidden(matches);
+        boolean announceSilently;
+        if (liftedHidden) {
+            announceSilently = true;
+        } else {
+            SilenceDecision decision = SilenceDecision.decide(silentFlag, publicFlag,
+                    matches.get(0).silent, mayOverrideSilence(source));
+            if (decision.refused()) {
+                source.sendMessage(Msg.legacy("§c" + SilenceDecision.REFUSAL_MESSAGE));
+                return;
+            }
+            announceSilently = decision.silent();
         }
         long now = System.currentTimeMillis();
         for (int i = 0; i < matches.size(); i++) {
@@ -958,9 +1068,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         // ban and an ipban together, and "Adam unbanned Steve" twice is noise, not information.
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
         announce(PunishmentAnnouncement.revoked(settings.announceRevoke, type,
-                revokeView(matches.get(0), name, source.name(), reason, decision.silent(), settings),
+                revokeView(matches.get(0), name, source.name(), reason, announceSilently,
+                        liftedHidden, settings),
                 now));
         flushSoon();
+    }
+
+    /** Whether any row a revoke verb matched was hidden. One hidden row hides the whole line. */
+    private static boolean anyHidden(List<ActivePunishment> matches) {
+        for (int i = 0; i < matches.size(); i++) {
+            if (matches.get(i).hidden) return true;
+        }
+        return false;
     }
 
     /**
@@ -1175,6 +1294,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      */
     private static PunishmentAnnouncement announcementFor(ActivePunishment p,
             PunishmentSettings settings) {
+        // The audience is read off the row by viewOf, which forces silent whenever hidden is set.
         return PunishmentAnnouncement.issued(
                 settings.announceIssue, viewOf(p, settings), System.currentTimeMillis());
     }
@@ -1322,9 +1442,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         revokeFamily(lifted.type), lifted.targetUuid, lifted.targetName);
                 if (!announceableRevoke(payload.string("revokeCause", ""))) return;
                 PunishmentSettings settings = PunishmentSettings.from(context.config());
+                // Hidden is read off the row being lifted, never off a flag, so a revoke frame
+                // about a hidden row is announced to node holders and to nobody else.
                 announce(PunishmentAnnouncement.revoked(settings.announceRevoke, lifted.type,
                         revokeView(lifted, lifted.targetName, payload.string("revokedBy", ""),
-                                payload.string("reason", ""), lifted.silent, settings),
+                                payload.string("reason", ""), lifted.silent, lifted.hidden,
+                                settings),
                         System.currentTimeMillis()));
             }
         };
@@ -1418,7 +1541,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             try {
                 visible = announcement.visibleTo(
                         player.hasPermission(PunishmentAnnouncement.NOTIFY_PERMISSION),
-                        player.hasPermission(PunishmentAnnouncement.ADMIN_PERMISSION));
+                        player.hasPermission(PunishmentAnnouncement.ADMIN_PERMISSION),
+                        player.hasPermission(HiddenPunishments.PERMISSION));
             } catch (RuntimeException gone) {
                 // Asking a player who left between the snapshot and the check. Silence is the
                 // right answer: they are not online to be told.
@@ -1554,6 +1678,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         local.ipDigest = request.string("ipDigest", result.string("ipDigest", null));
         local.reason = request.string("reason", result.string("reason", ""));
         local.silent = request.bool("silent", false);
+        local.hidden = request.bool("hidden", false);
         if (local.type.isEmpty() || "kick".equals(local.type)) return;
         String key = keyFor(local);
         if (key == null) return;
@@ -1673,18 +1798,28 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         });
     }
 
+    /**
+     * {@code /history}: the bot's full record when it is reachable, this instance's mirror when it
+     * is not.
+     *
+     * <p>Hidden rows are gated twice on purpose. {@code includeHidden} asks the bot for them, and
+     * {@link #visibleRows} drops any that come back anyway. The second check is not redundant: a
+     * bot that has not shipped this feature ignores the parameter and answers with everything, and
+     * the plugin is the side that knows whether this player holds the node.
+     */
     private void showHistory(final CommandSource source, final String uuid, final String name) {
+        final boolean seeHidden = maySeeHidden(source);
         final List<String> lines = new ArrayList<String>();
         lines.add("§6History for §f" + name);
         if (context.api().isUsable()) {
-            context.api().playerPunishments(uuid).whenComplete((data, failure) -> {
+            context.api().playerPunishments(uuid, seeHidden).whenComplete((data, failure) -> {
                 if (failure != null || data == null) {
-                    source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name))));
+                    source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name, seeHidden))));
                     return;
                 }
-                List<Payload> rows = data.children("punishments");
+                List<Payload> rows = visibleRows(data.children("punishments"), seeHidden);
                 if (rows.isEmpty()) {
-                    source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name))));
+                    source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name, seeHidden))));
                     return;
                 }
                 for (int i = 0; i < rows.size() && i < 20; i++) {
@@ -1694,24 +1829,38 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             });
             return;
         }
-        source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name))));
+        source.sendMessage(Msg.legacy(joinLines(localHistory(uuid, name, seeHidden))));
     }
 
-    private List<String> localHistory(String uuid, String name) {
+    /** The bot's rows a given reader may see. An absent {@code hidden} means not hidden. */
+    static List<Payload> visibleRows(List<Payload> rows, boolean seeHidden) {
+        if (seeHidden || rows == null) return rows;
+        List<Payload> out = new ArrayList<Payload>();
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i).bool("hidden", false)) continue;
+            out.add(rows.get(i));
+        }
+        return out;
+    }
+
+    private List<String> localHistory(String uuid, String name, boolean seeHidden) {
         List<String> lines = new ArrayList<String>();
         lines.add("§6History for §f" + name + " §8(local mirror)");
         List<ActivePunishment> found = activeOf(uuid, new String[] {"ban", "ipban", "mute", "warn"});
-        if (found.isEmpty()) {
-            lines.add("§7No active punishments on this instance.");
-            return lines;
-        }
+        int shown = 0;
         for (int i = 0; i < found.size(); i++) {
+            if (found.get(i).hidden && !seeHidden) continue;
             lines.add(formatLocal(found.get(i)));
+            shown++;
+        }
+        if (shown == 0) {
+            lines.add("§7No active punishments on this instance.");
         }
         return lines;
     }
 
     private void showBanlist(CommandSource source) {
+        final boolean seeHidden = maySeeHidden(source);
         List<String> lines = new ArrayList<String>();
         lines.add("§6Active bans");
         int n = 0;
@@ -1720,6 +1869,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 ActivePunishment p = mirror.get(key);
                 if (p == null || p.expired(System.currentTimeMillis())) continue;
                 if (!"ban".equals(p.type) && !"ipban".equals(p.type)) continue;
+                if (p.hidden && !seeHidden) continue;
                 lines.add(formatLocal(p));
                 n++;
             }
@@ -1730,9 +1880,13 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         source.sendMessage(Msg.legacy(joinLines(lines)));
         final int localCount = n;
         if (context.api().isUsable()) {
-            context.api().listPunishments("ban", null, Boolean.TRUE).whenComplete((data, failure) -> {
+            // The network-wide count answers what this reader may see, not what exists: counting
+            // hidden bans for somebody who cannot list them would tell them a hidden ban is there,
+            // which is the one thing hiding it was for.
+            context.api().listPunishments("ban", null, Boolean.TRUE, seeHidden)
+                    .whenComplete((data, failure) -> {
                 if (failure != null || data == null) return;
-                int extra = data.children("punishments").size();
+                int extra = visibleRows(data.children("punishments"), seeHidden).size();
                 if (extra > localCount) {
                     source.sendMessage(Msg.legacy("§7Bot lists " + extra + " active bans network-wide."));
                 }
@@ -1741,6 +1895,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     private void showStaffHistory(final CommandSource source, final String staff) {
+        final boolean seeHidden = maySeeHidden(source);
         if (!context.api().isUsable()) {
             source.sendMessage(Msg.legacy("§eStaff history needs the bot. Showing local issued-by matches."));
             List<String> lines = new ArrayList<String>();
@@ -1751,6 +1906,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                     ActivePunishment p = mirror.get(key);
                     if (p == null || p.issuedByName == null) continue;
                     if (!staff.equalsIgnoreCase(p.issuedByName)) continue;
+                    if (p.hidden && !seeHidden) continue;
                     lines.add(formatLocal(p));
                     n++;
                 }
@@ -1759,12 +1915,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             source.sendMessage(Msg.legacy(joinLines(lines)));
             return;
         }
-        context.api().listPunishments(null, null, null).whenComplete((data, failure) -> {
+        context.api().listPunishments(null, null, null, seeHidden).whenComplete((data, failure) -> {
             List<String> lines = new ArrayList<String>();
             lines.add("§6Staff history for §f" + staff);
             int n = 0;
             if (data != null) {
-                for (Payload row : data.children("punishments")) {
+                for (Payload row : visibleRows(data.children("punishments"), seeHidden)) {
                     String by = row.string("issuedByName", "");
                     if (!staff.equalsIgnoreCase(by)) continue;
                     lines.add(formatRow(row));
@@ -1995,13 +2151,36 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         return mute != null && !mute.expired(System.currentTimeMillis());
     }
 
+    /** Whether the active mute on this player is a hidden one. False when there is no mute. */
+    public boolean isMuteHidden(UUID uuid) {
+        if (uuid == null || mirror == null) return false;
+        ActivePunishment mute = mirror.get("mute:" + uuid);
+        return mute != null && !mute.expired(System.currentTimeMillis()) && mute.hidden;
+    }
+
     public void notifyStaff(String line) {
+        notifyStaff(line, false);
+    }
+
+    /**
+     * A staff notice about something a punished player did.
+     *
+     * <p>{@code hiddenOnly} narrows the audience to holders of
+     * {@link HiddenPunishments#PERMISSION}, and it has to, because the notice names the player and
+     * the punishment together: "Steve tried to edit a sign while muted" tells every mute-node
+     * holder that Steve is muted, which is the one fact a hidden mute keeps from them. The mute
+     * node is not the hidden node and {@code heimdall.admin} does not imply it.
+     */
+    public void notifyStaff(String line, boolean hiddenOnly) {
         ModuleContext ctx = this.context;
         if (ctx == null || line == null) return;
         Component message = Msg.legacy(line);
         for (PlayerHandle player : ctx.platform().players().onlinePlayers()) {
-            if (player.hasPermission("heimdall.punishments.mute")
-                    || player.hasPermission("heimdall.admin")) {
+            boolean allowed = hiddenOnly
+                    ? player.hasPermission(HiddenPunishments.PERMISSION)
+                    : player.hasPermission("heimdall.punishments.mute")
+                            || player.hasPermission("heimdall.admin");
+            if (allowed) {
                 player.sendMessage(message);
             }
         }
@@ -2050,6 +2229,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         p.country = payload.string("country", null);
         p.cidr = payload.string("cidr", null);
         p.silent = payload.bool("silent", false);
+        p.hidden = payload.bool("hidden", false);
         if (p.type.isEmpty()) return null;
         return p;
     }
@@ -2115,7 +2295,13 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .issuedAtMillis(p.issuedAtMillis())
                 .expiresAtMillis(p.expiresAtMillis())
                 .lengthSeconds(p.durationSeconds)
-                .silent(p.silent)
+                // p.silent || p.hidden rather than p.silent: a bot row could carry hidden without
+                // silent (an older issue path, a hand-edited document, a future bot that stops
+                // coercing one from the other), and the broadcast is the one place where reading
+                // that row too generously cannot be taken back. Same reasoning as visibleRows
+                // filtering what the bot already should not have sent.
+                .silent(p.silent || p.hidden)
+                .hidden(p.hidden)
                 .build();
     }
 
@@ -2137,7 +2323,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * a segment that drops beats a sentence that is wrong.
      */
     private static PunishmentView revokeView(ActivePunishment lifted, String name, String staff,
-            String reason, boolean silent, PunishmentSettings settings) {
+            String reason, boolean silent, boolean hidden, PunishmentSettings settings) {
         return PunishmentView.builder()
                 .type(lifted == null ? "" : lifted.type)
                 .targetName(name)
@@ -2149,7 +2335,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .issuedAtMillis(lifted == null ? 0L : lifted.issuedAtMillis())
                 .expiresAtMillis(lifted == null ? null : lifted.expiresAtMillis())
                 .lengthSeconds(lifted == null ? null : lifted.durationSeconds)
-                .silent(silent)
+                .silent(silent || hidden)
+                .hidden(hidden)
                 .build();
     }
 
@@ -2171,7 +2358,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String who = p.targetName == null ? "?" : p.targetName;
         String by = p.issuedByName == null || p.issuedByName.isEmpty() ? "" : " §7by §f" + p.issuedByName;
         String reason = p.reason == null || p.reason.isEmpty() ? "" : " §8" + p.reason;
-        return "§7 - §c" + p.type + " §f" + who + by + reason;
+        // Only a holder of the node is ever handed a hidden row, so the marker needs no gate of its
+        // own: it is here so a holder can tell which rows in front of them nobody else sees.
+        String badge = p.hidden ? " §5(hidden)" : "";
+        return "§7 - §c" + p.type + " §f" + who + by + reason + badge;
     }
 
     private static String formatRow(Payload row) {
@@ -2184,6 +2374,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (!by.isEmpty()) line += " §7by §f" + by;
         if (!reason.isEmpty()) line += " §8" + reason;
         if (!active) line += " §8(revoked)";
+        if (row.bool("hidden", false)) line += " §5(hidden)";
         return line;
     }
 

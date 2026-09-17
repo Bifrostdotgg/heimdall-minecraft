@@ -288,7 +288,26 @@ final class KnownNames {
     }
 
     /**
-     * The three families, each with an empty set.
+     * The same family, counting only the punishments an ordinary reader may know about.
+     *
+     * <p><strong>Two indexes rather than one, because completion is a disclosure.</strong>
+     * {@code /unban <tab>} offers the players with something to lift, and a hidden ban is a
+     * punishment the reader is not allowed to know exists: offering the name tells them, and the
+     * refusal they get on pressing enter ("No active ban for Steve") then tells them the name they
+     * were just offered was a lie. Filtering at completion time is not available - the index is
+     * read one lookup at a time precisely so nothing walks the mirror on a keystroke - so the
+     * split is written at the handful of moments a punishment lands or is lifted, where the row is
+     * already in hand.
+     *
+     * <p>A holder of {@code heimdall.punishments.hidden} reads the plain family and sees
+     * everything; everybody else reads this one.
+     */
+    static String visible(String family) {
+        return family == null ? null : family + ":visible";
+    }
+
+    /**
+     * The three families, each in both spellings, each with an empty set.
      *
      * <p>Fixed rather than created on demand, so a lookup for a family nobody has been punished in
      * is a hit on an empty map instead of a null the two writers and the reader each have to
@@ -298,9 +317,11 @@ final class KnownNames {
     private static Map<String, ConcurrentHashMap<String, Long>> emptyFamilies() {
         Map<String, ConcurrentHashMap<String, Long>> families =
                 new LinkedHashMap<String, ConcurrentHashMap<String, Long>>();
-        families.put("ban", new ConcurrentHashMap<String, Long>());
-        families.put("mute", new ConcurrentHashMap<String, Long>());
-        families.put("warn", new ConcurrentHashMap<String, Long>());
+        String[] names = {"ban", "mute", "warn"};
+        for (int i = 0; i < names.length; i++) {
+            families.put(names[i], new ConcurrentHashMap<String, Long>());
+            families.put(visible(names[i]), new ConcurrentHashMap<String, Long>());
+        }
         return Collections.unmodifiableMap(families);
     }
 

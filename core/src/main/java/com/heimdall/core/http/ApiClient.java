@@ -339,6 +339,19 @@ public final class ApiClient {
 
     public CompletableFuture<RawResponse> listPunishments(
             String type, String uuid, Boolean active, int limit) {
+        return listPunishments(type, uuid, active, limit, false);
+    }
+
+    /**
+     * {@code GET punishments}, optionally asking for hidden rows as well.
+     *
+     * <p>{@code includeHidden} is sent only when it is true, and only ever because the player who
+     * typed the lookup holds {@code heimdall.punishments.hidden}. Omitted, the bot leaves hidden
+     * rows out, which is also what an older bot that has never heard of the flag does - so the
+     * parameter can only ever widen an answer, never accidentally be the thing that hides one.
+     */
+    public CompletableFuture<RawResponse> listPunishments(
+            String type, String uuid, Boolean active, int limit, boolean includeHidden) {
         return async(() -> {
             ApiSettings current = settings;
             StringBuilder path = new StringBuilder("punishments?limit=");
@@ -352,20 +365,31 @@ public final class ApiClient {
             if (active != null) {
                 path.append("&active=").append(active.booleanValue());
             }
+            if (includeHidden) {
+                path.append("&includeHidden=true");
+            }
             return requests.execute(current,
                     HttpCall.get(guildPath(current, path.toString()), current.timeoutMs()));
         });
     }
 
     public CompletableFuture<RawResponse> playerPunishments(String uuid) {
+        return playerPunishments(uuid, false);
+    }
+
+    /** {@code GET punishments/player/:uuid}, optionally asking for hidden rows as well. */
+    public CompletableFuture<RawResponse> playerPunishments(String uuid, boolean includeHidden) {
         if (Strings.isBlank(uuid)) {
             throw new IllegalArgumentException("uuid is required");
         }
         return async(() -> {
             ApiSettings current = settings;
+            String path = "punishments/player/" + encodePath(uuid.trim());
+            if (includeHidden) {
+                path = path + "?includeHidden=true";
+            }
             return requests.execute(current,
-                    HttpCall.get(guildPath(current, "punishments/player/" + encodePath(uuid.trim())),
-                            current.timeoutMs()));
+                    HttpCall.get(guildPath(current, path), current.timeoutMs()));
         });
     }
 

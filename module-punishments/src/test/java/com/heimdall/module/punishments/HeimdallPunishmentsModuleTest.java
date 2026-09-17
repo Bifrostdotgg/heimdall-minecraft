@@ -605,7 +605,7 @@ class HeimdallPunishmentsModuleTest {
 
             FakeCommandSource console = FakeCommandSource.console();
             harness.module.submitIssue(console, "ban", steve, "Steve",
-                    PunishmentParser.parse(Arrays.asList("Steve", "7d", "griefing")), false);
+                    PunishmentParser.parse(Arrays.asList("Steve", "7d", "griefing")), false, false);
             harness.module.submitRevoke(console, "unban", steve, "Steve", "", false, false);
 
             assertTrue(console.messageText().isEmpty(),

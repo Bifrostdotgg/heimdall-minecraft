@@ -28,11 +28,14 @@ final class ScriptedPunishApi implements AutoCloseable {
     static final class Hit {
         final String method;
         final String path;
+        /** The raw query string, "" when there was none. The {@code includeHidden} flag lives here. */
+        final String query;
         final String body;
 
-        Hit(String method, String path, String body) {
+        Hit(String method, String path, String query, String body) {
             this.method = method;
             this.path = path;
+            this.query = query == null ? "" : query;
             this.body = body == null ? "" : body;
         }
     }
@@ -47,6 +50,8 @@ final class ScriptedPunishApi implements AutoCloseable {
     private volatile String syncBody =
             "{\"success\":true,\"data\":{\"punishments\":[],\"hash\":\"\\\"etag-1\\\"\"}}";
     private volatile String syncEtag = "\"etag-1\"";
+    private volatile String playerBody = "{\"success\":true,\"data\":{\"punishments\":[]}}";
+    private volatile String listBody = "{\"success\":true,\"data\":{\"punishments\":[]}}";
 
     ScriptedPunishApi() {
         try {
@@ -72,6 +77,38 @@ final class ScriptedPunishApi implements AutoCloseable {
         this.revokeStatus = status;
         this.revokeBody = body;
         return this;
+    }
+
+    /** What {@code GET punishments/player/:uuid} answers - the rows {@code /history} renders. */
+    ScriptedPunishApi playerResponds(String body) {
+        this.playerBody = body;
+        return this;
+    }
+
+    /** What {@code GET punishments} answers - the rows {@code /staffhistory} and /banlist read. */
+    ScriptedPunishApi listResponds(String body) {
+        this.listBody = body;
+        return this;
+    }
+
+    /** The last hit whose path ends with {@code suffix}, or null. */
+    Hit lastSuffix(String suffix) {
+        Hit found = null;
+        for (int i = 0; i < hits.size(); i++) {
+            if (hits.get(i).path.endsWith(suffix)) found = hits.get(i);
+        }
+        return found;
+    }
+
+    /** The last GET whose path contains {@code fragment}, or null. */
+    Hit lastGetContaining(String fragment) {
+        Hit found = null;
+        for (int i = 0; i < hits.size(); i++) {
+            if ("GET".equals(hits.get(i).method) && hits.get(i).path.contains(fragment)) {
+                found = hits.get(i);
+            }
+        }
+        return found;
     }
 
     ScriptedPunishApi syncResponds(String body, String etag) {
@@ -108,7 +145,8 @@ final class ScriptedPunishApi implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         String path = exchange.getRequestURI().getRawPath();
         String body = read(exchange.getRequestBody());
-        hits.add(new Hit(exchange.getRequestMethod(), path, body));
+        hits.add(new Hit(exchange.getRequestMethod(), path,
+                exchange.getRequestURI().getRawQuery(), body));
         if ("GET".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/sync")) {
             if (syncEtag != null) {
                 exchange.getResponseHeaders().set("ETag", syncEtag);
@@ -125,6 +163,14 @@ final class ScriptedPunishApi implements AutoCloseable {
                 return;
             }
             send(exchange, 200, syncBody);
+            return;
+        }
+        if ("GET".equals(exchange.getRequestMethod()) && path.contains("/punishments/player/")) {
+            send(exchange, 200, playerBody);
+            return;
+        }
+        if ("GET".equals(exchange.getRequestMethod()) && path.endsWith("/punishments")) {
+            send(exchange, 200, listBody);
             return;
         }
         if ("POST".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/revoke")) {

@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.heimdall.core.admin.PunishmentAdmin;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.punish.HiddenPunishments;
 import com.heimdall.core.punish.SilenceDecision;
 import com.heimdall.core.testing.FakeCommandSource;
 import com.heimdall.core.testing.FakePlayer;
@@ -216,6 +217,45 @@ class PunishmentCompletionTest {
     }
 
     @Test
+    @DisplayName("-h is offered to the hidden node and to nobody else, on its own node")
+    void hiddenFlagCompletion() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertFalse(complete(harness, "ban", "-").contains("-h"),
+                    "the silence override is not a claim to hide a punishment, and completing -h "
+                            + "for somebody the command will refuse is the same lie as -s");
+
+            FakeCommandSource hider = FakeCommandSource.player("Hider")
+                    .grant(HiddenPunishments.PERMISSION);
+            assertEquals(Arrays.asList("-h"),
+                    harness.module.complete(hider, "ban", Arrays.asList("-")),
+                    "and the hidden node alone offers -h without offering the silence flags, "
+                            + "because hidden implies silence rather than needing it");
+            assertEquals(Arrays.asList("-h"),
+                    harness.module.complete(hider, "ban", Arrays.asList("-h")));
+
+            FakeCommandSource both = FakeCommandSource.player("Both")
+                    .grant(SilenceDecision.OVERRIDE_PERMISSION)
+                    .grant(HiddenPunishments.PERMISSION);
+            assertEquals(Arrays.asList("-s", "-p", "-h"),
+                    harness.module.complete(both, "ban", Arrays.asList("-")));
+        }
+    }
+
+    @Test
+    @DisplayName("-h does not move the target either, or the reason takes the name")
+    void hiddenFlagDoesNotMoveTheTarget() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "-h", "Ste"));
+            assertEquals(HeimdallPunishmentsModule.DURATION_SUGGESTIONS,
+                    complete(harness, "ban", "-h", "Steve", ""));
+        }
+    }
+
+    @Test
     @DisplayName("durations are offered after the target, until one is typed")
     void durationCompletion() {
         try (PunishmentsHarness harness = replacing()) {
@@ -318,6 +358,56 @@ class PunishmentCompletionTest {
                 .put("targetName", name)
                 .put("reason", "testing")
                 .build());
+    }
+
+    @Test
+    @DisplayName("a hidden ban is not offered to /unban for a reader without the node")
+    void hiddenRowsAreNotUnbanCandidates() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            join(harness, "Alex");
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("id", "hidden-1")
+                    .put("type", "ban")
+                    .put("targetUuid", FakePlayer.named("Steve").uuid().toString())
+                    .put("targetName", "Steve")
+                    .put("reason", "alting")
+                    .put("silent", true)
+                    .put("hidden", true)
+                    .build());
+            ban(harness, "Alex");
+
+            assertEquals(Arrays.asList("Alex"), complete(harness, "unban", ""),
+                    "offering Steve would disclose a ban this reader may not know about, and the "
+                            + "refusal on pressing enter would then say the suggestion was a lie");
+
+            FakeCommandSource hider = FakeCommandSource.player("Hider")
+                    .grant(HiddenPunishments.PERMISSION);
+            assertTrue(harness.module.complete(hider, "unban", Arrays.asList("")).contains("Steve"),
+                    "and a node holder is offered the row they are allowed to lift");
+        }
+    }
+
+    @Test
+    @DisplayName("lifting the visible half of a family leaves the hidden half where it was")
+    void liftingOneHalfDoesNotDisclose() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            FakeCommandSource hider = FakeCommandSource.player("Hider")
+                    .grant(HiddenPunishments.PERMISSION);
+
+            harness.module.onStaffCommand(hider, "ban", Arrays.asList("Steve", "-h", "alting"));
+            assertEquals(Arrays.asList("Steve"),
+                    harness.module.complete(hider, "unban", Arrays.asList("")),
+                    "the ban really landed, so the empty answer below is a filter rather than a "
+                            + "command that quietly did nothing");
+            assertEquals(Collections.emptyList(), complete(harness, "unban", ""));
+
+            harness.module.onStaffCommand(hider, "unban", Arrays.asList("Steve"));
+            assertEquals(Collections.emptyList(),
+                    harness.module.complete(hider, "unban", Arrays.asList("")),
+                    "and the full family is cleared with it, rather than keeping a lifted row");
+        }
     }
 
     private static List<String> complete(PunishmentsHarness harness, String verb, String... args) {

@@ -26,6 +26,7 @@ public final class PunishmentView {
     private final Long expiresAtMillis;
     private final Long lengthSeconds;
     private final boolean silent;
+    private final boolean hidden;
 
     private PunishmentView(Builder builder) {
         this.type = builder.type == null ? "" : builder.type;
@@ -39,6 +40,7 @@ public final class PunishmentView {
         this.expiresAtMillis = builder.expiresAtMillis;
         this.lengthSeconds = builder.lengthSeconds;
         this.silent = builder.silent;
+        this.hidden = builder.hidden;
     }
 
     public static Builder builder() {
@@ -112,6 +114,17 @@ public final class PunishmentView {
 
     public boolean silent() {
         return silent;
+    }
+
+    /**
+     * Whether the row is hidden, in the {@link HiddenPunishments} sense.
+     *
+     * <p>Carried on the view rather than passed beside it because the announcement for a revoke
+     * has to read it off the row being lifted: {@code -p} on a hidden ban must not publish the
+     * lift to a server that was never told about the ban.
+     */
+    public boolean hidden() {
+        return hidden;
     }
 
     /** Whether it never ends. Drives the type label, the verb and the permanent screen variant. */
@@ -194,6 +207,7 @@ public final class PunishmentView {
         private Long expiresAtMillis;
         private Long lengthSeconds;
         private boolean silent;
+        private boolean hidden;
 
         private Builder() {
         }
@@ -251,6 +265,12 @@ public final class PunishmentView {
 
         public Builder silent(boolean value) {
             this.silent = value;
+            return this;
+        }
+
+        /** Hidden implies silent; {@link PunishmentAnnouncement} applies that, not this builder. */
+        public Builder hidden(boolean value) {
+            this.hidden = value;
             return this;
         }
 

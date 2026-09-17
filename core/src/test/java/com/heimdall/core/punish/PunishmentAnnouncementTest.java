@@ -189,6 +189,49 @@ class PunishmentAnnouncementTest {
     }
 
     @Test
+    @DisplayName("a hidden line reaches the hidden node only, and nothing else widens it")
+    void hiddenAudience() {
+        PunishmentAnnouncement hidden = PunishmentAnnouncement.issued(
+                ISSUE, hiddenView("ban", "Adam", "Steve", null, "alting", ANNOUNCED), NOW);
+
+        assertTrue(hidden.hidden());
+        assertTrue(hidden.silent(), "hidden implies silent whatever the row's silent flag said");
+        assertTrue(plain(hidden).startsWith("(hidden) "), plain(hidden));
+        assertTrue(hidden.line().contains("§5(hidden)"), hidden.line());
+        assertFalse(plain(hidden).contains("(silent)"),
+                "one prefix: two would name a wider audience than the line has");
+
+        assertFalse(hidden.visibleTo(false, false, false), "an ordinary player sees nothing");
+        assertFalse(hidden.visibleTo(true, false, false),
+                "the notify audience is the staff a hidden row is kept from");
+        assertFalse(hidden.visibleTo(false, true, false),
+                "and heimdall.admin does not imply the hidden node, unlike notify and silent");
+        assertTrue(hidden.visibleTo(false, false, true));
+        assertFalse(hidden.visibleTo(true, true),
+                "the two-argument form has no hidden answer in hand, so it answers no");
+
+        PunishmentAnnouncement lift = PunishmentAnnouncement.revoked(REVOKE, "ban",
+                hiddenView("ban", "Adam", "Steve", null, "", ANNOUNCED), NOW);
+        assertTrue(lift.hidden(),
+                "hidden is read off the row being lifted, so -p cannot publish the lift");
+        assertTrue(plain(lift).startsWith("(hidden) "), plain(lift));
+        assertFalse(lift.visibleTo(true, true, false));
+        assertTrue(lift.visibleTo(false, false, true));
+    }
+
+    @Test
+    @DisplayName("the hidden node does not widen an ordinary silent line's audience either way")
+    void hiddenNodeDoesNotChangeASilentLine() {
+        PunishmentAnnouncement silent = PunishmentAnnouncement.issued(
+                ISSUE, view("ban", "Adam", "Steve", null, "", SILENT), NOW);
+        assertFalse(silent.hidden());
+        assertTrue(plain(silent).startsWith("(silent) "), plain(silent));
+        assertFalse(silent.visibleTo(false, false, true),
+                "holding the hidden node is not a claim to see every silent punishment");
+        assertTrue(silent.visibleTo(true, false, false));
+    }
+
+    @Test
     @DisplayName("nothing is announced for a type that names no player, or for a nameless target")
     void nothingToSay() {
         assertNull(issued("geo", "Adam", "DE", null, "", ANNOUNCED));
@@ -267,6 +310,22 @@ class PunishmentAnnouncementTest {
     private static PunishmentAnnouncement revoked(String typeOrVerb, String target, String reason) {
         return PunishmentAnnouncement.revoked(REVOKE, typeOrVerb,
                 view(typeOrVerb, "Adam", target, null, reason, false), NOW);
+    }
+
+    /** The same row, hidden. Silence is left off deliberately: hidden has to imply it. */
+    private static PunishmentView hiddenView(String type, String staff, String target,
+            Long expiresAtMillis, String reason, boolean silent) {
+        return PunishmentView.builder()
+                .type(type)
+                .staffName(staff)
+                .targetName(target)
+                .reason(reason)
+                .serverName("Bifrost")
+                .issuedAtMillis(NOW)
+                .expiresAtMillis(expiresAtMillis)
+                .silent(silent)
+                .hidden(true)
+                .build();
     }
 
     private static PunishmentView view(String type, String staff, String target,

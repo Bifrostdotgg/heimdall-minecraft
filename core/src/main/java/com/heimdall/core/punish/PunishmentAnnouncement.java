@@ -34,6 +34,17 @@ import net.kyori.adventure.text.Component;
  * that an action happened; what silence buys is that the server at large does not. A silent
  * punishment that produced no line at all would make "silent" mean "unaudited in chat", which is
  * not what a moderator asking for it wants.
+ *
+ * <h2>Hidden is a narrower audience, not a louder silence</h2>
+ *
+ * <p>A hidden punishment is hidden <em>from staff</em>: it is kept out of the in-game lookups for
+ * everybody without {@link HiddenPunishments#PERMISSION}. Silent alone would therefore leak the
+ * whole thing in one line, because the silent audience is the notify node, which is exactly the
+ * staff a hidden row is being kept from. So a hidden line goes to holders of the hidden node and
+ * to nobody else - not to notify holders, not to {@code heimdall.admin} - and carries a
+ * {@code (hidden)} prefix instead of {@code (silent)}, matching the marker the lookups put on the
+ * same row. It is still announced to that audience for the reason silent lines are: an action
+ * nobody can read about in chat is unaudited, and the people who may read this one are named.
  */
 public final class PunishmentAnnouncement {
 
@@ -53,12 +64,24 @@ public final class PunishmentAnnouncement {
      */
     private static final String SILENT_PREFIX = "<dark_gray>(silent)</dark_gray> ";
 
+    /**
+     * Prepended to a hidden line, in place of {@link #SILENT_PREFIX}.
+     *
+     * <p>One prefix, not two: the audience is the hidden node alone, so "(silent)" beside it
+     * would name a wider audience than the line actually has. Also not part of the template, for
+     * the same reason silence is not - a guild able to clear it could announce a hidden
+     * punishment as an ordinary one.
+     */
+    private static final String HIDDEN_PREFIX = "<dark_purple>(hidden)</dark_purple> ";
+
     private final Component message;
     private final boolean silent;
+    private final boolean hidden;
 
-    private PunishmentAnnouncement(Component message, boolean silent) {
+    private PunishmentAnnouncement(Component message, boolean silent, boolean hidden) {
         this.message = message;
         this.silent = silent;
+        this.hidden = hidden;
     }
 
     /**
@@ -71,7 +94,8 @@ public final class PunishmentAnnouncement {
      * off.
      *
      * @param template the guild's {@code announceIssue} text
-     * @param view the punishment, whose {@link PunishmentView#silent()} decides the audience
+     * @param view the punishment, whose {@link PunishmentView#silent()} and
+     *     {@link PunishmentView#hidden()} decide the audience
      * @param nowMillis the clock, for the remaining-time token
      */
     public static PunishmentAnnouncement issued(String template, PunishmentView view,
@@ -124,11 +148,16 @@ public final class PunishmentAnnouncement {
         if (filled.trim().isEmpty()) {
             return null;
         }
-        String body = view.silent() ? SILENT_PREFIX + filled : filled;
+        // Hidden overrides silent rather than adding to it, and is read off the view - which for
+        // a revoke is the row being lifted - so -p cannot publish the lift of a hidden row.
+        boolean hidden = view.hidden();
+        boolean silent = view.silent() || hidden;
+        String prefix = hidden ? HIDDEN_PREFIX : (silent ? SILENT_PREFIX : "");
+        String body = prefix + filled;
         // The template, not the filled line, is what a parse failure is reported against: the
         // values change with every punishment, so keying on the finished text would report one
         // broken template once per ban and exhaust the warning budget within an evening.
-        return new PunishmentAnnouncement(Msg.mini(body, template), view.silent());
+        return new PunishmentAnnouncement(Msg.mini(body, template), silent, hidden);
     }
 
     /** The finished line, parsed once, ready to send. */
@@ -146,9 +175,14 @@ public final class PunishmentAnnouncement {
         return Msg.toLegacy(message);
     }
 
-    /** Whether this goes only to notify holders. */
+    /** Whether this goes only to notify holders. Always true when {@link #hidden()} is. */
     public boolean silent() {
         return silent;
+    }
+
+    /** Whether this goes only to holders of {@link HiddenPunishments#PERMISSION}. */
+    public boolean hidden() {
+        return hidden;
     }
 
     /**
@@ -158,11 +192,28 @@ public final class PunishmentAnnouncement {
      * and so the caller does the permission lookups on whichever thread it is already on.
      */
     public boolean visibleTo(boolean hasNotify, boolean hasAdmin) {
+        return visibleTo(hasNotify, hasAdmin, false);
+    }
+
+    /**
+     * Whether one player sees this line, including the hidden case.
+     *
+     * <p>A hidden line ignores the other two answers entirely. The notify node is the audience a
+     * hidden row is being kept from, and {@code heimdall.admin} deliberately does not imply the
+     * hidden node, so neither may widen this. The two-argument form above is kept for callers with
+     * no hidden lookup in hand, and it answers false for a hidden line - the safe direction, since
+     * a caller that has not been taught about hidden cannot be trusted to narrow the audience.
+     */
+    public boolean visibleTo(boolean hasNotify, boolean hasAdmin, boolean hasHidden) {
+        if (hidden) {
+            return hasHidden;
+        }
         return !silent || hasNotify || hasAdmin;
     }
 
     @Override
     public String toString() {
-        return "PunishmentAnnouncement{" + (silent ? "silent" : "public") + ", " + line() + "}";
+        String audience = hidden ? "hidden" : (silent ? "silent" : "public");
+        return "PunishmentAnnouncement{" + audience + ", " + line() + "}";
     }
 }

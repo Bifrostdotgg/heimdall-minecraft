@@ -212,4 +212,55 @@ class PunishmentParserTest {
         assertFalse(PunishmentParser.looksLikeDuration("0d0h"));
         assertNull(PunishmentParser.parseDurationSeconds("0s"));
     }
+
+    @Test
+    @DisplayName("-h parses anywhere, like -s and -p")
+    void hiddenFlagAnywhere() {
+        PunishmentParser.Parsed parsed = PunishmentParser.parse(
+                Arrays.asList("Steve", "7d", "-h", "ban", "evasion"));
+        assertTrue(parsed.hidden);
+        assertEquals("Steve", parsed.target);
+        assertEquals(Long.valueOf(7 * DAY), parsed.durationSeconds);
+        assertEquals("ban evasion", parsed.reason, "the flag is stripped out of the reason");
+
+        PunishmentParser.Parsed upper = PunishmentParser.parse(Arrays.asList("-H", "Steve", "alting"));
+        assertTrue(upper.hidden, "flags are case-insensitive, like -s and -p");
+        assertEquals("alting", upper.reason);
+    }
+
+    @Test
+    @DisplayName("-h implies silent, on Parsed and on Flags")
+    void hiddenForcesSilent() {
+        PunishmentParser.Parsed parsed = PunishmentParser.parse(Arrays.asList("Steve", "-h", "alting"));
+        assertTrue(parsed.hidden);
+        assertTrue(parsed.silent,
+                "a punishment hidden from staff lookups cannot be announced in chat, so the one "
+                        + "flag decides both and no caller has to remember the implication");
+        assertFalse(parsed.publicFlag);
+
+        PunishmentParser.Flags flags = PunishmentParser.flags(Arrays.asList("Steve", "-h"));
+        assertTrue(flags.hidden);
+        assertTrue(flags.silent, "the revoke path reads the same implication off Flags");
+    }
+
+    @Test
+    @DisplayName("-p does not undo the silence -h implies")
+    void hiddenWithPublicFlagStaysHiddenAndSilent() {
+        PunishmentParser.Parsed parsed = PunishmentParser.parse(
+                Arrays.asList("Steve", "-p", "-h", "1h", "alting"));
+        assertTrue(parsed.hidden);
+        assertTrue(parsed.silent, "-p does not undo the silence -h implies");
+        assertTrue(parsed.publicFlag, "the -p is still reported; the caller decides hidden wins");
+        assertEquals(Long.valueOf(HOUR), parsed.durationSeconds);
+        assertEquals("alting", parsed.reason);
+    }
+
+    @Test
+    @DisplayName("nothing is hidden without the flag")
+    void noFlagsMeansNothingHidden() {
+        PunishmentParser.Parsed parsed = PunishmentParser.parse(Arrays.asList("Steve", "griefing"));
+        assertFalse(parsed.hidden);
+        assertFalse(parsed.silent);
+        assertFalse(PunishmentParser.flags(null).hidden);
+    }
 }

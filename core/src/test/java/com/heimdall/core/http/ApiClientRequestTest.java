@@ -226,6 +226,35 @@ class ApiClientRequestTest {
             assertFalse(sent.has("id") && !sent.get("id").getAsString().isEmpty());
         }
 
+        // The two tests that asserted hidden and silent on an issue body used the minutes-only
+        // issuePunishment overloads, which round 2 deleted because nothing called them: the module
+        // builds the body itself and posts it through issuePunishment(Payload). The same two
+        // assertions now sit on that real path, in HiddenPunishmentTest#hiddenNodeAloneIsEnough.
+
+        @Test
+        @DisplayName("includeHidden appears on a lookup only when it was asked for")
+        void lookupsOnlyAskForHiddenWhenTold() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"punishments\":[]}}");
+            await(client.playerPunishments(UUID));
+            assertFalse(server.lastRequest().path.contains("includeHidden"),
+                    server.lastRequest().path);
+
+            server.respond(200, "{\"success\":true,\"data\":{\"punishments\":[]}}");
+            await(client.playerPunishments(UUID, true));
+            assertTrue(server.lastRequest().path.endsWith("?includeHidden=true"),
+                    server.lastRequest().path);
+
+            server.respond(200, "{\"success\":true,\"data\":{\"punishments\":[]}}");
+            await(client.listPunishments("ban", null, Boolean.TRUE, 50, true));
+            assertTrue(server.lastRequest().path.contains("includeHidden=true"),
+                    server.lastRequest().path);
+            assertTrue(Hmac.verify(SECRET, "GET", server.lastRequest().path, "",
+                    server.lastRequest().header("X-Signature"),
+                    server.lastRequest().header("X-Timestamp")),
+                    "the parameter is inside the signed path, so a bot verifying the signature "
+                            + "cannot be handed a widened lookup by a rewriting proxy");
+        }
+
         @Test
         @DisplayName("a GET signs over the empty-body hash")
         void getRequestsAreSignedToo() throws Exception {
