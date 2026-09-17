@@ -18,6 +18,15 @@ public final class ActivePunishment {
     public String country;
     public String cidr;
     public boolean silent;
+    /**
+     * Kept out of in-game staff lookups unless the reader holds
+     * {@code heimdall.punishments.hidden}. Enforcement ignores it entirely.
+     *
+     * <p>Absent from rows an older bot sends, and absent from mirror files written before this
+     * field existed, which both read back as {@code false} - the safe direction, since the worst
+     * case is a punishment that was never meant to be hidden being shown.
+     */
+    public boolean hidden;
 
     public boolean expired(long nowMillis) {
         if (expiresAt == null || expiresAt.isEmpty()) return false;

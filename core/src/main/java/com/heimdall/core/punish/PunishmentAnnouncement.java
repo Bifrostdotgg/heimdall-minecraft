@@ -25,6 +25,17 @@ import java.util.regex.Pattern;
  * that an action happened; what silence buys is that the server at large does not. A silent
  * punishment that produced no line at all would make "silent" mean "unaudited in chat", which is
  * not what a moderator asking for it wants.
+ *
+ * <h2>Hidden is a narrower audience, not a louder silence</h2>
+ *
+ * <p>A hidden punishment is hidden <em>from staff</em>: it is kept out of the in-game lookups for
+ * everybody without {@link HiddenPunishments#PERMISSION}. Silent alone would therefore leak the
+ * whole thing in one line, because the silent audience is the notify node, which is exactly the
+ * staff a hidden row is being kept from. So a hidden line goes to holders of the hidden node and
+ * to nobody else - not to notify holders, not to {@code heimdall.admin} - and carries a
+ * {@code (hidden)} prefix instead of {@code (silent)}, matching the marker the lookups put on the
+ * same row. It is still announced to that audience for the reason silent lines are: an action
+ * nobody can read about in chat is unaudited, and the people who may read this one are named.
  */
 public final class PunishmentAnnouncement {
 
@@ -63,10 +74,12 @@ public final class PunishmentAnnouncement {
 
     private final String line;
     private final boolean silent;
+    private final boolean hidden;
 
-    private PunishmentAnnouncement(String line, boolean silent) {
+    private PunishmentAnnouncement(String line, boolean silent, boolean hidden) {
         this.line = line;
         this.silent = silent;
+        this.hidden = hidden;
     }
 
     /**
@@ -87,6 +100,18 @@ public final class PunishmentAnnouncement {
      */
     public static PunishmentAnnouncement issued(String type, String staff, String target,
             Integer durationMinutes, String reason, boolean silent) {
+        return issued(type, staff, target, durationMinutes, reason, silent, false);
+    }
+
+    /**
+     * The same line, for a punishment that may be hidden.
+     *
+     * <p>{@code hidden} implies silence and overrides it: the prefix becomes {@code (hidden)} and
+     * the audience narrows to the hidden node alone. See the class javadoc for why the notify
+     * audience is the wrong one for a row that is being kept from staff.
+     */
+    public static PunishmentAnnouncement issued(String type, String staff, String target,
+            Integer durationMinutes, String reason, boolean silent, boolean hidden) {
         String verb = issueVerb(type);
         if (verb == null) {
             return null;
@@ -102,7 +127,8 @@ public final class PunishmentAnnouncement {
             body.append(" §7for §f").append(duration);
         }
         appendReason(body, reason);
-        return new PunishmentAnnouncement(prefixed(body.toString(), silent), silent);
+        return new PunishmentAnnouncement(
+                prefixed(body.toString(), silent || hidden, hidden), silent || hidden, hidden);
     }
 
     /**
@@ -115,6 +141,18 @@ public final class PunishmentAnnouncement {
      */
     public static PunishmentAnnouncement revoked(String typeOrVerb, String staff, String target,
             String reason, boolean silent) {
+        return revoked(typeOrVerb, staff, target, reason, silent, false);
+    }
+
+    /**
+     * The same line, for the lifting of a punishment that was hidden.
+     *
+     * <p>Read off the row being lifted, never off a flag: {@code -p} on a hidden ban would
+     * otherwise publish "Adam unbanned Steve" to a server that was never told about the ban, which
+     * discloses the punishment, later and out of context, to everybody.
+     */
+    public static PunishmentAnnouncement revoked(String typeOrVerb, String staff, String target,
+            String reason, boolean silent, boolean hidden) {
         String verb = revokeVerb(typeOrVerb);
         if (verb == null) {
             return null;
@@ -126,7 +164,8 @@ public final class PunishmentAnnouncement {
         StringBuilder body = new StringBuilder();
         body.append("§f").append(issuer(staff)).append(" §a").append(verb).append(" §f").append(who);
         appendReason(body, reason);
-        return new PunishmentAnnouncement(prefixed(body.toString(), silent), silent);
+        return new PunishmentAnnouncement(
+                prefixed(body.toString(), silent || hidden, hidden), silent || hidden, hidden);
     }
 
     /** The finished legacy-§ line, ready for {@code Msg.legacy}. */
@@ -134,9 +173,14 @@ public final class PunishmentAnnouncement {
         return line;
     }
 
-    /** Whether this goes only to notify holders. */
+    /** Whether this goes only to notify holders. Always true when {@link #hidden()} is. */
     public boolean silent() {
         return silent;
+    }
+
+    /** Whether this goes only to holders of {@link HiddenPunishments#PERMISSION}. */
+    public boolean hidden() {
+        return hidden;
     }
 
     /**
@@ -146,6 +190,22 @@ public final class PunishmentAnnouncement {
      * and so the caller does the permission lookups on whichever thread it is already on.
      */
     public boolean visibleTo(boolean hasNotify, boolean hasAdmin) {
+        return visibleTo(hasNotify, hasAdmin, false);
+    }
+
+    /**
+     * Whether one player sees this line, including the hidden case.
+     *
+     * <p>A hidden line ignores the other two answers entirely. The notify node is the audience a
+     * hidden row is being kept from, and {@code heimdall.admin} deliberately does not imply the
+     * hidden node, so neither may widen this. The two-argument form above is kept for callers with
+     * no hidden lookup in hand, and it answers false for a hidden line - the safe direction, since
+     * a caller that has not been taught about hidden cannot be trusted to narrow the audience.
+     */
+    public boolean visibleTo(boolean hasNotify, boolean hasAdmin, boolean hasHidden) {
+        if (hidden) {
+            return hasHidden;
+        }
         return !silent || hasNotify || hasAdmin;
     }
 
@@ -179,7 +239,12 @@ public final class PunishmentAnnouncement {
         }
     }
 
-    private static String prefixed(String body, boolean silent) {
+    private static String prefixed(String body, boolean silent, boolean hidden) {
+        if (hidden) {
+            // One prefix, not two: the audience is the hidden node alone, so "(silent)" beside it
+            // would name a wider audience than the line actually has.
+            return "§5(hidden) " + body;
+        }
         return silent ? "§8(silent) " + body : body;
     }
 
@@ -276,6 +341,7 @@ public final class PunishmentAnnouncement {
 
     @Override
     public String toString() {
-        return "PunishmentAnnouncement{" + (silent ? "silent" : "public") + ", " + line + "}";
+        String audience = hidden ? "hidden" : (silent ? "silent" : "public");
+        return "PunishmentAnnouncement{" + audience + ", " + line + "}";
     }
 }

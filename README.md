@@ -304,12 +304,30 @@ One node per verb, all OP by default:
 - `heimdall.punishments.history` - `/history`, `/staffhistory`, `/banlist`
 - `heimdall.punishments.dupeip` - `/dupeip`, `/iphistory`
 
-Two more decide who hears about a punishment, rather than who may issue one:
+Every issuing verb takes the same flags, anywhere in the arguments: `-s` silent, `-p` public,
+`-h` hidden (which implies `-s`).
+
+Three more decide who hears about a punishment, rather than only who may issue one:
 
 - `heimdall.punishments.notify` - see **silent** punishment announcements (default: OP).
   A punishment that is not silent is announced to everybody online and needs no node; a silent one
   is announced only to holders of this (or of `heimdall.admin`), prefixed `(silent)`. Silent means
   "the server at large does not find out", not "nobody does"
+- `heimdall.punishments.hidden` - issue a **hidden** punishment with `-h`, and see hidden ones in
+  `/history`, `/banlist` and `/staffhistory` (default: OP). One node for both halves: a moderator
+  who can hide a punishment and then cannot find it again is worse than either. A hidden punishment
+  is enforced exactly like any other - the target meets the same ban or mute screen - but it is kept
+  out of in-game staff lookups for everybody else, and `-h` is refused without the node rather than
+  run as a visible punishment. The chat line follows the same rule: a hidden punishment (and the
+  lifting of one, and a hidden punishment arriving from the bot) is announced to holders of this
+  node **only**, prefixed `(hidden)` - not to `heimdall.punishments.notify`, which is the staff
+  audience the row is being kept from. `-p` cannot publish the lifting of a hidden ban, and the
+  "tried to edit a sign while muted" staff notice narrows to this node when the mute is hidden.
+  `-h` is refused on `/unban`, `/unmute`, `/unwarn` and `/rollback`: whether lifting a punishment is
+  hidden is a fact about the row being lifted. Hidden implies silent, and this node alone is enough
+  for that: the `silent` override is not additionally required. Unlike `notify` and `silent` this is **not** implied
+  by `heimdall.admin`, because keeping a record from the rest of the staff team is not the same
+  decision as administering the plugin
 - `heimdall.punishments.silent` - override the guild's `silentByDefault` setting with `-s` or `-p`
   (default: OP). The guild default needs no permission. Departing from it in either direction does,
   because both are a decision about who finds out that a moderator acted. Without the node the

@@ -181,6 +181,47 @@ class PunishmentAnnouncementTest {
     }
 
     @Test
+    @DisplayName("a hidden line reaches the hidden node only, and nothing else widens it")
+    void hiddenAudience() {
+        PunishmentAnnouncement hidden = PunishmentAnnouncement.issued(
+                "ban", "Adam", "Steve", null, "alting", false, true);
+
+        assertTrue(hidden.hidden());
+        assertTrue(hidden.silent(), "hidden implies silent whatever the silent argument said");
+        assertTrue(hidden.line().startsWith("§5(hidden) "), hidden.line());
+        assertFalse(hidden.line().contains("(silent)"),
+                "one prefix: two would name a wider audience than the line has");
+
+        assertFalse(hidden.visibleTo(false, false, false), "an ordinary player sees nothing");
+        assertFalse(hidden.visibleTo(true, false, false),
+                "the notify audience is the staff a hidden row is kept from");
+        assertFalse(hidden.visibleTo(false, true, false),
+                "and heimdall.admin does not imply the hidden node, unlike notify and silent");
+        assertTrue(hidden.visibleTo(false, false, true));
+        assertFalse(hidden.visibleTo(true, true),
+                "the two-argument form has no hidden answer in hand, so it answers no");
+
+        PunishmentAnnouncement lift = PunishmentAnnouncement.revoked(
+                "ban", "Adam", "Steve", "", false, true);
+        assertTrue(lift.hidden());
+        assertTrue(lift.line().startsWith("§5(hidden) "), lift.line());
+        assertFalse(lift.visibleTo(true, true, false));
+        assertTrue(lift.visibleTo(false, false, true));
+    }
+
+    @Test
+    @DisplayName("the hidden node does not widen an ordinary silent line's audience either way")
+    void hiddenNodeDoesNotChangeASilentLine() {
+        PunishmentAnnouncement silent = PunishmentAnnouncement.issued(
+                "ban", "Adam", "Steve", null, "", true, false);
+        assertFalse(silent.hidden());
+        assertTrue(silent.line().startsWith("§8(silent) "), silent.line());
+        assertFalse(silent.visibleTo(false, false, true),
+                "holding the hidden node is not a claim to see every silent punishment");
+        assertTrue(silent.visibleTo(true, false, false));
+    }
+
+    @Test
     @DisplayName("nothing is announced for a type that names no player, or for a nameless target")
     void nothingToSay() {
         assertNull(PunishmentAnnouncement.issued("geo", "Adam", "DE", null, "", ANNOUNCED));
