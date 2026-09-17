@@ -99,8 +99,13 @@ final class BukkitHealthSource implements HealthSnapshotSource {
 
         try {
             if (online != null) {
+                // Counted before either number is written, so "both or neither" is a property of
+                // the code rather than of the order two put() calls happen to be in. If the walk
+                // ever found a way to throw, this leaves no half-written pair behind it: the
+                // builder would carry neither count, which is the whole point of pairing them.
+                int hidden = BukkitVanish.count(logger, online);
                 builder.put("onlinePlayers", online.size());
-                builder.put("vanishedPlayers", BukkitVanish.count(logger, online));
+                builder.put("vanishedPlayers", hidden);
             }
             builder.put("maxPlayers", Bukkit.getMaxPlayers());
         } catch (RuntimeException notReady) {

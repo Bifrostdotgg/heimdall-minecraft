@@ -131,10 +131,17 @@ final class BukkitVanish {
         if (logger == null) {
             return;
         }
-        // A supplier, so a server with no debug logging pays nothing for the name lookup - which is
-        // itself a call into the server and is wrapped for the same reason everything else here is.
-        logger.debug(() -> "vanish state for " + describe(player)
-                + " could not be read, counting them as vanished: " + e);
+        try {
+            // A supplier, so a server with no debug logging pays nothing for the name lookup -
+            // which is itself a call into the server, and is wrapped for the same reason everything
+            // else here is.
+            logger.debug(() -> "vanish state for " + describe(player)
+                    + " could not be read, counting them as vanished: " + e);
+        } catch (RuntimeException unloggable) {
+            // This is the recovery path. A caller is part way through a roster reply the bot is
+            // waiting on, and an exception escaping from the diagnostics about a swallowed
+            // exception would truncate that reply over a line nobody was going to read.
+        }
     }
 
     /** The player's name, or something harmless when even that cannot be asked for. */
