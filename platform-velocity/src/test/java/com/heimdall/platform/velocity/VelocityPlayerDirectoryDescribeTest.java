@@ -67,6 +67,16 @@ class VelocityPlayerDirectoryDescribeTest {
     }
 
     @Test
+    @DisplayName("a proxy neither declares vanish nor flags a row with it")
+    void aProxyReportsNoVanishState() {
+        // Vanish is a backend plugin's idea, carried on a player's metadata, and a proxy has neither.
+        // Declaring the capability would tell the bot that a row without the key is a player
+        // everyone may see, which on a proxy is a guess rather than an answer.
+        assertFalse(directory.reportsVanish());
+        assertFalse(directory.describe(handleOn("survival")).has("vanished"));
+    }
+
+    @Test
     @DisplayName("a handle from somewhere else describes to nothing rather than throwing")
     void aForeignHandleIsTolerated() {
         assertEquals(Payload.empty(), directory.describe(mock(PlayerHandle.class)));

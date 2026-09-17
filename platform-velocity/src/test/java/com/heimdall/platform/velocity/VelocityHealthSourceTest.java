@@ -41,6 +41,15 @@ class VelocityHealthSourceTest {
     }
 
     @Test
+    @DisplayName("a proxy never sends a vanish count either")
+    void noVanishCount() {
+        // A proxy has no metadata store and no vanish plugin, so a zero here would be a guess
+        // dressed as a measurement. It declares no vanish@1 and sends the key on no tick at all.
+        assertFalse(new VelocityHealthSource(mock(ProxyServer.class)).snapshot()
+                .has("vanishedPlayers"));
+    }
+
+    @Test
     @DisplayName("without a stubbed MOTD the clean field is empty and the icon is missing")
     void unreadStatusFieldsDegrade() {
         Payload snapshot = new VelocityHealthSource(mock(ProxyServer.class)).snapshot();
