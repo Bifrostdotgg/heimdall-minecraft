@@ -113,14 +113,33 @@ final class BukkitPunishmentGuard implements Listener {
         }
     }
 
+    /**
+     * Sends the notice, on whichever shape of {@code notifyStaff} the loaded module has.
+     *
+     * <p>The fallback mirrors the reasoning in {@link #muteHidden} above: a module with no
+     * two-argument overload predates hidden punishments entirely, so nothing it holds can be
+     * hidden, {@code hiddenOnly} is false by construction, and the one-argument form is the same
+     * call. Without the fallback the reflection simply threw and the notice was dropped, so a
+     * stale module jar beside a current platform jar silently lost every muted-sign warning -
+     * a failure with no symptom, which is the worst kind to ship.
+     */
     private void notifyStaff(String line, boolean hiddenOnly) {
         Object module = module();
         if (module == null) return;
         try {
             module.getClass().getMethod("notifyStaff", String.class, boolean.class)
                     .invoke(module, line, Boolean.valueOf(hiddenOnly));
+            return;
+        } catch (NoSuchMethodException tooOld) {
+            // Fall through to the one-argument form below.
         } catch (Throwable e) {
             logger.debug(() -> "punishment guard notify failed: " + e);
+            return;
+        }
+        try {
+            module.getClass().getMethod("notifyStaff", String.class).invoke(module, line);
+        } catch (Throwable e) {
+            logger.debug(() -> "punishment guard notify fallback failed: " + e);
         }
     }
 
