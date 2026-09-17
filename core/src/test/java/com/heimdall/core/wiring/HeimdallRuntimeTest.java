@@ -524,6 +524,34 @@ class HeimdallRuntimeTest {
         }
 
         @Test
+        @DisplayName("vanish@1 follows what the platform can see, not what is configured")
+        void vanishIsDeclaredOnlyByAPlatformThatSeesIt(@TempDir Path dataDir) {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime blind = runtime(dataDir, store).build();
+
+            assertFalse(blind.modules().capabilities().contains("vanish@1"),
+                    "a platform that cannot see vanish state must not declare it: the bot reads the "
+                            + "absence of the capability as 'this server cannot tell', and reads a "
+                            + "row with no 'vanished' key on a server that CAN tell as a player "
+                            + "everyone may see");
+            blind.close();
+
+            HeimdallRuntime seeing = HeimdallRuntime
+                    .builder(logger,
+                            new FakePlatform(ServerRole.STANDALONE, dataDir).reportingVanish(true))
+                    .bootstrapStore(store)
+                    .build();
+
+            assertTrue(seeing.modules().capabilities().contains("vanish@1"),
+                    "identify must declare it from construction, like health and status: "
+                            + seeing.modules().capabilities());
+            assertTrue(seeing.modules().capabilities().contains("health@1"));
+            assertFalse(seeing.modules().registeredIds().contains("vanish"),
+                    "vanish@1 is a third capability of health, not a managed module");
+            seeing.close();
+        }
+
+        @Test
         @DisplayName("with no config at all, health reporting is ON")
         void defaultsToOnWithNoConfigAtAll(@TempDir Path dataDir) {
             BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));

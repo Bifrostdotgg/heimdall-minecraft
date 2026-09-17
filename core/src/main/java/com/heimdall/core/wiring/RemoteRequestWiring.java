@@ -210,6 +210,12 @@ public final class RemoteRequestWiring {
      * here, once, so the platforms cannot drift apart on them the way v2's two entry points did,
      * while the third column stays each platform's own answer.
      *
+     * <p>The Bukkit family adds {@code vanished: true} to the rows it is true of, and omits the key
+     * entirely otherwise - see {@code Capabilities.VANISH}. Nothing here filters those rows out: who
+     * is allowed to see a hidden player is a permission the bot holds, and a roster that quietly
+     * dropped them would have answered that question on the bot's behalf, in the one place with no
+     * idea who is asking.
+     *
      * <p><strong>An empty roster is a successful answer.</strong> Nobody being online is the ordinary
      * state of most servers, and it must not be reported as a failure — a panel that says "error" when
      * a server is quiet is a panel nobody trusts when it says "error" for a real reason.

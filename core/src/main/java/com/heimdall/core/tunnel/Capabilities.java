@@ -39,6 +39,25 @@ public final class Capabilities {
     public static final String STATUS = "status@1";
 
     /**
+     * Vanish state on the roster: {@code vanished} on a {@code player_list} row, and
+     * {@code vanishedPlayers} on each health payload.
+     *
+     * <p>Not a separately togglable module either, and not a policy. The plugin <strong>reports</strong>
+     * who is hidden and never filters: a staff member who can see vanished players is a permission the
+     * bot holds, and a plugin that dropped the rows would have taken that decision away from the only
+     * side that can make it.
+     *
+     * <p><strong>Declared only by a platform that can answer the question.</strong> Vanish is a
+     * server-side plugin's idea, carried on a player's metadata, and a proxy has no metadata and no
+     * vanish plugin - so BungeeCord and Velocity declare nothing here and send neither key. A bot must
+     * therefore read the absence of this capability as "this server cannot tell", not as "nobody is
+     * hidden". {@link com.heimdall.core.platform.PlayerDirectory#reportsVanish()} is what decides, and
+     * {@code HealthModule} is what declares it, the same way {@link #STATUS} rides on health rather
+     * than becoming a dashboard toggle of its own.
+     */
+    public static final String VANISH = "vanish@1";
+
+    /**
      * The Discord chat bridge: batched {@code bridge.chat} and {@code bridge.event} out, rendered
      * {@code bridge.discord} in.
      *

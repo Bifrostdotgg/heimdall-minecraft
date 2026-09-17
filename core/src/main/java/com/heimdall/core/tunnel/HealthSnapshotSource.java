@@ -11,6 +11,11 @@ import com.heimdall.core.json.Payload;
  * than a typed record: a platform that can only answer half the questions should send half the
  * fields, not zeroes that the dashboard would then chart as a server running at 0 TPS.
  *
+ * <p>A platform that can see vanish state adds {@code vanishedPlayers} beside {@code onlinePlayers}
+ * - zero when nobody is hidden, which is a measurement rather than a guess and so is sent rather than
+ * omitted. A proxy sends the key on no tick at all; see {@link Capabilities#VANISH} for why the
+ * difference matters to the bot.
+ *
  * <p>{@code motdClean} is always present (empty when unread). {@code motdRaw} is optional.
  * {@code iconPngBase64} is omitted or JSON null when the favicon is missing or larger than 64 KiB
  * decoded. Player <em>counts</em> belong here; player <em>names</em> stay on {@code get_players} /

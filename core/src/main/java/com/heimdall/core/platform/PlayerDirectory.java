@@ -74,4 +74,26 @@ public interface PlayerDirectory {
      * a request that dies over a nicety.
      */
     Payload describe(PlayerHandle player);
+
+    /**
+     * Whether {@link #describe} can tell that a player is hidden by a vanish plugin.
+     *
+     * <p>A backend server can: every vanish plugin in wide use marks a hidden player with the same
+     * metadata key, so the Bukkit family answers {@code true} and writes {@code vanished} on the rows
+     * it is true of. A proxy cannot: it has no metadata store and no vanish plugin, so it answers
+     * {@code false} and writes the key on no row at all.
+     *
+     * <p>This is the whole of what gates {@link com.heimdall.core.tunnel.Capabilities#VANISH} on
+     * {@code identify}, and that is why it is a question about the platform rather than a constant.
+     * The bot has to be able to tell "nobody is hidden" from "this server cannot see who is", because
+     * the two look identical on the wire - every row simply lacks the key - and only one of them means
+     * the roster is safe to publish unfiltered.
+     *
+     * <p>Default {@code false}: a platform that has not thought about vanish must not claim to report
+     * it. Claiming it falsely is the expensive direction, since it tells the bot that an unmarked row
+     * is a player everyone can see.
+     */
+    default boolean reportsVanish() {
+        return false;
+    }
 }

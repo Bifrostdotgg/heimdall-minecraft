@@ -39,6 +39,15 @@ import java.util.Set;
  * is a second capability of this module, not a dashboard toggle of its own. Disable health and
  * those fields stop with the rest of the snapshot.
  *
+ * <p><strong>{@code vanish@1} is a third, and it is conditional.</strong> A Bukkit-family server can
+ * see that a player is hidden by a vanish plugin and reports it twice over: {@code vanishedPlayers}
+ * on the snapshot, and {@code vanished} on the roster rows {@code get_players} answers with. A proxy
+ * can see neither, so it declares neither - the flag comes from
+ * {@link com.heimdall.core.platform.PlayerDirectory#reportsVanish()} and is passed in at
+ * construction. The roster half does not stop when health is switched off, because it is answered by
+ * core's request wiring rather than by the heartbeat; the capability describes what the jar can see,
+ * which is true either way.
+ *
  * <p>Registered by {@code HeimdallRuntime} itself rather than by {@code HeimdallModules} — it is
  * core's own module, and core must not depend on the feature modules.
  *
@@ -56,22 +65,39 @@ public final class HealthModule implements HeimdallModule {
     /** The module id, which is also its key in the remote-config document. */
     public static final String ID = "health";
 
-    private static final Set<String> CAPABILITIES;
+    private static final Set<String> CAPABILITIES = capabilities(false);
 
-    static {
+    private static final Set<String> CAPABILITIES_WITH_VANISH = capabilities(true);
+
+    private static Set<String> capabilities(boolean vanish) {
         Set<String> caps = new LinkedHashSet<String>();
         caps.add(Capabilities.HEALTH);
         caps.add(Capabilities.STATUS);
-        CAPABILITIES = Collections.unmodifiableSet(caps);
+        if (vanish) {
+            caps.add(Capabilities.VANISH);
+        }
+        return Collections.unmodifiableSet(caps);
     }
 
     private final TunnelClient tunnel;
+    private final boolean reportsVanish;
 
     public HealthModule(TunnelClient tunnel) {
+        this(tunnel, false);
+    }
+
+    /**
+     * @param reportsVanish whether this platform's
+     *     {@link com.heimdall.core.platform.PlayerDirectory#reportsVanish() player directory} can see
+     *     vanish state. The Bukkit family can; a proxy cannot, and must not declare
+     *     {@link Capabilities#VANISH} it would never send a key for.
+     */
+    public HealthModule(TunnelClient tunnel, boolean reportsVanish) {
         if (tunnel == null) {
             throw new IllegalArgumentException("a tunnel is required");
         }
         this.tunnel = tunnel;
+        this.reportsVanish = reportsVanish;
     }
 
     @Override
@@ -81,7 +107,7 @@ public final class HealthModule implements HeimdallModule {
 
     @Override
     public Set<String> capabilities() {
-        return CAPABILITIES;
+        return reportsVanish ? CAPABILITIES_WITH_VANISH : CAPABILITIES;
     }
 
     @Override

@@ -232,6 +232,47 @@ class RemoteRequestWiringTest {
     }
 
     @Test
+    @DisplayName("a vanished player is reported, never dropped from the roster")
+    void aVanishedPlayerIsReportedRatherThanFiltered() {
+        FakePlatform platform = platform(ServerRole.STANDALONE);
+        platform.join(FakePlayer.named("Steve"));
+        platform.join(FakePlayer.named("Alex"));
+        platform.describingPlayers(new Function<PlayerHandle, Payload>() {
+            @Override
+            public Payload apply(PlayerHandle player) {
+                // What the Bukkit directory does: the key is written only when it is true, so a row
+                // without it is an ordinary player rather than an explicit "vanished: false".
+                return "Steve".equals(player.name())
+                        ? Payload.builder().put("vanished", true).build()
+                        : Payload.empty();
+            }
+        });
+        install(platform);
+
+        tunnel.push(Envelope.of("req-vanished", "get_players", Payload.empty()));
+
+        List<Payload> players = onlyReply("player_list").payload().children("players");
+        assertEquals(2, players.size(),
+                "who is allowed to see a hidden player is a permission the bot holds, so the plugin "
+                        + "reports and the bot decides: a roster that dropped the row would have "
+                        + "answered that question in the one place with no idea who is asking");
+        assertTrue(rowFor(players, "Steve").bool("vanished", false));
+        assertFalse(rowFor(players, "Alex").has("vanished"),
+                "an omitted key, not false: a bot older than this build reads the absence the same "
+                        + "way it always did");
+    }
+
+    /** The one row for a username, so a test never depends on roster ordering. */
+    private static Payload rowFor(List<Payload> players, String username) {
+        for (Payload row : players) {
+            if (username.equals(row.string("username", ""))) {
+                return row;
+            }
+        }
+        throw new AssertionError("no roster row for " + username);
+    }
+
+    @Test
     @DisplayName("an empty server answers with an empty roster, not with an error")
     void anEmptyServerIsASuccessfulAnswer() {
         install(platform(ServerRole.STANDALONE));
