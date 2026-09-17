@@ -35,7 +35,7 @@ class HealthModuleTest {
         executors = new HeimdallExecutors(logger, 1);
         TunnelClient tunnel = TunnelClient.builder(logger, executors).build();
         try {
-            HealthModule module = new HealthModule(tunnel);
+            HealthModule module = new HealthModule(tunnel, false);
 
             assertEquals(HealthModule.ID, module.id());
             assertEquals("health", module.id());

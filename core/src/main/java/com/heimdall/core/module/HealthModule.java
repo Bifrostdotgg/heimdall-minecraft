@@ -82,10 +82,6 @@ public final class HealthModule implements HeimdallModule {
     private final TunnelClient tunnel;
     private final boolean reportsVanish;
 
-    public HealthModule(TunnelClient tunnel) {
-        this(tunnel, false);
-    }
-
     /**
      * @param reportsVanish whether this platform's
      *     {@link com.heimdall.core.platform.PlayerDirectory#reportsVanish() player directory} can see
