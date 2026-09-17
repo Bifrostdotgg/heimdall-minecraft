@@ -1,6 +1,7 @@
 package com.heimdall.platform.bukkit;
 
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.platform.SchedulerBridge;
@@ -74,24 +75,71 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
         Collection<? extends Player> onlinePlayers();
     }
 
+    /**
+     * The real one. Shared with {@link BukkitHealthSource}, which reads the same list for its counts:
+     * two anonymous classes calling the same static method is two places to change when that static
+     * method moves, and neither of them a seam anybody could find.
+     */
+    static final RosterSource LIVE = new RosterSource() {
+        @Override
+        public Collection<? extends Player> onlinePlayers() {
+            return Bukkit.getOnlinePlayers();
+        }
+    };
+
+    private final HeimdallLogger logger;
     private final SchedulerBridge scheduler;
     private final BukkitMessenger messenger;
     private final RosterSource roster;
 
-    BukkitPlayerDirectory(SchedulerBridge scheduler, BukkitMessenger messenger) {
-        this(scheduler, messenger, new RosterSource() {
-            @Override
-            public Collection<? extends Player> onlinePlayers() {
-                return Bukkit.getOnlinePlayers();
-            }
-        });
+    BukkitPlayerDirectory(HeimdallLogger logger, SchedulerBridge scheduler, BukkitMessenger messenger) {
+        this(logger, scheduler, messenger, LIVE);
     }
 
     /** For the tests that need to drive a roster that mutates underneath a reader. */
-    BukkitPlayerDirectory(SchedulerBridge scheduler, BukkitMessenger messenger, RosterSource roster) {
+    BukkitPlayerDirectory(
+            HeimdallLogger logger,
+            SchedulerBridge scheduler,
+            BukkitMessenger messenger,
+            RosterSource roster) {
+        this.logger = logger;
         this.scheduler = scheduler;
         this.messenger = messenger;
         this.roster = roster;
+    }
+
+    /**
+     * One copy of the server's online list, with the momentary races retried out of it.
+     *
+     * <p>{@link BukkitHealthSource} needs the same discipline {@link #onlinePlayers()} applies, over
+     * the same live view, for a different reason: its two player counts have to describe one instant,
+     * so it takes a copy once and derives both from it. A second implementation of the retry would be
+     * a second place for {@value #SNAPSHOT_ATTEMPTS} to drift.
+     *
+     * <p>Everything except a race propagates unchanged - a server that has not finished starting, or
+     * has begun stopping, is a state with a real answer and the caller owns it.
+     *
+     * @throws IllegalStateException when {@value #SNAPSHOT_ATTEMPTS} consecutive reads all raced,
+     *     which is no longer a race but something else wearing its exception
+     */
+    static List<Player> raceTolerantCopy(RosterSource roster) {
+        RuntimeException lastRace = null;
+        for (int attempt = 0; attempt < SNAPSHOT_ATTEMPTS; attempt++) {
+            try {
+                Collection<? extends Player> online = roster.onlinePlayers();
+                return online == null
+                        ? Collections.<Player>emptyList()
+                        : new ArrayList<Player>(online);
+            } catch (ConcurrentModificationException raced) {
+                lastRace = raced;
+            } catch (IndexOutOfBoundsException raced) {
+                // The transforming view's size() and get() disagreeing for an instant.
+                lastRace = raced;
+            }
+        }
+        throw new IllegalStateException(
+                "the online player list kept changing under a read after " + SNAPSHOT_ATTEMPTS
+                        + " attempts", lastRace);
     }
 
     @Override
@@ -221,7 +269,7 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
             address = "unknown";
         }
         Payload.Builder described = Payload.builder().put("ip", address);
-        if (BukkitVanish.isVanished(bukkit)) {
+        if (BukkitVanish.isVanished(logger, bukkit)) {
             described.put("vanished", true);
         }
         return described.build();

@@ -65,7 +65,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
         BukkitPlayerDirectory builtPlayers = null;
         Log4jConsoleTap builtTap = null;
         try {
-            builtPlayers = new BukkitPlayerDirectory(mainThread, messenger);
+            builtPlayers = new BukkitPlayerDirectory(logger, mainThread, messenger);
             builtTap = new Log4jConsoleTap(logger, executors.io());
             this.players = builtPlayers;
             this.consoleTap = builtTap;

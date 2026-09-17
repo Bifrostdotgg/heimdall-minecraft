@@ -1,5 +1,6 @@
 package com.heimdall.platform.bukkit;
 
+import com.heimdall.core.log.HeimdallLogger;
 import java.util.Collection;
 import java.util.List;
 import org.bukkit.entity.Player;
@@ -21,19 +22,44 @@ import org.bukkit.metadata.MetadataValue;
  * a permission the bot holds, and the plugin has no idea who is looking at the answer it produces.
  * See {@code Capabilities.VANISH}.
  *
- * <h2>Why every read is wrapped</h2>
+ * <h2>An unreadable answer counts as vanished</h2>
  *
  * <p>A {@link MetadataValue} is supplied by whichever third-party plugin set it, and
  * {@link MetadataValue#asBoolean()} on a lazy implementation runs that plugin's code on this thread.
- * It can throw, and the two callers cannot afford one: {@code describe} is building a row in a reply
- * the bot is waiting on, and the health count rides the heartbeat that doubles as this server's
- * liveness signal. A value that throws counts as "not vanished" - the same answer as a server with no
- * vanish plugin at all, which is the one failure mode nobody has to be told about.
+ * When it throws, this answers <strong>true</strong>.
+ *
+ * <p>That is the opposite of the usual "degrade to the harmless default", and it is deliberate,
+ * because here the two outcomes are not symmetric. A server that declared {@code vanish@1} has told
+ * the bot it can see who is hidden, so the bot reads a row without the flag as a player who may be
+ * published. Guessing "not vanished" therefore leaks a hidden staff member into a Discord roster;
+ * guessing "vanished" hides someone who was not, and the worst that costs is one name missing from
+ * one refresh. Only the first mistake is irreversible.
+ *
+ * <p>The guess is cheap because it is rare: a server with no vanish plugin does not reach the catch
+ * at all. {@code MetadataStoreBase.getMetadata} is synchronised and returns an empty list for a key
+ * nobody has set, so "no vanish plugin" and "a vanish plugin whose value blew up" are genuinely
+ * distinguishable states rather than one shrug.
+ *
+ * <h2>Threading, and what the guard cannot reach</h2>
  *
  * <p>Both callers read from {@code heimdall-io} or {@code heimdall-ws} rather than the main thread,
- * exactly where they already read the online list and a player's address. Metadata is a per-player
- * map inside the server, so this adds no new threading assumption; a store mutated underneath a read
- * throws, and a throw here is already "not vanished".
+ * exactly where they already read the online list and a player's address. Reading the store itself is
+ * safe from there: {@code MetadataStoreBase.getMetadata} is synchronised and hands back a copy, so a
+ * plugin setting the key underneath a read cannot raise a
+ * {@link java.util.ConcurrentModificationException} out of this class.
+ *
+ * <p>What the values <em>do</em> off the main thread is another matter, and one case is worth naming
+ * because no catch here helps with it. VanishNoPacket stores a {@code LazyMetadataValue} whose
+ * {@code asBoolean()} calls back into {@code VanishManager.isVanished}, which looks the player up
+ * through {@code getServer().getPlayer(name)} - a main-thread read, re-entered from ours. Its own
+ * {@code VanishCheck} catches {@link Exception} and answers {@code false}, so a race there does not
+ * arrive as an exception this class can fail closed on: it arrives as a clean "not vanished".
+ *
+ * <p><strong>So the residual risk is real and is stated rather than papered over:</strong> on a
+ * VanishNoPacket server, a vanished player can be reported unflagged for the one roster reply that
+ * lost that race. It cannot be fixed from here, only by hopping to the main thread for every roster
+ * row, which is the blocking this platform's directory exists to avoid. The next refresh corrects
+ * it, and the count on the heartbeat is re-sent every tick.
  */
 final class BukkitVanish {
 
@@ -43,16 +69,20 @@ final class BukkitVanish {
     private BukkitVanish() {
     }
 
-    /** Whether this player is currently hidden. {@code false} for null, and for anything unreadable. */
-    static boolean isVanished(Player player) {
+    /**
+     * Whether this player is currently hidden.
+     *
+     * <p>{@code false} for a null player, and <strong>true</strong> for anything that throws: see the
+     * class comment for why the unreadable case is not the harmless one.
+     *
+     * @param logger where the guess is recorded, or {@code null} to make it silently
+     */
+    static boolean isVanished(HeimdallLogger logger, final Player player) {
         if (player == null) {
             return false;
         }
         try {
             List<MetadataValue> values = player.getMetadata(METADATA_KEY);
-            if (values == null) {
-                return false;
-            }
             for (MetadataValue value : values) {
                 if (value == null) {
                     continue;
@@ -65,13 +95,16 @@ final class BukkitVanish {
                         return true;
                     }
                 } catch (RuntimeException thirdParty) {
-                    // One plugin's value cannot decide the answer for the rest, and it certainly
-                    // cannot cost the caller its reply.
+                    debug(logger, player, thirdParty);
+                    return true;
                 }
             }
         } catch (RuntimeException unreadable) {
-            // A player the server has already begun tearing down, or a metadata store being mutated
-            // under the read. Neither is evidence that anybody is hidden.
+            // The store itself, which is synchronised and cannot race: something is wrong with this
+            // player rather than with the timing, and an unanswerable question about a staff member
+            // is answered the safe way round.
+            debug(logger, player, unreadable);
+            return true;
         }
         return false;
     }
@@ -79,22 +112,37 @@ final class BukkitVanish {
     /**
      * How many of these players are hidden.
      *
-     * <p>May throw whatever iterating {@code online} throws: on the Bukkit family that collection is
-     * the server's own live view, so a join or a quit landing mid-count raises
-     * {@link java.util.ConcurrentModificationException}. The caller decides what to do about it, and
-     * the health source simply omits the field for that tick - the next heartbeat is seconds away,
-     * which is why this does not retry the way a one-shot roster request has to.
+     * <p>Takes a list the caller already owns rather than the server's live view, so nothing here can
+     * raise a {@link java.util.ConcurrentModificationException}: the snapshot is
+     * {@link BukkitPlayerDirectory#raceTolerantCopy}'s job, and taking it once is what keeps this
+     * count and the {@code onlinePlayers} beside it describing the same instant.
      */
-    static int count(Collection<? extends Player> online) {
-        if (online == null) {
-            return 0;
-        }
+    static int count(HeimdallLogger logger, Collection<? extends Player> online) {
         int hidden = 0;
         for (Player player : online) {
-            if (isVanished(player)) {
+            if (isVanished(logger, player)) {
                 hidden++;
             }
         }
         return hidden;
+    }
+
+    private static void debug(HeimdallLogger logger, final Player player, final RuntimeException e) {
+        if (logger == null) {
+            return;
+        }
+        // A supplier, so a server with no debug logging pays nothing for the name lookup - which is
+        // itself a call into the server and is wrapped for the same reason everything else here is.
+        logger.debug(() -> "vanish state for " + describe(player)
+                + " could not be read, counting them as vanished: " + e);
+    }
+
+    /** The player's name, or something harmless when even that cannot be asked for. */
+    private static String describe(Player player) {
+        try {
+            return String.valueOf(player.getName());
+        } catch (RuntimeException gone) {
+            return "a player on their way out";
+        }
     }
 }

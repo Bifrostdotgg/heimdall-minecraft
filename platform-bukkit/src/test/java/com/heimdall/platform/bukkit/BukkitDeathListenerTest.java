@@ -50,7 +50,7 @@ class BukkitDeathListenerTest {
             }
         });
         return new BukkitDeathListener(
-                logger, sessions, new BukkitPlayerDirectory(InlineScheduler.INSTANCE, null));
+                logger, sessions, new BukkitPlayerDirectory(logger, InlineScheduler.INSTANCE, null));
     }
 
     private static PlayerDeathEvent death(String message) {
@@ -114,7 +114,7 @@ class BukkitDeathListenerTest {
     @Test
     @DisplayName("with nobody listening, nothing happens and nothing is logged")
     void noListenersIsNotAnError() {
-        new BukkitDeathListener(logger, sessions, new BukkitPlayerDirectory(InlineScheduler.INSTANCE, null))
+        new BukkitDeathListener(logger, sessions, new BukkitPlayerDirectory(logger, InlineScheduler.INSTANCE, null))
                 .onDeath(death("Steve was slain by Alex"));
 
         assertTrue(deaths.isEmpty());

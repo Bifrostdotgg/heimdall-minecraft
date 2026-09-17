@@ -9,6 +9,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.log.LogLevel;
+import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.platform.PlayerHandle;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -33,8 +35,9 @@ import org.junit.jupiter.api.Test;
  */
 class BukkitPlayerDirectoryDescribeTest {
 
+    private final RecordingLogger logger = new RecordingLogger(true);
     private final BukkitPlayerDirectory directory =
-            new BukkitPlayerDirectory(InlineScheduler.INSTANCE, null);
+            new BukkitPlayerDirectory(logger, InlineScheduler.INSTANCE, null);
 
     private PlayerHandle handleFor(InetSocketAddress address) {
         return directory.wrap(player(address));
@@ -119,11 +122,12 @@ class BukkitPlayerDirectoryDescribeTest {
     }
 
     @Test
-    @DisplayName("a metadata value that throws counts as not vanished, and the row still answers")
-    void aThrowingMetadataValueIsNotVanished() {
+    @DisplayName("a metadata value that throws is flagged vanished, and the row still answers")
+    void aThrowingMetadataValueFailsClosed() {
         // asBoolean() on a lazy value runs a third-party plugin's code on this thread, and this
-        // thread is building a row in a reply the bot is waiting on. A throw must cost the flag,
-        // not the roster.
+        // thread is building a row in a reply the bot is waiting on. A throw must cost the flag's
+        // accuracy, never the roster - and it fails CLOSED, because this server told the bot it can
+        // see who is hidden, so an unflagged row reads as "safe to publish".
         MetadataValue explosive = mock(MetadataValue.class);
         when(explosive.asBoolean()).thenThrow(new IllegalStateException("not my thread"));
         List<MetadataValue> values = singletonList(explosive);
@@ -132,19 +136,24 @@ class BukkitPlayerDirectoryDescribeTest {
 
         Payload described = directory.describe(directory.wrap(player));
 
-        assertFalse(described.has("vanished"),
-                "the same answer a server with no vanish plugin gives, which is the one failure "
-                        + "mode nobody has to be told about");
+        assertTrue(described.bool("vanished", false),
+                "hiding someone who was not hidden costs one name off one refresh; publishing "
+                        + "someone who was cannot be taken back");
         assertEquals("unknown", described.string("ip", ""));
+        assertTrue(logger.logged(LogLevel.DEBUG, "counting them as vanished"),
+                "the guess is recorded, or an operator has no way to see it happening");
     }
 
     @Test
-    @DisplayName("a metadata store that cannot be read at all is not vanished either")
-    void anUnreadableMetadataStoreIsNotVanished() {
+    @DisplayName("a metadata store that cannot be read at all fails closed too")
+    void anUnreadableMetadataStoreFailsClosed() {
+        // getMetadata is synchronised and answers an empty list for a key nobody set, so a server
+        // with no vanish plugin never reaches this branch: reaching it means something is wrong with
+        // this player, which is not the moment to guess in the publishable direction.
         Player player = player(null);
         when(player.getMetadata("vanished")).thenThrow(new IllegalStateException("shutting down"));
 
-        assertFalse(directory.describe(directory.wrap(player)).has("vanished"));
+        assertTrue(directory.describe(directory.wrap(player)).bool("vanished", false));
     }
 
     @Test
