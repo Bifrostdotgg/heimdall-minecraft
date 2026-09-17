@@ -1,0 +1,475 @@
+package com.heimdall.module.punishments;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.heimdall.core.admin.PunishmentAdmin;
+import com.heimdall.core.config.ServerRole;
+import com.heimdall.core.json.Payload;
+import com.heimdall.core.punish.HiddenPunishments;
+import com.heimdall.core.punish.SilenceDecision;
+import com.heimdall.core.testing.FakeCommandSource;
+import com.heimdall.core.testing.FakePlayer;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/**
+ * What {@code /hd ban} suggests, and to whom.
+ *
+ * <p>Before this, the punishment verbs completed nothing at all - not even the online players
+ * Bukkit would have offered on its own, because the tree returns an empty list rather than
+ * {@code null} for a verb it knows about. The bug report was "/hd ban did not tab-complete my
+ * name".
+ */
+class PunishmentCompletionTest {
+
+    @TempDir
+    Path dataDir;
+
+    private static final FakeCommandSource MODERATOR =
+            FakeCommandSource.player("Mod").grant(SilenceDecision.OVERRIDE_PERMISSION);
+
+    @Test
+    @DisplayName("an online player completes at the target position")
+    void onlinePlayerCompletes() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            join(harness, "Alex");
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "Ste"));
+            assertTrue(complete(harness, "ban", "").containsAll(Arrays.asList("Alex", "Steve")));
+            assertEquals(Collections.emptyList(), complete(harness, "ban", "zz"));
+        }
+    }
+
+    @Test
+    @DisplayName("no arguments at all is the target position, not the end of the world")
+    void emptyArgumentListCompletesNames() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertEquals(Arrays.asList("Steve"),
+                    harness.module.complete(MODERATOR, "ban", Collections.<String>emptyList()),
+                    "the trailing empty word is a convention of the two callers, not a promise of "
+                            + "the interface, and without it this offered nothing at all");
+        }
+    }
+
+    @Test
+    @DisplayName("the target is the first non-flag word, however many flags came first")
+    void flagsDoNotMoveTheTarget() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "-s", "Ste"));
+            assertEquals(Arrays.asList("Steve"),
+                    complete(harness, "ban", "-s", "-p", "--sender=Console", "Ste"));
+        }
+    }
+
+    @Test
+    @DisplayName("a player this server has only seen, not hosted, still completes")
+    void seenPlayersComplete() {
+        try (PunishmentsHarness harness = replacing()) {
+            harness.login(UUID.randomUUID(), "Notch", "203.0.113.9");
+
+            assertEquals(Arrays.asList("Notch"), complete(harness, "ban", "Not"));
+        }
+    }
+
+    @Test
+    @DisplayName("so does a player who is only a row in the punishment mirror")
+    void punishedPlayersComplete() {
+        try (PunishmentsHarness harness = replacing()) {
+            ban(harness, "Herobrine");
+
+            assertEquals(Arrays.asList("Herobrine"), complete(harness, "ban", "Hero"));
+        }
+    }
+
+    @Test
+    @DisplayName("online players come before everyone else")
+    void onlineFirst() {
+        try (PunishmentsHarness harness = replacing()) {
+            harness.login(UUID.randomUUID(), "Aaa", "203.0.113.9");
+            join(harness, "Zzz");
+
+            assertEquals(Arrays.asList("Zzz", "Aaa"), complete(harness, "ban", ""),
+                    "alphabetical inside each group, but the people who are here come first");
+        }
+    }
+
+    @Test
+    @DisplayName("a player who left is still known, just no longer first")
+    void quitKeepsTheName() {
+        try (PunishmentsHarness harness = replacing()) {
+            FakePlayer steve = join(harness, "Steve");
+            harness.sessions.quit(steve, 2L);
+            harness.platform.leave(steve);
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "Ste"));
+        }
+    }
+
+    @Test
+    @DisplayName("unban offers only players with a ban to lift")
+    void revokeVerbsFilterToTheirFamily() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            join(harness, "Alex");
+            ban(harness, "Steve");
+            mute(harness, "Alex");
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "unban", ""));
+            assertEquals(Arrays.asList("Alex"), complete(harness, "unmute", ""));
+            assertEquals(Collections.emptyList(), complete(harness, "unwarn", ""));
+            assertTrue(complete(harness, "ban", "").containsAll(Arrays.asList("Alex", "Steve")),
+                    "an issue verb is not filtered: anybody can be banned");
+        }
+    }
+
+    @Test
+    @DisplayName("an expired ban is not an unban candidate")
+    void expiredRowsAreNotOffered() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            recordUntil(harness, "ban", "Steve",
+                    java.time.Instant.ofEpochMilli(System.currentTimeMillis() - 1000).toString());
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "Ste"),
+                    "the name is known either way; it is the unban candidacy that expired");
+            assertEquals(Collections.emptyList(), complete(harness, "unban", "Ste"));
+        }
+    }
+
+    @Test
+    @DisplayName("a revoked name leaves the family it was in")
+    void revokedNamesLeaveTheFamily() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            ban(harness, "Steve");
+            assertEquals(Arrays.asList("Steve"), complete(harness, "unban", ""));
+
+            harness.tunnel.push("punish.revoke", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", FakePlayer.named("Steve").uuid().toString())
+                    .build());
+
+            assertEquals(Collections.emptyList(), complete(harness, "unban", ""),
+                    "there is nothing left to lift, so the name is not an answer");
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "Ste"),
+                    "and the name is still known, because it is still a name");
+        }
+    }
+
+    @Test
+    @DisplayName("a name a moderator banned and then unbanned leaves the family too")
+    void nativeRoundTripLeavesTheFamily() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            harness.module.onStaffCommand(MODERATOR, "ban", Arrays.asList("Steve", "griefing"));
+            assertEquals(Arrays.asList("Steve"), complete(harness, "unban", ""));
+
+            harness.module.onStaffCommand(MODERATOR, "unban", Arrays.asList("Steve"));
+            assertEquals(Collections.emptyList(), complete(harness, "unban", ""));
+        }
+    }
+
+    @Test
+    @DisplayName("an IP ban is an unban candidate, and it is the same family as a ban")
+    void ipBansAreUnbanCandidates() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("id", "ip-1")
+                    .put("type", "ipban")
+                    .put("targetUuid", FakePlayer.named("Steve").uuid().toString())
+                    .put("targetName", "Steve")
+                    .put("ipDigest", "digest-1")
+                    .build());
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "unban", ""));
+            assertEquals(Collections.emptyList(), complete(harness, "unmute", ""));
+        }
+    }
+
+    @Test
+    @DisplayName("a dash completes the flags, and only for somebody allowed to use them")
+    void flagCompletion() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertEquals(Arrays.asList("-s", "-p"), complete(harness, "ban", "-"));
+            assertEquals(Arrays.asList("-s"), complete(harness, "ban", "-s"));
+            assertEquals(Collections.emptyList(),
+                    harness.module.complete(FakeCommandSource.player("Nobody"), "ban",
+                            Arrays.asList("-")),
+                    "the command refuses -s without the node, so completing it is a lie");
+        }
+    }
+
+    @Test
+    @DisplayName("-h is offered to the hidden node and to nobody else, on its own node")
+    void hiddenFlagCompletion() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertFalse(complete(harness, "ban", "-").contains("-h"),
+                    "the silence override is not a claim to hide a punishment, and completing -h "
+                            + "for somebody the command will refuse is the same lie as -s");
+
+            FakeCommandSource hider = FakeCommandSource.player("Hider")
+                    .grant(HiddenPunishments.PERMISSION);
+            assertEquals(Arrays.asList("-h"),
+                    harness.module.complete(hider, "ban", Arrays.asList("-")),
+                    "and the hidden node alone offers -h without offering the silence flags, "
+                            + "because hidden implies silence rather than needing it");
+            assertEquals(Arrays.asList("-h"),
+                    harness.module.complete(hider, "ban", Arrays.asList("-h")));
+
+            FakeCommandSource both = FakeCommandSource.player("Both")
+                    .grant(SilenceDecision.OVERRIDE_PERMISSION)
+                    .grant(HiddenPunishments.PERMISSION);
+            assertEquals(Arrays.asList("-s", "-p", "-h"),
+                    harness.module.complete(both, "ban", Arrays.asList("-")));
+        }
+    }
+
+    @Test
+    @DisplayName("-h is issue-only, so a revoke verb does not offer it even to the node")
+    void hiddenFlagIsNotOfferedOnRevokeVerbs() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            FakeCommandSource both = FakeCommandSource.player("Both")
+                    .grant(SilenceDecision.OVERRIDE_PERMISSION)
+                    .grant(HiddenPunishments.PERMISSION);
+
+            for (String verb : Arrays.asList("unban", "unmute", "unwarn", "rollback")) {
+                assertEquals(Arrays.asList("-s", "-p"),
+                        harness.module.complete(both, verb, Arrays.asList("-")),
+                        verb + " refuses -h with a sentence, so completing it is a lie the sender "
+                                + "has every reason to read as a bug: they do hold the node");
+                assertEquals(Collections.emptyList(),
+                        harness.module.complete(both, verb, Arrays.asList("-h")));
+            }
+            assertEquals(Arrays.asList("-s", "-p", "-h"),
+                    harness.module.complete(both, "ban", Arrays.asList("-")),
+                    "and the issuing verbs are unchanged by the narrowing");
+        }
+    }
+
+    @Test
+    @DisplayName("a lookup takes no flags, so none are offered however many nodes are held")
+    void lookupVerbsOfferNoFlags() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            FakeCommandSource both = FakeCommandSource.player("Both")
+                    .grant(SilenceDecision.OVERRIDE_PERMISSION)
+                    .grant(HiddenPunishments.PERMISSION);
+
+            for (String verb : Arrays.asList("history", "banlist", "staffhistory", "dupeip",
+                    "iphistory")) {
+                assertEquals(Collections.emptyList(),
+                        harness.module.complete(both, verb, Arrays.asList("-")),
+                        verb + " reads; none of -s, -p or -h means anything to a read, and the "
+                                + "lookup path drops them");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("the -h offer follows the node on an issuing verb, and only the node")
+    void hiddenFlagFollowsTheNodeOnIssuingVerbs() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            FakeCommandSource hider = FakeCommandSource.player("Hider")
+                    .grant(HiddenPunishments.PERMISSION);
+
+            for (String verb : Arrays.asList("ban", "tempban", "ipban", "mute", "kick", "warn")) {
+                assertEquals(Arrays.asList("-h"),
+                        harness.module.complete(hider, verb, Arrays.asList("-")), verb);
+                assertFalse(complete(harness, verb, "-").contains("-h"),
+                        verb + " must not offer -h to the silence override alone");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("-h does not move the target either, or the reason takes the name")
+    void hiddenFlagDoesNotMoveTheTarget() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "-h", "Ste"));
+            assertEquals(HeimdallPunishmentsModule.DURATION_SUGGESTIONS,
+                    complete(harness, "ban", "-h", "Steve", ""));
+        }
+    }
+
+    @Test
+    @DisplayName("durations are offered after the target, until one is typed")
+    void durationCompletion() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertEquals(HeimdallPunishmentsModule.DURATION_SUGGESTIONS,
+                    complete(harness, "ban", "Steve", ""));
+            assertEquals(Arrays.asList("30m", "30d"), complete(harness, "ban", "Steve", "30"));
+            assertEquals(Arrays.asList("perm"), complete(harness, "ban", "Steve", "p"));
+            assertEquals(Collections.emptyList(), complete(harness, "ban", "Steve", "7d", ""),
+                    "the duration is taken, so the rest is the reason and has no vocabulary");
+            assertEquals(Collections.emptyList(),
+                    complete(harness, "ban", "-s", "Steve", "7d", "grief", ""));
+        }
+    }
+
+    @Test
+    @DisplayName("verbs with no duration to give offer none")
+    void durationlessVerbs() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+
+            assertEquals(Collections.emptyList(), complete(harness, "unban", "Steve", ""));
+            assertEquals(Collections.emptyList(), complete(harness, "kick", "Steve", ""));
+            assertEquals(Collections.emptyList(), complete(harness, "warn", "Steve", ""),
+                    "a warn is an event, not a state: offering a length the bot then drops is "
+                            + "worse than offering nothing");
+            assertEquals(Collections.emptyList(), complete(harness, "warn", "Steve", "1"));
+            assertEquals(Collections.emptyList(), complete(harness, "history", "Steve", ""));
+            assertEquals(Collections.emptyList(), complete(harness, "banlist", ""),
+                    "/banlist takes no arguments at all");
+        }
+    }
+
+    @Test
+    @DisplayName("the answer is capped, so a tab press cannot ship a whole player history")
+    void cappedAtAHundred() {
+        try (PunishmentsHarness harness = replacing()) {
+            for (int i = 0; i < 250; i++) {
+                harness.login(UUID.randomUUID(), String.format("Player%03d", i), "203.0.113.9");
+            }
+
+            List<String> suggestions = complete(harness, "ban", "Player");
+            assertEquals(PunishmentAdmin.COMPLETION_LIMIT, suggestions.size());
+            assertTrue(suggestions.contains("Player000"));
+            assertFalse(suggestions.contains("Player249"),
+                    "alphabetical, so the cut falls at the far end rather than at random");
+        }
+    }
+
+    @Test
+    @DisplayName("a name is offered once, however many ways this server knows it")
+    void namesAreNotDuplicated() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            harness.login(FakePlayer.named("Steve").uuid(), "Steve", "203.0.113.9");
+            ban(harness, "steve");
+
+            assertEquals(Arrays.asList("Steve"), complete(harness, "ban", "ste"),
+                    "matched case-insensitively, and the online spelling is the one shown");
+        }
+    }
+
+    private PunishmentsHarness replacing() {
+        return new PunishmentsHarness(dataDir, ServerRole.STANDALONE).enableReplace();
+    }
+
+    private static FakePlayer join(PunishmentsHarness harness, String name) {
+        FakePlayer player = harness.platform.join(FakePlayer.named(name));
+        harness.sessions.join(player, 1L);
+        return player;
+    }
+
+    private static void ban(PunishmentsHarness harness, String name) {
+        record(harness, "ban", name);
+    }
+
+    private static void mute(PunishmentsHarness harness, String name) {
+        record(harness, "mute", name);
+    }
+
+    private static void recordUntil(PunishmentsHarness harness, String type, String name,
+            String expiresAt) {
+        harness.tunnel.push("punish.apply", Payload.builder()
+                .put("id", type + "-" + name)
+                .put("type", type)
+                .put("targetUuid", FakePlayer.named(name).uuid().toString())
+                .put("targetName", name)
+                .put("reason", "testing")
+                .put("expiresAt", expiresAt)
+                .build());
+    }
+
+    /** A punishment arriving from the bot, which is how a name this server never hosted gets in. */
+    private static void record(PunishmentsHarness harness, String type, String name) {
+        harness.tunnel.push("punish.apply", Payload.builder()
+                .put("id", type + "-" + name)
+                .put("type", type)
+                .put("targetUuid", FakePlayer.named(name).uuid().toString())
+                .put("targetName", name)
+                .put("reason", "testing")
+                .build());
+    }
+
+    @Test
+    @DisplayName("a hidden ban is not offered to /unban for a reader without the node")
+    void hiddenRowsAreNotUnbanCandidates() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            join(harness, "Alex");
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("id", "hidden-1")
+                    .put("type", "ban")
+                    .put("targetUuid", FakePlayer.named("Steve").uuid().toString())
+                    .put("targetName", "Steve")
+                    .put("reason", "alting")
+                    .put("silent", true)
+                    .put("hidden", true)
+                    .build());
+            ban(harness, "Alex");
+
+            assertEquals(Arrays.asList("Alex"), complete(harness, "unban", ""),
+                    "offering Steve would disclose a ban this reader may not know about, and the "
+                            + "refusal on pressing enter would then say the suggestion was a lie");
+
+            FakeCommandSource hider = FakeCommandSource.player("Hider")
+                    .grant(HiddenPunishments.PERMISSION);
+            assertTrue(harness.module.complete(hider, "unban", Arrays.asList("")).contains("Steve"),
+                    "and a node holder is offered the row they are allowed to lift");
+        }
+    }
+
+    @Test
+    @DisplayName("lifting the visible half of a family leaves the hidden half where it was")
+    void liftingOneHalfDoesNotDisclose() {
+        try (PunishmentsHarness harness = replacing()) {
+            join(harness, "Steve");
+            FakeCommandSource hider = FakeCommandSource.player("Hider")
+                    .grant(HiddenPunishments.PERMISSION);
+
+            harness.module.onStaffCommand(hider, "ban", Arrays.asList("Steve", "-h", "alting"));
+            assertEquals(Arrays.asList("Steve"),
+                    harness.module.complete(hider, "unban", Arrays.asList("")),
+                    "the ban really landed, so the empty answer below is a filter rather than a "
+                            + "command that quietly did nothing");
+            assertEquals(Collections.emptyList(), complete(harness, "unban", ""));
+
+            harness.module.onStaffCommand(hider, "unban", Arrays.asList("Steve"));
+            assertEquals(Collections.emptyList(),
+                    harness.module.complete(hider, "unban", Arrays.asList("")),
+                    "and the full family is cleared with it, rather than keeping a lifted row");
+        }
+    }
+
+    private static List<String> complete(PunishmentsHarness harness, String verb, String... args) {
+        return harness.module.complete(MODERATOR, verb, Arrays.asList(args));
+    }
+}

@@ -1,9 +1,14 @@
 package com.heimdall.core.text;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.heimdall.core.log.LogLevel;
+import com.heimdall.core.log.RecordingLogger;
+import com.heimdall.core.testing.TestText;
+import java.util.List;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -133,6 +138,116 @@ class MsgTest {
         assertTrue(plain.contains("injected"), "the reason text still appears");
         assertEquals(NamedTextColor.RED, colourOf(parsed),
                 "a reason containing MiniMessage tags must not restyle the template");
+    }
+
+    @Test
+    @DisplayName("a value ending in a backslash cannot escape the tag that follows it")
+    void trailingBackslashCannotEscapeTheNextTag() {
+        // /hd ban Steve 1d cheating\ - the reason ends in the character MiniMessage escapes
+        // with. escapeTags does not double it, so the closing tag the template wrote became
+        // literal text and yellow stayed open for the rest of the screen.
+        Component parsed = Msg.miniTemplate(
+                "<yellow>{reason}</yellow><red>after</red>", "reason", "cheating\\");
+
+        String plain = TestText.plain(parsed);
+        assertEquals("cheating\\after", plain,
+                "the backslash is text, and the tag after it is still a tag");
+        assertFalse(plain.contains("</yellow>"),
+                "an unescaped trailing backslash prints the next tag instead of closing: " + plain);
+    }
+
+    @Test
+    @DisplayName("a backslash in a value is still only a backslash")
+    void backslashesStayLiteral() {
+        assertEquals("C:\\path and <red>",
+                TestText.plain(Msg.miniTemplate("{reason}", "reason", "C:\\path and <red>")),
+                "doubling for MiniMessage must not double what the player reads");
+    }
+
+    // ── Broken templates ────────────────────────────────────────────
+
+    @Test
+    @DisplayName("the unparseable fallback strips tags rather than printing them at the player")
+    void strippedFallbackKeepsTheWords() {
+        assertEquals("Reason » griefing",
+                Msg.stripTags("<gray>Reason</gray> » <yellow>griefing</yellow>"),
+                "a disconnect screen full of raw tags answers none of the questions it exists for");
+    }
+
+    @Test
+    @DisplayName("stripping keeps an escaped bracket, because that one is text")
+    void strippingKeepsEscapedBrackets() {
+        assertEquals("a <red> b",
+                Msg.stripTags("a \\<red\\> b"),
+                "the value was escaped on its way in, so its angle brackets are the reader's");
+        assertEquals("unclosed <tag",
+                Msg.stripTags("unclosed <tag"),
+                "an opening bracket with no partner is a character somebody typed");
+    }
+
+    @Test
+    @DisplayName("a template with a legacy code warns once, however many times it renders")
+    void sectionCodeInATemplateWarnsOnce() {
+        RecordingLogger logger = new RecordingLogger();
+        Msg.diagnostics(logger);
+        try {
+            String template = "<gray>Reason</gray> §c{reason}";
+            for (int i = 0; i < 3; i++) {
+                Template.fill(template, Template.values().put("reason", "griefing " + i));
+            }
+            Template.fill("<gray>{reason}</gray>", Template.values().put("reason", "clean"));
+
+            List<String> warnings = logger.messagesAt(LogLevel.WARN);
+            assertEquals(1, warnings.size(), warnings.toString());
+            assertTrue(warnings.get(0).contains("section colour code"), warnings.get(0));
+        } finally {
+            Msg.diagnostics(null);
+        }
+    }
+
+    @Test
+    @DisplayName("the warning budget is bounded, and a repeat never spends any of it")
+    void theWarningBudgetIsBounded() {
+        RecordingLogger logger = new RecordingLogger();
+        Msg.diagnostics(logger);
+        try {
+            for (int i = 0; i < Msg.REPORT_LIMIT + 20; i++) {
+                Template.fill("<gray>§cbroken " + i + "</gray>", Template.values());
+            }
+            assertEquals(Msg.REPORT_LIMIT, logger.messagesAt(LogLevel.WARN).size(),
+                    "the set is keyed on something a guild controls, so it has to stop somewhere");
+
+            logger.clear();
+            for (int i = 0; i < 500; i++) {
+                Template.fill("<gray>§cbroken 0</gray>", Template.values());
+            }
+            assertTrue(logger.messagesAt(LogLevel.WARN).isEmpty(),
+                    "an already-reported template costs nothing, however often it renders: "
+                            + logger.messagesAt(LogLevel.WARN));
+        } finally {
+            Msg.diagnostics(null);
+        }
+    }
+
+    @Test
+    @DisplayName("re-wiring the sink gives a guild that fixed its templates a fresh budget")
+    void rewiringResetsTheBudget() {
+        RecordingLogger first = new RecordingLogger();
+        Msg.diagnostics(first);
+        try {
+            Template.fill("<gray>§cbroken</gray>", Template.values());
+            assertEquals(1, first.messagesAt(LogLevel.WARN).size());
+
+            RecordingLogger second = new RecordingLogger();
+            Msg.diagnostics(second);
+            Template.fill("<gray>§cbroken</gray>", Template.values());
+
+            assertEquals(1, second.messagesAt(LogLevel.WARN).size(),
+                    "a reload is where a guild's edits arrive, so it must not report into a set "
+                            + "still full of the templates they just fixed");
+        } finally {
+            Msg.diagnostics(null);
+        }
     }
 
     private static String contentTree(Component component) {

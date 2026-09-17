@@ -226,33 +226,10 @@ class ApiClientRequestTest {
             assertFalse(sent.has("id") && !sent.get("id").getAsString().isEmpty());
         }
 
-        @Test
-        @DisplayName("an issued punishment carries hidden, and hidden forces silent on the wire")
-        void issueCarriesHidden() throws Exception {
-            server.respond(200, "{\"success\":true,\"data\":{\"id\":\"mongo-1\"}}");
-
-            await(client.issuePunishment("ban", UUID, "Steve", "alting", null, false, true,
-                    null, "Adam"));
-
-            JsonObject sent = bodyOf(server.lastRequest());
-            assertTrue(sent.get("hidden").getAsBoolean());
-            assertTrue(sent.get("silent").getAsBoolean(),
-                    "a hidden punishment announced in chat would defeat itself, so the two fields "
-                            + "agree before the bot has to correct either of them");
-        }
-
-        @Test
-        @DisplayName("a punishment issued without the flag says so rather than leaving it to a default")
-        void issueSaysNotHidden() throws Exception {
-            server.respond(200, "{\"success\":true,\"data\":{\"id\":\"mongo-1\"}}");
-
-            await(client.issuePunishment("ban", UUID, "Steve", "griefing", null, false,
-                    null, "Adam"));
-
-            JsonObject sent = bodyOf(server.lastRequest());
-            assertFalse(sent.get("hidden").getAsBoolean());
-            assertFalse(sent.get("silent").getAsBoolean());
-        }
+        // The two tests that asserted hidden and silent on an issue body used the minutes-only
+        // issuePunishment overloads, which round 2 deleted because nothing called them: the module
+        // builds the body itself and posts it through issuePunishment(Payload). The same two
+        // assertions now sit on that real path, in HiddenPunishmentTest#hiddenNodeAloneIsEnough.
 
         @Test
         @DisplayName("includeHidden appears on a lookup only when it was asked for")

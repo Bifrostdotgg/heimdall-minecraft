@@ -18,6 +18,10 @@ dependencies {
     // tier" — which needs a fake server rather than a mock, and copying one per module is how five
     // near-identical no-op loggers end up in a repo.
     testImplementation(testFixtures(project(":core")))
+    // The same compile-only LiteBans stub, on the test classpath as well. The hook path builds a
+    // wire payload, and what that payload carries is worth asserting; the test needs an Entry to
+    // hand the bridge, and the stub is already the shape LiteBans publishes.
+    testImplementation(sourceSets["litebansApi"].output)
     // The wire contract, executable. The offense flow is tested against the real ApiClient talking
     // to :stub-bot over a socket, not against a mocked client: the escalation response shape is the
     // thing most likely to be wrong, and two of our own files agreeing with each other would not

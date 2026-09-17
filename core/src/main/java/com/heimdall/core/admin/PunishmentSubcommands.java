@@ -121,6 +121,29 @@ final class PunishmentSubcommands {
         public void run(CommandSource source, List<String> args, AdminContext context) {
             delegate(source, type, args, context);
         }
+
+        /**
+         * Same delegation as {@link #run}, and for the same reason: the names worth suggesting
+         * live in the module's mirror and last-address file, which core must not depend on.
+         *
+         * <p>Contained the same way too. A completer that throws on a keystroke would make the
+         * command unusable while still being perfectly runnable, which is a confusing way to
+         * break; the platforms catch it as well, and this keeps the tree's answer consistent
+         * whichever of them is asking.
+         */
+        @Override
+        public List<String> complete(CommandSource source, List<String> args, AdminContext context) {
+            PunishmentAdmin punishments = context.punishments();
+            if (!punishments.isAvailable()) {
+                return Collections.emptyList();
+            }
+            try {
+                List<String> suggestions = punishments.complete(source, type, args);
+                return suggestions == null ? Collections.<String>emptyList() : suggestions;
+            } catch (RuntimeException broken) {
+                return Collections.emptyList();
+            }
+        }
     }
 
     /**

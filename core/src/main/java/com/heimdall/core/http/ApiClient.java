@@ -262,37 +262,6 @@ public final class ApiClient {
         });
     }
 
-    public CompletableFuture<JsonObject> issuePunishment(
-            String type, String uuid, String name, String reason, Integer durationMinutes,
-            boolean silent, String issuerUuid, String issuerName) {
-        return issuePunishment(type, uuid, name, reason, durationMinutes, silent, false,
-                issuerUuid, issuerName);
-    }
-
-    /**
-     * {@code POST punishments}, with {@code hidden}.
-     *
-     * <p>A hidden punishment is kept out of in-game staff lookups; the bot forces
-     * {@code silent} when it sees it, and the caller is expected to have forced it too, so the
-     * two agree on the wire rather than only after the bot has corrected one of them.
-     */
-    public CompletableFuture<JsonObject> issuePunishment(
-            String type, String uuid, String name, String reason, Integer durationMinutes,
-            boolean silent, boolean hidden, String issuerUuid, String issuerName) {
-        JsonObject body = new JsonObject();
-        body.addProperty("type", type);
-        if (uuid != null) body.addProperty("targetUuid", uuid);
-        if (name != null) body.addProperty("targetName", name);
-        body.addProperty("reason", reason == null ? "" : reason);
-        if (durationMinutes != null) body.addProperty("durationMinutes", durationMinutes);
-        body.addProperty("silent", silent || hidden);
-        body.addProperty("hidden", hidden);
-        body.addProperty("source", "command");
-        if (issuerUuid != null) body.addProperty("issuedByUuid", issuerUuid);
-        if (issuerName != null) body.addProperty("issuedByName", issuerName);
-        return issuePunishment(body);
-    }
-
     public CompletableFuture<JsonObject> issuePunishment(JsonObject body) {
         if (body == null) throw new IllegalArgumentException("body is required");
         return async(() -> {

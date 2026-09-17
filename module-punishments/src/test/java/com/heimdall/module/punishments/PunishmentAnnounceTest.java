@@ -659,18 +659,42 @@ class PunishmentAnnounceTest {
     }
 
     @Test
-    @DisplayName("the remaining duration is read off expiresAt, because the wire has no length")
-    void remainingDuration() {
-        long now = 1_700_000_000_000L;
-        assertNull(HeimdallPunishmentsModule.minutesUntil(null, now));
-        assertNull(HeimdallPunishmentsModule.minutesUntil("", now));
-        assertNull(HeimdallPunishmentsModule.minutesUntil("not an instant", now),
-                "an unparseable expiry reads as permanent rather than taking the announcement down");
-        assertNull(HeimdallPunishmentsModule.minutesUntil(
-                java.time.Instant.ofEpochMilli(now - 1000).toString(), now),
-                "already expired is not a duration");
-        assertEquals(Integer.valueOf(60), HeimdallPunishmentsModule.minutesUntil(
-                java.time.Instant.ofEpochMilli(now + 3_600_000L).toString(), now));
+    @DisplayName("a lifted tempban is announced as a temporary one, not a permanent one")
+    void revokeReadsTheTypeOffTheLiftedRow() {
+        try (PunishmentsHarness harness = announcingWith(Payload.builder()
+                .put("announceRevoke", "{staff} {verb} {player}: {type}")
+                .build())) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(FakeCommandSource.console(), "tempban",
+                    Arrays.asList("Steve", "1h", "spam"));
+            harness.module.onStaffCommand(FakeCommandSource.console(), "unban",
+                    Arrays.asList("Steve"));
+
+            assertTrue(told(bystander, "Temporary ban"), bystander.messageText().toString());
+            assertFalse(told(bystander, "Permanent"),
+                    "the revoke view used to carry no expiry, so everything it lifted read as "
+                            + "permanent: " + bystander.messageText());
+        }
+    }
+
+    @Test
+    @DisplayName("a lifted permanent ban still reads as a permanent one")
+    void revokeOfAPermanentBanStillSaysPermanent() {
+        try (PunishmentsHarness harness = announcingWith(Payload.builder()
+                .put("announceRevoke", "{staff} {verb} {player}: {type}")
+                .build())) {
+            FakePlayer bystander = harness.platform.join(FakePlayer.named("Notch"));
+            harness.platform.join(FakePlayer.named("Steve"));
+
+            harness.module.onStaffCommand(FakeCommandSource.console(), "ban",
+                    Arrays.asList("Steve", "spam"));
+            harness.module.onStaffCommand(FakeCommandSource.console(), "unban",
+                    Arrays.asList("Steve"));
+
+            assertTrue(told(bystander, "Permanent ban"), bystander.messageText().toString());
+        }
     }
 
     @Test
@@ -748,6 +772,19 @@ class PunishmentAnnounceTest {
 
     private PunishmentsHarness silentByDefault() {
         return harnessWith(true, ServerRole.STANDALONE);
+    }
+
+    /** An announcing standalone server with some of its screen keys overridden. */
+    private PunishmentsHarness announcingWith(Payload overrides) {
+        Payload.Builder settings = Payload.builder()
+                .put("mode", "replace")
+                .put("ipSalt", "replace-salt")
+                .put("rootAliases", false)
+                .put("silentByDefault", false);
+        for (String key : overrides.keys()) {
+            settings.put(key, overrides.string(key, ""));
+        }
+        return new PunishmentsHarness(dataDir, ServerRole.STANDALONE).enableWith(settings.build());
     }
 
     private PunishmentsHarness harnessWith(boolean silentByDefault, ServerRole role) {

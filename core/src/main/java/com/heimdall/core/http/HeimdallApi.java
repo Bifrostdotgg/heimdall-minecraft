@@ -169,20 +169,6 @@ public final class HeimdallApi {
         return gated(() -> client.offend(report));
     }
 
-    public CompletableFuture<Boolean> issuePunishment(
-            final String type, final String uuid, final String name, final String reason,
-            final Integer durationMinutes, final boolean silent, final String issuerUuid,
-            final String issuerName) {
-        return gated(() -> client.issuePunishment(
-                type, uuid, name, reason, durationMinutes, silent, issuerUuid, issuerName)
-                .thenApply(new java.util.function.Function<JsonObject, Boolean>() {
-                    @Override
-                    public Boolean apply(JsonObject ignored) {
-                        return Boolean.TRUE;
-                    }
-                }));
-    }
-
     public CompletableFuture<Payload> issuePunishment(final Payload body) {
         return gated(() -> client.issuePunishment(body).thenApply(HeimdallApi::asPayload));
     }
