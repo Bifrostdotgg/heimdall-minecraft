@@ -3,6 +3,8 @@ package com.heimdall.platform.bukkit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.heimdall.core.json.Payload;
 import com.heimdall.platform.bukkit.adapter.TickSource;
@@ -11,7 +13,14 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.AbstractList;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.ConcurrentModificationException;
+import org.bukkit.entity.Player;
+import org.bukkit.metadata.MetadataValue;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -27,8 +36,46 @@ import org.junit.jupiter.api.io.TempDir;
  * <p>These run with no Bukkit server behind them, which exercises the other half of the contract
  * for free: the player counts are also left out rather than becoming an exception on the heartbeat
  * thread.
+ *
+ * <p>{@code vanishedPlayers} is the one field that breaks the omission rule, and the tests say why:
+ * zero hidden players is a measurement, so it is sent, and a snapshot with no such field at all means
+ * a proxy or a jar older than the count.
  */
 class BukkitHealthSourceTest {
+
+    /** No MOTD and no icon, without a server to fail to read one from. */
+    private static final BukkitHealthSource.MotdFaviconSource MISSING_STATUS =
+            new BukkitHealthSource.MotdFaviconSource() {
+                @Override
+                public String motd() {
+                    return null;
+                }
+
+                @Override
+                public File iconFile() {
+                    return null;
+                }
+            };
+
+    /** A source reading a fixed roster. {@code maxPlayers} is still absent: that one needs a server. */
+    private static BukkitHealthSource withRoster(final Player... online) {
+        return new BukkitHealthSource(TickSource.UNAVAILABLE, MISSING_STATUS,
+                new BukkitPlayerDirectory.RosterSource() {
+                    @Override
+                    public Collection<? extends Player> onlinePlayers() {
+                        return Arrays.asList(online);
+                    }
+                });
+    }
+
+    /** A player the shared vanish metadata key is, or is not, set on. */
+    private static Player player(boolean vanished) {
+        Player player = mock(Player.class);
+        MetadataValue value = mock(MetadataValue.class);
+        when(value.asBoolean()).thenReturn(vanished);
+        when(player.getMetadata("vanished")).thenReturn(Collections.singletonList(value));
+        return player;
+    }
 
     /** A tick source that reports exactly what it is told to. */
     private static TickSource ticks(final Double tps, final Double mspt) {
@@ -96,6 +143,78 @@ class BukkitHealthSourceTest {
         Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot();
         assertFalse(snapshot.has("onlinePlayers"));
         assertFalse(snapshot.has("maxPlayers"));
+    }
+
+    @Test
+    @DisplayName("no server behind it means no vanish count either")
+    void withoutAServerTheVanishCountIsOmitted() {
+        assertFalse(new BukkitHealthSource(TickSource.UNAVAILABLE).snapshot().has("vanishedPlayers"),
+                "a count nobody could take is absent, exactly like onlinePlayers beside it");
+    }
+
+    @Test
+    @DisplayName("a roster with nobody hidden reports zero rather than omitting the field")
+    void nobodyHiddenIsZero() {
+        Payload snapshot = withRoster(player(false), player(false)).snapshot();
+
+        assertEquals(2, snapshot.intValue("onlinePlayers", -1));
+        assertEquals(0, snapshot.intValue("vanishedPlayers", -1),
+                "'nobody is hidden' is something this server measured, so it is sent; an omitted "
+                        + "field means a proxy or an older jar, which is a different fact");
+    }
+
+    @Test
+    @DisplayName("hidden players are counted, and only the hidden ones")
+    void hiddenPlayersAreCounted() {
+        Payload snapshot = withRoster(player(true), player(false), player(true)).snapshot();
+
+        assertEquals(3, snapshot.intValue("onlinePlayers", -1));
+        assertEquals(2, snapshot.intValue("vanishedPlayers", -1));
+    }
+
+    @Test
+    @DisplayName("a metadata value that throws counts as not vanished")
+    void aThrowingMetadataValueIsNotCounted() {
+        // The snapshot rides the heartbeat, and the heartbeat is this server's liveness signal. A
+        // third-party value throwing must not cost a tick its health frame.
+        Player explosive = mock(Player.class);
+        MetadataValue value = mock(MetadataValue.class);
+        when(value.asBoolean()).thenThrow(new IllegalStateException("not my thread"));
+        when(explosive.getMetadata("vanished")).thenReturn(Collections.singletonList(value));
+
+        Payload snapshot = withRoster(explosive, player(true)).snapshot();
+
+        assertEquals(1, snapshot.intValue("vanishedPlayers", -1));
+        assertTrue(snapshot.has("usedMemMb"), "the rest of the snapshot still goes");
+    }
+
+    @Test
+    @DisplayName("a roster that races is still worth a snapshot, minus the one field")
+    void aRacingRosterKeepsTheOtherCounts() {
+        // Iterating the server's live view is the only read here a join or a quit can throw out of,
+        // which is why it is done last: the counts already on the builder survive it.
+        Payload snapshot = new BukkitHealthSource(TickSource.UNAVAILABLE, MISSING_STATUS,
+                new BukkitPlayerDirectory.RosterSource() {
+                    @Override
+                    public Collection<? extends Player> onlinePlayers() {
+                        return new AbstractList<Player>() {
+                            @Override
+                            public Player get(int index) {
+                                throw new ConcurrentModificationException("somebody joined");
+                            }
+
+                            @Override
+                            public int size() {
+                                return 2;
+                            }
+                        };
+                    }
+                }).snapshot();
+
+        assertEquals(2, snapshot.intValue("onlinePlayers", -1));
+        assertFalse(snapshot.has("vanishedPlayers"),
+                "one missing field on one heartbeat is a field the next tick supplies seconds later");
+        assertTrue(snapshot.has("usedMemMb"));
     }
 
     @Test

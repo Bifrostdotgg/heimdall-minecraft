@@ -195,15 +195,22 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
      * <p>No {@code server} key, because a Bukkit server is not in front of anything — there is no
      * backend for a player to be "on". The proxy's directory answers that question instead, and
      * neither platform has to know the other exists.
+     *
+     * <p><strong>{@code vanished: true}, or no key at all.</strong> A player hidden by a vanish
+     * plugin is reported rather than dropped, because who may see one is a permission the bot holds
+     * and this row has no idea who is about to read it. The key is omitted rather than written
+     * {@code false} for the ordinary case: every bot built before this existed reads a row without it
+     * exactly as it always did, and the wire stays as small as the panel that renders it needs.
      */
     @Override
     public Payload describe(PlayerHandle player) {
         if (!(player instanceof BukkitPlayerHandle)) {
             return Payload.empty();
         }
+        Player bukkit = ((BukkitPlayerHandle) player).player();
         String address = "unknown";
         try {
-            InetSocketAddress socket = ((BukkitPlayerHandle) player).player().getAddress();
+            InetSocketAddress socket = bukkit.getAddress();
             if (socket != null && socket.getAddress() != null) {
                 address = socket.getAddress().getHostAddress();
             }
@@ -213,7 +220,23 @@ final class BukkitPlayerDirectory implements PlayerDirectory {
             // not.
             address = "unknown";
         }
-        return Payload.builder().put("ip", address).build();
+        Payload.Builder described = Payload.builder().put("ip", address);
+        if (BukkitVanish.isVanished(bukkit)) {
+            described.put("vanished", true);
+        }
+        return described.build();
+    }
+
+    /**
+     * Yes: the metadata key five vanish plugins share is readable from here.
+     *
+     * <p>This is what puts {@code vanish@1} on {@code identify}, and it is answered on the Bukkit
+     * family only. The proxies inherit the default and mean it: a proxy has no metadata store, so a
+     * row of theirs without the key says nothing about whether anybody is hidden.
+     */
+    @Override
+    public boolean reportsVanish() {
+        return true;
     }
 
     /**

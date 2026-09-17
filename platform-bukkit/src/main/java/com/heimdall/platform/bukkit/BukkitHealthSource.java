@@ -7,7 +7,9 @@ import com.heimdall.platform.common.JvmHealth;
 import com.heimdall.platform.common.StatusHealth;
 import java.io.File;
 import java.lang.reflect.Method;
+import java.util.Collection;
 import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 
 /**
  * The periodic TPS/memory/player-count snapshot, for a Bukkit-family server.
@@ -22,14 +24,21 @@ import org.bukkit.Bukkit;
  * when unread) so a {@code status@1} bot has a stable key. The favicon is omitted when the PNG
  * cannot be read or is over 64 KiB decoded.
  *
- * <p>Called on {@code heimdall-ws} every heartbeat, and reads only counters, a string getter and a
- * cached file - no Bukkit call here blocks or needs the main thread. {@link TickSource} is what
- * makes the tick figures optional; see it for why Spigot cannot be asked directly.
+ * <p>{@code vanishedPlayers} is the one field sent as zero rather than omitted when it is zero, and
+ * that is not a contradiction: "nobody is hidden" is something this server measured, unlike a tps it
+ * cannot read. A bot reading a snapshot with no {@code vanishedPlayers} at all is talking to a proxy
+ * or to an older jar, which is a different fact and is why {@code vanish@1} exists to say so.
+ *
+ * <p>Called on {@code heimdall-ws} every heartbeat, and reads only counters, a string getter, a
+ * cached file and, for the vanish count, one pass over the online list - no Bukkit call here blocks
+ * or needs the main thread. {@link TickSource} is what makes the tick figures optional; see it for
+ * why Spigot cannot be asked directly.
  */
 final class BukkitHealthSource implements HealthSnapshotSource {
 
     private final TickSource ticks;
     private final MotdFaviconSource status;
+    private final BukkitPlayerDirectory.RosterSource roster;
     private StatusHealth.IconFile iconCache;
 
     BukkitHealthSource(TickSource ticks) {
@@ -38,8 +47,15 @@ final class BukkitHealthSource implements HealthSnapshotSource {
 
     /** Package-visible so tests can stub MOTD and the icon file without a running server. */
     BukkitHealthSource(TickSource ticks, MotdFaviconSource status) {
+        this(ticks, status, LIVE_ROSTER);
+    }
+
+    /** And this one so they can stub the online list, which is the only way to count vanish. */
+    BukkitHealthSource(
+            TickSource ticks, MotdFaviconSource status, BukkitPlayerDirectory.RosterSource roster) {
         this.ticks = ticks;
         this.status = status;
+        this.roster = roster;
     }
 
     @Override
@@ -55,12 +71,28 @@ final class BukkitHealthSource implements HealthSnapshotSource {
             builder.put("mspt", mspt.doubleValue());
         }
 
+        Collection<? extends Player> online = null;
         try {
-            builder.put("onlinePlayers", Bukkit.getOnlinePlayers().size());
+            online = roster.onlinePlayers();
+            if (online != null) {
+                builder.put("onlinePlayers", online.size());
+            }
             builder.put("maxPlayers", Bukkit.getMaxPlayers());
         } catch (RuntimeException notReady) {
             // Asked before the server has finished starting or while it is stopping. The counts are
             // left out; the heartbeat still goes, which is what keeps the connection alive.
+        }
+
+        if (online != null) {
+            try {
+                builder.put("vanishedPlayers", BukkitVanish.count(online));
+            } catch (RuntimeException raced) {
+                // Its own block because it is the only read here that walks the live view rather
+                // than asking it for a number, so it is the only one a join or a quit can raise a
+                // ConcurrentModificationException out of. Sharing the block above would let that
+                // race cost the player counts as well, and one missing field on one heartbeat is a
+                // field the next tick supplies seconds later.
+            }
         }
 
         String motd = "";
@@ -115,6 +147,15 @@ final class BukkitHealthSource implements HealthSnapshotSource {
         }
         return null;
     }
+
+    /** The server's own online list. Static on Bukkit, which is the whole reason for the seam. */
+    private static final BukkitPlayerDirectory.RosterSource LIVE_ROSTER =
+            new BukkitPlayerDirectory.RosterSource() {
+                @Override
+                public Collection<? extends Player> onlinePlayers() {
+                    return Bukkit.getOnlinePlayers();
+                }
+            };
 
     /** MOTD string and server-icon.png location. The live impl talks to Bukkit. */
     interface MotdFaviconSource {
