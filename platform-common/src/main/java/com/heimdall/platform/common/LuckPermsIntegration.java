@@ -1,18 +1,33 @@
 package com.heimdall.platform.common;
 
 import com.heimdall.core.log.HeimdallLogger;
+import com.heimdall.core.platform.GroupsChangedListener;
 import com.heimdall.core.platform.LuckPermsBridge;
+import com.heimdall.core.util.Registration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Consumer;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
+import net.luckperms.api.event.EventBus;
+import net.luckperms.api.event.EventSubscription;
+import net.luckperms.api.event.node.NodeAddEvent;
+import net.luckperms.api.event.node.NodeClearEvent;
+import net.luckperms.api.event.node.NodeMutateEvent;
+import net.luckperms.api.event.node.NodeRemoveEvent;
+import net.luckperms.api.event.user.UserDataRecalculateEvent;
 import net.luckperms.api.model.group.Group;
 import net.luckperms.api.model.user.User;
+import net.luckperms.api.node.Node;
 import net.luckperms.api.node.types.InheritanceNode;
+import net.luckperms.api.query.QueryOptions;
 
 /**
  * One LuckPerms bridge for both platforms.
@@ -107,24 +122,41 @@ final class LuckPermsIntegration implements LuckPermsBridge {
         return resolve() != null;
     }
 
+    /**
+     * Fails, rather than answering an empty list, whenever the groups are not actually known: no
+     * LuckPerms, no uuid, a user LuckPerms could not load, or a read that threw.
+     *
+     * <p>An empty list is a real answer ("holds no groups") and the bot acts on it: it diffs against
+     * nothing (issue #796 / MC-11), and for reverse role sync it would read as every mapped rank being
+     * gone and strip the Discord roles. Every caller already has a path for "unknown" (the join calls
+     * leave {@code currentGroups} out), so a failed future is what sends them down it.
+     *
+     * <p>Reads {@linkplain #ownedGroupsOf the groups the user owns in any context}, not the ones that
+     * apply under this server's context.
+     */
     @Override
     public CompletableFuture<List<String>> getPlayerGroups(final UUID playerUuid) {
         final LuckPerms api = resolve();
         if (api == null || playerUuid == null) {
-            return CompletableFuture.completedFuture(Collections.<String>emptyList());
+            CompletableFuture<List<String>> unknown = new CompletableFuture<List<String>>();
+            unknown.completeExceptionally(new IllegalStateException(api == null
+                    ? "LuckPerms is not available" : "no player uuid"));
+            return unknown;
         }
         return CompletableFuture.supplyAsync(new java.util.function.Supplier<List<String>>() {
             @Override
             public List<String> get() {
+                User user;
                 try {
-                    User user = loadUser(api, playerUuid);
-                    return user == null ? Collections.<String>emptyList() : groupsOf(user);
+                    user = loadUser(api, playerUuid);
                 } catch (RuntimeException e) {
                     invalidate(api);
-                    logger.warn("could not read LuckPerms groups for " + playerUuid + ": "
-                            + e.getMessage());
-                    return Collections.<String>emptyList();
+                    throw e;
                 }
+                if (user == null) {
+                    throw new IllegalStateException("LuckPerms could not load " + playerUuid);
+                }
+                return ownedGroupsOf(user);
             }
         }, executor);
     }
@@ -202,6 +234,216 @@ final class LuckPermsIntegration implements LuckPermsBridge {
     }
 
     /**
+     * Subscribes to the LuckPerms events that can change a user's inheritance groups.
+     *
+     * <h2>Which events, and why these</h2>
+     *
+     * <ul>
+     *   <li>{@link NodeAddEvent} and {@link NodeRemoveEvent}, only when the target is a user and the
+     *       node is an {@link InheritanceNode}. That is {@code /lp user X parent add|remove}, and what
+     *       store plugins (Tebex included) run when a rank is bought or refunded. A permission or
+     *       meta node changes nothing about groups, and a node on a <em>group</em> is not a user
+     *       change.
+     *   <li>{@link NodeClearEvent} on a user, when any cleared node was an inheritance node:
+     *       {@code parent clear} goes through it rather than through a remove.
+     *   <li>{@link UserDataRecalculateEvent}, unfiltered, as the catch-all for any path that changes
+     *       a user's groups without one of the node events above. The 5.4 API documents it as firing
+     *       when a user's cached data is recalculated; it does not document which changes lead to a
+     *       recalculation. In particular this class does <strong>not</strong> assume that an expiring
+     *       temporary rank, or an edit to a group a user inherits, reaches it: that has not been
+     *       verified against LuckPerms itself, and the join-time {@code currentGroups} is what is
+     *       relied on for those. It also fires for plenty that changes no group, which is why the
+     *       listener gets the full list and decides for itself whether anything moved (see
+     *       {@link GroupsChangedListener}).
+     * </ul>
+     *
+     * <h2>Threads</h2>
+     *
+     * <p>LuckPerms posts these on its own async event executor. The handlers here do nothing on that
+     * thread but pick out the {@link User} and queue the rest: reading the inherited groups resolves
+     * the whole inheritance graph, which is not work to do on LuckPerms' dispatch thread, and the
+     * listener is Heimdall code with no business running there either.
+     *
+     * <p>The queue is {@link GroupReads}: coalesced per user (at most one pending read each, which
+     * reads the latest state when it runs) and drained one read at a time, in order, by a
+     * {@link SerialExecutor} over {@code heimdall-io}. The ordering is what guarantees the last call a
+     * listener sees for a user carries the newest state; on a plain multi-thread pool two reads for
+     * one user could finish in either order, and a listener that keeps "the latest call wins" would
+     * then keep the older one.
+     *
+     * <p>The {@link User} carried by the event is read rather than looking the uuid up again, because
+     * a user edited while offline is loaded only for the duration of the edit: a fresh lookup could
+     * find nothing, or load a second copy from storage.
+     *
+     * <p>Subscribed against the API instance resolved now. If LuckPerms is hot-reloaded underneath a
+     * running server the old event bus dies with it and this subscription goes quiet; that is the same
+     * edge {@link #luckPerms} documents for every other call, and it heals the next time the consuming
+     * module subscribes.
+     */
+    @Override
+    public Registration onGroupsChanged(final GroupsChangedListener listener) {
+        final LuckPerms api = resolve();
+        if (api == null || listener == null) {
+            return Registration.NONE;
+        }
+        final GroupReads reads = new GroupReads(new SerialExecutor(executor, logger), listener);
+        final List<EventSubscription<?>> subscriptions = new ArrayList<EventSubscription<?>>();
+        try {
+            EventBus bus = api.getEventBus();
+            subscriptions.add(bus.subscribe(NodeAddEvent.class, new Consumer<NodeAddEvent>() {
+                @Override
+                public void accept(NodeAddEvent event) {
+                    if (event.getNode() instanceof InheritanceNode) {
+                        onUserMutated(event, reads);
+                    }
+                }
+            }));
+            subscriptions.add(bus.subscribe(NodeRemoveEvent.class, new Consumer<NodeRemoveEvent>() {
+                @Override
+                public void accept(NodeRemoveEvent event) {
+                    if (event.getNode() instanceof InheritanceNode) {
+                        onUserMutated(event, reads);
+                    }
+                }
+            }));
+            subscriptions.add(bus.subscribe(NodeClearEvent.class, new Consumer<NodeClearEvent>() {
+                @Override
+                public void accept(NodeClearEvent event) {
+                    if (anyInheritance(event.getNodes())) {
+                        onUserMutated(event, reads);
+                    }
+                }
+            }));
+            subscriptions.add(bus.subscribe(UserDataRecalculateEvent.class,
+                    new Consumer<UserDataRecalculateEvent>() {
+                        @Override
+                        public void accept(UserDataRecalculateEvent event) {
+                            reads.request(event.getUser());
+                        }
+                    }));
+        } catch (RuntimeException e) {
+            closeAll(subscriptions);
+            invalidate(api);
+            logger.warn("could not subscribe to LuckPerms group changes: " + e.getMessage());
+            return Registration.NONE;
+        }
+        return Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                closeAll(subscriptions);
+            }
+        });
+    }
+
+    private static void onUserMutated(NodeMutateEvent event, GroupReads reads) {
+        if (event.isUser() && event.getTarget() instanceof User) {
+            reads.request((User) event.getTarget());
+        }
+    }
+
+    /**
+     * The read queue behind one subscription: at most one pending read per user, run in order.
+     *
+     * <p>Every node change fires twice over (the node event, then the recalculation), and a bulk edit
+     * fires for every user it touches, so an uncoalesced queue grows with the event rate rather than
+     * with the number of users changing. Here a user with a read already queued is not queued again:
+     * the newest {@link User} object replaces the queued one, and the read, when it runs, sees the
+     * newest state anyway. The pending entry is removed <em>before</em> the read starts, so an event
+     * that lands mid-read queues a fresh one rather than being absorbed by a read that may already
+     * have looked. The queue is therefore bounded by the number of distinct users with a change
+     * outstanding.
+     *
+     * <p>The {@link SerialExecutor} underneath runs reads one at a time in queue order. With at most
+     * one queued read per user, that is what guarantees the last call a listener sees for a user
+     * carries a state no older than any earlier call's.
+     */
+    final class GroupReads {
+
+        private final Executor serial;
+        private final GroupsChangedListener listener;
+        private final ConcurrentHashMap<UUID, User> queued = new ConcurrentHashMap<UUID, User>();
+
+        GroupReads(Executor serial, GroupsChangedListener listener) {
+            this.serial = serial;
+            this.listener = listener;
+        }
+
+        /**
+         * Queues a read-and-notify for a user unless one is already queued. Runs on the LuckPerms
+         * event thread, so it is cheap and never throws back into LuckPerms: an exception here would
+         * be logged as a failure of LuckPerms' own event.
+         */
+        void request(User user) {
+            if (user == null) {
+                return;
+            }
+            final UUID uuid = user.getUniqueId();
+            if (queued.put(uuid, user) != null) {
+                return;
+            }
+            try {
+                serial.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        read(uuid);
+                    }
+                });
+            } catch (RejectedExecutionException shuttingDown) {
+                // The plugin's pools are going down; there is nobody left to tell.
+                queued.remove(uuid);
+            }
+        }
+
+        private void read(final UUID uuid) {
+            User user = queued.remove(uuid);
+            if (user == null) {
+                return;
+            }
+            List<String> groups;
+            try {
+                groups = ownedGroupsOf(user);
+            } catch (RuntimeException e) {
+                // Not reported as "no groups": an empty list would read as every watched group
+                // having been removed. Skipping costs one change, which the next event or the
+                // next join reconciles.
+                final String reason = e.getMessage();
+                logger.debug(() -> "could not read LuckPerms groups for " + uuid
+                        + " after a change: " + reason);
+                return;
+            }
+            try {
+                listener.onGroupsChanged(uuid, Collections.unmodifiableList(groups));
+            } catch (RuntimeException e) {
+                logger.warn("a LuckPerms group-change listener failed for " + uuid + ": "
+                        + e.getMessage());
+            }
+        }
+    }
+
+    private static boolean anyInheritance(Collection<Node> nodes) {
+        if (nodes == null) {
+            return false;
+        }
+        for (Node node : nodes) {
+            if (node instanceof InheritanceNode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void closeAll(List<EventSubscription<?>> subscriptions) {
+        for (EventSubscription<?> subscription : subscriptions) {
+            try {
+                subscription.close();
+            } catch (RuntimeException ignored) {
+                // A LuckPerms that has already shut down has already dropped it.
+            }
+        }
+        subscriptions.clear();
+    }
+
+    /**
      * Forgets a resolved API that has just failed, so the next call resolves again.
      *
      * <p>Compare-and-set against the handle the failing call actually used: another thread may have
@@ -238,6 +480,29 @@ final class LuckPermsIntegration implements LuckPermsBridge {
     private static List<String> groupsOf(User user) {
         List<String> names = new ArrayList<String>();
         for (Group group : user.getInheritedGroups(user.getQueryOptions())) {
+            names.add(group.getName());
+        }
+        return names;
+    }
+
+    /**
+     * The groups a user <em>owns</em>, in any context: what reverse role sync and the join-time
+     * {@code currentGroups} report.
+     *
+     * <p>{@link QueryOptions#nonContextual()} rather than the user's own query options. "Does this
+     * player have the VIP rank" is a question about ownership, and the contextual answer depends on
+     * which server is asking: a parent granted with {@code server=lobby} is invisible to the survival
+     * server's contextual query, so survival would report the rank as absent and the bot would take
+     * the Discord role away. The non-contextual query counts parent nodes whatever their context,
+     * and still resolves groups inherited through other groups.
+     *
+     * <p>Deliberately <strong>not</strong> used by {@link #setPlayerGroups}'s diff, which stays on
+     * {@link #groupsOf}: departure N7 records that changing what the forward diff reads changes which
+     * groups are written on every sync, and that is not a change to make as a side effect.
+     */
+    static List<String> ownedGroupsOf(User user) {
+        List<String> names = new ArrayList<String>();
+        for (Group group : user.getInheritedGroups(QueryOptions.nonContextual())) {
             names.add(group.getName());
         }
         return names;

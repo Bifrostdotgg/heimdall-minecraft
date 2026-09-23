@@ -98,6 +98,10 @@ class RoleSyncJoinSnapshotTest {
         FakePlayer player = FakePlayer.named(name);
         bot.fixtures().put(PlayerFixture.of(player.uuid().toString(), name, Outcome.ALLOW)
                 .withGroups(TARGET, MANAGED));
+        // Loaded in LuckPerms and holding nothing, said explicitly: the fake, like the real bridge,
+        // treats a player it has never heard of as unknown and fails the read. A test that wants
+        // groups calls holding() afterwards; one that wants a failed read calls failing().
+        harness.luckPerms.known(player.uuid());
         return player;
     }
 
@@ -291,10 +295,59 @@ class RoleSyncJoinSnapshotTest {
     @DisplayName("switching the module off takes the join listener with it")
     void disableUnwindsTheJoinListener() {
         harness.enable();
-        assertEquals(1, harness.sessions.joinListenerCount());
+        // Two: the snapshot requester, and the reverse-sync reporter's join seed.
+        assertEquals(2, harness.sessions.joinListenerCount());
 
         harness.disable();
 
         assertEquals(0, harness.sessions.joinListenerCount());
+    }
+
+    // Reverse role sync's seed comes only from a join call that reached the bot.
+
+    @Test
+    @DisplayName("a successful snapshot request seeds reverse sync with the groups it carried")
+    void successfulSnapshotSeedsReverseSync() {
+        harness.configure(RoleSyncHarness.watching("vip"));
+        FakePlayer steve = linked("Steve");
+        harness.platform.join(steve);
+        harness.luckPerms.holding(steve.uuid(), "default", "vip");
+
+        harness.sessions.join(steve, 1L);
+        await(() -> bot.requestCount(SNAPSHOT) == 1 && !harness.syncs().isEmpty(),
+                "the snapshot request should complete: " + harness.logger.records());
+
+        harness.luckPerms.fireGroupsChanged(steve.uuid(), Arrays.asList("default", "vip", "builder"));
+        sleepPastWindow();
+        assertEquals(0, harness.bus.sent(GroupChangeReporter.FRAME_TYPE).size(),
+                "the snapshot request told the bot about vip; nothing new to report");
+    }
+
+    @Test
+    @DisplayName("a failed snapshot request leaves the player unseeded, so their next change reports")
+    void failedSnapshotLeavesPlayerUnseeded() {
+        harness.close();
+        harness = new RoleSyncHarness(dataDirectory, executors -> new HeimdallApi(new ApiClient(
+                new RecordingLogger(), settings("wrong-key"), executors.io())));
+        harness.configure(RoleSyncHarness.watching("vip"));
+        FakePlayer steve = linked("Steve");
+        harness.platform.join(steve);
+        harness.luckPerms.holding(steve.uuid(), "default", "vip");
+
+        harness.sessions.join(steve, 1L);
+        await(() -> harness.countLogged(LogLevel.WARN, "could not fetch a role-sync snapshot") == 1,
+                "the snapshot request should fail: " + harness.logger.records());
+
+        harness.luckPerms.fireGroupsChanged(steve.uuid(), Arrays.asList("default", "vip", "builder"));
+        await(() -> harness.bus.sent(GroupChangeReporter.FRAME_TYPE).size() == 1,
+                "the bot never heard about vip, so it must be reported: " + harness.logger.records());
+    }
+
+    private static void sleepPastWindow() {
+        try {
+            Thread.sleep(GroupChangeReporter.DEBOUNCE_MS + 400L);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 }

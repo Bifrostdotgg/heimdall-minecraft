@@ -335,6 +335,12 @@ class WhitelistLoginOutcomesTest {
                             java.util.List<String> managedGroups) {
                         return java.util.concurrent.CompletableFuture.completedFuture(Boolean.FALSE);
                     }
+
+                    @Override
+                    public com.heimdall.core.util.Registration onGroupsChanged(
+                            com.heimdall.core.platform.GroupsChangedListener listener) {
+                        return com.heimdall.core.util.Registration.NONE;
+                    }
                 });
 
                 Verdict verdict = h.login(WhitelistHarness.ALLOWED, "Steve");

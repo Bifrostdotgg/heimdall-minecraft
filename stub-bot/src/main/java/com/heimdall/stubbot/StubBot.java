@@ -187,6 +187,14 @@ public final class StubBot implements AutoCloseable {
         return http.lastRoleSyncSnapshotRequest();
     }
 
+    /**
+     * The body of the most recent {@code connection-attempt} request, a copy, or {@code null} if there
+     * has not been one. So a test can assert that {@code currentGroups} is omitted when unknown.
+     */
+    public com.google.gson.JsonObject lastConnectionAttemptRequest() {
+        return http.lastConnectionAttemptRequest();
+    }
+
     @Override
     public void close() {
         multiplexer.close();

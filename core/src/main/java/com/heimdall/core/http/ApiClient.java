@@ -182,11 +182,15 @@ public final class ApiClient {
             body.addProperty("serverIp", attempt.serverIp());
             body.addProperty("serverId", current.serverId());
             body.addProperty("currentlyWhitelisted", attempt.currentlyWhitelisted());
-            JsonArray groups = new JsonArray();
-            for (String group : attempt.currentGroups()) {
-                groups.add(group);
+            // Omitted, not emptied, when unknown: see ConnectionAttempt#currentGroups.
+            List<String> currentGroups = attempt.currentGroups();
+            if (currentGroups != null) {
+                JsonArray groups = new JsonArray();
+                for (String group : currentGroups) {
+                    groups.add(group);
+                }
+                body.add("currentGroups", groups);
             }
-            body.add("currentGroups", groups);
             addBedrockIdentity(body, attempt.uuid());
 
             return ApiResponses.connectionAttempt(requests.execute(current,

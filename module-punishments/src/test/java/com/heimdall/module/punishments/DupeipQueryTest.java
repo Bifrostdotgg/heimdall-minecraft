@@ -426,6 +426,11 @@ class DupeipQueryTest {
         }
 
         @Override
+        public Registration onModeChange(com.heimdall.core.tunnel.ProtocolModeListener listener) {
+            return Registration.NONE;
+        }
+
+        @Override
         public ProtocolMode mode() {
             return ProtocolMode.UNKNOWN;
         }

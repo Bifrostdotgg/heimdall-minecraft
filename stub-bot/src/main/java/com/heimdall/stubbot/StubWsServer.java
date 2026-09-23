@@ -320,6 +320,17 @@ public final class StubWsServer extends WebSocketServer {
                         + " event(s) " + kinds);
                 return;
             }
+            case "rolesync.groups" -> {
+                // Fire-and-forget from the plugin, so no reply. Recorded whole for the tests; the
+                // log line carries the group count only, like the bridge lines above.
+                server.addRoleSyncGroupReport(payload);
+                int groups = payload.has("groups") && payload.get("groups").isJsonArray()
+                        ? payload.getAsJsonArray("groups").size()
+                        : 0;
+                StubLog.info("rolesync.groups from " + server.serverId() + ": " + groups
+                        + " group(s)");
+                return;
+            }
             case "config.ack" -> {
                 // Also not a liveness signal, for consistency with identify: the v3 handshake is
                 // about configuration, and letting it double as a heartbeat would mean a client

@@ -2091,6 +2091,8 @@ change with a real blast radius and no reported complaint behind it.
 room: what the dashboard means by "this player has this group" is the actual question, and the
 plugin's diff is downstream of the answer.
 
+**Update (reverse role sync):** join-time `currentGroups` is now the non-contextual ownership read (`LuckPermsIntegration.ownedGroupsOf`), while the forward diff above still reads contextual groups; so in the bot's RCON mode a parent held only in a server context counts as held everywhere, and a role loss removes only the global node. That is an unusual setup, documented here rather than handled.
+
 ### N8 — v2's `cleanupUser` is not ported yet
 
 v2's Velocity LuckPerms manager exposed `cleanupUser(uuid)`, which drops a user from LuckPerms'

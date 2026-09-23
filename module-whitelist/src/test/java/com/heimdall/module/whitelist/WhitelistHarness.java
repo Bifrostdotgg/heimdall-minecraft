@@ -236,8 +236,20 @@ final class WhitelistHarness implements AutoCloseable {
             applied.add(username + ":" + describe(directive));
         }
 
+        private final List<String> delivered = new CopyOnWriteArrayList<String>();
+
+        @Override
+        public void groupsDelivered(UUID playerUuid, List<String> currentGroups) {
+            delivered.add(playerUuid + ":" + currentGroups);
+        }
+
         List<String> applied() {
             return Collections.unmodifiableList(new ArrayList<String>(applied));
+        }
+
+        /** Every {@code groupsDelivered} call, as {@code uuid:[groups]}, oldest first. */
+        List<String> delivered() {
+            return Collections.unmodifiableList(new ArrayList<String>(delivered));
         }
 
         void clear() {

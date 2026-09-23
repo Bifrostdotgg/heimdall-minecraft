@@ -131,9 +131,15 @@ final class JoinSnapshotRequester implements PlayerSessionListener {
         }
 
         CompletableFuture<RoleSyncDirective> request;
+        // What the request actually carried, so a successful answer can tell reverse role sync what
+        // the bot now knows. Null when the key was left out: nothing was delivered then.
+        final java.util.concurrent.atomic.AtomicReference<List<String>> sent =
+                new java.util.concurrent.atomic.AtomicReference<List<String>>();
         try {
-            request = currentGroups(bridge, uuid, username).thenCompose(
-                    groups -> bot.requestRoleSyncSnapshot(username, uuid.toString(), groups));
+            request = currentGroups(bridge, uuid, username).thenCompose(groups -> {
+                sent.set(groups);
+                return bot.requestRoleSyncSnapshot(username, uuid.toString(), groups);
+            });
         } catch (RuntimeException refused) {
             report(username, refused);
             return;
@@ -146,6 +152,10 @@ final class JoinSnapshotRequester implements PlayerSessionListener {
                     return;
                 }
                 reportedFailures.clear();
+                List<String> delivered = sent.get();
+                if (delivered != null) {
+                    sink.groupsDelivered(uuid, delivered);
+                }
                 sink.applyOnJoin(uuid, username,
                         directive == null ? RoleSyncDirective.absent() : directive);
             }

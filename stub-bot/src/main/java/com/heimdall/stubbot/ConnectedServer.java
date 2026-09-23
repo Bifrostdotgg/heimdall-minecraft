@@ -59,6 +59,15 @@ public final class ConnectedServer {
 
     private final List<JsonObject> bridgeEvents = Collections.synchronizedList(new ArrayList<>());
 
+    /**
+     * Reverse role-sync reports received via {@code rolesync.groups}, one payload per frame.
+     *
+     * <p>Whole payloads rather than unpacked fields, so a test asserts the exact shape the bot's
+     * handler will parse ({@code uuid}, {@code username}, {@code groups}, {@code at}).
+     */
+    private final List<JsonObject> roleSyncGroupReports =
+            Collections.synchronizedList(new ArrayList<>());
+
     ConnectedServer(String guildId, String serverId, WebSocket socket, long nowMs) {
         this.guildId = guildId;
         this.serverId = serverId;
@@ -174,6 +183,15 @@ public final class ConnectedServer {
     /** Player events received via {@code bridge.event}, oldest first. */
     public List<JsonObject> bridgeEvents() {
         return copyOf(bridgeEvents);
+    }
+
+    /** Reverse role-sync reports received via {@code rolesync.groups}, oldest first. */
+    public List<JsonObject> roleSyncGroupReports() {
+        return copyOf(roleSyncGroupReports);
+    }
+
+    void addRoleSyncGroupReport(JsonObject report) {
+        append(roleSyncGroupReports, report);
     }
 
     void addBridgeChatLine(JsonObject line) {

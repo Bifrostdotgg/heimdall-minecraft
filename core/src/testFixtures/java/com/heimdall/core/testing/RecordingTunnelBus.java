@@ -3,6 +3,7 @@ package com.heimdall.core.testing;
 import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.tunnel.ProtocolMode;
+import com.heimdall.core.tunnel.ProtocolModeListener;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
@@ -80,6 +81,9 @@ public final class RecordingTunnelBus implements TunnelBus {
     private final Map<String, Executor> executors =
             Collections.synchronizedMap(new LinkedHashMap<String, Executor>());
 
+    private final CopyOnWriteArrayList<ProtocolModeListener> modeListeners =
+            new CopyOnWriteArrayList<ProtocolModeListener>();
+
     private volatile boolean connected = true;
     private volatile ProtocolMode mode = ProtocolMode.V3;
 
@@ -143,8 +147,24 @@ public final class RecordingTunnelBus implements TunnelBus {
 
     /** Sets whether the link is up. What the console module's drain-and-discard branches on. */
     public RecordingTunnelBus connected(boolean value) {
+        boolean was = this.connected;
         this.connected = value;
+        if (was != value) {
+            // What the real client reports: UNKNOWN while down, the negotiated mode once back up.
+            fireMode(value ? ProtocolMode.UNKNOWN : mode, value ? mode : ProtocolMode.UNKNOWN);
+        }
         return this;
+    }
+
+    private void fireMode(ProtocolMode previous, ProtocolMode current) {
+        for (ProtocolModeListener listener : modeListeners) {
+            listener.onModeChanged(previous, current);
+        }
+    }
+
+    /** How many mode listeners are subscribed: the leak assertion for a module toggle. */
+    public int modeListenerCount() {
+        return modeListeners.size();
     }
 
     /** Says the link is down. */
@@ -158,8 +178,24 @@ public final class RecordingTunnelBus implements TunnelBus {
     }
 
     public RecordingTunnelBus mode(ProtocolMode value) {
+        ProtocolMode previous = this.mode;
         this.mode = value;
+        if (previous != value) {
+            fireMode(previous, value);
+        }
         return this;
+    }
+
+    /** Inline, like {@link #push}: a mode change is delivered on the thread that made it. */
+    @Override
+    public Registration onModeChange(final ProtocolModeListener listener) {
+        modeListeners.add(listener);
+        return Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                modeListeners.remove(listener);
+            }
+        });
     }
 
     @Override

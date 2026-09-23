@@ -1,6 +1,7 @@
 package com.heimdall.core.roles;
 
 import com.heimdall.core.http.model.RoleSyncDirective;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -40,6 +41,10 @@ public interface RoleSyncSink {
         @Override
         public void applyOnJoin(UUID playerUuid, String username, RoleSyncDirective directive) {
         }
+
+        @Override
+        public void groupsDelivered(UUID playerUuid, List<String> currentGroups) {
+        }
     };
 
     /**
@@ -52,4 +57,22 @@ public interface RoleSyncSink {
      * @param username the name as the platform reported it, for logging — never normalised (D8)
      */
     void applyOnJoin(UUID playerUuid, String username, RoleSyncDirective directive);
+
+    /**
+     * Says that a join-time call from <em>this</em> server reached the bot, successfully, carrying
+     * these {@code currentGroups}.
+     *
+     * <p>Reverse role sync (in-game rank to Discord role) needs to know what the bot has already been
+     * told about a player, so that it reports only what the bot does not know. The only honest source
+     * for that is a call that actually delivered the groups: reading LuckPerms locally at join says
+     * nothing about the bot when this server made no call (a backend deferring to its gatekeeper), or
+     * the call failed, or the bot was not reachable. So a caller invokes this only after a successful
+     * response to a request that carried a real list, never for one that left the key out.
+     *
+     * <p>Called at most once per join call, on whatever thread completed it; implementations must not
+     * block. The player may not be online yet (the blocking login path completes before the join).
+     *
+     * @param currentGroups exactly the list the request carried; never {@code null}
+     */
+    void groupsDelivered(UUID playerUuid, List<String> currentGroups);
 }

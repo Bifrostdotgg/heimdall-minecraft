@@ -209,5 +209,11 @@ class RoleSyncPushTest {
                 UUID playerUuid, List<String> targetGroups, List<String> managedGroups) {
             throw new IllegalStateException("boom");
         }
+
+        @Override
+        public com.heimdall.core.util.Registration onGroupsChanged(
+                com.heimdall.core.platform.GroupsChangedListener listener) {
+            throw new IllegalStateException("boom");
+        }
     }
 }
