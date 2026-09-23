@@ -49,6 +49,9 @@ dependencies {
     // depends on both, against the stub bot: whether a login costs one bot call or two is only
     // visible in the requests the stub receives.
     testImplementation(project(":stub-bot"))
+    // The stub hands back the frames it received as Gson objects (the reverse role-sync test reads
+    // the rolesync.groups payload that way).
+    testImplementation(libs.gson)
 }
 
 /**

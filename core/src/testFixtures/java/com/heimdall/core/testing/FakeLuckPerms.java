@@ -1,6 +1,8 @@
 package com.heimdall.core.testing;
 
+import com.heimdall.core.platform.GroupsChangedListener;
 import com.heimdall.core.platform.LuckPermsBridge;
+import com.heimdall.core.util.Registration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -62,13 +64,25 @@ public final class FakeLuckPerms implements LuckPermsBridge {
     private final Map<UUID, List<String>> currentGroups =
             Collections.synchronizedMap(new LinkedHashMap<UUID, List<String>>());
 
+    private final CopyOnWriteArrayList<GroupsChangedListener> groupListeners =
+            new CopyOnWriteArrayList<GroupsChangedListener>();
+
     private volatile boolean available = true;
+    private volatile boolean refusingListeners;
     private volatile RuntimeException failure;
 
-    /** Says what {@link #getPlayerGroups} should report for a player. */
+    /**
+     * Loads a player holding {@code groups}: what {@link #getPlayerGroups} reports for them. With no
+     * groups this is "loaded, holds nothing", which is a real answer and not the same as unknown.
+     */
     public FakeLuckPerms holding(UUID uuid, String... groups) {
         currentGroups.put(uuid, Collections.unmodifiableList(java.util.Arrays.asList(groups)));
         return this;
+    }
+
+    /** Loads a player who holds no groups: {@link #getPlayerGroups} answers {@code []}. */
+    public FakeLuckPerms known(UUID uuid) {
+        return holding(uuid);
     }
 
     /** Makes the bridge report itself absent, as a server without LuckPerms would. */
@@ -77,10 +91,42 @@ public final class FakeLuckPerms implements LuckPermsBridge {
         return this;
     }
 
+    /**
+     * Makes {@link #onGroupsChanged} answer {@link Registration#NONE} while still reporting itself
+     * available: a LuckPerms that is up but will not take a listener, so a test can prove the caller
+     * does not mistake that for a subscription.
+     */
+    public FakeLuckPerms refusingListeners(boolean value) {
+        this.refusingListeners = value;
+        return this;
+    }
+
     /** Makes every call fail — the path where LuckPerms is present but its storage is not. */
     public FakeLuckPerms failing(RuntimeException cause) {
         this.failure = cause;
         return this;
+    }
+
+    /**
+     * Changes what a player holds and tells every {@link #onGroupsChanged} listener, inline.
+     *
+     * <p>Both halves, because that is what LuckPerms does: the new state is what a later
+     * {@link #getPlayerGroups} reads, and the listener is handed the whole list rather than a delta.
+     * Inline rather than on an executor so a test controls the ordering; the real bridge's hop off
+     * LuckPerms' thread is {@code LuckPermsIntegration}'s to prove.
+     */
+    public FakeLuckPerms fireGroupsChanged(UUID uuid, List<String> groups) {
+        List<String> now = Collections.unmodifiableList(new ArrayList<String>(groups));
+        currentGroups.put(uuid, now);
+        for (GroupsChangedListener listener : groupListeners) {
+            listener.onGroupsChanged(uuid, now);
+        }
+        return this;
+    }
+
+    /** How many group-change listeners are subscribed: the leak assertion for a module toggle. */
+    public int groupListenerCount() {
+        return groupListeners.size();
     }
 
     /** Every sync applied, oldest first. */
@@ -106,9 +152,16 @@ public final class FakeLuckPerms implements LuckPermsBridge {
             failed.completeExceptionally(broken);
             return failed;
         }
-        List<String> held = currentGroups.get(playerUuid);
-        return CompletableFuture.completedFuture(
-                held == null ? Collections.<String>emptyList() : held);
+        List<String> held = available ? currentGroups.get(playerUuid) : null;
+        if (held == null) {
+            // The real bridge's contract: a player it cannot load, or no LuckPerms at all, is
+            // unknown, and unknown is a failed future rather than an empty list.
+            CompletableFuture<List<String>> unknown = new CompletableFuture<List<String>>();
+            unknown.completeExceptionally(new IllegalStateException(available
+                    ? "no such user loaded: " + playerUuid : "LuckPerms is not available"));
+            return unknown;
+        }
+        return CompletableFuture.completedFuture(held);
     }
 
     @Override
@@ -125,5 +178,20 @@ public final class FakeLuckPerms implements LuckPermsBridge {
         }
         syncs.add(new Sync(playerUuid, targetGroups, managedGroups));
         return CompletableFuture.completedFuture(Boolean.TRUE);
+    }
+
+    /** Honours {@link #unavailable()} the way the real bridge does: no LuckPerms, no listener. */
+    @Override
+    public Registration onGroupsChanged(final GroupsChangedListener listener) {
+        if (!available || refusingListeners || listener == null) {
+            return Registration.NONE;
+        }
+        groupListeners.add(listener);
+        return Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                groupListeners.remove(listener);
+            }
+        });
     }
 }

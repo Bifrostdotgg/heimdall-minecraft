@@ -98,6 +98,9 @@ final class StubHttpApi {
     /** The body of the most recent {@code role-sync/snapshot} request, or {@code null}. */
     private volatile JsonObject lastRoleSyncSnapshotRequest;
 
+    /** The body of the most recent {@code connection-attempt} request, or {@code null}. */
+    private volatile JsonObject lastConnectionAttemptRequest;
+
     StubHttpApi(StubBotConfig config, FixtureStore fixtures) {
         this.config = config;
         this.fixtures = fixtures;
@@ -156,6 +159,11 @@ final class StubHttpApi {
 
     JsonObject lastRoleSyncSnapshotRequest() {
         JsonObject last = lastRoleSyncSnapshotRequest;
+        return last == null ? null : last.deepCopy();
+    }
+
+    JsonObject lastConnectionAttemptRequest() {
+        JsonObject last = lastConnectionAttemptRequest;
         return last == null ? null : last.deepCopy();
     }
 
@@ -408,6 +416,7 @@ final class StubHttpApi {
     private void handleConnectionAttempt(HttpExchange exchange, String guildId, String body)
             throws IOException {
         JsonObject request = parseObject(body);
+        lastConnectionAttemptRequest = request;
         String username = optString(request, "username");
         String uuid = optString(request, "uuid");
 

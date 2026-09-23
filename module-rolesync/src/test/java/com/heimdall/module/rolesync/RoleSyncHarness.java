@@ -46,6 +46,8 @@ final class RoleSyncHarness implements AutoCloseable {
     /** Same-thread join and quit dispatch, so a join can be pushed and asserted without a latch. */
     final PlayerSessionEvents sessions = new PlayerSessionEvents(logger, Runnable::run);
     private final ModuleManager manager;
+    private final RemoteConfig remoteConfig;
+    private int configVersion;
 
     RoleSyncHarness(Path dataDirectory) {
         this(dataDirectory, null);
@@ -65,7 +67,7 @@ final class RoleSyncHarness implements AutoCloseable {
         this.executors = new HeimdallExecutors(logger, 1);
         this.platform = new FakePlatform(role, dataDirectory);
         this.platform.withLuckPerms(luckPerms);
-        RemoteConfig remoteConfig = new RemoteConfig(
+        this.remoteConfig = new RemoteConfig(
                 logger, dataDirectory.resolve("remote-config.json"), ConfigDocument.empty());
         ModuleEnvironment.Builder environment = ModuleEnvironment.builder();
         if (api != null) {
@@ -107,6 +109,32 @@ final class RoleSyncHarness implements AutoCloseable {
     RoleSyncHarness enable() {
         manager.reconcile(Collections.singleton(HeimdallRoleSyncModule.ID));
         return this;
+    }
+
+    /**
+     * Pushes a config that enables the module with {@code settings}, and reconciles, as a dashboard
+     * save would. A second call with different settings is a live settings change: the module stays
+     * enabled and only its config listeners fire.
+     */
+    RoleSyncHarness configure(Payload settings) {
+        remoteConfig.onConfigPush(Payload.builder()
+                .put("version", ++configVersion)
+                .put("modules", Payload.builder()
+                        .put(HeimdallRoleSyncModule.ID, Payload.builder()
+                                .put("enabled", true)
+                                .put("settings", settings)
+                                .build())
+                        .build())
+                .build());
+        manager.reconcileFromConfig();
+        return this;
+    }
+
+    /** Settings carrying {@code watchedGroups}. */
+    static Payload watching(String... groups) {
+        return Payload.builder()
+                .putStrings(GroupChangeReporter.WATCHED_GROUPS, java.util.Arrays.asList(groups))
+                .build();
     }
 
     /** Turns it off again. */

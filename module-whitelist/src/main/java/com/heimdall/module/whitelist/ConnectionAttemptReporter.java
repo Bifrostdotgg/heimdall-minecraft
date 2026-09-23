@@ -10,7 +10,6 @@ import com.heimdall.core.platform.LuckPermsBridge;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.util.Strings;
-import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
@@ -221,7 +220,11 @@ final class ConnectionAttemptReporter {
                 // overloads rather than the synchronous stages.
                 return currentGroups(login)
                         .thenCompose(groups -> api.connectionAttempt(
-                                request(login, groups, currentlyWhitelisted)))
+                                request(login, groups, currentlyWhitelisted))
+                                .thenApply(result -> {
+                                    deliverGroups(login, groups, result);
+                                    return result;
+                                }))
                         .whenComplete(new BiConsumer<ConnectionAttemptResult, Throwable>() {
                     @Override
                     public void accept(ConnectionAttemptResult result, Throwable failure) {
@@ -257,33 +260,56 @@ final class ConnectionAttemptReporter {
     }
 
     /**
-     * The groups the player currently holds, for the bot to diff against.
+     * The groups the player currently holds, for the bot to diff against, or {@code null} when they
+     * are not known.
      *
-     * <p>Empty when LuckPerms is absent, which is the honest answer — the bot then has nothing to
-     * diff and makes no group decisions. Empty on a timeout is the answer that is <em>not</em>
-     * honest, so that case is logged.
+     * <p>Null means the request leaves {@code currentGroups} out, which the bot reads as "unknown" and
+     * makes no group decision on. That is the answer for LuckPerms being absent, for a read that
+     * failed, and for a user LuckPerms could not load. An empty list would instead say "holds no
+     * groups": the bot would diff against nothing and conclude every managed group needs adding
+     * (issue #796 / MC-11), and reverse role sync would read it as every mapped rank being gone.
+     * {@code role-sync/snapshot} has followed this contract from the start; this path could not until
+     * {@link ConnectionAttempt#currentGroups} became nullable.
      */
     private CompletableFuture<List<String>> currentGroups(LoginAttempt login) {
         LuckPermsBridge bridge = platform.integrations().luckPerms().orElse(null);
         if (bridge == null || !bridge.isAvailable()) {
-            return CompletableFuture.completedFuture(Collections.<String>emptyList());
+            return CompletableFuture.completedFuture(null);
         }
         try {
             return bridge.getPlayerGroups(login.uuid()).exceptionally(broken -> {
-                // Empty here is not an honest answer, it is a fallback — the bot then diffs against
-                // nothing and concludes every managed group needs adding, which is issue #796 /
-                // MC-11. So it is said out loud rather than passed off as "no groups".
-                logger.warn("could not read " + login.username() + "'s LuckPerms groups; sending an "
-                        + "empty set, so the bot will diff against nothing for this login "
-                        + "(issue #796 / MC-11): " + Strings.trimToEmpty(broken.getMessage()));
-                return Collections.<String>emptyList();
+                // Said out loud, because a LuckPerms whose storage cannot be read is an operator
+                // problem; but the request still goes, just without the key.
+                logger.warn("could not read " + login.username() + "'s LuckPerms groups; sending the "
+                        + "login without currentGroups, which the bot reads as unknown (no diff): "
+                        + Strings.trimToEmpty(broken.getMessage()));
+                return null;
             });
         } catch (RuntimeException bridgeRefused) {
             // The bridge throwing synchronously rather than failing its future. Not a shape
             // LuckPermsIntegration produces, but a fake or a future implementation might.
             logger.warn("the LuckPerms bridge refused a group read for " + login.username() + ": "
                     + Strings.trimToEmpty(bridgeRefused.getMessage()));
-            return CompletableFuture.completedFuture(Collections.<String>emptyList());
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    /**
+     * Tells role sync which groups this login's request delivered to the bot, so reverse role sync
+     * reports only what the bot does not already know. Only after a successful answer for an admitted
+     * player, and only when the request really carried a list: see
+     * {@link RoleSyncSink#groupsDelivered}.
+     */
+    private void deliverGroups(
+            LoginAttempt login, List<String> groups, ConnectionAttemptResult result) {
+        if (groups == null || result == null || !result.whitelisted()) {
+            return;
+        }
+        try {
+            roleSync.get().groupsDelivered(login.uuid(), groups);
+        } catch (RuntimeException broken) {
+            logger.error("recording the groups sent for " + login.username() + " failed; their "
+                    + "login is unaffected", broken);
         }
     }
 }

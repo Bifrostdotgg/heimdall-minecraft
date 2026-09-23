@@ -126,6 +126,27 @@ class ApiClientRequestTest {
         }
 
         @Test
+        @DisplayName("unknown currentGroups is left out of connection-attempt, not sent as []")
+        void unknownGroupsAreOmitted() throws Exception {
+            connect(ConnectionAttempt.builder("AllowedSteve", UUID).build());
+
+            JsonObject body = bodyOf(server.lastRequest());
+            assertFalse(body.has("currentGroups"),
+                    "[] would tell the bot the player holds no groups; absent says unknown");
+        }
+
+        @Test
+        @DisplayName("a known but empty list is still sent: holding no groups is a real answer")
+        void emptyGroupsAreSent() throws Exception {
+            connect(ConnectionAttempt.builder("AllowedSteve", UUID)
+                    .currentGroups(java.util.Collections.<String>emptyList())
+                    .build());
+
+            JsonObject body = bodyOf(server.lastRequest());
+            assertEquals(0, body.getAsJsonArray("currentGroups").size());
+        }
+
+        @Test
         @DisplayName("the link-code body is verbatim too — this is the one that reached the database")
         void linkCodeUsernameIsVerbatim() throws Exception {
             server.respond(200, "{\"success\":true,\"data\":{\"alreadyLinked\":false,\"code\":\"135790\"}}");

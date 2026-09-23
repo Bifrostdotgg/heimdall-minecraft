@@ -77,4 +77,20 @@ public interface TunnelBus {
 
     /** Whether a socket is currently open. */
     boolean isConnected();
+
+    /**
+     * Subscribes to {@link ProtocolMode} changes: {@link ProtocolMode#UNKNOWN} on a disconnect, the
+     * negotiated mode once a (re)connect completes its handshake.
+     *
+     * <p>On the bus so a module can react to a reconnect without holding the concrete
+     * {@link TunnelClient}; reverse role sync uses it to forget what it believes the bot knows,
+     * because a frame sent into a dying socket is dropped silently. Through a module's context the
+     * subscription is tracked like any other and unwound on disable.
+     *
+     * <p>Called on whichever thread changed the mode (the socket's, in production), so a listener
+     * must be cheap and must not block.
+     *
+     * @return a handle that unsubscribes; closing it twice is a no-op
+     */
+    Registration onModeChange(ProtocolModeListener listener);
 }

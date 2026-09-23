@@ -369,6 +369,7 @@ public final class TunnelClient implements TunnelBus {
     }
 
     /** Registers a listener for {@link ProtocolMode} changes. */
+    @Override
     public Registration onModeChange(ProtocolModeListener listener) {
         return negotiator.onModeChange(listener);
     }

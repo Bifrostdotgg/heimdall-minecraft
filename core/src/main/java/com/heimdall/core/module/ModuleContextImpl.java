@@ -282,6 +282,11 @@ final class ModuleContextImpl implements ModuleContext {
         }
 
         @Override
+        public Registration onModeChange(com.heimdall.core.tunnel.ProtocolModeListener listener) {
+            return registrations.track(delegate.onModeChange(listener));
+        }
+
+        @Override
         public ProtocolMode mode() {
             return delegate.mode();
         }

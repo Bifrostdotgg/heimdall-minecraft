@@ -77,14 +77,24 @@ import java.util.function.Supplier;
  * step</em>, and {@code LuckPermsBridge} needs a method for it. Until then, adding one would be
  * adding a cache-management API with no cache to manage.
  *
- * <h2>Settings: none, deliberately</h2>
+ * <h2>Settings: one, and it is the bot's</h2>
  *
- * <p>{@code enabled} is the manager's business, and nothing else about this module is worth a knob.
- * v2 had no role-sync settings, the dashboard sends none, and the only candidate — the two-second
- * join defer — would be a field permanently reading its own default while presenting as an option
- * an operator could change. If one is ever added it goes in with the dashboard field in the same
- * change, and it is read through {@link ModuleContext#settings()} at the point of use rather than
- * captured in {@link #enable}, because a settings change does not re-enable a module.
+ * <p>{@code enabled} is the manager's business. The only setting is {@code watchedGroups}, the
+ * LuckPerms groups the bot wants reported for reverse role sync (in-game rank to Discord role). It is
+ * not an operator knob: the bot computes it from the dashboard's Minecraft-to-Discord mappings, and
+ * {@link GroupChangeReporter} reads it through {@link ModuleContext#settings()} at the point of use
+ * rather than capturing it in {@link #enable}, because a settings change does not re-enable a module.
+ *
+ * <p>The two-second join defer is still not a setting, for the reason it never was: it would be a
+ * field permanently reading its own default while presenting as an option an operator could change.
+ *
+ * <h2>Reverse role sync lives here too</h2>
+ *
+ * <p>{@link GroupChangeReporter} is enabled and disabled with the module rather than being a module
+ * of its own. Both directions are "role sync" to the dashboard, share the one capability the bot
+ * negotiates, and need LuckPerms for the same reason; a separate toggle would be a second switch that
+ * has to agree with the first. It never writes to LuckPerms, and the forward path never reads what it
+ * reports, so the two cannot feed each other.
  *
  * <h2>Threading and ownership</h2>
  *
@@ -118,6 +128,9 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
      * something that belongs to the previous cycle.
      */
     private volatile RoleSyncApplier applier;
+
+    /** Reverse role sync for the current enable cycle, or {@code null} while the module is off. */
+    private volatile GroupChangeReporter reporter;
 
     /**
      * Who already delivers a directive on login, and so makes the join-time request redundant.
@@ -194,6 +207,12 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
                     }
                 },
                 this));
+
+        // Reverse role sync. Subscribes to LuckPerms only while the bot has asked for at least one
+        // group; see GroupChangeReporter for why an unwatched server pays nothing.
+        GroupChangeReporter reporting = new GroupChangeReporter(context);
+        this.reporter = reporting;
+        reporting.start();
     }
 
     @Override
@@ -202,6 +221,13 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
         this.applier = null;
         if (running != null) {
             running.shutdown();
+        }
+        // Its LuckPerms subscription and its debounce timers are not registered through the
+        // context, so this is the only thing that closes them.
+        GroupChangeReporter reporting = this.reporter;
+        this.reporter = null;
+        if (reporting != null) {
+            reporting.close();
         }
     }
 
@@ -234,6 +260,21 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
             return;
         }
         running.applyOnJoin(uuid, username, directive);
+    }
+
+    /**
+     * Records what a successful join-time call told the bot, for reverse role sync.
+     *
+     * <p>Called by the whitelist module after a {@code connection-attempt} answer and by this
+     * module's own snapshot request; see {@link RoleSyncSink#groupsDelivered} for why only a
+     * delivered list counts. A no-op while the module is off.
+     */
+    @Override
+    public void groupsDelivered(UUID uuid, java.util.List<String> currentGroups) {
+        GroupChangeReporter reporting = this.reporter;
+        if (reporting != null && uuid != null && currentGroups != null) {
+            reporting.delivered(uuid, currentGroups);
+        }
     }
 
     /** The live applier, or {@code null} when the module is off. For tests. */

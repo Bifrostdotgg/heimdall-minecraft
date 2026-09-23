@@ -2,6 +2,7 @@ package com.heimdall.core.module;
 
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.tunnel.ProtocolMode;
+import com.heimdall.core.tunnel.ProtocolModeListener;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
@@ -56,6 +57,12 @@ final class OfflineTunnelBus implements TunnelBus {
 
     @Override
     public Registration subscribe(String type, TunnelMessageHandler handler, Executor executor) {
+        return Registration.NONE;
+    }
+
+    /** There is no socket, so the mode never changes. */
+    @Override
+    public Registration onModeChange(ProtocolModeListener listener) {
         return Registration.NONE;
     }
 

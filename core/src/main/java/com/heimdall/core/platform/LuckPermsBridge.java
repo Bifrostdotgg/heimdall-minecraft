@@ -1,5 +1,6 @@
 package com.heimdall.core.platform;
 
+import com.heimdall.core.util.Registration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -40,14 +41,20 @@ public interface LuckPermsBridge {
     boolean isAvailable();
 
     /**
-     * The groups a player currently inherits, including ones they are not online to hold.
+     * The groups a player currently owns, including ones inherited through other groups and ones
+     * granted only in another server's context.
      *
      * <p>Falls back to loading the user from storage when they are not in LuckPerms' cache — which
      * is the normal state during a pre-login check, since the player is not on the server yet.
      * Reporting an empty list there is issue #796 / MC-11: the bot then diffs against nothing and
      * concludes every managed group needs adding.
      *
-     * @return the group names; empty if LuckPerms is absent or the user could not be loaded
+     * <p><strong>Unknown is a failed future, never an empty list.</strong> An empty list means "holds
+     * no groups" and the bot acts on it; LuckPerms being absent, a user that could not be loaded,
+     * and a read that threw are all "unknown", and callers leave {@code currentGroups} out of their
+     * requests for those.
+     *
+     * @return the group names, or a future failed with the reason they are not known
      */
     CompletableFuture<List<String>> getPlayerGroups(UUID playerUuid);
 
@@ -67,4 +74,29 @@ public interface LuckPermsBridge {
      */
     CompletableFuture<Boolean> setPlayerGroups(
             UUID playerUuid, List<String> targetGroups, List<String> managedGroups);
+
+    /**
+     * Subscribes to changes in any user's inheritance groups, for reverse role sync.
+     *
+     * <p>Fires after a group node is added to, removed from or cleared on a user, and after LuckPerms
+     * recalculates a user's data. As far as the 5.4 API documents, that recalculation is the likeliest
+     * signal for changes no node event describes (an expiring temporary rank, an edit to a group the
+     * user inherits), but the API does not promise it, so nothing here depends on it.
+     *
+     * <p>The live report is the fast path, not the guaranteed one. Anything it misses (an expiry, a
+     * change to a player who is not loaded or not online) is reconciled from the {@code currentGroups}
+     * the join-time calls carry.
+     *
+     * <p>Abstract rather than a default returning {@link Registration#NONE}, on purpose. A bridge
+     * that silently never reports would make reverse sync look configured and do nothing, which is
+     * the failure nobody notices; an implementation that genuinely cannot listen says so by writing
+     * the {@code NONE} itself.
+     *
+     * <p>Subscribing when LuckPerms is not available returns {@link Registration#NONE} rather than
+     * failing, and does <strong>not</strong> retry later. A caller that wants to survive LuckPerms
+     * starting second re-subscribes once {@link #isAvailable()} turns true.
+     *
+     * @return a handle that unsubscribes; idempotent
+     */
+    Registration onGroupsChanged(GroupsChangedListener listener);
 }

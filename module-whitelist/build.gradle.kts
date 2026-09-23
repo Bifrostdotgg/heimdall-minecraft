@@ -14,6 +14,8 @@ dependencies {
     // fake would only agree with whatever this repo believes about them; :stub-bot is a
     // transcription of the bot's own handlers.
     testImplementation(project(":stub-bot"))
+    // The stub hands back the request bodies it received as Gson objects (currentGroups tests).
+    testImplementation(libs.gson)
 }
 
 /**

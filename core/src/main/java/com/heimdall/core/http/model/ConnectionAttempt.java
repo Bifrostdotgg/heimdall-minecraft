@@ -41,7 +41,9 @@ public final class ConnectionAttempt {
         this.ip = Strings.trimToEmpty(builder.ip);
         this.serverIp = Strings.isBlank(builder.serverIp) ? "localhost" : builder.serverIp.trim();
         this.currentlyWhitelisted = builder.currentlyWhitelisted;
-        this.currentGroups = Lists.copyOf(builder.currentGroups);
+        // Null stays null: "unknown" and "holds no groups" are different answers to the bot.
+        this.currentGroups =
+                builder.currentGroups == null ? null : Lists.copyOf(builder.currentGroups);
     }
 
     public static Builder builder(String username, String uuid) {
@@ -73,7 +75,17 @@ public final class ConnectionAttempt {
         return currentlyWhitelisted;
     }
 
-    /** The permission groups the player currently holds, for role-sync diffing. */
+    /**
+     * The permission groups the player currently holds, for role-sync diffing, or {@code null} when
+     * they are not known.
+     *
+     * <p>Null, not empty, when LuckPerms is absent or the read failed, and the request then leaves
+     * the key out. The bot's contract is the one {@code role-sync/snapshot} already follows: a
+     * missing {@code currentGroups} means "unknown" and the bot does no diff, while {@code []} means
+     * "holds no groups" and the bot diffs against that. Sending {@code []} for "unknown" is the false
+     * diff of issue #796 / MC-11, and with reverse role sync it would also read as "every mapped rank
+     * is gone" and strip the matching Discord roles.
+     */
     public List<String> currentGroups() {
         return currentGroups;
     }
@@ -92,7 +104,7 @@ public final class ConnectionAttempt {
                 && uuid.equals(that.uuid)
                 && ip.equals(that.ip)
                 && serverIp.equals(that.serverIp)
-                && currentGroups.equals(that.currentGroups);
+                && Objects.equals(currentGroups, that.currentGroups);
     }
 
     @Override
@@ -145,6 +157,7 @@ public final class ConnectionAttempt {
             return this;
         }
 
+        /** {@code null} (the default) means unknown, and the key is left out of the request. */
         public Builder currentGroups(List<String> value) {
             this.currentGroups = value;
             return this;
