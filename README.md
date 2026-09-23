@@ -194,12 +194,22 @@ dashboard until cleared (see [Admin Commands](#admin-commands)).
 
 | Module | What it does | Runs on | Default |
 | --- | --- | --- | --- |
-| `whitelist` | The login gate, the local whitelist mirror and `/linkdiscord`. On a proxied network the gatekeeper owns the decision; a backend re-check is the `enforceOnBackend` setting | every role | on |
-| `rolesync` | Applies the bot's Discord-role snapshots to a player's LuckPerms groups | every role | on |
+| `whitelist` | The login gate and the local whitelist mirror. On a proxied network the gatekeeper owns the decision; a backend re-check is the `enforceOnBackend` setting | every role | on |
+| `rolesync` | Applies the bot's Discord-role snapshots to a player's LuckPerms groups, on join and whenever someone's Discord roles change. Does not need the whitelist module | every role | on |
 | `offenses` | `/offend` and the escalation tiers the dashboard defines | every role | on |
 | `console` | Streams the server console to the dashboard and runs commands from it | every role | off — it streams every log line |
 | `bridge` | Relays Minecraft chat and join/leave/death into Discord, and mapped Discord channels back in-game | every role | on, and inert until channels are mapped |
 | `health` | The TPS/memory/player-count snapshots that ride the heartbeat | every role | on |
+
+**Linking and role sync do not need the whitelist module.** `/linkdiscord` (alias `/link`) is part of the plugin itself, not of any module: it is registered whenever the plugin is running, whatever modules are on, so players can link their Discord account on an open server too (on a server not yet connected to the bot it says so). Role sync works the same way with the whitelist on or off. When the whitelist module decides a login, the bot's answer already carries the player's role snapshot and nothing extra is asked. When it does not (the whitelist is off, or the player is on the bypass list), the server that would have asked about the login fetches the snapshot from the bot as the player joins, in the background. On a proxied network that is the proxy: a backend that leaves logins to its proxy (`enforceOnBackend` off, or the whitelist off on a backend) does not fetch. A failed fetch changes nothing until the next role change or join.
+
+What that costs per login depends on the network:
+
+- **Standalone server:** one request to the bot per login.
+- **Proxied network whose backends defer** (`enforceOnBackend` off, or no whitelist on the backends): one request per login for the whole network, made by the proxy. Switching servers costs nothing.
+- **Proxied network on the default `enforceOnBackend: true`:** every backend join and every server switch already asks the bot about the login, as it always has, and that answer carries the role snapshot, so nothing extra is sent. A player on the bypass list is the exception: the proxy and each backend that re-checks logins each fetch a snapshot for them.
+
+**Known gap: LuckPerms only on the backends.** A common setup runs LuckPerms on the backends and not on the proxy. If the backends defer to the proxy, the proxy has nowhere to write groups and skips, the backends leave it to the proxy, and no server syncs groups on join. In RCON mode the bot's RCON group update that a join would normally trigger does not happen either. The same applies to a backend behind a proxy that does not run Heimdall at all: a backend counts as "behind a proxy" from its own proxy-forwarding settings (or the role set in `bootstrap.yml`), so with the whitelist off it makes no join-time request. Groups still follow every Discord role change as it happens; only the sync at join is missing. This is a documented limitation, not a regression: before this release there was no join-time sync at all without the whitelist module. To get join-time sync on such a network, run LuckPerms on the proxy, or turn the whitelist module on (on the backends, with `enforceOnBackend` on, if the proxy has no LuckPerms).
 
 Two notes worth having before you turn something on:
 

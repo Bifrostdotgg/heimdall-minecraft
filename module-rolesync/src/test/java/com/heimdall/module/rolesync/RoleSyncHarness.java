@@ -2,6 +2,7 @@ package com.heimdall.module.rolesync;
 
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.ServerRole;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
@@ -41,16 +42,36 @@ final class RoleSyncHarness implements AutoCloseable {
     final FakePlatform platform;
     final HeimdallRoleSyncModule module = new HeimdallRoleSyncModule();
 
-    private final HeimdallExecutors executors;
+    final HeimdallExecutors executors;
+    /** Same-thread join and quit dispatch, so a join can be pushed and asserted without a latch. */
+    final PlayerSessionEvents sessions = new PlayerSessionEvents(logger, Runnable::run);
     private final ModuleManager manager;
 
     RoleSyncHarness(Path dataDirectory) {
+        this(dataDirectory, null);
+    }
+
+    /**
+     * @param api a factory for the gateway the module reaches the bot through, given this harness's
+     *     executors; {@code null} for the unconfigured one a fresh server has
+     */
+    RoleSyncHarness(Path dataDirectory, java.util.function.Function<HeimdallExecutors, HeimdallApi> api) {
+        this(dataDirectory, ServerRole.STANDALONE, api);
+    }
+
+    /** As above, on a server of the given role. */
+    RoleSyncHarness(Path dataDirectory, ServerRole role,
+            java.util.function.Function<HeimdallExecutors, HeimdallApi> api) {
         this.executors = new HeimdallExecutors(logger, 1);
-        this.platform = new FakePlatform(ServerRole.STANDALONE, dataDirectory);
+        this.platform = new FakePlatform(role, dataDirectory);
         this.platform.withLuckPerms(luckPerms);
         RemoteConfig remoteConfig = new RemoteConfig(
                 logger, dataDirectory.resolve("remote-config.json"), ConfigDocument.empty());
-        this.manager = new ModuleManager(ModuleEnvironment.builder()
+        ModuleEnvironment.Builder environment = ModuleEnvironment.builder();
+        if (api != null) {
+            environment.api(api.apply(executors));
+        }
+        this.manager = new ModuleManager(environment
                 .logger(logger)
                 .executors(executors)
                 .tunnel(bus)
@@ -60,7 +81,7 @@ final class RoleSyncHarness implements AutoCloseable {
                 .platform(platform)
                 // Same-thread, so a test needs no latch. The real dispatcher's off-the-event-thread
                 // behaviour is core's to prove, not this module's.
-                .playerSessions(new PlayerSessionEvents(logger, Runnable::run))
+                .playerSessions(sessions)
                 .build());
         this.manager.register(module);
     }

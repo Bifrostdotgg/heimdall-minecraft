@@ -14,8 +14,12 @@
  * <h2>What is a subcommand and what is a module command</h2>
  *
  * <p>Everything here is an <em>operator</em> action gated on {@code heimdall.admin}.
- * {@code /linkdiscord} and {@code /offend} are not: they are player-facing, they belong to the
- * modules that implement them, and they are registered and unregistered with those modules (D53).
+ * {@code /linkdiscord} and {@code /offend} are not: they are player-facing. {@code /offend} belongs
+ * to the module that implements it and is registered and unregistered with it (D53).
+ * {@code /linkdiscord} is core's own, registered unconditionally by the runtime at start (on a
+ * server that has not been set up it answers "not connected yet"), because every feature that
+ * needs a linked account depends on it (see
+ * {@link com.heimdall.core.link.LinkDiscordCommand}).
  *
  * <h2>Reaching a module from core</h2>
  *

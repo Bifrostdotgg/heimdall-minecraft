@@ -1,3 +1,5 @@
+import org.gradle.api.attributes.java.TargetJvmVersion
+
 plugins {
     // Java 8, because :platform-bukkit consumes it and that module's floor is Spigot 1.8.8.
     // :platform-velocity is Java 17 and consumes it happily — a lower target is always loadable.
@@ -43,4 +45,20 @@ dependencies {
     // reaches it transitively, so it is unit-tested against real LogEvents rather than a mock —
     // a hand-rolled LogEvent would let the test agree with itself about an API shape.
     testImplementation(libs.log4j.core)
+    // The whitelist and role-sync modules are tested together here, the only project that already
+    // depends on both, against the stub bot: whether a login costs one bot call or two is only
+    // visible in the requests the stub receives.
+    testImplementation(project(":stub-bot"))
+}
+
+/**
+ * Lets the TEST classpaths, and only those, accept :stub-bot's Java 21 artifact. Verbatim from
+ * module-whitelist/build.gradle.kts, which explains why; the shipped bytecode stays --release 8.
+ */
+listOf(configurations.testCompileClasspath, configurations.testRuntimeClasspath).forEach { classpath ->
+    classpath.configure {
+        attributes {
+            attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 21)
+        }
+    }
 }

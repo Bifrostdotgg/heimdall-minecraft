@@ -129,6 +129,15 @@ final class ApiResponses {
         return RoleSyncDirective.enabled(strings(object, "targetGroups"), strings(object, "managedGroups"));
     }
 
+    /**
+     * Reads {@code POST role-sync/snapshot}: {@code {roleSync: <block>}}, the block being exactly
+     * the one a {@code connection-attempt} answer carries, so it goes through the same parser and
+     * keeps the same three states. A {@code data} with no {@code roleSync} key is absent.
+     */
+    static RoleSyncDirective roleSyncSnapshot(RawResponse response) {
+        return roleSync(Envelopes.unwrapObject(response.status(), response.body()));
+    }
+
     static LinkCodeResult linkCode(RawResponse response) {
         JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
         if (bool(data, "alreadyLinked")) {

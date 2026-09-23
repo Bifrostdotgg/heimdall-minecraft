@@ -35,7 +35,9 @@ class WhitelistLifecycleTest {
                 assertEquals(1, h.loginPipeline.size(), "cycle " + cycle);
                 assertEquals(1, h.sessions.joinListenerCount(), "cycle " + cycle);
                 assertEquals(1, h.sessions.quitListenerCount(), "cycle " + cycle);
-                assertTrue(h.platform.commandRegistry().has("linkdiscord"), "cycle " + cycle);
+                // Linking is core's since role sync stopped depending on this module; a module
+                // that re-registered it would collide with the runtime's copy.
+                assertFalse(h.platform.commandRegistry().has("linkdiscord"), "cycle " + cycle);
 
                 h.disableModule();
                 assertEquals(0, h.loginPipeline.size(), "cycle " + cycle);

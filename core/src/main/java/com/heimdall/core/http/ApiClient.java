@@ -14,6 +14,7 @@ import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.http.model.PunishmentImportRow;
 import com.heimdall.core.http.model.ResolvedName;
+import com.heimdall.core.http.model.RoleSyncDirective;
 import com.heimdall.core.http.model.WhitelistSyncResult;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
@@ -55,8 +56,8 @@ import java.util.function.Supplier;
  * <table border="1">
  *   <caption>Which budget bounds which call</caption>
  *   <tr><th>Call</th><th>Wait at least</th></tr>
- *   <tr><td>{@link #connectionAttempt}, {@link #requestLinkCode}, {@link #offenseTypes},
- *       {@link #offend}</td><td>{@link ApiSettings#joinTimeoutMs()}</td></tr>
+ *   <tr><td>{@link #connectionAttempt}, {@link #requestLinkCode},
+ *       {@link #requestRoleSyncSnapshot}, {@link #offenseTypes}, {@link #offend}</td><td>{@link ApiSettings#joinTimeoutMs()}</td></tr>
  *   <tr><td>{@link #whitelistSync}</td><td>{@link ApiSettings#whitelistSyncJoinTimeoutMs()}</td></tr>
  *   <tr><td>{@link #latestRelease}</td><td>{@link ApiSettings#updateCheckJoinTimeoutMs()}</td></tr>
  * </table>
@@ -211,6 +212,74 @@ public final class ApiClient {
             return ApiResponses.linkCode(requests.execute(current,
                     HttpCall.post(guildPath(current, "request-link-code"), body.toString(),
                             current.timeoutMs())));
+        });
+    }
+
+    /**
+     * {@code POST role-sync/snapshot}: the player's role-sync directive, asked for on its own.
+     *
+     * <p>The same tri-state block that rides on a {@code connection-attempt} answer, read by the
+     * same parser, for a server that does not make that call: one whose whitelist module is off, or
+     * which is not the component deciding logins. See {@code HeimdallRoleSyncModule} for when it is
+     * sent; the rule is that a login costs exactly one bot call, never two.
+     *
+     * <h2>"No answer" is {@link RoleSyncDirective#absent()}, and a broken bot is not</h2>
+     *
+     * <p>A {@code 404} maps to absent: it is what a bot without this route answers (an older bot
+     * than the plugin is an ordinary state during a rollout), and what a guild without the Minecraft
+     * integration gets ({@code NOT_CONFIGURED}). Both mean "there is no snapshot to apply", which is
+     * exactly what absent says. An unknown player is not a 404: the bot answers
+     * {@code roleSync: null}, which the parser already reads as absent.
+     *
+     * <p>Only a 404. A {@code success: false} body on a 2xx stays the loud failure
+     * {@code Envelopes.unwrap} makes it (departure D5), and every other refusal (a {@code 401}, a
+     * {@code 400}, a {@code 5xx} that outlived its retries) and every transport failure still
+     * completes the future exceptionally. The caller
+     * does nothing in either case, so the player sees no difference, but an operator reading the log
+     * needs to be able to tell "no snapshot" from "the bot rejected our signature".
+     *
+     * <h2>{@code currentGroups} is optional, and absent is not the same as empty</h2>
+     *
+     * <p>The groups the player holds in LuckPerms right now, as on {@code connection-attempt}: the
+     * bot uses them for its background refresh and its RCON diff. The bot reads the two ways of
+     * saying nothing differently: a <strong>missing</strong> key means "unknown", so it does no diff
+     * and writes no audit row, while an <strong>empty list</strong> means "holds no groups" and is
+     * diffed against. {@code null} here omits the key, and is what a caller passes when it could not
+     * read the groups; passing an empty list instead would be the false diff of issue #796 / MC-11.
+     *
+     * @param currentGroups the player's LuckPerms groups, or {@code null} when they are not known
+     */
+    public CompletableFuture<RoleSyncDirective> requestRoleSyncSnapshot(
+            String username, String uuid, List<String> currentGroups) {
+        if (Strings.isBlank(username) || Strings.isBlank(uuid)) {
+            throw new IllegalArgumentException("username and uuid are required");
+        }
+        return async(() -> {
+            ApiSettings current = settings;
+            JsonObject body = new JsonObject();
+            body.addProperty("uuid", uuid.trim());
+            // Verbatim, for the same reason as request-link-code (departure D8).
+            body.addProperty("username", username.trim());
+            if (currentGroups != null) {
+                JsonArray groups = new JsonArray();
+                for (String group : currentGroups) {
+                    groups.add(group);
+                }
+                body.add("currentGroups", groups);
+            }
+            // isBedrock, bedrockGamertag and bedrockXuid for a Floodgate player, exactly as on
+            // connection-attempt: the bot's username fallback classifies the platform from them.
+            addBedrockIdentity(body, uuid.trim());
+            try {
+                return ApiResponses.roleSyncSnapshot(requests.execute(current,
+                        HttpCall.post(guildPath(current, "role-sync/snapshot"), body.toString(),
+                                current.timeoutMs())));
+            } catch (ApiError refused) {
+                if (refused.httpStatus() == 404) {
+                    return RoleSyncDirective.absent();
+                }
+                throw refused;
+            }
         });
     }
 

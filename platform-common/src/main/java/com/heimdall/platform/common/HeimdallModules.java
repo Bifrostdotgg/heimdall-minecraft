@@ -76,7 +76,7 @@ public final class HeimdallModules {
         HeimdallWhitelistModule whitelist = new HeimdallWhitelistModule();
         HeimdallRoleSyncModule roleSync = new HeimdallRoleSyncModule();
         HeimdallOffensesModule offenses = new HeimdallOffensesModule();
-        whitelist.setRoleSyncSink(roleSync);
+        wireRoleSync(whitelist, roleSync);
 
         runtime.modules().register(whitelist);
         runtime.modules().register(roleSync);
@@ -92,5 +92,19 @@ public final class HeimdallModules {
         // The modules themselves implement the admin interfaces. A separate adapter object would
         // only be a place for the two to disagree about whether a module is running.
         admin.whitelist(whitelist).offenses(offenses).punishments(punishments);
+    }
+
+    /**
+     * The two edges between whitelist and role sync, in both directions.
+     *
+     * <p>Whitelist hands role sync the directive from each login answer; role sync asks whitelist
+     * how each login was covered, so it requests a snapshot of its own only when no answer is coming
+     * and this server is the one that would have made the call. Neither module can name the other,
+     * so both edges are made here. Package-private and separate so a test can wire the real pair the
+     * way production does.
+     */
+    static void wireRoleSync(HeimdallWhitelistModule whitelist, HeimdallRoleSyncModule roleSync) {
+        whitelist.setRoleSyncSink(roleSync);
+        roleSync.setLoginSource(whitelist);
     }
 }

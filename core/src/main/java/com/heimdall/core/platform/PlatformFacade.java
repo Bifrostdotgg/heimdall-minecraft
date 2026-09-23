@@ -85,10 +85,11 @@ public interface PlatformFacade {
     /**
      * Registering commands players can type, and unregistering them again.
      *
-     * <p>Added in phase 1d, as a focused interface for the same reason the four above are: three
-     * modules need to own a verb ({@code /offend}, {@code /linkdiscord}, {@code /link}), and a
-     * module that registers one must be able to have it taken away when it is switched off — which
-     * is the whole of departure D30 applied to commands.
+     * <p>Added in phase 1d, as a focused interface for the same reason the four above are: a module
+     * that owns a verb ({@code /offend}) must be able to have it taken away when it is switched off,
+     * which is the whole of departure D30 applied to commands. Core registers its own player verb,
+     * {@code /linkdiscord} with {@code /link}, through the same interface, once at start and
+     * independent of any module (see {@code com.heimdall.core.link.LinkDiscordCommand}).
      *
      * <p>A platform that cannot register commands returns {@link CommandRegistrar#NONE}. That is a
      * plugin with fewer verbs, not a plugin that failed to load.

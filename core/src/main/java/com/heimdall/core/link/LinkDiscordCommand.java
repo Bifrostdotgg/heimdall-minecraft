@@ -1,4 +1,4 @@
-package com.heimdall.module.whitelist;
+package com.heimdall.core.link;
 
 import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandSource;
@@ -18,6 +18,28 @@ import java.util.function.BiConsumer;
 
 /**
  * {@code /linkdiscord} and its alias {@code /link}: a six-digit code, and a cooldown.
+ *
+ * <h2>Why this is in core, and not in the whitelist module</h2>
+ *
+ * <p>It used to be registered by the whitelist module, and that made every other feature that
+ * needs a linked account quietly depend on the whitelist being switched on. A guild that only wants
+ * Discord roles mirrored into LuckPerms, or punishments that follow the Discord account, or the chat
+ * bridge naming the Discord user, turned the whitelist off and found nobody could link any more:
+ * the command had gone with the module that happened to own it.
+ *
+ * <p><strong>Linking is a property of the bot link, not of the whitelist.</strong> The code it
+ * mints is consumed by whitelist, role sync, punishments and the bridge alike, and
+ * the bot answers {@code request-link-code} whether or not this server runs its whitelist module
+ * (it checks only that the guild has the Minecraft integration on). So it is
+ * registered once by {@link com.heimdall.core.wiring.HeimdallRuntime#start()}, beside the other
+ * things that exist because there is a bot to talk to (the same category as
+ * {@code RemoteRequestWiring}, departure D71), and it is never unregistered by a module toggle. On
+ * a server that has not been set up, or whose guild has not resolved yet, it is still there and
+ * says so, which is better than "Unknown command" for a player following a guild's instructions.
+ *
+ * <p>The cost is that a guild with no Discord features at all still has a {@code /link} verb. That
+ * was judged the lesser surprise: the command explains itself, and {@code heimdall.linkdiscord}
+ * can be denied by an operator who wants it gone.
  *
  * <h2>Why the cooldown is in memory</h2>
  *
@@ -44,15 +66,15 @@ import java.util.function.BiConsumer;
  * fired and the reply is sent from the future's completion on {@code heimdall-io}. Sending a message
  * from there is safe: {@code CommandSource} hops if its platform needs it.
  */
-final class LinkDiscordCommand {
+public final class LinkDiscordCommand {
 
     /** v2's window, to the millisecond. */
-    static final long COOLDOWN_MS = TimeUnit.SECONDS.toMillis(30);
+    public static final long COOLDOWN_MS = TimeUnit.SECONDS.toMillis(30);
 
-    static final String PERMISSION = "heimdall.linkdiscord";
+    public static final String PERMISSION = "heimdall.linkdiscord";
 
     /** Skips the cooldown. Checked while the player is online, so a permission works here. */
-    static final String BYPASS_PERMISSION = "heimdall.bypass";
+    public static final String BYPASS_PERMISSION = "heimdall.bypass";
 
     private static final String BORDER = "&a==================================================";
 
@@ -69,13 +91,13 @@ final class LinkDiscordCommand {
      */
     private final Map<UUID, Long> lastUsed = new ConcurrentHashMap<UUID, Long>();
 
-    LinkDiscordCommand(HeimdallLogger logger, HeimdallApi api) {
+    public LinkDiscordCommand(HeimdallLogger logger, HeimdallApi api) {
         this.logger = logger;
         this.api = api;
     }
 
     /** The spec, with {@code /link} as an alias — both platforms register the pair. */
-    CommandSpec spec() {
+    public CommandSpec spec() {
         return CommandSpec.named("linkdiscord")
                 .aliases(Arrays.asList("link"))
                 .permission(PERMISSION)

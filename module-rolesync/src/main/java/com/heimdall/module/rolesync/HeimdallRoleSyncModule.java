@@ -1,29 +1,45 @@
 package com.heimdall.module.rolesync;
 
 import com.heimdall.core.config.ServerRole;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.model.RoleSyncDirective;
 import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
+import com.heimdall.core.platform.LuckPermsBridge;
+import com.heimdall.core.roles.RoleSyncLoginSource;
 import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.tunnel.Capabilities;
 import java.util.Collections;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * Applies the bot's Discord-role snapshots to a player's LuckPerms groups.
  *
- * <h2>Two triggers, one module</h2>
+ * <h2>Two triggers, one module, and a join path that does not need the whitelist</h2>
  *
  * <ul>
  *   <li>A {@code role_sync} frame the bot broadcasts when somebody's Discord roles change, handled
  *       by {@link RoleSyncPushHandler}. This module owns that subscription.
- *   <li>The {@code roleSync} block on a {@code connection-attempt} answer, handled by
- *       {@link #applyOnJoin}. This module does <strong>not</strong> make that HTTP call: the
- *       whitelist module owns the login path and already has the answer in its hand, and two
- *       modules calling {@code connection-attempt} for the same join would double every login's
- *       round trips and give the bot two join records for one arrival.
+ *   <li>A player joining. When the whitelist module decided the login, the {@code roleSync} block
+ *       on its {@code connection-attempt} answer arrives through {@link #applyOnJoin}, and this
+ *       module does <strong>not</strong> make an HTTP call of its own: two calls for the same join
+ *       would double every login's round trips. When no answer is coming and this is the server
+ *       that would have made that call (the whitelist module is off or failed, or the player is
+ *       bypassed, on a standalone server, a proxy, or an enforcing backend),
+ *       {@link JoinSnapshotRequester} asks {@code role-sync/snapshot} for the same block and hands
+ *       it to the same {@link #applyOnJoin}. A backend that leaves logins to its gatekeeper does
+ *       not ask: one login is one bot call per network, not per server.
  * </ul>
+ *
+ * <p>Until that second path existed, role sync on join depended entirely on the whitelist module:
+ * a guild that wanted Discord roles mirrored into LuckPerms but ran an open server got groups only
+ * from pushes, so a player whose roles changed while they were offline joined with stale groups
+ * and kept them until the next change. Which case a join is in is the whitelist module's to say,
+ * through {@link RoleSyncLoginSource}; that interface's javadoc records why it is not answered by
+ * reading the whitelist's enabled flag from the remote config.
  *
  * <h2>{@link #roles()} is empty — this runs anywhere</h2>
  *
@@ -103,6 +119,23 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
      */
     private volatile RoleSyncApplier applier;
 
+    /**
+     * Who already delivers a directive on login, and so makes the join-time request redundant.
+     *
+     * <p>Set by the wiring, like the whitelist module's {@code setRoleSyncSink}, and for the same
+     * reason: neither module may depend on the other. {@link RoleSyncLoginSource#NONE} until then,
+     * which is also the right answer on a build with no whitelist module: there is no login check,
+     * so the server's role decides. A standalone server or a proxy asks on every join; an
+     * {@code ENFORCER} backend does not, because its gatekeeper is the one that would have made the
+     * login call. See {@link JoinSnapshotRequester}.
+     */
+    private volatile RoleSyncLoginSource loginSource = RoleSyncLoginSource.NONE;
+
+    /** Wires in whoever answers logins. Called once by the runtime, before anything is enabled. */
+    public void setLoginSource(RoleSyncLoginSource source) {
+        this.loginSource = source == null ? RoleSyncLoginSource.NONE : source;
+    }
+
     @Override
     public String id() {
         return ID;
@@ -128,6 +161,39 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
         // server thread — LuckPermsBridge does its own hopping.
         context.tunnel().subscribe(RoleSyncPushHandler.MESSAGE_TYPE,
                 new RoleSyncPushHandler(context, started));
+        // Tracked by the context like the subscription, so a disable unwinds it. Runs on
+        // heimdall-io and only fires a request, so a join is never held up by the bot.
+        final ModuleContext ctx = context;
+        context.onPlayerJoin(new JoinSnapshotRequester(
+                context.logger(),
+                new Supplier<HeimdallApi>() {
+                    @Override
+                    public HeimdallApi get() {
+                        return ctx.api();
+                    }
+                },
+                new Supplier<RoleSyncLoginSource>() {
+                    @Override
+                    public RoleSyncLoginSource get() {
+                        return loginSource;
+                    }
+                },
+                new Supplier<ServerRole>() {
+                    @Override
+                    public ServerRole get() {
+                        return ctx.platform().role();
+                    }
+                },
+                new Supplier<LuckPermsBridge>() {
+                    @Override
+                    public LuckPermsBridge get() {
+                        // Quiet on purpose: the absence warning belongs to the apply path.
+                        Optional<LuckPermsBridge> found = ctx.platform().integrations().luckPerms();
+                        LuckPermsBridge bridge = found.isPresent() ? found.get() : null;
+                        return bridge != null && bridge.isAvailable() ? bridge : null;
+                    }
+                },
+                this));
     }
 
     @Override
@@ -144,7 +210,9 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
      *
      * <p><strong>This is the module's service API</strong>, and the only supported way in from
      * another module. The whitelist module calls it once per admitted login with whatever the
-     * {@code connection-attempt} answer carried, including {@link RoleSyncDirective#absent()} —
+     * {@code connection-attempt} answer carried, and this module's own join-time snapshot request
+     * calls it the same way when no such answer is coming. Both pass
+     * {@link RoleSyncDirective#absent()} through as well:
      * passing the tri-state through rather than pre-filtering it is what keeps the "why did nothing
      * happen" answer in one place.
      *

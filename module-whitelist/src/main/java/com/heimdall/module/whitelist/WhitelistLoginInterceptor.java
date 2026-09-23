@@ -7,9 +7,11 @@ import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.pipeline.Interceptor;
 import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.pipeline.Verdict;
+import com.heimdall.core.roles.RoleSyncLoginSource;
 import com.heimdall.core.text.Msg;
 import com.heimdall.core.util.BypassList;
 import com.heimdall.core.util.Strings;
+import java.util.UUID;
 import java.util.function.Supplier;
 
 /**
@@ -114,19 +116,21 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
     Outcome evaluate(LoginAttempt attempt, boolean commit) {
         WhitelistSettings current = settings.get();
 
-        if (!Boolean.TRUE.equals(moduleEnabled.get())) {
-            logger.debug(() -> "whitelist is switched off; abstaining for " + attempt.username());
-            return Outcome.of(Verdict.abstain(), "the whitelist module is switched off");
-        }
-        if (role == ServerRole.ENFORCER && !current.enforceOnBackend()) {
-            logger.debug(() -> "enforceOnBackend is off and this is a backend; the gatekeeper owns "
-                    + "the decision for " + attempt.username());
-            return Outcome.of(Verdict.abstain(),
-                    "this is a backend and enforceOnBackend is off — the gatekeeper decides");
-        }
-        if (BypassList.isBypassed(current.bypassUuids(), attempt.uuid().toString())) {
-            logger.debug(() -> attempt.username() + " is on the bypass list; skipping the check");
-            return Outcome.of(Verdict.abstain(), "their UUID is on the bypass list");
+        switch (skipFor(current, attempt.uuid())) {
+            case SWITCHED_OFF:
+                logger.debug(() -> "whitelist is switched off; abstaining for " + attempt.username());
+                return Outcome.of(Verdict.abstain(), "the whitelist module is switched off");
+            case GATEKEEPER_DECIDES:
+                logger.debug(() -> "enforceOnBackend is off and this is a backend; the gatekeeper "
+                        + "owns the decision for " + attempt.username());
+                return Outcome.of(Verdict.abstain(),
+                        "this is a backend and enforceOnBackend is off — the gatekeeper decides");
+            case BYPASSED:
+                logger.debug(() -> attempt.username() + " is on the bypass list; skipping the check");
+                return Outcome.of(Verdict.abstain(), "their UUID is on the bypass list");
+            case NONE:
+            default:
+                break;
         }
 
         if (mirror.isWhitelisted(attempt.uuid())) {
@@ -178,6 +182,61 @@ final class WhitelistLoginInterceptor implements Interceptor<LoginAttempt> {
             logger.warn("whitelist check failed for " + attempt.username() + ": "
                     + Strings.trimToEmpty(failed.getMessage()));
             return fallback(current, attempt, failed.getMessage());
+        }
+    }
+
+    /**
+     * The reasons this interceptor abstains without asking the bot, in the order it checks them.
+     *
+     * <p>An enum rather than three inline branches because two callers need the same answer:
+     * {@link #evaluate} to decide a login, and {@link #coverageFor} to tell role sync whether that
+     * login will have carried a {@code roleSync} block. Written once, so the two cannot drift: if a
+     * fourth reason to skip the bot is ever added here, role sync learns about it for free rather
+     * than silently losing the join-time sync for that player.
+     */
+    enum Skip { NONE, SWITCHED_OFF, GATEKEEPER_DECIDES, BYPASSED }
+
+    private Skip skipFor(WhitelistSettings current, UUID uuid) {
+        if (!Boolean.TRUE.equals(moduleEnabled.get())) {
+            return Skip.SWITCHED_OFF;
+        }
+        if (role == ServerRole.ENFORCER && !current.enforceOnBackend()) {
+            return Skip.GATEKEEPER_DECIDES;
+        }
+        if (BypassList.isBypassed(current.bypassUuids(), uuid.toString())) {
+            return Skip.BYPASSED;
+        }
+        return Skip.NONE;
+    }
+
+    /**
+     * What a login by this player does about their role snapshot, for role sync.
+     *
+     * <p>Each {@link Skip} maps to one answer: no skip means the login goes to the bot
+     * ({@code DELIVERS}); a backend deferring to its gatekeeper is {@code DEFERS_TO_GATEKEEPER}, so
+     * the gatekeeper stays the network's only caller; a bypassed player is {@code NOT_COVERED}; and
+     * a module switched off (its config says so, even if this interceptor has not been unwound yet)
+     * is {@code NO_LOGIN_CHECK}.
+     *
+     * <p>Reads the settings live, like {@link #evaluate}. It does not look at the mirror: a mirror
+     * hit still fires the background report, and that report carries the {@code roleSync} block
+     * too. It also does not ask whether a guild has resolved, because without one neither this
+     * module nor role sync can reach the bot, so the answer makes no difference.
+     */
+    RoleSyncLoginSource.Coverage coverageFor(UUID uuid) {
+        if (uuid == null) {
+            return RoleSyncLoginSource.Coverage.NOT_COVERED;
+        }
+        switch (skipFor(settings.get(), uuid)) {
+            case NONE:
+                return RoleSyncLoginSource.Coverage.DELIVERS;
+            case GATEKEEPER_DECIDES:
+                return RoleSyncLoginSource.Coverage.DEFERS_TO_GATEKEEPER;
+            case SWITCHED_OFF:
+                return RoleSyncLoginSource.Coverage.NO_LOGIN_CHECK;
+            case BYPASSED:
+            default:
+                return RoleSyncLoginSource.Coverage.NOT_COVERED;
         }
     }
 
