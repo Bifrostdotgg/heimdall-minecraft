@@ -152,6 +152,7 @@ Successful responses use the envelope `{"success": true, "data": {…}}`; errors
 | `POST` | `…/connection-attempt` | The login gate. Called on every join. |
 | `GET` | `…/whitelist/sync` | Full whitelist for the pre-warm cache. ETag + `304`. |
 | `POST` | `…/request-link-code` | `/linkdiscord` in game → a 6-digit code. |
+| `POST` | `…/role-sync/snapshot` | The `roleSync` block on its own, for a server whose whitelist module is off. |
 | `GET` | `…/offense-types` | Offense types with escalation tiers. `data` is an **array**. |
 | `POST` | `…/offend` | Record an offense, resolve the escalation tier. |
 | `GET` | `…/plugin/latest` | Latest release metadata for the self-updater. |
@@ -237,6 +238,18 @@ Golden ETags (asserted in `WhitelistEtagTest`, computed independently in PowerSh
 
 The real bot mints a random code; the stub derives a stable one from the UUID (or uses the fixture's
 `authCode`) so a test can assert the exact value.
+
+### `POST …/role-sync/snapshot`
+
+`{"uuid", "username", "isBedrock"?, "currentGroups"?}` → `{"roleSync": <block>}` (the key is
+always present), where the block is built exactly as the one on a
+`connection-attempt` answer (`null`, `{"enabled": false}`, or `{"enabled": true, "targetGroups",
+"managedGroups"}`), from the same fixture fields. It does not depend on the fixture's outcome, and an
+unknown player gets `roleSync: null`. `bot.setRoleSyncSnapshotRoute(false)` makes the route a plain
+`404`, which is what a bot older than the plugin answers; `bot.requestCount("POST
+role-sync/snapshot")` says how many times it was called, and `bot.lastRoleSyncSnapshotRequest()`
+returns the last body so a test can check what was sent. The optional fields are accepted and
+otherwise ignored.
 
 ### `POST …/offend`
 

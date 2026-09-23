@@ -79,6 +79,25 @@ final class StubHttpApi {
      */
     private final Map<String, AtomicInteger> infractionCounts = new ConcurrentHashMap<>();
 
+    /**
+     * Signed guild-route requests received, keyed {@code "METHOD route"} as the dispatcher sees
+     * them (for example {@code "POST role-sync/snapshot"}).
+     *
+     * <p>So a test can assert that a call was NOT made, which no response shape can show. The one
+     * that needs it is role sync's "a login costs exactly one bot call": with the whitelist module
+     * answering logins, a snapshot request would be a second round trip for the same join.
+     */
+    private final Map<String, AtomicInteger> routeHits = new ConcurrentHashMap<>();
+
+    /**
+     * Whether {@code POST role-sync/snapshot} exists. Off simulates a bot older than the plugin,
+     * which answers the route with the dispatcher's ordinary 404.
+     */
+    private volatile boolean roleSyncSnapshotRoute = true;
+
+    /** The body of the most recent {@code role-sync/snapshot} request, or {@code null}. */
+    private volatile JsonObject lastRoleSyncSnapshotRequest;
+
     StubHttpApi(StubBotConfig config, FixtureStore fixtures) {
         this.config = config;
         this.fixtures = fixtures;
@@ -123,6 +142,21 @@ final class StubHttpApi {
     /** Clears the escalation counters, so a test can replay {@code /offend} from a known state. */
     void resetInfractions() {
         infractionCounts.clear();
+    }
+
+    /** How many signed requests reached {@code "METHOD route"}, for example {@code "POST offend"}. */
+    int requestCount(String methodAndRoute) {
+        AtomicInteger hits = routeHits.get(methodAndRoute);
+        return hits == null ? 0 : hits.get();
+    }
+
+    void setRoleSyncSnapshotRoute(boolean present) {
+        this.roleSyncSnapshotRoute = present;
+    }
+
+    JsonObject lastRoleSyncSnapshotRequest() {
+        JsonObject last = lastRoleSyncSnapshotRequest;
+        return last == null ? null : last.deepCopy();
     }
 
     // ── Dispatch ─────────────────────────────────────────────────────────────
@@ -176,6 +210,8 @@ final class StubHttpApi {
             String route = matcher.group(2);
 
             StubLog.debug(method + " " + signedPath);
+            routeHits.computeIfAbsent(method + " " + route, key -> new AtomicInteger())
+                    .incrementAndGet();
 
             // The guild check is deliberately NOT hoisted here. On the bot, every route that
             // validates its body does so BEFORE loading the guild's config, so a request that is
@@ -191,6 +227,13 @@ final class StubHttpApi {
                     }
                 }
                 case "POST request-link-code" -> handleRequestLinkCode(exchange, guildId, body);
+                case "POST role-sync/snapshot" -> {
+                    if (roleSyncSnapshotRoute) {
+                        handleRoleSyncSnapshot(exchange, guildId, body);
+                    } else {
+                        sendError(exchange, 404, "NOT_FOUND", "No route for " + method + " " + route);
+                    }
+                }
                 case "GET offense-types" -> {
                     if (guildIsConfigured(exchange, guildId)) {
                         sendEnvelope(exchange, 200, config.offenseTypes());
@@ -486,6 +529,41 @@ final class StubHttpApi {
         sync.add("targetGroups", toArray(target == null ? List.of() : target));
         sync.add("managedGroups", toArray(fixture.managedGroups()));
         return sync;
+    }
+
+    /**
+     * {@code POST role-sync/snapshot}: the {@code roleSync} block on its own, for a server whose
+     * whitelist module is off and so never sees a {@code connection-attempt} answer.
+     *
+     * <p>The block is built by {@link #roleSync} exactly as the login answer's is, so a fixture
+     * configures both the same way ({@code withGroups}, {@code withRoleSyncEnabled}). Unlike the
+     * login answer it does not depend on the fixture's {@link Outcome}: role sync is about a linked
+     * Discord account, not about whitelist admission. An unknown player is {@code roleSync: null},
+     * the absent state; the key is always present, as on the bot. Body first, config second, the
+     * same order as every other route. Optional body fields: {@code isBedrock} (with the Bedrock
+     * gamertag and xuid) and {@code currentGroups}.
+     */
+    private void handleRoleSyncSnapshot(HttpExchange exchange, String guildId, String body)
+            throws IOException {
+        JsonObject request = parseObject(body);
+        lastRoleSyncSnapshotRequest = request;
+        String username = optString(request, "username");
+        String uuid = optString(request, "uuid");
+
+        if (isBlank(username) || isBlank(uuid)) {
+            sendError(exchange, 400, "MISSING_FIELDS", "username and uuid are required");
+            return;
+        }
+        if (!guildIsConfigured(exchange, guildId)) {
+            return;
+        }
+
+        // isBedrock and currentGroups are accepted and otherwise ignored: the real bot uses them
+        // for its username fallback and its background refresh, neither of which the stub models.
+        // The body is kept (lastRoleSyncSnapshotRequest) so a test can assert what was sent.
+        JsonObject data = new JsonObject();
+        data.add("roleSync", roleSync(fixtures.find(uuid)));
+        sendEnvelope(exchange, 200, data);
     }
 
     private void handleWhitelistSync(HttpExchange exchange) throws IOException {

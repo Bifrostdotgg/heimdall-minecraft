@@ -376,6 +376,97 @@ class StubBotApiClientTest {
         }
     }
 
+    // ── role-sync/snapshot ───────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("role-sync snapshot: the connection-attempt block on its own")
+    class RoleSyncSnapshot {
+
+        @Test
+        @DisplayName("an enabled snapshot carries both group lists, parsed by the login answer's parser")
+        void enabledSnapshot() throws Exception {
+            RoleSyncDirective directive =
+                    await(client.requestRoleSyncSnapshot("AllowedSteve", ALLOWED, null));
+
+            assertTrue(directive.isPresent());
+            assertTrue(directive.isEnabled());
+            assertEquals(Arrays.asList("vip"), directive.targetGroups());
+            assertEquals(Arrays.asList("vip", "member"), directive.managedGroups());
+            assertEquals(1, bot.requestCount("POST role-sync/snapshot"));
+        }
+
+        @Test
+        @DisplayName("it does not depend on whitelist admission: a denied player still has roles")
+        void independentOfWhitelistOutcome() throws Exception {
+            bot.fixtures().put(PlayerFixture.of(DENIED, "DeniedAlex", Outcome.DENY)
+                    .withGroups(Arrays.asList("builder"), Arrays.asList("builder")));
+
+            RoleSyncDirective directive = await(client.requestRoleSyncSnapshot("DeniedAlex", DENIED, null));
+
+            assertTrue(directive.isEnabled());
+            assertEquals(Arrays.asList("builder"), directive.targetGroups());
+        }
+
+        @Test
+        @DisplayName("{enabled:false} stays disabled, not absent (departure D2)")
+        void disabledSnapshot() throws Exception {
+            bot.fixtures().put(PlayerFixture.of(ALLOWED, "AllowedSteve", Outcome.ALLOW)
+                    .withRoleSyncEnabled(Boolean.FALSE));
+
+            RoleSyncDirective directive =
+                    await(client.requestRoleSyncSnapshot("AllowedSteve", ALLOWED, null));
+
+            assertTrue(directive.isPresent());
+            assertFalse(directive.isEnabled());
+        }
+
+        @Test
+        @DisplayName("currentGroups is sent when known, and omitted rather than emptied when not")
+        void currentGroupsIsSentOrOmitted() throws Exception {
+            await(client.requestRoleSyncSnapshot("AllowedSteve", ALLOWED, Arrays.asList("member")));
+            com.google.gson.JsonObject sent = bot.lastRoleSyncSnapshotRequest();
+            assertEquals("member", sent.getAsJsonArray("currentGroups").get(0).getAsString());
+            assertEquals(ALLOWED, sent.get("uuid").getAsString());
+            assertEquals("AllowedSteve", sent.get("username").getAsString());
+
+            await(client.requestRoleSyncSnapshot("AllowedSteve", ALLOWED, null));
+            assertFalse(bot.lastRoleSyncSnapshotRequest().has("currentGroups"),
+                    "an empty list would tell the bot the player holds nothing (#796 / MC-11)");
+        }
+
+        @Test
+        @DisplayName("an unknown player is roleSync:null, which is absent")
+        void unknownPlayerIsAbsent() throws Exception {
+            RoleSyncDirective directive = await(client.requestRoleSyncSnapshot(
+                    "Nobody", "99999999-9999-9999-9999-999999999999", null));
+
+            assertFalse(directive.isPresent());
+        }
+
+        @Test
+        @DisplayName("a bot without the route answers 404, which is absent rather than an error")
+        void missingRouteIsAbsent() throws Exception {
+            bot.setRoleSyncSnapshotRoute(false);
+
+            RoleSyncDirective directive =
+                    await(client.requestRoleSyncSnapshot("AllowedSteve", ALLOWED, null));
+
+            assertFalse(directive.isPresent(),
+                    "an older bot than the plugin is an ordinary rollout state, not a failure");
+        }
+
+        @Test
+        @DisplayName("a rejected signature is still an error, so the log can tell it from 'no snapshot'")
+        void unauthorisedStillFails() {
+            ApiClient wrongKey = new ApiClient(
+                    logger, settings(GUILD, "not-the-key"), executors.io());
+
+            ApiError error = assertThrows(ApiError.class,
+                    () -> await(wrongKey.requestRoleSyncSnapshot("AllowedSteve", ALLOWED, null)));
+            assertEquals(401, error.httpStatus());
+        }
+    }
+
     // ── The remaining endpoints ──────────────────────────────────────────────
 
     @Nested

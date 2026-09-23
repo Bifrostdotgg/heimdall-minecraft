@@ -163,6 +163,30 @@ public final class StubBot implements AutoCloseable {
         http.resetInfractions();
     }
 
+    /**
+     * How many signed guild-route requests reached {@code "METHOD route"}, where route is the path
+     * after {@code /minecraft/}: {@code requestCount("POST role-sync/snapshot")}.
+     */
+    public int requestCount(String methodAndRoute) {
+        return http.requestCount(methodAndRoute);
+    }
+
+    /**
+     * Whether {@code POST role-sync/snapshot} exists. {@code false} answers it with a plain 404,
+     * which is what a bot older than the plugin does.
+     */
+    public void setRoleSyncSnapshotRoute(boolean present) {
+        http.setRoleSyncSnapshotRoute(present);
+    }
+
+    /**
+     * The body of the most recent {@code role-sync/snapshot} request, a copy, or {@code null} if
+     * there has not been one. So a test can assert on {@code currentGroups} and {@code isBedrock}.
+     */
+    public com.google.gson.JsonObject lastRoleSyncSnapshotRequest() {
+        return http.lastRoleSyncSnapshotRequest();
+    }
+
     @Override
     public void close() {
         multiplexer.close();

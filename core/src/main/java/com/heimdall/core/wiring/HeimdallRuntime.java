@@ -9,6 +9,7 @@ import com.heimdall.core.http.ClaimClient;
 import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.identity.InstanceFingerprint;
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.link.LinkDiscordCommand;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.module.HealthModule;
 import com.heimdall.core.module.ModuleEnvironment;
@@ -381,6 +382,13 @@ public final class HeimdallRuntime implements AutoCloseable {
         // because none of the three is a feature a guild opts into — see RemoteRequestWiring.
         registrations.add(RemoteRequestWiring.install(
                 logger, platform, tunnel, executors.io(), executors.scheduler()));
+        // /linkdiscord and /link, for the same reason and in the same place: linking is a property
+        // of having a bot to talk to, and whitelist, role sync, punishments and the bridge all
+        // depend on it, so it must not vanish with whichever module used to register it. Before the
+        // not-configured return too, so a fresh server answers "not connected yet" rather than
+        // "Unknown command". Unlike a module command it is never unregistered by a toggle; see
+        // LinkDiscordCommand's javadoc.
+        registrations.add(platform.commands().register(new LinkDiscordCommand(logger, api).spec()));
         // Applies bootstrap.yml's local-disable set AND does the first reconcile against it, so a
         // module an operator switched off locally is never even started, whatever the cached or
         // pushed config says.

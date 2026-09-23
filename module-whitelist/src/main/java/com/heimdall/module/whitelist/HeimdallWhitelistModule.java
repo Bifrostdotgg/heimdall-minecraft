@@ -11,6 +11,7 @@ import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
+import com.heimdall.core.roles.RoleSyncLoginSource;
 import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.tunnel.Capabilities;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
@@ -22,7 +23,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
- * The login gate, the local whitelist mirror, and {@code /linkdiscord}.
+ * The login gate and the local whitelist mirror.
+ *
+ * <h2>{@code /linkdiscord} is not here any more</h2>
+ *
+ * <p>This module used to register it, which meant switching the whitelist off also switched off
+ * linking, and with it role sync, punishments and the bridge for any player not yet linked. It is
+ * core's now, registered unconditionally by the runtime at start (on a server that has not been
+ * set up it is still there, and answers that the server is not connected yet); see
+ * {@link com.heimdall.core.link.LinkDiscordCommand}.
  *
  * <h2>It runs on every role, and a backend can opt out</h2>
  *
@@ -59,12 +68,13 @@ import java.util.function.Supplier;
  * <h2>Threading and ownership</h2>
  *
  * <p>Everything is registered through {@code ModuleContext} and unwound mechanically on disable: the
- * interceptor, both session listeners, both scheduled polls, the command, and the mirror — which is
+ * interceptor, both session listeners, both scheduled polls, and the mirror, which is
  * flushed as it closes. This class therefore keeps no handles. What it does keep is the
  * collaborators, and they are rebuilt on every enable so a toggle cannot leave an interceptor
  * holding a store that has already been shut.
  */
-public final class HeimdallWhitelistModule implements HeimdallModule, WhitelistAdmin {
+public final class HeimdallWhitelistModule
+        implements HeimdallModule, WhitelistAdmin, RoleSyncLoginSource {
 
     /** The module's stable identifier, and its key in the remote-config document. */
     public static final String ID = "whitelist";
@@ -156,7 +166,6 @@ public final class HeimdallWhitelistModule implements HeimdallModule, WhitelistA
         ctx.onPlayerQuit(mirrorService.onQuit());
         schedulePolls(ctx, atOpen, mirrorService);
         subscribeToWhitelistChanges(ctx, mirrorService);
-        ctx.registerCommand(new LinkDiscordCommand(ctx.logger(), ctx.api()).spec());
 
         ctx.onConfigChanged(new ModuleConfigListener() {
             @Override
@@ -267,6 +276,25 @@ public final class HeimdallWhitelistModule implements HeimdallModule, WhitelistA
             ctx.logger().warn("cacheWindow or maxExtensionHours changed, and both are fixed when the "
                     + "mirror is opened — switch this module off and on again for them to apply");
         }
+    }
+
+    // ── RoleSyncLoginSource: whether role sync needs to ask for itself ────────
+
+    /**
+     * What this player's login did about their role snapshot, so role sync neither asks twice for
+     * one join nor asks from a backend whose gatekeeper already did.
+     *
+     * <p>{@code NO_LOGIN_CHECK} whenever this module is not running, which covers every way it can
+     * be off without the remote config saying so: switched off locally in {@code bootstrap.yml}, or
+     * failed to start. Role sync then decides by the server's role alone. Otherwise the answer is
+     * the interceptor's, from the same skip reasons the login decision uses; see
+     * {@link WhitelistLoginInterceptor#coverageFor}. See {@link RoleSyncLoginSource} for why the
+     * question is asked here rather than answered from the config.
+     */
+    @Override
+    public RoleSyncLoginSource.Coverage coverageFor(UUID playerUuid) {
+        WhitelistLoginInterceptor gate = interceptor;
+        return gate == null ? RoleSyncLoginSource.Coverage.NO_LOGIN_CHECK : gate.coverageFor(playerUuid);
     }
 
     // ── WhitelistAdmin: what /hd cache and /hd test reach ────────────────────

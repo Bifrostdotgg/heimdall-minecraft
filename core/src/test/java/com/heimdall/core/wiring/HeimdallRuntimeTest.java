@@ -162,6 +162,33 @@ class HeimdallRuntimeTest {
         }
 
         @Test
+        @DisplayName("/linkdiscord is core's: registered on start with no modules at all, unwound on close")
+        void linkCommandIsRegisteredWithoutAnyModule(@TempDir Path dataDir) {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
+            HeimdallRuntime runtime = HeimdallRuntime.builder(logger, platform)
+                    .bootstrapStore(store)
+                    .build();
+
+            assertFalse(platform.commandRegistry().has("linkdiscord"), "nothing until start()");
+
+            runtime.start();
+
+            // No module is registered here, the whitelist least of all. Linking used to be the
+            // whitelist module's command, so a guild that ran role sync or punishments with the
+            // whitelist off had no way for a player to link. And registered before the
+            // not-configured return, so a fresh server answers "not connected yet" instead of
+            // "Unknown command".
+            assertTrue(platform.commandRegistry().has("linkdiscord"));
+            assertTrue(platform.commandRegistry().has("link"), "/link is what players type");
+
+            runtime.close();
+
+            assertFalse(platform.commandRegistry().has("linkdiscord"),
+                    "the handle is in the runtime's registration list, so close() unwinds it");
+        }
+
+        @Test
         @DisplayName("modules still load, on their defaults")
         void modulesStillLoad(@TempDir Path dataDir) {
             BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
