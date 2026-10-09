@@ -31,8 +31,11 @@ import java.util.Properties;
  *
  * <p>A pack zip is never opened where it lies. ItemsAdder, Nexo and Oraxen rewrite their zips when
  * they rebuild, and an open handle (on Windows, a lock) on their file would get in their way for as
- * long as the stack lives. So each zip is copied into {@code cache/packs/open/} once per change and
- * the copy is what is opened; copies no longer in use are deleted when the stack is rebuilt.
+ * long as the stack lives. So each zip is copied into {@code cache/packs/open/} once per change, on
+ * the asset thread ({@link #privateCopy}), and the copy is what is opened; a pack whose copy is not
+ * ready yet (or failed) is simply left out of the stack and its fingerprint, so the next rescan
+ * picks it up. The server pack is already the cache's own file, which nothing else writes, and is
+ * opened directly. Copies no longer in use are deleted when the stack is rebuilt.
  *
  * <p>Discovery is a handful of {@code stat} calls, cheap enough to repeat every few seconds; the
  * {@link #fingerprint} of what it found (paths, sizes, modification times) is what decides whether
@@ -60,11 +63,28 @@ final class PackSources {
         final Path path;
         final boolean zip;
         final String label;
+        /** What is actually opened: the private copy of a pack zip, else {@link #path}. */
+        final Path openPath;
 
         Candidate(Path path, boolean zip, String label) {
+            this(path, zip, label, path);
+        }
+
+        private Candidate(Path path, boolean zip, String label, Path openPath) {
             this.path = path;
             this.zip = zip;
             this.label = label;
+            this.openPath = openPath;
+        }
+
+        /** Whether this needs a private copy before it can be opened. */
+        boolean needsCopy() {
+            return zip && !"server".equals(label);
+        }
+
+        /** This candidate, opened from {@code copy}. */
+        Candidate openingAt(Path copy) {
+            return new Candidate(path, zip, label, copy);
         }
 
         String fingerprint() {
@@ -171,9 +191,15 @@ final class PackSources {
             try {
                 AssetRoot root;
                 if (candidate.zip) {
-                    Path copy = privateCopy(candidate.path);
-                    copies.add(copy);
-                    root = new AssetRoot.Zip(copy);
+                    // Never the operator's or a plugin's file: the private copy, or the server
+                    // pack, which is the cache's own. Copying happens on the asset thread.
+                    if (candidate.needsCopy() && candidate.openPath.equals(candidate.path)) {
+                        continue;
+                    }
+                    if (candidate.needsCopy()) {
+                        copies.add(candidate.openPath);
+                    }
+                    root = new AssetRoot.Zip(candidate.openPath);
                 } else {
                     root = new AssetRoot.Directory(candidate.path);
                 }
@@ -191,17 +217,40 @@ final class PackSources {
                 copies);
     }
 
-    /** The cache's copy of a pack zip, made once per (path, size, modification time). */
+    /** Where the private copy of {@code zip}, as it is now, lives (whether or not it exists). */
+    private Path copyPath(Path zip) throws IOException {
+        long size = Files.size(zip);
+        long modified = Files.getLastModifiedTime(zip).toMillis();
+        String key = VanillaAssets.sha1(zip.toAbsolutePath().toString()
+                .getBytes(StandardCharsets.UTF_8)).substring(0, 12);
+        return cacheDir.resolve("packs").resolve("open")
+                .resolve(key + "-" + size + "-" + modified + ".zip");
+    }
+
+    /**
+     * The private copy of {@code zip} if it is ready, else {@code null}. Two {@code stat} calls and
+     * a hash of the path: cheap enough for the render thread, which never copies.
+     */
+    Path readyCopy(Path zip) {
+        try {
+            Path copy = copyPath(zip);
+            return Files.isRegularFile(copy) && Files.size(copy) == Files.size(zip) ? copy : null;
+        } catch (IOException | RuntimeException gone) {
+            return null;
+        }
+    }
+
+    /**
+     * Makes the cache's copy of a pack zip, once per (path, size, modification time). Blocking: the
+     * asset thread only.
+     */
     Path privateCopy(Path zip) throws IOException {
         long size = Files.size(zip);
         if (size > MAX_SERVER_PACK_BYTES) {
             throw new AssetException("a pack zip is larger than " + MAX_SERVER_PACK_BYTES + " bytes");
         }
-        long modified = Files.getLastModifiedTime(zip).toMillis();
-        Path dir = cacheDir.resolve("packs").resolve("open");
-        String key = VanillaAssets.sha1(zip.toAbsolutePath().toString()
-                .getBytes(StandardCharsets.UTF_8)).substring(0, 12);
-        Path copy = dir.resolve(key + "-" + size + "-" + modified + ".zip");
+        Path copy = copyPath(zip);
+        Path dir = copy.getParent();
         if (Files.isRegularFile(copy) && Files.size(copy) == size) {
             return copy;
         }

@@ -73,6 +73,12 @@ final class VanillaAssets {
     /** Leftover temporary files younger than this may belong to another live server; left alone. */
     static final long LEFTOVER_AGE_MS = 10L * 60 * 1000;
 
+    /**
+     * A version cache used within this long is never pruned: two servers on different versions can
+     * share one plugin folder, and each one's prepare marks its own cache as in use.
+     */
+    static final long IN_USE_MS = 24L * 60 * 60 * 1000;
+
     private final HeimdallLogger logger;
     private final HttpSource http;
     private final Path root;
@@ -469,10 +475,22 @@ final class VanillaAssets {
         }
     }
 
+    /** Marks {@code dir} as in use now (its marker's modification time), for {@link #pruneOthers}. */
+    static void touch(Path dir) {
+        try {
+            Files.setLastModifiedTime(dir.resolve(MARKER),
+                    java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis()));
+        } catch (IOException | RuntimeException ignored) {
+            // A cache that cannot be marked may be pruned by a sibling server; it is refetched.
+        }
+    }
+
     /**
-     * Deletes every complete version cache other than {@code current}: after an upgrade the old
-     * version's assets are dead weight. Incomplete directories are left to {@link #ensure}, which
-     * rebuilds or deletes them; dot-prefixed temporaries to {@link #sweepLeftovers}.
+     * Deletes every complete version cache other than {@code current} that has not been used for
+     * {@link #IN_USE_MS}: after an upgrade the old version's assets are dead weight, but a cache
+     * another server on the same folder still uses is marked recent and kept. Incomplete
+     * directories are left to {@link #ensure}, which rebuilds or deletes them; dot-prefixed
+     * temporaries to {@link #sweepLeftovers}.
      *
      * @return how many were removed
      */
@@ -480,11 +498,13 @@ final class VanillaAssets {
         if (current == null || !Files.isDirectory(root)) {
             return 0;
         }
+        long cutoff = System.currentTimeMillis() - IN_USE_MS;
         List<Path> stale = new ArrayList<Path>();
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(root)) {
             for (Path child : stream) {
                 if (!child.getFileName().toString().startsWith(".") && Files.isDirectory(child)
-                        && !child.equals(current) && isComplete(child)) {
+                        && !child.equals(current) && isComplete(child)
+                        && Files.getLastModifiedTime(child.resolve(MARKER)).toMillis() < cutoff) {
                     stale.add(child);
                 }
             }

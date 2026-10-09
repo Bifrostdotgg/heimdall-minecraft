@@ -40,6 +40,17 @@ class PackSourcesTest {
                 "assets/minecraft/lang/en_us.json", "{\"marker\":\"" + marker + "\"}"));
     }
 
+    /** What the asset thread does before a stack can open a zip: make its private copy. */
+    private static List<PackSources.Candidate> copied(PackSources sources,
+            List<PackSources.Candidate> found) throws IOException {
+        List<PackSources.Candidate> out = new ArrayList<PackSources.Candidate>();
+        for (PackSources.Candidate candidate : found) {
+            out.add(candidate.needsCopy()
+                    ? candidate.openingAt(sources.privateCopy(candidate.path)) : candidate);
+        }
+        return out;
+    }
+
     private static List<String> labels(List<PackSources.Candidate> candidates) {
         List<String> out = new ArrayList<String>();
         for (PackSources.Candidate candidate : candidates) {
@@ -79,10 +90,12 @@ class PackSourcesTest {
         expected.add("oraxen:pack.zip");
         assertEquals(expected, labels(found));
 
-        PackStack stack = sources().open(found, null, 55);
+        PackStack stack = sources().open(copied(sources(), found), null, 55);
         try {
             String lang = new String(stack.read("assets/minecraft/lang/en_us.json", 1024), "UTF-8");
             assertTrue(lang.contains("folder-a"), "the operator's folder wins");
+            assertFalse(stack.copies().contains(serverPack), "the server pack is opened in place");
+            assertEquals(5, stack.copies().size(), "every other zip from its private copy");
         } finally {
             stack.close();
         }
@@ -95,7 +108,13 @@ class PackSourcesTest {
         Files.write(generated, pack("itemsadder"));
         PackSources sources = sources();
 
-        PackStack stack = sources.open(sources.discover(null, null), null, 55);
+        PackStack uncopied = sources.open(sources.discover(null, null), null, 55);
+        assertEquals(0, uncopied.size(), "no copy yet: left out rather than opened in place");
+        assertNull(sources.readyCopy(generated));
+        uncopied.close();
+
+        PackStack stack = sources.open(copied(sources, sources.discover(null, null)), null, 55);
+        assertNotNull(sources.readyCopy(generated));
         try {
             Files.delete(generated);
             Files.write(generated, pack("rebuilt"));
@@ -106,7 +125,7 @@ class PackSourcesTest {
             stack.close();
         }
 
-        PackStack rebuilt = sources.open(sources.discover(null, null), null, 55);
+        PackStack rebuilt = sources.open(copied(sources, sources.discover(null, null)), null, 55);
         try {
             sources.pruneCopies(rebuilt.copies());
             Path open = plugins().resolve("Heimdall/cache/packs/open");

@@ -35,8 +35,12 @@ import java.util.Set;
  * on it and taller accented glyphs reach above it, as in game. Bold is the glyph drawn again one GUI
  * pixel right, adding one to the advance; italic shears each row by {@code 1 - 0.25 * y}.
  *
- * <p>Loading only indexes the font files; each sheet is decoded the first time one of its glyphs is
- * drawn, once per pack stack, and a sheet that will not decode is remembered as such.
+ * <p>Loading only indexes the font files. Nothing here holds a decoded sheet: a glyph keeps its
+ * sheet's path and its metrics, and the pixels are fetched through {@link Textures#load} when it is
+ * drawn, so every sheet lives in the texture cache's 32 MB budget like any other image. A name full
+ * of private-use characters from a dozen GUI sheets costs decoding time, never pinned memory. A
+ * sheet that will not decode is remembered as such, and the glyph map is capped at
+ * {@value #MAX_GLYPHS} entries; characters no font has are not memoised at all.
  *
  * <p>Render thread only.
  */
@@ -48,9 +52,16 @@ final class BitmapFont {
     /** Providers read per font file, at most. */
     static final int MAX_PROVIDERS = 256;
 
-    /** One glyph: where it is on its sheet and how it sits on the line. */
+    /** Resolved glyph metrics kept, at most. */
+    static final int MAX_GLYPHS = 4096;
+
+    /**
+     * One glyph: where it is on its sheet and how it sits on the line. {@code sheet} is set only
+     * for the built-in set's tiny static sheet; a pack glyph names its sheet by {@code path}.
+     */
     static final class Glyph {
         final BufferedImage sheet;
+        final String path;
         final int x;
         final int y;
         final int cellWidth;
@@ -62,7 +73,13 @@ final class BitmapFont {
 
         Glyph(BufferedImage sheet, int x, int y, int cellWidth, int cellHeight, double scale,
                 double ascent, double advance) {
+            this(sheet, null, x, y, cellWidth, cellHeight, scale, ascent, advance);
+        }
+
+        Glyph(BufferedImage sheet, String path, int x, int y, int cellWidth, int cellHeight,
+                double scale, double ascent, double advance) {
             this.sheet = sheet;
+            this.path = path;
             this.x = x;
             this.y = y;
             this.cellWidth = cellWidth;
@@ -73,13 +90,13 @@ final class BitmapFont {
         }
 
         boolean blank() {
-            return sheet == null;
+            return sheet == null && path == null;
         }
     }
 
     /**
-     * A bitmap provider's sheet, decoded on first use. A sheet that fails to decode is remembered
-     * as failed, so a broken file costs one attempt per stack, not one per character.
+     * A bitmap provider's sheet: its path and grid, never its pixels. A sheet that fails to decode
+     * is remembered as failed, so a broken file costs one attempt per stack, not one per character.
      */
     static final class Sheet {
         final String path;
@@ -87,8 +104,8 @@ final class BitmapFont {
         final int columns;
         final double height;
         final double ascent;
-        private BufferedImage image;
         private boolean tried;
+        private boolean failed;
 
         Sheet(String path, int rows, int columns, double height, double ascent) {
             this.path = path;
@@ -98,20 +115,24 @@ final class BitmapFont {
             this.ascent = ascent;
         }
 
+        /** The decoded sheet from the texture cache, or {@code null} if it has failed for good. */
         BufferedImage image(Textures textures) {
-            if (!tried) {
-                tried = true;
-                image = textures.load(path);
-                if (image != null && (image.getWidth() / columns <= 0
-                        || image.getHeight() / rows <= 0)) {
-                    image = null;
-                }
+            if (failed) {
+                return null;
             }
+            BufferedImage image = textures.load(path);
+            if (image == null || image.getWidth() / columns <= 0 || image.getHeight() / rows <= 0) {
+                if (!tried) {
+                    failed = true;
+                }
+                image = null;
+            }
+            tried = true;
             return image;
         }
 
         boolean failed() {
-            return tried && image == null;
+            return failed;
         }
     }
 
@@ -272,21 +293,31 @@ final class BitmapFont {
                 int y = slot.row * cellHeight;
                 double scale = slot.sheet.height / cellHeight;
                 int width = contentWidth(image, x, y, cellWidth, cellHeight);
-                glyph = new Glyph(image, x, y, cellWidth, cellHeight, scale, slot.sheet.ascent,
-                        (int) (0.5 + width * scale) + 1);
-                glyphs.put(cp, glyph);
+                glyph = new Glyph(null, slot.sheet.path, x, y, cellWidth, cellHeight, scale,
+                        slot.sheet.ascent, (int) (0.5 + width * scale) + 1);
+                remember(cp, glyph);
                 return glyph;
             }
         }
         glyph = Builtin.glyph(cp);
-        if (glyph == null && cp != '?') {
-            glyph = glyph('?');
+        if (glyph != null) {
+            remember(cp, glyph);
+            return glyph;
         }
-        if (glyph == null) {
-            glyph = Builtin.glyph('?');
+        // Not memoised per character: a name of a thousand distinct unknown characters must not
+        // grow this map. The '?' it falls back to is memoised once, under its own code point.
+        return cp == '?' ? Builtin.glyph('?') : glyph('?');
+    }
+
+    private void remember(int cp, Glyph glyph) {
+        if (glyphs.size() < MAX_GLYPHS) {
+            glyphs.put(cp, glyph);
         }
-        glyphs.put(cp, glyph);
-        return glyph;
+    }
+
+    /** How many glyphs are memoised; for the bound's test. */
+    int memoisedGlyphs() {
+        return glyphs.size();
     }
 
     /** Advance of one character, in GUI pixels. */
@@ -311,8 +342,15 @@ final class BitmapFont {
         return glyph.advance + (bold ? 1 : 0);
     }
 
-    private static void paint(Canvas canvas, Glyph glyph, double x, double y, int argb,
+    private void paint(Canvas canvas, Glyph glyph, double x, double y, int argb,
             boolean italic) {
+        // Fetched per draw, through the bounded cache: the sheet may have been evicted since the
+        // glyph was measured, and then it is decoded again rather than pinned.
+        BufferedImage sheet = glyph.sheet != null ? glyph.sheet : textures.load(glyph.path);
+        if (sheet == null || sheet.getWidth() < glyph.x + glyph.cellWidth
+                || sheet.getHeight() < glyph.y + glyph.cellHeight) {
+            return;
+        }
         int s = canvas.scale;
         double top = y + 7 - glyph.ascent;
         double guiWidth = glyph.cellWidth * glyph.scale;
@@ -331,7 +369,7 @@ final class BitmapFont {
             }
             for (int ox = 0; ox < outWidth; ox++) {
                 int sx = glyph.x + Math.min(glyph.cellWidth - 1, (int) (ox * perOut));
-                int alpha = (glyph.sheet.getRGB(sx, sy) >>> 24) & 0xFF;
+                int alpha = (sheet.getRGB(sx, sy) >>> 24) & 0xFF;
                 if (alpha == 0) {
                     continue;
                 }

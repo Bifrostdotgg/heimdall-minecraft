@@ -178,6 +178,11 @@ class VanillaAssetsTest {
     void completeOlderVersionsArePrunedAndIncompleteOnesLeftToEnsure() throws Exception {
         Fixtures.write(temp.resolve("1.21.4"), Fixtures.files(
                 VanillaAssets.MARKER, repeat('b', 40) + " 1.21.4\n", "version.json", "{}"));
+        Files.setLastModifiedTime(temp.resolve("1.21.4").resolve(VanillaAssets.MARKER),
+                java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis()
+                        - 2 * VanillaAssets.IN_USE_MS));
+        Fixtures.write(temp.resolve("1.21.2"), Fixtures.files(
+                VanillaAssets.MARKER, repeat('c', 40) + " 1.21.2\n", "version.json", "{}"));
         Fixtures.write(temp.resolve("1.21.3"), Fixtures.files("version.json", "{}"));
         byte[] jar = clientJar();
         VanillaAssets assets = new VanillaAssets(logger,
@@ -186,7 +191,9 @@ class VanillaAssetsTest {
         Path current = assets.ensure("1.21.5");
         assertEquals(1, assets.pruneOthers(current));
 
-        assertFalse(Files.exists(temp.resolve("1.21.4")));
+        assertFalse(Files.exists(temp.resolve("1.21.4")), "complete and unused for days");
+        assertTrue(Files.isDirectory(temp.resolve("1.21.2")),
+                "complete but used today, perhaps by a sibling server on this folder");
         assertTrue(Files.isDirectory(temp.resolve("1.21.3")));
         assertNotNull(assets.cached("1.21.5"));
     }
@@ -268,6 +275,57 @@ class VanillaAssetsTest {
         Files.write(jar, evil);
         assertThrows(IOException.class, () -> VanillaAssets.extract(jar, temp.resolve("out")));
         assertFalse(Files.exists(temp.getParent().resolve("escaped.json")));
+    }
+
+    @Test
+    void aSlowTransferHitsTheWallClock() {
+        java.io.InputStream drip = new java.io.InputStream() {
+            @Override
+            public int read() {
+                return 1;
+            }
+
+            @Override
+            public int read(byte[] buffer, int offset, int length) {
+                try {
+                    Thread.sleep(5);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                buffer[offset] = 1;
+                return 1;
+            }
+        };
+        long deadline = System.currentTimeMillis() + 60;
+        AssetException failure = assertThrows(AssetException.class, () -> HttpSource.Url.copy(
+                drip, new java.io.ByteArrayOutputStream(), Long.MAX_VALUE, deadline, "slow.example"));
+        assertTrue(failure.getMessage().contains("took too long"));
+        assertTrue(failure.getMessage().contains("slow.example"));
+    }
+
+    @Test
+    void redirectsNeverDropFromHttpsToHttp() throws Exception {
+        assertTrue(HttpSource.Url.checkHop(false, "https", "a"));
+        assertTrue(HttpSource.Url.checkHop(true, "https", "a"));
+        assertFalse(HttpSource.Url.checkHop(false, "http", "a"), "plain http from the start is allowed");
+        AssetException down = assertThrows(AssetException.class,
+                () -> HttpSource.Url.checkHop(true, "http", "evil.example"));
+        assertTrue(down.getMessage().contains("evil.example"));
+        assertThrows(AssetException.class, () -> HttpSource.Url.checkHop(false, "file", "x"));
+    }
+
+    @Test
+    void defaultsAreMemoisedOnlyForIdsTheServerKnows() {
+        BukkitItemDefaults defaults = new BukkitItemDefaults();
+        for (int i = 0; i < 50; i++) {
+            assertEquals(0, defaults.maxDurability("custom:made_up_" + i));
+            defaults.rarity("custom:made_up_" + i);
+        }
+        assertEquals(0, defaults.memoised(), "player-supplied ids never grow the memo");
+
+        assertEquals(1561, defaults.maxDurability("minecraft:diamond_sword"));
+        defaults.rarity("minecraft:diamond_sword");
+        assertEquals(2, defaults.memoised(), "a real Material is memoised, once per map");
     }
 
     @Test

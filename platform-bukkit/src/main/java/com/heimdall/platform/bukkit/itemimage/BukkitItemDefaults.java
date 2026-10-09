@@ -92,6 +92,11 @@ final class BukkitItemDefaults implements ItemDefaults {
         return value;
     }
 
+    /** How many ids are memoised, across both maps; for the memo gate's test. */
+    int memoised() {
+        return durability.size() + rarity.size();
+    }
+
     private static String reflectiveRarity(String id) {
         try {
             Material material = material(id);

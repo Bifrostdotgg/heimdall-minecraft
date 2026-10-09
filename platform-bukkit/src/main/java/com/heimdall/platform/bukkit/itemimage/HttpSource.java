@@ -99,11 +99,7 @@ interface HttpSource {
                 if (!"https".equals(protocol) && !"http".equals(protocol)) {
                     throw new AssetException("refusing a " + protocol + " URL");
                 }
-                if (secure && "http".equals(protocol)) {
-                    throw new AssetException("refusing a redirect from https to http ("
-                            + url.getHost() + ")");
-                }
-                secure = "https".equals(protocol);
+                secure = checkHop(secure, protocol, url.getHost());
                 HttpURLConnection connection;
                 int code;
                 try {
@@ -137,7 +133,23 @@ interface HttpSource {
             throw new AssetException("too many redirects");
         }
 
-        private static long copy(InputStream in, OutputStream out, long maxBytes, long deadline,
+        /**
+         * The redirect rule for one hop: only http and https, and never down from https to http.
+         *
+         * @return whether this hop is https, for the next hop's check
+         */
+        static boolean checkHop(boolean wasSecure, String protocol, String host)
+                throws AssetException {
+            if (!"https".equals(protocol) && !"http".equals(protocol)) {
+                throw new AssetException("refusing a " + protocol + " URL");
+            }
+            if (wasSecure && "http".equals(protocol)) {
+                throw new AssetException("refusing a redirect from https to http (" + host + ")");
+            }
+            return "https".equals(protocol);
+        }
+
+        static long copy(InputStream in, OutputStream out, long maxBytes, long deadline,
                 String host) throws IOException {
             byte[] buffer = new byte[16 * 1024];
             long total = 0;

@@ -131,6 +131,105 @@ class BukkitItemImagesTest {
     }
 
     @Test
+    void cardsExpireOnTheTimerEvenWhenNothingRenders() throws Exception {
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        final java.util.concurrent.atomic.AtomicLong now =
+                new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+        service.clock = new java.util.function.LongSupplier() {
+            @Override
+            public long getAsLong() {
+                return now.get();
+            }
+        };
+        service.expiryPeriodMs = 20L;
+
+        assertNotNull(service.render(wardedJar()).get(10, TimeUnit.SECONDS));
+        assertEquals(1, service.cachedCards());
+        Thread.sleep(100);
+        assertEquals(1, service.cachedCards(), "the timer runs, and a live card survives it");
+
+        now.addAndGet(BukkitItemImages.CACHE_TTL_MS + 1);
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (service.cachedCards() > 0 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        assertEquals(0, service.cachedCards(), "purged by the timer, with no render to notice");
+    }
+
+    @Test
+    void theRenderCacheKeyCarriesNoItemText() {
+        String key = BukkitItemImages.cacheKey(Fixtures.stack(), wardedJar());
+        assertFalse(key.contains("Warded"), key);
+        assertFalse(key.contains("Throw it"), key);
+        assertTrue(key.endsWith(BukkitItemImages.sha256(wardedJar().cacheKey())));
+    }
+
+    @Test
+    void prepareMarksItsCacheAndPrunesOnlyStaleSiblings() throws Exception {
+        Path assets = server.resolve("plugins/Heimdall/cache/assets");
+        String sha = "0123456789012345678901234567890123456789";
+        Fixtures.write(assets.resolve("1.21.5"), Fixtures.files(VanillaAssets.MARKER, sha));
+        Fixtures.write(assets.resolve("1.21.4"), Fixtures.files(VanillaAssets.MARKER, sha));
+        Fixtures.write(assets.resolve("1.21.3"), Fixtures.files(VanillaAssets.MARKER, sha));
+        long old = System.currentTimeMillis() - 2 * VanillaAssets.IN_USE_MS;
+        for (String version : new String[] {"1.21.5", "1.21.4"}) {
+            Files.setLastModifiedTime(assets.resolve(version).resolve(VanillaAssets.MARKER),
+                    java.nio.file.attribute.FileTime.fromMillis(old));
+        }
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+
+        service.prepare();
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (Files.exists(assets.resolve("1.21.4")) && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+
+        assertFalse(Files.exists(assets.resolve("1.21.4")), "stale sibling pruned");
+        assertTrue(Files.exists(assets.resolve("1.21.3")), "recently used sibling kept");
+        assertTrue(Files.getLastModifiedTime(assets.resolve("1.21.5").resolve(VanillaAssets.MARKER))
+                .toMillis() > old, "this server's own cache is marked in use");
+    }
+
+    @Test
+    void aRegeneratedPackIsRecopiedAndTheOldCopyPruned() throws Exception {
+        Path generated = server.resolve("plugins/ItemsAdder/output/generated.zip");
+        Files.createDirectories(generated.getParent());
+        Files.write(generated, Fixtures.zip(Fixtures.files(
+                "assets/minecraft/lang/en_us.json", "{\"item.minecraft.stone\":\"One\"}")));
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        service.rescanNanos = 0L;
+        Files.createDirectories(server.resolve("plugins/Heimdall"));
+        Files.write(server.resolve("plugins/Heimdall/item-images.yml"),
+                Fixtures.utf8("download-vanilla-assets: false\n"));
+
+        awaitName(service, "One");
+        Files.write(generated, Fixtures.zip(Fixtures.files(
+                "assets/minecraft/lang/en_us.json", "{\"item.minecraft.stone\":\"Two!\"}")));
+        Files.setLastModifiedTime(generated, java.nio.file.attribute.FileTime.fromMillis(
+                System.currentTimeMillis() + 60_000L));
+        awaitName(service, "Two!");
+
+        Path open = server.resolve("plugins/Heimdall/cache/packs/open");
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (Files.list(open).count() != 1 && System.currentTimeMillis() < deadline) {
+            service.render(ChatItem.builder("stone").build()).get(10, TimeUnit.SECONDS);
+            Thread.sleep(20);
+        }
+        assertEquals(1, Files.list(open).count(), "only the current copy is kept");
+        assertTrue(Files.exists(generated), "the original was never held open");
+    }
+
+    private static void awaitName(BukkitItemImages service, String expected) throws Exception {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (!expected.equals(service.translate("item.minecraft.stone"))
+                && System.currentTimeMillis() < deadline) {
+            service.render(ChatItem.builder("stone").build()).get(10, TimeUnit.SECONDS);
+            Thread.sleep(20);
+        }
+        assertEquals(expected, service.translate("item.minecraft.stone"));
+    }
+
+    @Test
     void afterCloseNothingRenders() throws Exception {
         BukkitItemImages service = build(new Fixtures.FakeHttp());
         service.close();

@@ -78,8 +78,12 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     static final int SCALE = 2;
     static final long PREPARE_RETRY_MS = 10L * 60 * 1000;
 
-    /** After a successful prepare, the next one (cheap unless a pack URL went stale) is a day out. */
-    static final long PREPARE_REFRESH_MS = 24L * 60 * 60 * 1000;
+    /**
+     * After a successful prepare, the next one is six hours out: cheap unless a pack URL went
+     * stale, and often enough that this server's version cache stays marked in use (see
+     * {@link VanillaAssets#IN_USE_MS}) for any sibling server pruning the shared folder.
+     */
+    static final long PREPARE_REFRESH_MS = 6L * 60 * 60 * 1000;
 
     /** How long a rendered card is kept. */
     static final long CACHE_TTL_MS = 10L * 60 * 1000;
@@ -97,6 +101,35 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
 
     private final ThreadPoolExecutor assets;
     private final ThreadPoolExecutor renders;
+
+    /** Wall clock for the render cache's lifetime; a field so a test can move time. */
+    volatile java.util.function.LongSupplier clock = new java.util.function.LongSupplier() {
+        @Override
+        public long getAsLong() {
+            return System.currentTimeMillis();
+        }
+    };
+
+    /** How often the expiry timer purges dead cards; a field so a test can shorten it. */
+    volatile long expiryPeriodMs = 60_000L;
+
+    /**
+     * Posts a purge of expired cards to the render thread every {@link #expiryPeriodMs}, so a card
+     * dies on time on an idle server too, not only when the next render happens to look. Started
+     * by the first card cached; render-thread state is only ever touched on the render thread.
+     */
+    private volatile java.util.concurrent.ScheduledThreadPoolExecutor expiry;
+
+    /** Pack zips being copied on the asset thread right now. */
+    private final java.util.Set<Path> copying =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** When a copy last failed, per pack, so a broken file is retried a minute later, not per scan. */
+    private final java.util.Map<Path, Long> copyFailedAt =
+            new java.util.concurrent.ConcurrentHashMap<Path, Long>();
+
+    /** Rescan interval; a field so a test can rescan on every render. */
+    volatile long rescanNanos = TimeUnit.SECONDS.toNanos(RESCAN_SECONDS);
 
     /** {@code null} until probed; then whether AWT works here. */
     private volatile Boolean awt;
@@ -271,6 +304,10 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     @Override
     public void close() {
         closed = true;
+        java.util.concurrent.ScheduledThreadPoolExecutor timer = expiry;
+        if (timer != null) {
+            timer.shutdownNow();
+        }
         assets.shutdownNow();
         try {
             renders.execute(new Runnable() {
@@ -319,6 +356,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             }
         }
         if (dir != null) {
+            VanillaAssets.touch(dir);
             final int pruned = vanilla.pruneOthers(dir);
             if (pruned > 0) {
                 logger.debug(() -> "item images: removed " + pruned + " old asset version(s)");
@@ -366,7 +404,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         try {
             Deadline deadline = Deadline.in(RENDER_BUDGET_MS);
             refreshStack(false);
-            String key = stack.fingerprint() + "\n" + sha256(item.cacheKey());
+            String key = cacheKey(stack, item);
             byte[] cached = cached(key);
             if (cached != null) {
                 return cached;
@@ -401,7 +439,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         if (entry == null) {
             return null;
         }
-        if (System.currentTimeMillis() - entry.drawnAt > CACHE_TTL_MS) {
+        if (clock.getAsLong() - entry.drawnAt > CACHE_TTL_MS) {
             cache.remove(key);
             cacheBytes -= entry.png.length;
             return null;
@@ -409,8 +447,76 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         return entry.png;
     }
 
+    /**
+     * The render cache's key: the stack's fingerprint and a SHA-256 of the item's normalised model.
+     * The model's text (names, lore) never appears in it.
+     */
+    static String cacheKey(PackStack stack, ChatItem item) {
+        return stack.fingerprint() + "\n" + sha256(item.cacheKey());
+    }
+
+    /** Drops every expired card. Render thread only. */
+    private void expireNow() {
+        long now = clock.getAsLong();
+        java.util.Iterator<Map.Entry<String, Cached>> entries = cache.entrySet().iterator();
+        while (entries.hasNext()) {
+            Cached entry = entries.next().getValue();
+            if (now - entry.drawnAt > CACHE_TTL_MS) {
+                cacheBytes -= entry.png.length;
+                entries.remove();
+            }
+        }
+    }
+
+    private void startExpiryTimer() {
+        if (expiry != null || closed) {
+            return;
+        }
+        java.util.concurrent.ScheduledThreadPoolExecutor timer =
+                new java.util.concurrent.ScheduledThreadPoolExecutor(1, new ThreadFactory() {
+                    @Override
+                    public Thread newThread(Runnable runnable) {
+                        Thread thread = new Thread(runnable, "heimdall-item-expiry");
+                        thread.setDaemon(true);
+                        return thread;
+                    }
+                });
+        final Runnable purge = new Runnable() {
+            @Override
+            public void run() {
+                expireNow();
+            }
+        };
+        long period = Math.max(1L, expiryPeriodMs);
+        timer.scheduleWithFixedDelay(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    renders.execute(purge);
+                } catch (RejectedExecutionException busyOrClosed) {
+                    // Full queue: the next tick tries again. Closed: the cards go with the cache.
+                }
+            }
+        }, period, period, TimeUnit.MILLISECONDS);
+        expiry = timer;
+        if (closed) {
+            timer.shutdownNow();
+        }
+    }
+
+    /** How many cards are cached, read on the render thread; for tests. */
+    int cachedCards() throws Exception {
+        return renders.submit(new java.util.concurrent.Callable<Integer>() {
+            @Override
+            public Integer call() {
+                return cache.size();
+            }
+        }).get(10, TimeUnit.SECONDS);
+    }
+
     private void remember(String key, byte[] png) {
-        long now = System.currentTimeMillis();
+        startExpiryTimer();
+        long now = clock.getAsLong();
         Cached previous = cache.put(key, new Cached(png, now));
         if (previous != null) {
             cacheBytes -= previous.png.length;
@@ -456,9 +562,23 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         if (!force && stack != null && generation == stackGeneration && now - nextScanAt < 0) {
             return;
         }
-        nextScanAt = now + TimeUnit.SECONDS.toNanos(RESCAN_SECONDS);
+        nextScanAt = now + rescanNanos;
         Path vanillaNow = vanillaDir;
-        List<PackSources.Candidate> candidates = sources.discover(packFolder, serverPack);
+        List<PackSources.Candidate> candidates = new java.util.ArrayList<PackSources.Candidate>();
+        for (PackSources.Candidate candidate : sources.discover(packFolder, serverPack)) {
+            if (!candidate.needsCopy()) {
+                candidates.add(candidate);
+                continue;
+            }
+            Path copy = sources.readyCopy(candidate.path);
+            if (copy != null) {
+                candidates.add(candidate.openingAt(copy));
+            } else {
+                // Left out until its copy is ready, and out of the fingerprint with it, so the
+                // rescan after the copy (or after a failed copy's retry) rebuilds the stack.
+                requestCopy(candidate.path);
+            }
+        }
         int format = VanillaAssets.packFormat(vanillaNow);
         String fingerprint = PackSources.fingerprint(candidates, vanillaNow) + "|format:" + format;
         if (stack != null && fingerprint.equals(stack.fingerprint())) {
@@ -479,6 +599,49 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         final int names = english.size();
         logger.debug(() -> "item images: pack stack rebuilt (" + roots + " source(s), " + names
                 + " English names)");
+    }
+
+    /** Copies a pack zip on the asset thread, then has the render thread rebuild the stack. */
+    private void requestCopy(final Path zip) {
+        Long failed = copyFailedAt.get(zip);
+        if (closed || (failed != null && System.currentTimeMillis() - failed < 60_000L)
+                || !copying.add(zip)) {
+            return;
+        }
+        try {
+            assets.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        sources.privateCopy(zip);
+                        copyFailedAt.remove(zip);
+                    } catch (Throwable error) {
+                        copyFailedAt.put(zip, System.currentTimeMillis());
+                        logger.debug(() -> "item images: copying a pack failed ("
+                                + AssetException.describe(error) + "); retrying in a minute");
+                    } finally {
+                        copying.remove(zip);
+                    }
+                    assetGeneration.incrementAndGet();
+                    try {
+                        renders.execute(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    refreshStack(false);
+                                } catch (Throwable ignored) {
+                                    // The next render refreshes it instead.
+                                }
+                            }
+                        });
+                    } catch (RejectedExecutionException busy) {
+                        // The next render refreshes it instead.
+                    }
+                }
+            });
+        } catch (RejectedExecutionException full) {
+            copying.remove(zip);
+        }
     }
 
     private void closeStack() {

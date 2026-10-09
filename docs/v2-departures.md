@@ -2023,10 +2023,15 @@ platform-free and never logs a name or a lore line.
 translation whose format repeats its argument (`%1$s%1$s...`) nested a few levels deep multiplies at
 every level: a 543-character custom name built that way expanded without limit. Every intermediate
 string (each argument's text, each format's result) is capped at 1024 characters, and each component
-read has one budget of nodes visited and characters produced, after which the rest is dropped. A
-tokenised hover that is not `show_item` is skipped whole, so an item quoted inside a `show_text`
-argument is not taken for a tag. Anything that still goes wrong, an `Error` included, is caught
-around the rewrite and the line relays verbatim; nothing escapes into the platform's chat dispatch.
+read has budgets of nodes visited and characters produced, after which the rest is dropped: one for
+the line and a separate one shared by every translation argument, so a wide fan-out of arguments
+cannot spend the line's share and leave an empty name. A tokenised hover that is not `show_item` is
+skipped whole, so an item quoted inside a `show_text` argument is not taken for a tag. Anything that
+still goes wrong in the rewrite or while attaching images, an `Error` included, is caught and the
+line relays (verbatim, or as `[Name]` text if the rewrite had finished). Nothing is rethrown:
+`ChatPipeline` catches only `RuntimeException` around an observer, so an `Error` let out would skip
+every observer after the bridge. One warning a minute names the throwable's class, never its
+message.
 
 **Drawn on the backend only, behind `Integrations.itemImages()`.** A default method answering
 `ItemImages.NONE`, like `chatChannels()` in D85, so both proxies need no change. The Bukkit family
@@ -2043,7 +2048,10 @@ answers with `BukkitItemImages`:
   read and the extraction are size-capped, and entry names cannot escape the cache. A manifest entry
   without a SHA-1 fails closed. Temporary files carry a per-instance id, and only ones older than ten
   minutes are swept, so two servers on one folder never delete each other's downloads. Once a
-  version's cache is in place, complete caches of other versions are deleted. Every transfer has
+  version's cache is in place, complete caches of other versions are deleted, except any used in the
+  last 24 hours: each prepare (every six hours) marks its own cache in use, so two servers on
+  different versions sharing one plugin folder keep each other's. A server idle for more than a day
+  can lose its cache to a sibling and fetches it again on its next prepare. Every transfer has
   connect and read timeouts plus a wall-clock cap (two minutes for a document, five for a download),
   and a redirect from https to http is refused. Log lines name the exception class and the host,
   never a full URL (a pack URL can carry a token).
@@ -2055,8 +2063,10 @@ answers with `BukkitItemImages`:
   jar's `version.json`). Discovery is re-run at most every ten seconds and the stack rebuilt only
   when a file's size or modification time changed. A zip is never opened where it lies: ItemsAdder,
   Nexo and Oraxen rewrite theirs, and an open handle (a lock, on Windows) would be in their way, so
-  each is copied into `cache/packs/open/` once per change and the copy is opened; unused copies are
-  deleted on the next rebuild. A server pack with no `resource-pack-sha1` is re-fetched once its copy
+  each is copied into `cache/packs/open/` once per change, on the asset thread, and the copy is
+  opened. A pack whose copy is not ready yet, or failed (retried a minute later), is left out of the
+  stack and of its fingerprint, so the rescan after the copy rebuilds it; unused copies are deleted
+  on the next rebuild. The server pack is the cache's own file and is opened in place. A server pack with no `resource-pack-sha1` is re-fetched once its copy
   is a day old; a failed fetch is retried after ten minutes, and the previous copy stays in use.
 - **Models resolve the way the client does:** `item_model`, then `items/<id>.json` evaluated against
   custom model data (`range_dispatch`, `select`, `condition`, `composite`, tints), then the
@@ -2074,8 +2084,11 @@ answers with `BukkitItemImages`:
   `ItemType#getItemRarity()` on 1.20.5+ (else a small table), and the language data.
 - **Off the chat thread, bounded:** one render thread with a queue of 16 (refused past that), a 3 s
   budget per render checked between steps, and a redraw at half scale for a card that encodes over
-  256 KiB. Font files are indexed once per pack stack, outside any render's budget, and each glyph
-  sheet is decoded on first use (a sheet that fails is remembered). Textures are bounded before
+  256 KiB. Font files are indexed once per pack stack, outside any render's budget. A glyph keeps
+  only its sheet's path and its metrics: the sheet's pixels come from the texture cache when the
+  glyph is drawn, so a name drawing on many large GUI sheets stays inside that cache's budget instead
+  of pinning each sheet for the stack's life. A sheet that fails is remembered, and characters no
+  font has are not memoised. Textures are bounded before
   decoding (file size, then the header's dimensions), the first animation frame is copied out of its
   strip, model textures are shrunk to the icon's 32 pixels, and the texture cache is bounded at 32 MB
   of decoded pixels. The probe for `java.awt` makes an image, a `Graphics2D` and a real PNG; a JVM
@@ -2083,7 +2096,8 @@ answers with `BukkitItemImages`:
   written through in-memory ImageIO streams, never ImageIO's disk cache or its global setting.
 - **The render cache keeps pictures, not records.** It is keyed by the pack stack's fingerprint and a
   SHA-256 of the item's normalised model (never the text), bounded at 128 cards or 16 MB, and an
-  entry lives at most ten minutes.
+  entry lives at most ten minutes: a timer purges expired cards every minute, so they die on time on
+  an idle server too, not only when the next render looks.
 - **Configuration:** Local knobs, in an optional `plugins/Heimdall/item-images.yml`: `download-vanilla-assets`
   (default `true`) and `pack-folder`.
 
@@ -2115,7 +2129,9 @@ this; the event batcher is unchanged.
 deque in front of the chat batcher: with nothing pending a line goes straight through, adding no
 latency, and a line said after a pending item line waits behind it and ships after it, in the order
 both were said. A line therefore waits only while an item line ahead of it is drawing, and never
-longer than that line's budget, which began before it arrived. The deque holds at most 500 lines
+longer than that line's budget, which began before it arrived. The budget timers run on the shared
+`heimdall-sched` thread, so the 750 ms is plus that thread's latency: a large frame being sent or a
+slow task ahead of the timer can delay it. The deque holds at most 500 lines
 (past that its head ships with whatever finished); at most eight item lines wait on renders at once,
 and past that a line ships text-only, still in order. Each pending line carries the enable cycle it
 was said in, and a render finishing after a disable is dropped rather than shipped into the next

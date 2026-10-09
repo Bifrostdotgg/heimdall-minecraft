@@ -77,6 +77,50 @@ class TexturesTest {
     }
 
     @Test
+    void manyFontSheetsStayInsideTheTextureBudget() {
+        java.util.Map<String, byte[]> files = new java.util.LinkedHashMap<String, byte[]>();
+        StringBuilder providers = new StringBuilder("{\"providers\":[");
+        StringBuilder line = new StringBuilder();
+        for (int i = 0; i < 10; i++) {
+            int cp = 0xE000 + i;
+            files.put("assets/minecraft/textures/font/gui" + i + ".png",
+                    Fixtures.png(2048, 1024, 0xFFFFFFFF));
+            providers.append(i == 0 ? "" : ",").append("{\"type\":\"bitmap\",\"file\":")
+                    .append("\"minecraft:font/gui").append(i).append(".png\",\"ascent\":7,")
+                    .append("\"height\":8,\"chars\":[\"").append(new String(Character.toChars(cp)))
+                    .append("\"]}");
+            line.appendCodePoint(cp);
+        }
+        files.put("assets/minecraft/font/default.json", Fixtures.utf8(providers + "]}"));
+        PackStack stack = Fixtures.stack(Fixtures.write(temp.resolve("sheets"), files));
+        Textures textures = new Textures(stack);
+        BitmapFont font = BitmapFont.load(stack, textures);
+        Canvas canvas = new Canvas(200, 12, 1);
+
+        double x = 0;
+        for (int i = 0; i < line.length(); i++) {
+            x += font.draw(canvas, line.charAt(i), x, 0, 0xFFFFFFFF, false, false);
+            assertTrue(textures.cachedBytes() <= Textures.MAX_CACHE_BYTES,
+                    "after sheet " + i + ": " + textures.cachedBytes());
+        }
+        assertTrue(x > 0);
+        for (int i = 0; i < line.length(); i++) {
+            BitmapFont.Glyph glyph = font.glyph(line.charAt(i));
+            assertNull(glyph.sheet, "a pack glyph pins no decoded sheet outside the cache");
+            assertNotNull(glyph.path);
+        }
+    }
+
+    @Test
+    void charactersNoFontHasAreNotMemoised() {
+        BitmapFont font = BitmapFont.load(Fixtures.stack(), new Textures(Fixtures.stack()));
+        for (int cp = 0xE000; cp < 0xE000 + 5000; cp++) {
+            font.glyph(cp);
+        }
+        assertTrue(font.memoisedGlyphs() < 200, "memoised: " + font.memoisedGlyphs());
+    }
+
+    @Test
     void fontSheetsAreDecodedOnFirstUseAndAFailureIsRemembered() {
         Path pack = Fixtures.write(temp.resolve("font"), Fixtures.files(
                 "assets/minecraft/font/default.json",
