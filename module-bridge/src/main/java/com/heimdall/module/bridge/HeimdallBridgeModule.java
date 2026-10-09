@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import net.kyori.adventure.text.Component;
 
@@ -228,9 +229,10 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /**
      * The chat-plugin channel inventory, plugin to bot: {@code {"state", "channels"}}.
      *
-     * <p>Sent at enable, again on every reconnect (a frame sent into a dying socket is lost
-     * silently, so the bot is assumed to know nothing after one), and whenever the state or the
-     * channel list changes. Never otherwise. See {@link #reportInventory}.
+     * <p>Sent on the first flush after enable, again on the first flush after every reconnect (a
+     * frame sent into a dying socket is lost silently, so the bot is assumed to know nothing after
+     * one), and whenever the state or the channel list changes. Never otherwise. See
+     * {@link #reportInventory}.
      */
     static final String FRAME_CHANNELS = "bridge.channels";
 
@@ -314,9 +316,10 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     private final Object observerLock = new Object();
 
     /**
-     * Guards what the bot was last told. Held only around the compare-and-send in
-     * {@link #reportInventory} and in {@link #forgetInventory}; never while calling the channel
-     * integration, which can reach the server's plugin-manager lock.
+     * Guards what the bot was last told. Taken by {@link #reportInventory} alone, around the
+     * compare-and-send, and never while calling the channel integration (which can reach the
+     * server's plugin-manager lock). Nothing else takes it, so no thread can ever wait on it; see
+     * {@link #forgetInventory} for why that matters.
      */
     private final Object inventoryLock = new Object();
 
@@ -331,6 +334,12 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     /** Flushes since the last inventory poll. Only {@code heimdall-sched} touches it. */
     private int flushesSinceInventoryPoll;
+
+    /** Set by {@link #forgetInventory}; applied, and cleared, by the next report. */
+    private final AtomicBoolean forgetRequested = new AtomicBoolean();
+
+    /** Set by enable and by a reconnect; the next flush makes a forced report and clears it. */
+    private final AtomicBoolean inventoryReportRequested = new AtomicBoolean();
 
     /** Issued to each inventory read before it starts; see {@link #reportInventory}. */
     private final AtomicLong inventoryStamp = new AtomicLong();
@@ -419,16 +428,21 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
         // A reconnect means the bot may know nothing about this server's channels: whatever was sent
         // before went to a socket that is gone, possibly to a bot that has since restarted. So the
-        // record of what it was told is wiped on the way down and the inventory resent on the way
-        // up, on the socket's thread, which is cheap enough: one state read and one frame. Tracked
-        // by the context like every other registration here.
+        // record of what it was told is wiped on the way down and a report is requested on the way
+        // up. Tracked by the context like every other registration here.
+        //
+        // Requested, never made here. The negotiator invokes this listener while holding its own
+        // monitor, and reading the channel integration can reach Bukkit's plugin manager, whose
+        // monitor the server holds while disabling plugins; a disable tears the tunnel down, which
+        // needs the negotiator's monitor. Reporting inline would be a deadlock at shutdown or
+        // /reload. The next flush, on heimdall-sched with no lock held, makes the report.
         context.tunnel().onModeChange(new ProtocolModeListener() {
             @Override
             public void onModeChanged(ProtocolMode previous, ProtocolMode current) {
                 if (current == ProtocolMode.UNKNOWN) {
                     forgetInventory();
                 } else {
-                    reportInventory(true);
+                    inventoryReportRequested.set(true);
                 }
             }
         });
@@ -440,8 +454,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             }
         }, FLUSH_PERIOD_MS, FLUSH_PERIOD_MS);
 
+        // The first report goes out on the first flush, a second from now, for the same reason as
+        // the reconnect above: enable can run under the module manager's own lock, and the server
+        // can hold its plugin-manager monitor while waiting for that lock during a disable.
         forgetInventory();
-        reportInventory(true);
+        inventoryReportRequested.set(true);
     }
 
     @Override
@@ -616,10 +633,13 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         events.flush(bus);
 
         // The inventory poll rides on the flush rather than a schedule of its own: one fewer
-        // registration to track, and the cadence only has to be roughly right.
-        if (++flushesSinceInventoryPoll >= INVENTORY_POLL_FLUSHES) {
+        // registration to track, and the cadence only has to be roughly right. A requested report
+        // (enable, reconnect) is made here too, and forced: this is the one place the integration is
+        // read with no lock of Heimdall's, the tunnel's or the module manager's held.
+        boolean requested = inventoryReportRequested.getAndSet(false);
+        if (requested || ++flushesSinceInventoryPoll >= INVENTORY_POLL_FLUSHES) {
             flushesSinceInventoryPoll = 0;
-            reportInventory(false);
+            reportInventory(requested);
         }
     }
 
@@ -628,8 +648,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /**
      * Sends {@link #FRAME_CHANNELS} if the bot has not been told, or if what it was told has changed.
      *
-     * <p>{@code force} sends regardless of what was last reported, and is what enable and a
-     * reconnect use. Either way nothing is recorded as sent while the tunnel is down: the frame would
+     * <p><strong>Called from {@link #flush} only</strong> (and tests), never from a listener or a
+     * lifecycle method: see the comments in {@link #enable} for the locks that rule those out.
+     *
+     * <p>{@code force} sends regardless of what was last reported, and is what a requested report
+     * (enable, reconnect) uses. Either way nothing is recorded as sent while the tunnel is down: the frame would
      * go nowhere, and recording it would suppress the resend the next poll would otherwise make.
      *
      * <p>Package-private so a test can drive a poll without running five flushes.
@@ -665,10 +688,18 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
 
         synchronized (inventoryLock) {
+            if (forgetRequested.getAndSet(false)) {
+                reportedState = null;
+                reportedNames = Collections.emptyList();
+            }
             if (stamp < sentStamp) {
                 return;
             }
             if (!force && state == reportedState && names.equals(reportedNames)) {
+                // A newer read confirmed what the bot already has. Recording its stamp is what
+                // stops an older read still in flight (one that saw a state since reverted) from
+                // being sent after it: X, then a slow read of Y, then X again must leave the bot on X.
+                sentStamp = stamp;
                 return;
             }
             if (!bus.isConnected()) {
@@ -693,15 +724,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /**
      * Forgets what the bot was told, so the next report sends whatever it finds.
      *
-     * <p>Takes only {@link #inventoryLock}, and nothing that holds it ever calls out of this class
-     * (see {@link #reportInventory}), so this is safe from a disable running under the server's own
-     * plugin-manager lock.
+     * <p>Lock-free: it only raises a flag that the next {@link #reportInventory} applies under
+     * {@link #inventoryLock}. This runs from the tunnel's mode listener, which the negotiator calls
+     * while holding its own monitor, and from disable, which can run under the server's
+     * plugin-manager monitor. Taking {@code inventoryLock} here would make those threads wait on a
+     * lock that is held around a socket send, and whether the WebSocket library's own locks could
+     * close that loop is not something this class can see. So nothing but
+     * {@link #reportInventory} ever takes {@code inventoryLock}, and nothing can wait on it.
      */
     private void forgetInventory() {
-        synchronized (inventoryLock) {
-            reportedState = null;
-            reportedNames = Collections.emptyList();
-        }
+        forgetRequested.set(true);
     }
 
     /** The platform's channel integration, never {@code null}. */

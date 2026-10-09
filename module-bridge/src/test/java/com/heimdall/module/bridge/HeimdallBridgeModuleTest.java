@@ -184,6 +184,22 @@ class HeimdallBridgeModuleTest {
             return this;
         }
 
+        /**
+         * When armed, the next {@link #state()} captures the state at entry, signals
+         * {@link #entered}, and waits for {@link #release} before returning what it captured: a
+         * slow read whose answer is already stale by the time it is used.
+         */
+        private volatile boolean blockNextState;
+        private final java.util.concurrent.CountDownLatch entered =
+                new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.CountDownLatch release =
+                new java.util.concurrent.CountDownLatch(1);
+
+        FakeChannels blockingNextState() {
+            this.blockNextState = true;
+            return this;
+        }
+
         private void observeCaller() {
             calls++;
             Object lock = watchedLock;
@@ -216,7 +232,17 @@ class HeimdallBridgeModuleTest {
         @Override
         public State state() {
             observeCaller();
-            return state;
+            State captured = state;
+            if (blockNextState) {
+                blockNextState = false;
+                entered.countDown();
+                try {
+                    release.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return captured;
         }
 
         @Override
@@ -815,8 +841,10 @@ class HeimdallBridgeModuleTest {
         void emptyFlushIsSilent() {
             setUp(ServerRole.STANDALONE, null);
             enable();
-            // Enable reports the channel inventory once, by design; that frame is covered by its own
-            // suite. What this asserts is that a flush with nothing new has nothing to say.
+            // The first flush after enable reports the channel inventory once, by design; that frame
+            // is covered by its own suite. What this asserts is that a flush with nothing new has
+            // nothing to say.
+            module.flush();
             tunnel.clearSent();
 
             module.flush();
@@ -1300,11 +1328,28 @@ class HeimdallBridgeModuleTest {
             }
         }
 
+        /** Enables, lets the first flush make the requested report, then forgets what was sent. */
+        private void enableAndSettle() {
+            enable();
+            module.flush();
+            tunnel.clearSent();
+        }
+
+        private Object inventoryLock() throws Exception {
+            java.lang.reflect.Field field =
+                    HeimdallBridgeModule.class.getDeclaredField("inventoryLock");
+            field.setAccessible(true);
+            return field.get(module);
+        }
+
         @Test
-        @DisplayName("enable reports 'none' with no channels when there is no chat plugin")
+        @DisplayName("the first flush after enable reports 'none' when there is no chat plugin")
         void enableReportsNone() {
             setUp(ServerRole.STANDALONE, null);
             enable();
+            assertTrue(inventories().isEmpty(), "requested at enable, made on the flush");
+
+            module.flush();
 
             List<Payload> sent = inventories();
             assertEquals(1, sent.size());
@@ -1314,11 +1359,12 @@ class HeimdallBridgeModuleTest {
         }
 
         @Test
-        @DisplayName("enable reports 'active' with the chat plugin's channel names")
+        @DisplayName("the first flush after enable reports 'active' with the channel names")
         void enableReportsActive() {
             setUp(ServerRole.STANDALONE, null);
             platform.withChatChannels(new FakeChannels().channel("global").channel("staff"));
             enable();
+            module.flush();
 
             List<Payload> sent = inventories();
             assertEquals(1, sent.size());
@@ -1333,6 +1379,7 @@ class HeimdallBridgeModuleTest {
             platform.withChatChannels(
                     new FakeChannels().channel("global").state(ChatChannels.State.BROKEN));
             enable();
+            module.flush();
 
             List<Payload> sent = inventories();
             assertEquals("broken", sent.get(0).string("state", ""));
@@ -1340,15 +1387,17 @@ class HeimdallBridgeModuleTest {
         }
 
         @Test
-        @DisplayName("a reconnect resends it, even though nothing changed")
+        @DisplayName("a reconnect resends it on the next flush, even though nothing changed")
         void reconnectResends() {
             setUp(ServerRole.STANDALONE, null);
             platform.withChatChannels(new FakeChannels().channel("global"));
-            enable();
-            tunnel.clearSent();
+            enableAndSettle();
 
             tunnel.disconnected();
             tunnel.reconnected();
+            assertTrue(inventories().isEmpty(), "never from the mode listener itself");
+
+            module.flush();
 
             List<Payload> sent = inventories();
             assertEquals(1, sent.size(),
@@ -1357,14 +1406,40 @@ class HeimdallBridgeModuleTest {
         }
 
         @Test
-        @DisplayName("enabled while disconnected: nothing sent, then sent on connect")
+        @DisplayName("the mode listener and enable never call the integration (deadlock rule)")
+        void listenersNeverCallTheIntegration() {
+            // The negotiator calls mode listeners while holding its own monitor, and enable can run
+            // under the module manager's lock. The real integration can reach Bukkit's getPlugin,
+            // synchronized on the plugin manager, which the server holds while disabling plugins and
+            // tearing the tunnel down. So neither may call it: they only request a report.
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+
+            enable();
+            tunnel.disconnected();
+            tunnel.reconnected();
+            tunnel.mode(com.heimdall.core.tunnel.ProtocolMode.V2_COMPAT);
+
+            assertEquals(0, channels.calls,
+                    "the integration was called synchronously from enable or a mode change");
+
+            module.flush();
+            assertTrue(channels.calls > 0);
+            assertEquals(1, inventories().size(), "one report for everything requested");
+        }
+
+        @Test
+        @DisplayName("enabled while disconnected: nothing sent, then sent on the flush after connect")
         void enabledWhileDisconnected() {
             setUp(ServerRole.STANDALONE, null);
             tunnel.connected(false);
             enable();
+            module.flush();
             assertTrue(inventories().isEmpty());
 
             tunnel.connected(true);
+            module.flush();
 
             assertEquals(1, inventories().size());
         }
@@ -1375,8 +1450,7 @@ class HeimdallBridgeModuleTest {
             setUp(ServerRole.STANDALONE, null);
             FakeChannels channels = new FakeChannels().channel("global");
             platform.withChatChannels(channels);
-            enable();
-            tunnel.clearSent();
+            enableAndSettle();
 
             pollOnce();
             assertTrue(inventories().isEmpty(), "unchanged, so nothing to say");
@@ -1403,8 +1477,7 @@ class HeimdallBridgeModuleTest {
             setUp(ServerRole.STANDALONE, null);
             FakeChannels channels = new FakeChannels().channel("global");
             platform.withChatChannels(channels);
-            enable();
-            tunnel.clearSent();
+            enableAndSettle();
 
             channels.channel("trade");
             for (int i = 0; i < HeimdallBridgeModule.INVENTORY_POLL_FLUSHES - 1; i++) {
@@ -1416,29 +1489,82 @@ class HeimdallBridgeModuleTest {
         }
 
         @Test
-        @DisplayName("the integration is never called while inventoryLock is held (no deadlock)")
+        @DisplayName("the integration is never called while inventoryLock is held")
         void integrationIsNotCalledUnderTheLock() throws Exception {
-            // The real integration can reach Bukkit's getPlugin, synchronized on the plugin manager,
-            // and the server disables plugins while holding that monitor; a disable reaches
-            // forgetInventory(), which takes inventoryLock. Calling the integration under
-            // inventoryLock is therefore half of a deadlock at shutdown or /reload.
             setUp(ServerRole.STANDALONE, null);
-            java.lang.reflect.Field field =
-                    HeimdallBridgeModule.class.getDeclaredField("inventoryLock");
-            field.setAccessible(true);
-            FakeChannels channels = new FakeChannels().channel("global").watching(field.get(module));
+            FakeChannels channels = new FakeChannels().channel("global");
             platform.withChatChannels(channels);
+            channels.watching(inventoryLock());
 
             enable();
+            module.flush();
             channels.channel("trade");
             pollOnce();
             tunnel.disconnected();
             tunnel.reconnected();
+            module.flush();
 
             assertTrue(channels.calls > 0, "the fake must actually have been asked");
             assertEquals(0, channels.callsUnderWatchedLock,
                     "state() or channelNames() ran while inventoryLock was held");
             assertEquals(3, inventories().size(), "enable, the change, and the reconnect");
+        }
+
+        @Test
+        @DisplayName("an older read that finishes after a newer report is not sent")
+        void olderReadIsNotSentAfterNewer() throws Exception {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+            enableAndSettle();
+
+            // A slow read starts while the state is ACTIVE...
+            channels.blockingNextState();
+            Thread slow = new Thread(() -> module.reportInventory(true), "slow-inventory-read");
+            slow.start();
+            assertTrue(channels.entered.await(10, java.util.concurrent.TimeUnit.SECONDS));
+
+            // ...the state changes and a newer read reports it...
+            channels.state(ChatChannels.State.NONE);
+            module.reportInventory(true);
+            assertEquals("none", inventories().get(inventories().size() - 1).string("state", ""));
+
+            // ...and then the slow one arrives with what it saw at the start.
+            channels.release.countDown();
+            slow.join(10000);
+
+            List<Payload> sent = inventories();
+            assertEquals("none", sent.get(sent.size() - 1).string("state", ""),
+                    "the bot must be left on the newest answer, not the slowest: " + sent);
+            assertEquals(1, sent.size(), "the stale read is dropped, not sent");
+        }
+
+        @Test
+        @DisplayName("X, a slow read of Y, then X again: the bot stays on X")
+        void flipFlopDoesNotSendTheStaleMiddle() throws Exception {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+            enableAndSettle();
+
+            // The bot holds X (active). A poll starts while the state is briefly Y (none)...
+            channels.state(ChatChannels.State.NONE);
+            channels.blockingNextState();
+            Thread slow = new Thread(() -> module.reportInventory(false), "slow-inventory-read");
+            slow.start();
+            assertTrue(channels.entered.await(10, java.util.concurrent.TimeUnit.SECONDS));
+
+            // ...it flips back to X, and a newer poll finds nothing changed...
+            channels.state(ChatChannels.State.ACTIVE);
+            module.reportInventory(false);
+
+            // ...then the slow poll arrives with Y.
+            channels.release.countDown();
+            slow.join(10000);
+
+            assertTrue(inventories().isEmpty(),
+                    "the newer read confirmed X; sending the older Y would leave the bot wrong: "
+                            + inventories());
         }
 
         @Test
@@ -1453,6 +1579,7 @@ class HeimdallBridgeModuleTest {
             tunnel.clearSent();
             tunnel.disconnected();
             tunnel.reconnected();
+            module.flush();
 
             assertEquals(before, tunnel.modeListenerCount());
             assertTrue(inventories().isEmpty());

@@ -551,6 +551,27 @@ class ChatControlChannelsTest {
     }
 
     @Test
+    @DisplayName("a listing that breaks the integration answers empty, never the last good names")
+    void brokenListingIsEmpty() {
+        Channel.create("global");
+        ChatControlChannels channels = active();
+        assertEquals(Collections.singletonList("global"), channels.channelNames());
+
+        // Heimdall's own handling of the answer fails (not ChatControl's code), which is a
+        // permanent failure rather than a one-call one.
+        Channel.namesOverride = Collections.singletonList(new Object() {
+            @Override
+            public String toString() {
+                throw new IllegalStateException("not a name");
+            }
+        });
+
+        assertTrue(channels.channelNames().isEmpty(),
+                "a broken integration has no inventory; the last good one would be a guess");
+        assertEquals(ChatChannels.State.BROKEN, channels.state());
+    }
+
+    @Test
     @DisplayName("a reflective failure that is not ChatControl's own code throwing is permanent")
     void nonInvocationFailuresArePermanent() {
         for (Throwable moved : Arrays.<Throwable>asList(

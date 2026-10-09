@@ -1935,12 +1935,21 @@ classes when it is switched back on.
 | `config.push` bridge settings | `chatChannels`: array of channel names this server relays; absent means empty |
 | `bridge.channels` (new, plugin to bot) | `{"state": "none" \| "active" \| "broken", "channels": [names]}` |
 
-`bridge.channels` is sent at enable, on every reconnect (a frame sent into a dying socket is lost
-silently, so the bot is assumed to know nothing after one), and whenever the state or the channel
-list changes, polled every five seconds from the existing one-second flush. Never otherwise. The
-integration is read outside the bridge's own lock, because it can reach Bukkit's plugin-manager
-monitor, which the server holds while disabling plugins (and a disable takes the bridge's lock); a
-stamp taken before each read keeps an older read from being sent after a newer one.
+`bridge.channels` is sent on the first flush after enable, on the first flush after every reconnect
+(a frame sent into a dying socket is lost silently, so the bot is assumed to know nothing after one),
+and whenever the state or the channel list changes, polled every five seconds from the existing
+one-second flush. Never otherwise.
+
+**The integration is only ever read from that flush.** Reading it can reach Bukkit's `getPlugin`,
+which is synchronized on the plugin manager, and the server holds that monitor while disabling
+plugins, which tears the tunnel down. So nothing that can run under another lock reads it: the tunnel's
+mode listener (called while the negotiator holds its own monitor) and `enable` (which can run under
+the module manager's lock) only *request* a report, and the flush on `heimdall-sched`, holding nothing,
+makes it. The bridge's own inventory lock is taken by that report alone, never while reading the
+integration, and "forget what the bot was told" is a lock-free flag the next report applies, so no
+thread ever waits on that lock. A stamp taken before each read keeps an older read from being sent
+after a newer one, including a newer read that found nothing changed. On the Bukkit side the
+integration likewise loads ChatControl's classes and registers its hook without holding its own lock.
 
 **Both directions fail closed.** Outbound, a channel line is relayed only if its channel is in
 `chatChannels` (case-insensitive); an absent or empty setting relays no channel lines at all, so a
@@ -1960,6 +1969,10 @@ channelled server. Drops are counted in the debug line, never described.
   the component (rather than blocking the line) is therefore not seen. Blocking, muting,
   private-message auto-mode and shadow-blocking are all seen, through the cancelled flag and the
   viewers.
+- On Paper with ChatControl installed and listeners on the sync `PlayerChatEvent`, Paper runs that
+  event on the main thread between the two async ones and the chat thread waits for it. If the main
+  thread stalls for longer than the five-second park expiry, the parked line has expired when
+  `AsyncChatEvent` finally fires, and it is dropped unrelayed (fails closed).
 - On Paper with ChatControl installed, a synthetic `AsyncPlayerChatEvent` that another plugin
   fires on its own is not relayed untagged: no `AsyncChatEvent` follows it, so its parked line is
   discarded when the thread is next touched (it expires after a few seconds, the next line's

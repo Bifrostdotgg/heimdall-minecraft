@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -170,8 +171,11 @@ final class ChatControlChannels implements ChatChannels {
     /** Set once at bootstrap; the hook registers only when there is a pipeline to feed. */
     private volatile ChatPipeline pipeline;
 
-    /** Whether the post-event listener is registered. Guarded by {@link #lock} for writes. */
+    /** Whether the post-event listener is registered. Written once, by the registration claimant. */
     private volatile boolean hooked;
+
+    /** Claimed by the one thread that attempts the registration; never released. */
+    private final AtomicBoolean registrationClaimed = new AtomicBoolean();
 
     /** The channel names last read successfully; see {@link #channelNames()}. */
     private volatile List<String> lastNames;
@@ -436,38 +440,55 @@ final class ChatControlChannels implements ChatChannels {
         if (resolved != null && (hooked || pipeline == null)) {
             return resolved;
         }
-        synchronized (lock) {
-            if (brokenBecause != null) {
+        if (brokenBecause != null) {
+            return null;
+        }
+        // Neither the class loading nor the registration below happens under `lock`. Loading runs
+        // ChatControl's static initialisers and takes class-loader locks, and registerEvent belongs
+        // to the server's plugin manager, whose monitor the server holds while dispatching sync
+        // events and disabling plugins. `lock` is taken from inside such dispatches (markBroken,
+        // from the channel hook), so holding it across either call could close a loop with them.
+        if (resolved == null) {
+            Api loaded;
+            try {
+                loaded = Api.load(environment.loaderOf(plugin));
+            } catch (Throwable failed) {
+                markBroken("ChatControl's API could not be found (a ChatControl update may have "
+                        + "moved it)", failed);
                 return null;
             }
-            if (api == null) {
-                try {
-                    api = Api.load(environment.loaderOf(plugin));
-                } catch (Throwable failed) {
-                    markBroken("ChatControl's API could not be found (a ChatControl update may "
-                            + "have moved it)", failed);
+            synchronized (lock) {
+                if (chatControl != plugin) {
+                    // Replaced while loading (a reload during the very first resolution). These
+                    // handles belong to the old copy; the next call starts over with the new one.
                     return null;
                 }
-            }
-            if (!hooked && pipeline != null) {
-                try {
-                    final Api bound = api;
-                    environment.register(bound.postEvent, new Listener() {
-                    }, new EventExecutor() {
-                        @Override
-                        public void execute(Listener listener, Event event) {
-                            onChannelPost(bound, event);
-                        }
-                    });
-                    hooked = true;
-                    logger.info("ChatControl detected: Discord relay follows its chat channels");
-                } catch (Throwable failed) {
-                    markBroken("registering the ChatControl channel listener failed", failed);
-                    return null;
+                if (api == null) {
+                    api = loaded;
                 }
+                resolved = api;
             }
-            return api;
         }
+        if (!hooked && pipeline != null && registrationClaimed.compareAndSet(false, true)) {
+            // One attempt, ever, by whichever thread claims it. Another thread arriving meanwhile
+            // sees hooked=false and answers NONE for that call, which is the truth until this lands.
+            final Api bound = resolved;
+            try {
+                environment.register(bound.postEvent, new Listener() {
+                }, new EventExecutor() {
+                    @Override
+                    public void execute(Listener listener, Event event) {
+                        onChannelPost(bound, event);
+                    }
+                });
+                hooked = true;
+                logger.info("ChatControl detected: Discord relay follows its chat channels");
+            } catch (Throwable failed) {
+                markBroken("registering the ChatControl channel listener failed", failed);
+                return null;
+            }
+        }
+        return brokenBecause != null ? null : resolved;
     }
 
     /** Channel names, or {@code null} after marking the integration broken. */

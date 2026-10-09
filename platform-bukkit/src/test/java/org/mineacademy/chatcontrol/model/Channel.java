@@ -30,6 +30,13 @@ public final class Channel {
     /** Test steering: when set, {@link #getChannelNames} throws it. */
     public static volatile RuntimeException failChannelNames;
 
+    /**
+     * Test steering: when set, {@link #getChannelNames} returns this instead. Erasure lets it hold
+     * things that are not strings, which is how a test makes Heimdall's own handling of the answer
+     * fail, rather than ChatControl's code.
+     */
+    public static volatile List<?> namesOverride;
+
     private static final List<Channel> LOADED = new CopyOnWriteArrayList<Channel>();
     private static final Set<UUID> USING = ConcurrentHashMap.newKeySet();
 
@@ -48,6 +55,7 @@ public final class Channel {
         failOnlinePlayers = null;
         failUsing = null;
         failChannelNames = null;
+        namesOverride = null;
     }
 
     /** Test steering: loads a channel. */
@@ -76,6 +84,12 @@ public final class Channel {
         RuntimeException failure = failChannelNames;
         if (failure != null) {
             throw failure;
+        }
+        List<?> override = namesOverride;
+        if (override != null) {
+            @SuppressWarnings("unchecked")
+            List<String> forced = (List<String>) override;
+            return forced;
         }
         List<String> names = new ArrayList<String>();
         for (Channel channel : LOADED) {
