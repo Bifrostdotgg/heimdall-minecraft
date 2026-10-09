@@ -23,7 +23,11 @@ import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.TunnelSpiService;
 import java.io.File;
 import java.util.Collections;
+import java.util.function.IntSupplier;
 import org.bukkit.Bukkit;
+import org.bukkit.event.Event;
+import org.bukkit.event.EventPriority;
+import org.bukkit.plugin.EventExecutor;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -283,10 +287,29 @@ final class BukkitBootstrap {
         // Before the chat listener, so the first line typed already knows whether ChatControl is
         // deciding channels. attach() also registers ChatControl's channel hook when it is there.
         platform.chatControl().attach(runtime.chatPipeline());
-        Bukkit.getPluginManager().registerEvents(
-                new BukkitChatListener(
-                        logger, runtime.chatPipeline(), platform.messenger(), platform.chatControl()),
-                plugin);
+        // Paper's AsyncChatEvent, looked up by name through the server's own loader: it fires after
+        // the legacy chat event, and on Paper that is where ChatControl does its work, so with
+        // ChatControl installed the untagged relay waits for it. Absent on Spigot. See D85.
+        final BukkitChatListener chat = new BukkitChatListener(
+                logger, runtime.chatPipeline(), platform.messenger(), platform.chatControl(),
+                BukkitChatListener.ModernChat.detect(Bukkit.class.getClassLoader()),
+                new IntSupplier() {
+                    @Override
+                    public int getAsInt() {
+                        return Bukkit.getOnlinePlayers().size();
+                    }
+                });
+        Bukkit.getPluginManager().registerEvents(chat, plugin);
+        chat.installModern(new BukkitChatListener.ModernRegistrar() {
+            @Override
+            public void register(Class<? extends Event> type, EventExecutor executor) {
+                // ignoreCancelled false: the handler must run for a cancelled line too, to release
+                // what the legacy handler parked; it checks cancellation itself.
+                Bukkit.getPluginManager().registerEvent(
+                        type, chat, EventPriority.MONITOR, executor, plugin, false);
+            }
+        });
+        logger.debug(() -> "chat relay: Paper chat hook " + chat.modernState());
         Bukkit.getPluginManager().registerEvents(
                 new BukkitCommandListener(logger, runtime.commandPipeline(), platform.messenger()),
                 plugin);

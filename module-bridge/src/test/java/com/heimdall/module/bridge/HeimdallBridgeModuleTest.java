@@ -172,11 +172,21 @@ class HeimdallBridgeModuleTest {
     private static final class FakeChannels implements ChatChannels {
 
         private volatile State state = State.ACTIVE;
+        private volatile boolean membersIgnoreState;
         private final Map<String, List<PlayerHandle>> channels =
                 Collections.synchronizedMap(new LinkedHashMap<String, List<PlayerHandle>>());
 
         FakeChannels state(State value) {
             this.state = value;
+            return this;
+        }
+
+        /**
+         * Answers members whatever the state says, which the interface forbids. Exists to prove the
+         * bridge applies its own ACTIVE gate rather than trusting the integration to.
+         */
+        FakeChannels lyingAboutMembers() {
+            this.membersIgnoreState = true;
             return this;
         }
 
@@ -202,7 +212,7 @@ class HeimdallBridgeModuleTest {
 
         @Override
         public Optional<Collection<PlayerHandle>> members(String channel) {
-            if (state != State.ACTIVE || channel == null) {
+            if ((state != State.ACTIVE && !membersIgnoreState) || channel == null) {
                 return Optional.empty();
             }
             synchronized (channels) {
@@ -1161,6 +1171,32 @@ class HeimdallBridgeModuleTest {
             tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("for staff", "staff"));
 
             assertTrue(mod.messageText().isEmpty());
+        }
+
+        private void assertLyingIntegrationIgnored(ChatChannels.State state) {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer mod = platform.join(FakePlayer.named("Mod"));
+            platform.withChatChannels(
+                    new FakeChannels().channel("staff", mod).state(state).lyingAboutMembers());
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("for staff", "staff"));
+
+            assertTrue(mod.messageText().isEmpty(),
+                    "an integration that hands out members while " + state + " must not be "
+                            + "believed: routing by channel needs the hook to be live");
+        }
+
+        @Test
+        @DisplayName("the bridge's own ACTIVE gate: members offered while BROKEN are ignored")
+        void activeGateIgnoresBrokenMembers() {
+            assertLyingIntegrationIgnored(ChatChannels.State.BROKEN);
+        }
+
+        @Test
+        @DisplayName("the bridge's own ACTIVE gate: members offered while NONE are ignored")
+        void activeGateIgnoresNoneMembers() {
+            assertLyingIntegrationIgnored(ChatChannels.State.NONE);
         }
 
         @Test

@@ -1857,16 +1857,46 @@ dependency anything can compile against.
 
 **Where relay happens moved, and only when ChatControl is installed.** Without it the listener is
 unchanged. With it, `NORMAL` runs the checks only (`dispatch`), so a muted player is still blocked
-before anything is delivered, and relay happens later from one of two places:
+before anything is delivered, and relay happens later. Which path a line takes is decided once, at
+`LOWEST`, and carried to the later handlers in a per-thread state, so a ChatControl that becomes
+visible half-way through a line cannot make it relay twice.
 
-- ChatControl's own `ChannelPostChatEvent`, at `MONITOR`, for a line delivered into a channel. This
-  also covers lines sent by command (`/ch send`), which never fire a Bukkit chat event. It runs
-  `dispatch` again, read-only, so a muted player whose line ChatControl delivered anyway is still
-  not relayed, and never cancels ChatControl's event. `isCancelledSilently()` lines (shadow-blocked
-  by ChatControl's rules, visible only to the sender) are never relayed, and only a `Player` sender
-  is chat.
-- A second `AsyncPlayerChatEvent` handler at `MONITOR`, untagged, for a player ChatControl is not
-  routing into a channel (`Channel.isUsingChannels` false, or channels switched off).
+- **A line delivered into a channel** is relayed from ChatControl's own `ChannelPostChatEvent`, at
+  `MONITOR`. This also covers lines sent by command (`/ch send`), which never fire a Bukkit chat
+  event. It runs `dispatch` again, read-only, so a muted player whose line ChatControl delivered
+  anyway is still not relayed, and it never cancels ChatControl's event. `isCancelledSilently()`
+  lines (shadow-blocked by ChatControl's rules, visible only to the sender) are never relayed, and
+  only a `Player` sender is chat. A legacy chat line from a player ChatControl routes into a channel
+  (`Channel.isUsingChannels`) is never relayed from the chat listener.
+- **Any other line** is relayed untagged, but only once ChatControl has finished with it, and where
+  that happens differs by server:
+  - **Spigot:** ChatControl works in the legacy `AsyncPlayerChatEvent`, so the relay runs at that
+    event's `MONITOR`.
+  - **Paper:** ChatControl (default `Chat_Listener_Priority` `HIGH-MODERN`) does all of its work
+    in Paper's `AsyncChatEvent`: mutes, rules, the no-write checks, and private-message auto-mode,
+    which after `/tell bob` re-sends each chat line as a `/tell` and cancels the chat event.
+    Paper fires that event **after** the legacy one, on the same thread. In `ChatProcessor.process`
+    (PaperMC/Paper `main`, read for this change) the legacy async event is posted first, then the
+    sync `PlayerChatEvent` on the main thread if it has listeners (waited for), then
+    `processModern` posts `AsyncChatEvent` on the calling thread with the legacy cancelled flag
+    carried over. It is posted even when cancelled. Relaying at the legacy `MONITOR` would have
+    published private messages, ChatControl-muted players and rule-blocked lines under
+    ChatControl's default config. So where `AsyncChatEvent` exists, the legacy `MONITOR` only
+    **parks** the line in a `ThreadLocal`. A `MONITOR` executor on `AsyncChatEvent`, registered
+    by class name and reading only Bukkit's `Event`, `Cancellable` and `PlayerEvent` types plus
+    one reflective `viewers()` call treated as a plain collection (the Adventure `message()` is
+    never touched, so the shading problem of D43 does not arise), takes it back. It relays the
+    line only if the event is not cancelled and belongs to the same sender. The `ThreadLocal` is
+    reset at the legacy `LOWEST`, so a line that never reached the second half cannot be picked up
+    by a later one. If the class exists but the executor cannot be registered, nothing is relayed
+    untagged and that is logged once. It never falls back to the legacy `MONITOR`.
+
+**Shadow-blocks for players outside channels.** ChatControl can shadow-block a line without
+cancelling it, by shrinking its audience to the sender. So the untagged relay also drops a line whose
+audience has no players at all, or only the sender while somebody else is online: the legacy
+recipients on Spigot, the `AsyncChatEvent` viewers on Paper (where the console is also a viewer and
+is not counted). Only `Player` instances are counted. A genuinely private line nobody else could see
+is dropped by the same rule, which is the accepted direction.
 
 `ChatChannelProxyEvent`, ChatControl's event for a line forwarded from another backend, is
 deliberately not hooked: the backend it was typed on relays its own chat, so hooking it would relay
@@ -1875,9 +1905,24 @@ inbound direction: it re-runs ChatControl's pipeline as the sender and fires the
 which would loop every Discord line straight back to Discord.
 
 **The switch is presence, not health.** If ChatControl is installed but a class Heimdall needs has
-moved (a ChatControl update), the integration reports `broken`, the untagged handler relays nothing
+moved (a ChatControl update), the integration reports `broken`, the untagged relay relays nothing
 and logs that once, and inbound messages are dropped. A broken hook that fell back to relaying at
 `NORMAL` would leak exactly when the code that understands channels stopped working.
+
+Two kinds of failure are told apart. A **resolution** failure (a missing class, method or field, a
+type that is not what it was, a linkage error, a hook that cannot be registered) is permanent for the
+boot. **ChatControl's own code throwing** while Heimdall calls it (an `InvocationTargetException`, for
+example `getOnlinePlayers()` racing a player who just quit) fails closed for that one call only: the
+member lookup comes back empty, the line is dropped, and a warning naming the exception's class (never
+its message) is logged at most once a minute. An `Error` from Heimdall's own chat pipeline inside the
+hook is logged as Heimdall's, and does not mark ChatControl broken.
+
+**Reloads fail closed.** A plugin manager (PlugMan, ServerUtils) can unload ChatControl and load a
+fresh copy in a new class loader, and the hook is bound to the old one. So once anything has been
+resolved, a disabled cached instance makes the integration ask Bukkit again on every call. ChatControl
+gone, or back as a different instance, is `broken` with a reason that says to restart the server. The
+same instance switched off in place is `none`: it is not routing chat, and it is still the same
+classes when it is switched back on.
 
 **The wire (`chatchannels@1`, a build capability declared alongside `bridge@1`, like `status@1`):**
 
@@ -1900,11 +1945,16 @@ known here; a message naming no channel is shown to everybody only when the stat
 dropped on an `active` or `broken` server, because "everybody" is not an audience anybody picked on a
 channelled server. Drops are counted in the debug line, never described.
 
-**Known limit, named.** For a player who is *not* in a channel, on Paper, the untagged relay still
-runs at the legacy event's `MONITOR`, which is before ChatControl's own processing in the Adventure
-event. A line ChatControl's rules later block for such a player can therefore still be relayed. That
-is no worse than before this change, and channel lines, the case this entry exists for, are relayed
-from ChatControl's post-delivery event, after every rule has run.
+**Known limits, named.**
+
+- On Paper the untagged relay sends the text as the legacy event left it. A ChatControl rule that
+  *rewrites* a word in the `AsyncChatEvent` component (rather than blocking the line) is not seen,
+  because reading the component is exactly what shading forbids. Blocking, muting, private-message
+  auto-mode and shadow-blocking are all seen, through the cancelled flag and the viewers.
+- The shadow-block check is a heuristic on audience size, and drops a legitimate line nobody else
+  could see.
+- A reloaded ChatControl pauses relay until the server restarts, rather than re-hooking into the new
+  class loader.
 
 ---
 

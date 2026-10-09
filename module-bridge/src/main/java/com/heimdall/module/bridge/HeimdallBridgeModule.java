@@ -629,20 +629,26 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         if (ctx == null || bus == null) {
             return;
         }
-        ChatChannels channels = chatChannels(ctx);
-        ChatChannels.State state = stateOf(channels);
-        List<String> names = Collections.emptyList();
-        if (state == ChatChannels.State.ACTIVE) {
-            try {
-                names = Collections.unmodifiableList(new ArrayList<String>(channels.channelNames()));
-            } catch (RuntimeException failed) {
-                // The interface says this cannot throw. If it does anyway, the honest report is that
-                // the channel plugin cannot be read, which is exactly what BROKEN means.
-                state = ChatChannels.State.BROKEN;
-            }
-        }
-
+        ChatChannels.State state;
+        List<String> names;
+        // Read and sent under one lock. Reading outside it would let a forced report on the socket
+        // thread and a poll on heimdall-sched each read, then send in the opposite order, leaving the
+        // bot holding the older of the two inventories.
         synchronized (inventoryLock) {
+            ChatChannels channels = chatChannels(ctx);
+            state = stateOf(channels);
+            names = Collections.emptyList();
+            if (state == ChatChannels.State.ACTIVE) {
+                try {
+                    names = Collections.unmodifiableList(
+                            new ArrayList<String>(channels.channelNames()));
+                } catch (RuntimeException failed) {
+                    // The interface says this cannot throw. If it does anyway, the honest report is
+                    // that the channel plugin cannot be read, which is exactly what BROKEN means.
+                    state = ChatChannels.State.BROKEN;
+                }
+            }
+
             if (!force && state == reportedState && names.equals(reportedNames)) {
                 return;
             }

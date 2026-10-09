@@ -11,6 +11,9 @@ public final class ChannelPostChatEvent extends Event implements Cancellable {
 
     private static final HandlerList HANDLERS = new HandlerList();
 
+    /** Test steering: when set, {@link #getMessage()} throws it, as ChatControl's own code can. */
+    public static volatile RuntimeException failGetMessage;
+
     private final Channel channel;
     private final CommandSender sender;
     private final String message;
@@ -34,6 +37,10 @@ public final class ChannelPostChatEvent extends Event implements Cancellable {
     }
 
     public String getMessage() {
+        RuntimeException failure = failGetMessage;
+        if (failure != null) {
+            throw failure;
+        }
         return message;
     }
 

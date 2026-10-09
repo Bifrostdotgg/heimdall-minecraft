@@ -7,6 +7,7 @@ import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.PlayerHandle;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -64,13 +65,32 @@ import org.bukkit.plugin.Plugin;
  *
  * <h2>Resolution</h2>
  *
+ * <h2>Two kinds of failure</h2>
+ *
+ * <p>A <em>resolution</em> failure (a class, method or field that is not there, a type that is not
+ * what it was, a linkage error) means the API moved, and it is permanent: the state becomes
+ * {@code BROKEN} for the rest of the boot. ChatControl's <em>own code throwing</em> while Heimdall
+ * calls it (an {@link InvocationTargetException}, say {@code getOnlinePlayers()} racing a player who
+ * just quit) is one call's problem: that one lookup or line fails closed, a warning is logged at most
+ * once a minute, and the next call tries again.
+ *
+ * <h2>Reloads</h2>
+ *
+ * <p>A plugin manager (PlugMan, ServerUtils) can unload ChatControl and load a fresh copy in a new
+ * class loader. The hook and every handle here are bound to the old one, so once anything has been
+ * resolved, ChatControl disappearing or coming back as a different instance is {@code BROKEN} with a
+ * reason that says to restart, never a quiet {@code NONE} while the new copy routes channels
+ * unobserved.
+ *
+ * <h2>Resolution</h2>
+ *
  * <p>Lazy, and retried while unresolved, for the same load-order reason as LuckPerms (#796 / MC-10):
  * {@code softdepend} makes ChatControl enable first on an ordinary boot, but nothing guarantees it.
  * A missing plugin is re-looked-up at most once per {@link #RETRY_NANOS}, because
  * {@code getPlugin} is synchronized on the plugin manager and the chat listener asks per message.
- * A <em>found</em> plugin is cached forever. A reflective failure is cached forever too, as
- * {@code BROKEN}: a class that was not there a second ago will not be there now, and retrying it per
- * message would turn one error into a log flood.
+ * A <em>found</em> plugin is cached, and only re-checked while it is disabled (see Reloads). A
+ * resolution failure is cached for good, as {@code BROKEN}: a class that was not there a second ago
+ * will not be there now, and retrying it per message would turn one error into a log flood.
  *
  * <p>Every public method is safe from any thread, does not block beyond ChatControl's own reads,
  * and never throws: anything reflective is caught as {@link Throwable}, because the failure this
@@ -87,6 +107,9 @@ final class ChatControlChannels implements ChatChannels {
 
     /** How long a "ChatControl is not installed" answer is trusted before asking Bukkit again. */
     static final long RETRY_NANOS = 5_000_000_000L;
+
+    /** At most one warning per this interval for ChatControl's own code throwing. */
+    static final long TRANSIENT_WARN_NANOS = 60_000_000_000L;
 
     /**
      * What this class needs from the server, as a seam.
@@ -113,7 +136,9 @@ final class ChatControlChannels implements ChatChannels {
         /** Leave it to the channel hook: the player's line is going into a channel. */
         SKIP,
         /** The hook cannot be trusted, so relay nothing (fail closed). */
-        BROKEN
+        BROKEN,
+        /** ChatControl threw while answering for this one line; drop it (fail closed), try again next. */
+        TRANSIENT
     }
 
     private final HeimdallLogger logger;
@@ -123,11 +148,18 @@ final class ChatControlChannels implements ChatChannels {
 
     private final Object lock = new Object();
 
-    /** The ChatControl plugin once found; never reset. */
+    /** The ChatControl plugin once found; replaced only before anything was bound to it. */
     private volatile Plugin chatControl;
 
-    /** {@link System#nanoTime()} before which a missing ChatControl is not looked up again. */
+    /**
+     * {@link System#nanoTime()} before which a missing ChatControl is not looked up again. Starts at
+     * construction time rather than zero, because {@code nanoTime}'s origin is arbitrary and may be
+     * negative.
+     */
     private volatile long nextLookupAt;
+
+    /** {@link System#nanoTime()} before which a transient ChatControl failure is not warned again. */
+    private volatile long nextTransientWarnAt;
 
     /** The resolved reflective handles; {@code null} until ChatControl is enabled and resolved. */
     private volatile Api api;
@@ -150,6 +182,9 @@ final class ChatControlChannels implements ChatChannels {
         this.environment = environment;
         this.handles = handles;
         this.retryNanos = retryNanos;
+        long now = System.nanoTime();
+        this.nextLookupAt = now;
+        this.nextTransientWarnAt = now;
     }
 
     /** The production wiring: Bukkit's plugin manager, owned by {@code heimdall}. */
@@ -184,10 +219,12 @@ final class ChatControlChannels implements ChatChannels {
 
     @Override
     public State state() {
+        // Looked up first: the lookup is where a reload is noticed, and it marks the integration
+        // broken, so checking brokenBecause before it would answer NONE for that one call.
+        Plugin plugin = chatControl();
         if (brokenBecause != null) {
             return State.BROKEN;
         }
-        Plugin plugin = chatControl();
         if (plugin == null || !isEnabled(plugin)) {
             // Not installed, or installed and not running: either way ChatControl is not routing
             // chat, so chat is one room.
@@ -262,7 +299,7 @@ final class ChatControlChannels implements ChatChannels {
             }
             return Optional.<Collection<PlayerHandle>>of(Collections.unmodifiableList(members));
         } catch (Throwable failed) {
-            markBroken("looking up a ChatControl channel's members failed", failed);
+            fail("looking up a ChatControl channel's members", failed);
             return Optional.empty();
         }
     }
@@ -283,8 +320,9 @@ final class ChatControlChannels implements ChatChannels {
             Object using = api.isUsingChannels.invoke(null, player);
             return Boolean.TRUE.equals(using) ? UntaggedRelay.SKIP : UntaggedRelay.RELAY;
         } catch (Throwable failed) {
-            markBroken("Channel.isUsingChannels failed", failed);
-            return UntaggedRelay.BROKEN;
+            return fail("checking whether a player uses ChatControl channels", failed)
+                    ? UntaggedRelay.BROKEN
+                    : UntaggedRelay.TRANSIENT;
         }
     }
 
@@ -295,11 +333,18 @@ final class ChatControlChannels implements ChatChannels {
 
     // ── Resolution ───────────────────────────────────────────────────────────
 
-    /** The ChatControl plugin, looked up again at most once per retry interval while missing. */
+    /**
+     * The ChatControl plugin, looked up again at most once per retry interval while missing, and
+     * re-checked on every call while the cached instance is disabled, which is what a reload looks
+     * like from here.
+     */
     private Plugin chatControl() {
         Plugin found = chatControl;
         if (found != null) {
-            return found;
+            if (brokenBecause == null && !isEnabled(found)) {
+                checkReloaded(found);
+            }
+            return chatControl;
         }
         long now = System.nanoTime();
         if (now - nextLookupAt < 0) {
@@ -316,6 +361,42 @@ final class ChatControlChannels implements ChatChannels {
         }
         chatControl = found;
         return found;
+    }
+
+    /**
+     * The cached ChatControl is disabled: find out whether it is the same plugin switched off, or
+     * gone, or replaced by a fresh copy.
+     *
+     * <p>Switched off in place is {@code NONE}: it is not routing chat, and if it is switched back on
+     * it is the same classes, so the hook is still valid. Gone or replaced, once anything was bound to
+     * the old class loader, is {@code BROKEN}: the hook listens on the old copy's event class and
+     * would never hear the new one route a staff line. Before anything was bound there is nothing
+     * stale, so the new answer is simply adopted.
+     */
+    private void checkReloaded(Plugin cached) {
+        // Not throttled, unlike the missing-plugin lookup. A throttle here would leave a window of
+        // up to RETRY_NANOS in which a reloaded copy routes staff lines while this answers NONE, and
+        // a disabled cached instance is rare (a reload, or ChatControl switched off by hand), so a
+        // synchronized getPlugin per call for that stretch is the cheaper risk.
+        Plugin current;
+        try {
+            current = environment.findChatControl();
+        } catch (Throwable failed) {
+            // Could not ask; keep the current answer and ask again next interval.
+            return;
+        }
+        if (current == cached) {
+            return;
+        }
+        synchronized (lock) {
+            if (api == null && !hooked) {
+                chatControl = current;
+                return;
+            }
+        }
+        markBroken(current == null
+                ? "ChatControl was unloaded after Heimdall hooked it; restart the server to re-hook"
+                : "ChatControl was reloaded; restart the server to re-hook", null);
     }
 
     private static boolean isEnabled(Plugin plugin) {
@@ -386,21 +467,56 @@ final class ChatControlChannels implements ChatChannels {
             }
             return Collections.unmodifiableList(out);
         } catch (Throwable failed) {
-            markBroken("Channel.getChannelNames failed", failed);
+            fail("listing ChatControl channels", failed);
             return null;
         }
     }
 
     /**
+     * Classifies a failure from a reflective call.
+     *
+     * <p>An {@link InvocationTargetException} is ChatControl's own code throwing for this one call: a
+     * rate-limited warning, and the caller fails closed for that call only. Anything else (a missing
+     * member, an access or linkage error, a type that is not what it was, an argument the method no
+     * longer takes) means the API moved, and the integration is broken for good.
+     *
+     * @return {@code true} if the integration is now broken
+     */
+    private boolean fail(String what, Throwable failure) {
+        if (failure instanceof InvocationTargetException) {
+            warnTransient(what, ((InvocationTargetException) failure).getCause());
+            return false;
+        }
+        markBroken(what + " failed", failure);
+        return true;
+    }
+
+    /**
+     * At most one warning a minute. Names the exception's class only, never its message: this runs
+     * while a chat line or a Discord message is in flight, and a message is the one place a third
+     * party's code could put that text.
+     */
+    private void warnTransient(String what, Throwable thrown) {
+        long now = System.nanoTime();
+        if (now - nextTransientWarnAt < 0) {
+            return;
+        }
+        nextTransientWarnAt = now + TRANSIENT_WARN_NANOS;
+        logger.warn("ChatControl threw " + (thrown == null ? "an exception" : thrown.getClass().getName())
+                + " while Heimdall was " + what + "; that one relay was skipped, nothing else is "
+                + "affected. Repeats are reported at most once a minute.");
+    }
+
+    /**
      * Records the integration as broken, once, with an error naming why. No chat text can reach this
-     * line: the causes are reflective failures, whose messages name classes and methods.
+     * line: the causes are resolution failures and reloads, whose messages name classes and methods.
      */
     private void markBroken(String why, Throwable cause) {
         synchronized (lock) {
             if (brokenBecause != null) {
                 return;
             }
-            brokenBecause = why + ": " + cause;
+            brokenBecause = cause == null ? why : why + ": " + cause;
         }
         logger.error("ChatControl channel integration disabled: " + why + ". Chat relay to and "
                 + "from Discord is paused on this server until this is fixed, so a staff channel "
@@ -424,6 +540,7 @@ final class ChatControlChannels implements ChatChannels {
         if (chat == null) {
             return;
         }
+        ChatMessage message;
         try {
             if (Boolean.TRUE.equals(bound.eventCancelledSilently.invoke(event))) {
                 return;
@@ -441,9 +558,20 @@ final class ChatControlChannels implements ChatChannels {
             }
             Object text = bound.eventMessage.invoke(event);
             Player player = (Player) sender;
-            ChatMessage message = ChatMessage.inChannel(
+            message = ChatMessage.inChannel(
                     player.getUniqueId(), player.getName(), text == null ? "" : text.toString(),
                     name.toString());
+        } catch (Throwable failed) {
+            // Only the reflective reads above can say anything about ChatControl's health. A throw
+            // from its own getters drops this one line; anything else means the API moved.
+            fail("reading a ChatControl channel message", failed);
+            return;
+        }
+
+        // Heimdall's own pipeline, outside the catch above on purpose: an Error from a check or an
+        // observer is a Heimdall bug, and recording it as "ChatControl is broken" would pause relay
+        // for the rest of the boot and blame the wrong plugin.
+        try {
             Verdict verdict = chat.dispatch(message);
             if (verdict.isDeny()) {
                 // Read-only: ChatControl already decided to deliver it, and Heimdall's verdict is
@@ -452,7 +580,8 @@ final class ChatControlChannels implements ChatChannels {
             }
             chat.notifyObservers(message);
         } catch (Throwable failed) {
-            markBroken("reading a ChatControl channel message failed", failed);
+            logger.error("the chat pipeline threw on a ChatControl channel line; it was delivered "
+                    + "in game but not relayed", failed);
         }
     }
 

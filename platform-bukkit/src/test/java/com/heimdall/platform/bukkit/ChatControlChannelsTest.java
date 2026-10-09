@@ -408,6 +408,139 @@ class ChatControlChannelsTest {
         assertTrue(logger.logged(LogLevel.SEVERE, "ChatControl channel integration disabled"));
     }
 
+    // ── Reloads ──────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("ChatControl reloaded by a plugin manager: BROKEN, with a reason that says restart")
+    void reloadedIsBroken() {
+        ChatControlChannels channels = active();
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+
+        when(environment.chatControl.isEnabled()).thenReturn(false);
+        environment.chatControl = plugin(true);
+
+        assertEquals(ChatChannels.State.BROKEN, channels.state(),
+                "the hook listens on the old copy's event class; the new copy would route staff "
+                        + "lines unobserved while this said none");
+        assertTrue(channels.installed(), "and relay stays out of the NORMAL handler");
+        assertTrue(channels.brokenReason().contains("reloaded"), channels.brokenReason());
+        assertTrue(channels.brokenReason().contains("restart"), channels.brokenReason());
+    }
+
+    @Test
+    @DisplayName("ChatControl unloaded after being hooked: BROKEN, not none")
+    void unloadedIsBroken() {
+        ChatControlChannels channels = active();
+
+        when(environment.chatControl.isEnabled()).thenReturn(false);
+        environment.chatControl = null;
+
+        assertEquals(ChatChannels.State.BROKEN, channels.state());
+        assertTrue(channels.brokenReason().contains("unloaded"), channels.brokenReason());
+    }
+
+    @Test
+    @DisplayName("ChatControl switched off in place: none, and nothing is reported broken")
+    void disabledInPlaceIsNone() {
+        ChatControlChannels channels = active();
+        Plugin same = environment.chatControl;
+
+        when(same.isEnabled()).thenReturn(false);
+        assertEquals(ChatChannels.State.NONE, channels.state(),
+                "the same copy, not routing chat; switched back on it is the same classes");
+
+        when(same.isEnabled()).thenReturn(true);
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+        assertTrue(logger.at(LogLevel.SEVERE).isEmpty(), logger.records().toString());
+    }
+
+    @Test
+    @DisplayName("a replacement before anything was bound is simply adopted")
+    void replacedBeforeBindingIsAdopted() {
+        environment.chatControl = plugin(false);
+        Settings.Channels.ENABLED = Boolean.TRUE;
+        ChatControlChannels channels = channels();
+        channels.attach(pipeline);
+        assertEquals(ChatChannels.State.NONE, channels.state());
+
+        environment.chatControl = plugin(true);
+
+        assertEquals(ChatChannels.State.ACTIVE, channels.state(),
+                "nothing was bound to the first copy, so there is nothing stale to protect");
+    }
+
+    // ── One-call failures ────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("ChatControl's own code throwing while listing members fails that call only")
+    void throwingMembersIsTransient() {
+        Player mod = player("Mod");
+        Channel.create("staff").member(mod, ChannelMode.WRITE);
+        ChatControlChannels channels = active();
+
+        Channel.failOnlinePlayers = new IllegalStateException("correct-horse quit mid-lookup");
+        assertFalse(channels.members("staff").isPresent(), "fail closed for this call");
+        assertFalse(channels.members("staff").isPresent());
+        assertEquals(ChatChannels.State.ACTIVE, channels.state(), "and only this call");
+
+        Channel.failOnlinePlayers = null;
+        assertEquals(Collections.singletonList("Mod"), names(channels.members("staff").get()));
+
+        assertEquals(1, logger.at(LogLevel.WARN).size(),
+                "rate-limited: one warning for the burst, not one per call: " + logger.records());
+        assertTrue(logger.at(LogLevel.SEVERE).isEmpty(), logger.records().toString());
+        assertFalse(logger.records().toString().contains("correct-horse"),
+                "the exception's class is named, never its message: " + logger.records());
+    }
+
+    @Test
+    @DisplayName("isUsingChannels throwing answers TRANSIENT, not BROKEN")
+    void throwingUsingIsTransient() {
+        ChatControlChannels channels = active();
+
+        Channel.failUsing = new IllegalStateException("no player cache yet");
+
+        assertEquals(ChatControlChannels.UntaggedRelay.TRANSIENT,
+                channels.untaggedRelay(player("Steve")));
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+    }
+
+    @Test
+    @DisplayName("a channel event whose getter throws drops that line, and the next one relays")
+    void throwingGetterDropsOneLine() throws Exception {
+        Channel staff = Channel.create("staff");
+        ChatControlChannels channels = active();
+
+        ChannelPostChatEvent.failGetMessage = new IllegalStateException("boom");
+        try {
+            environment.fire(new ChannelPostChatEvent(staff, player("Steve"), "first", false));
+        } finally {
+            ChannelPostChatEvent.failGetMessage = null;
+        }
+        environment.fire(new ChannelPostChatEvent(staff, player("Steve"), "second", false));
+
+        assertEquals(1, relayed.size());
+        assertEquals("second", relayed.get(0).message());
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+    }
+
+    @Test
+    @DisplayName("an Error from Heimdall's own pipeline is not blamed on ChatControl")
+    void pipelineErrorDoesNotBreakTheIntegration() throws Exception {
+        pipeline.register(message -> {
+            throw new AssertionError("a Heimdall bug");
+        }, 0, "test");
+        Channel staff = Channel.create("staff");
+        ChatControlChannels channels = active();
+
+        environment.fire(new ChannelPostChatEvent(staff, player("Steve"), "hi", false));
+
+        assertEquals(ChatChannels.State.ACTIVE, channels.state(),
+                "pausing relay for the rest of the boot and naming ChatControl would be wrong twice");
+        assertTrue(logger.logged(LogLevel.SEVERE, "the chat pipeline threw"),
+                logger.records().toString());
+    }
+
     @Test
     @DisplayName("nothing it logs carries a message body")
     void logsCarryNoChatText() throws Exception {

@@ -21,6 +21,12 @@ import org.mineacademy.chatcontrol.settings.Settings;
  */
 public final class Channel {
 
+    /** Test steering: when set, {@link #getOnlinePlayers()} throws it, as ChatControl's can. */
+    public static volatile RuntimeException failOnlinePlayers;
+
+    /** Test steering: when set, {@link #isUsingChannels} throws it. */
+    public static volatile RuntimeException failUsing;
+
     private static final List<Channel> LOADED = new CopyOnWriteArrayList<Channel>();
     private static final Set<UUID> USING = ConcurrentHashMap.newKeySet();
 
@@ -36,6 +42,8 @@ public final class Channel {
     public static void reset() {
         LOADED.clear();
         USING.clear();
+        failOnlinePlayers = null;
+        failUsing = null;
     }
 
     /** Test steering: loads a channel. */
@@ -79,6 +87,10 @@ public final class Channel {
 
     /** Like the real one: dereferences ENABLED unguarded, so a null setting throws. */
     public static boolean isUsingChannels(Player player) {
+        RuntimeException failure = failUsing;
+        if (failure != null) {
+            throw failure;
+        }
         return Settings.Channels.ENABLED.booleanValue() && USING.contains(player.getUniqueId());
     }
 
@@ -87,6 +99,10 @@ public final class Channel {
     }
 
     public Map<Player, ChannelMode> getOnlinePlayers() {
+        RuntimeException failure = failOnlinePlayers;
+        if (failure != null) {
+            throw failure;
+        }
         synchronized (members) {
             return new LinkedHashMap<Player, ChannelMode>(members);
         }
