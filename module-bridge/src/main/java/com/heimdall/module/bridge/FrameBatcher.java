@@ -51,9 +51,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * platform's event thread, a session listener on {@code heimdall-io} — and must stay what it is: an
  * offer onto a lock-free queue. It must not log, must not block and must not throw.
  *
- * <p>{@link #flush} runs on {@code heimdall-sched} (an immediate drain or the one-second tick, never
- * both at once: it is a single thread), and is the only place a frame is built. It takes the bus as an argument rather than reading a field, so the caller can snapshot a
- * reference a concurrent {@code disable()} might be clearing.
+ * <p>{@link #flush} runs on {@code heimdall-sched} (an immediate drain or the one-second tick,
+ * never both at once: it is a single thread), and is the only place a frame is built. It takes the
+ * bus as an argument rather than reading a field, so the caller can snapshot a reference a
+ * concurrent {@code disable()} might be clearing.
  *
  * @param <T> the queued item; a small immutable value, never a live handle
  */
@@ -156,6 +157,8 @@ final class FrameBatcher<T> {
      * class javadoc.
      */
     int queuedCount() {
-        return queued.get();
+        // Never below zero: clear() racing a drain's decrements can leave the counter at -1, and an
+        // undercount would hide the last queued item from the bridge's backlog re-check.
+        return Math.max(0, queued.get());
     }
 }

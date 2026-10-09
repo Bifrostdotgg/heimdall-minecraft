@@ -87,6 +87,12 @@ class HeimdallBridgeModuleTest {
      */
     private final List<Runnable> pendingDrains = new ArrayList<Runnable>();
 
+    /** The delay each requested drain asked for, in request order. */
+    private final List<Long> drainDelays = new ArrayList<Long>();
+
+    /** When set, the next drain request is refused as a shutting-down executor would. */
+    private boolean rejectNextDrain;
+
     /** Builds the whole rig for a role, since the relay default depends on it. */
     private void setUp(ServerRole role, Payload settings) {
         executors = new HeimdallExecutors(logger, 1);
@@ -112,10 +118,17 @@ class HeimdallBridgeModuleTest {
                 .build());
         module = new HeimdallBridgeModule();
         pendingDrains.clear();
-        module.drainExecutorForTests(new java.util.concurrent.Executor() {
+        drainDelays.clear();
+        rejectNextDrain = false;
+        module.drainSchedulerForTests(new HeimdallBridgeModule.DrainScheduler() {
             @Override
-            public void execute(Runnable command) {
-                pendingDrains.add(command);
+            public void schedule(Runnable drain, long delayMs) {
+                if (rejectNextDrain) {
+                    rejectNextDrain = false;
+                    throw new java.util.concurrent.RejectedExecutionException("shutting down");
+                }
+                drainDelays.add(delayMs);
+                pendingDrains.add(drain);
             }
         });
         manager.register(module);
@@ -664,6 +677,38 @@ class HeimdallBridgeModuleTest {
             assertEquals(1, pendingDrains.size());
             runDrains();
             assertEquals(1, tunnel.sent(HeimdallBridgeModule.FRAME_EVENT).size());
+        }
+
+        @Test
+        @DisplayName("the first drain is immediate; one straight after another is spaced")
+        void drainsAreSpaced() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "one");
+            assertEquals(Long.valueOf(0L), drainDelays.get(0), "a quiet line leaves at once");
+            runDrains();
+            say("Steve", "two");
+
+            long delay = drainDelays.get(1);
+            assertTrue(delay > 0L && delay <= HeimdallBridgeModule.MIN_DRAIN_SPACING_MS,
+                    "a drain right after a drain waits out the spacing, got " + delay);
+        }
+
+        @Test
+        @DisplayName("a refused drain does not latch: the next line asks again")
+        void aRefusedDrainDoesNotLatch() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            rejectNextDrain = true;
+            say("Steve", "refused");
+            assertTrue(pendingDrains.isEmpty());
+
+            say("Steve", "accepted");
+            assertEquals(1, pendingDrains.size(), "the request flag was reset by the refusal");
+            runDrains();
+            assertEquals(2, relayedLines().size());
         }
 
         @Test
