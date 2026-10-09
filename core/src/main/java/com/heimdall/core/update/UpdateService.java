@@ -125,9 +125,24 @@ public final class UpdateService {
      * @return whether an update is available as of this check; {@code false} on any failure
      */
     public boolean checkNow() {
+        return check(false);
+    }
+
+    /**
+     * {@link #checkNow()}, asking the bot to skip its release cache.
+     *
+     * <p>For checks an operator asked for by hand: {@code /hd check}, and {@link #updateNow()},
+     * which every caller reaches from a command or a dashboard request. The periodic tick never
+     * uses this - see {@link ReleaseSource#latestRelease(boolean)}.
+     */
+    public boolean checkNowFresh() {
+        return check(true);
+    }
+
+    private boolean check(boolean fresh) {
         try {
-            PluginRelease release =
-                    releases.latestRelease().get(releases.joinTimeoutMs(), TimeUnit.MILLISECONDS);
+            PluginRelease release = releases.latestRelease(fresh)
+                    .get(releases.joinTimeoutMs(), TimeUnit.MILLISECONDS);
             if (release == null || Strings.isBlank(release.version())) {
                 logger.debug("no release information returned by the bot");
                 return false;
@@ -162,7 +177,9 @@ public final class UpdateService {
      * handler or a tunnel reply that has to print something either way.
      */
     public InstallOutcome updateNow() {
-        checkNow();
+        // Always by hand (a command or a dashboard request), so past the bot's cache: installing
+        // "the latest" must mean the release that was just published, not the one an hour ago.
+        checkNowFresh();
         Published current = published;
         if (!current.available || current.release == null) {
             return InstallOutcome.upToDate("Heimdall " + currentVersion + " is already the latest version.");

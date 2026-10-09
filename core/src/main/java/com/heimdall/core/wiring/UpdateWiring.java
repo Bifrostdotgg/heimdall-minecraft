@@ -306,6 +306,11 @@ public final class UpdateWiring {
         }
 
         @Override
+        public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
+            return api.latestRelease(fresh);
+        }
+
+        @Override
         public long joinTimeoutMs() {
             // The update-check budget, not the login one. They differ by roughly twenty seconds at
             // the defaults because plugin/latest runs with a much longer per-attempt timeout, and
@@ -336,7 +341,8 @@ public final class UpdateWiring {
 
         @Override
         public boolean checkNow() {
-            return service.checkNow();
+            // /hd check: an operator asking by hand, so past the bot's release cache.
+            return service.checkNowFresh();
         }
 
         @Override

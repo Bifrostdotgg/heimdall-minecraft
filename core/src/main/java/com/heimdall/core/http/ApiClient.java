@@ -541,10 +541,22 @@ public final class ApiClient {
 
     /** {@code GET plugin/latest} — the newest published release, for the update check. */
     public CompletableFuture<PluginRelease> latestRelease() {
+        return latestRelease(false);
+    }
+
+    /**
+     * {@code GET plugin/latest}, with {@code ?fresh=1} when an operator asked by hand.
+     *
+     * <p>The flag asks the bot to skip its release cache. It travels in the query because the
+     * signature covers the path including the query, so it cannot be added or stripped in transit;
+     * a bot that predates it ignores it and serves its cache, which is the old behaviour.
+     */
+    public CompletableFuture<PluginRelease> latestRelease(final boolean fresh) {
         return async(() -> {
             ApiSettings current = settings;
+            String route = fresh ? "plugin/latest?fresh=1" : "plugin/latest";
             return ApiResponses.pluginRelease(requests.execute(current,
-                    HttpCall.get(guildPath(current, "plugin/latest"), current.updateCheckTimeoutMs())));
+                    HttpCall.get(guildPath(current, route), current.updateCheckTimeoutMs())));
         });
     }
 

@@ -49,6 +49,22 @@ public interface ReleaseSource {
     CompletableFuture<PluginRelease> latestRelease();
 
     /**
+     * The newest published release, optionally asking the bot to skip its cache.
+     *
+     * <p>{@code fresh} is for checks an operator asked for by hand ({@code /hd check},
+     * {@code /hd update}, a dashboard update request). The bot caches the release for up to an
+     * hour, so without it a release published minutes ago is invisible to the person who just went
+     * looking for it. The periodic check never sets it: hundreds of servers on a timer must not each
+     * reach GitHub through the bot.
+     *
+     * <p>Defaults to the cached call, so a source that cannot ask for a fresh answer still answers.
+     * The same threading contract as {@link #latestRelease()}.
+     */
+    default CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
+        return latestRelease();
+    }
+
+    /**
      * How long a caller may block on {@link #latestRelease()} before giving up.
      *
      * <p>Must cover the whole retry sequence plus slack, not one attempt. See the note on the

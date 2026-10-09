@@ -507,5 +507,14 @@ class StubBotApiClientTest {
             assertNotNull(release.publishedAt());
             assertFalse(release.releaseNotes().isEmpty());
         }
+
+        @Test
+        void latestReleaseFresh() throws Exception {
+            // ?fresh=1 is inside the signed path: a stub that verifies over path AND query, the
+            // way the bot does, must accept it and route it like the plain call.
+            PluginRelease release = await(client.latestRelease(true));
+
+            assertEquals("v3.0.0", release.version());
+        }
     }
 }

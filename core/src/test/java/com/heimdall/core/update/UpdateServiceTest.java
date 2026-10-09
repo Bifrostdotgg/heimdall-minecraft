@@ -15,6 +15,7 @@ import com.heimdall.core.util.Registration;
 import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -270,6 +271,36 @@ class UpdateServiceTest {
     }
 
     @Nested
+    @DisplayName("bypassing the bot's release cache")
+    class Freshness {
+
+        @Test
+        @DisplayName("the periodic check uses the cache")
+        void periodicIsCached() {
+            FakeSource source = new FakeSource(release("3.1.0"));
+            UpdateService service = serviceFor(source);
+
+            service.startPeriodicChecks(constant(UpdateSettings.defaults()));
+            scheduler.runPending();
+
+            assertEquals(Arrays.asList(false), source.freshFlags);
+        }
+
+        @Test
+        @DisplayName("checkNow uses the cache; checkNowFresh and updateNow skip it")
+        void handChecksAreFresh() {
+            FakeSource source = new FakeSource(release("3.0.0"));
+            UpdateService service = serviceFor(source);
+
+            service.checkNow();
+            service.checkNowFresh();
+            service.updateNow();
+
+            assertEquals(Arrays.asList(false, true, true), source.freshFlags);
+        }
+    }
+
+    @Nested
     @DisplayName("startPeriodicChecks")
     class PeriodicChecks {
 
@@ -408,6 +439,8 @@ class UpdateServiceTest {
     private static class FakeSource implements ReleaseSource {
 
         final AtomicInteger calls = new AtomicInteger();
+        /** The {@code fresh} flag of every call, in order. */
+        final List<Boolean> freshFlags = new ArrayList<Boolean>();
         private final PluginRelease release;
         private final Throwable failure;
 
@@ -435,6 +468,12 @@ class UpdateServiceTest {
                 return failed;
             }
             return CompletableFuture.completedFuture(release);
+        }
+
+        @Override
+        public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
+            freshFlags.add(fresh);
+            return latestRelease();
         }
 
         @Override
