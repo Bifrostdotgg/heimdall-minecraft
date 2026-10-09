@@ -195,6 +195,29 @@ class HoverTagsTest {
         }
 
         @Test
+        void anItemQuotedInsideAShowTextHoverIsNotATag() {
+            String inner = "<hover:show_item:stone:1>[Stone]";
+            String line = "<hover:show_text:'" + inner + "'>hi</hover> and " + ItemCaptures.spoon();
+            HoverTags.Rewrite rewrite = HoverTags.rewrite(line, ItemTranslations.NONE);
+            assertNotNull(rewrite);
+            assertEquals("<hover:show_text:'" + inner + "'>hi</hover> and [Spoon]", rewrite.text(),
+                    "the show_text tag is skipped whole, its quoted argument untouched");
+            assertEquals(1, rewrite.items().size());
+        }
+
+        @Test
+        void candidateTagsPerLineAreCapped() {
+            StringBuilder within = new StringBuilder();
+            for (int i = 0; i < HoverTags.MAX_ATTEMPTS - 1; i++) {
+                within.append("<hover:show_text:'a'>x ");
+            }
+            assertNotNull(HoverTags.rewrite(within + ItemCaptures.spoon(), ItemTranslations.NONE),
+                    "the last allowed attempt still finds the item");
+            assertNull(HoverTags.rewrite(within + "<hover:show_text:'a'>x " + ItemCaptures.spoon(),
+                    ItemTranslations.NONE), "one attempt past the cap is never examined");
+        }
+
+        @Test
         void toStringNeverCarriesTheText() {
             HoverTags.Rewrite rewrite = HoverTags.rewrite(ItemCaptures.spoon(), ItemTranslations.NONE);
             assertFalse(rewrite.toString().contains("Spoon"));

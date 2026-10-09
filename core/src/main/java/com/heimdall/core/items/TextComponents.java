@@ -111,7 +111,7 @@ public final class TextComponents {
             }
         }
         List<ItemText.Span> out = new ArrayList<ItemText.Span>();
-        flatten(value, Style.NONE, out, tr, 0);
+        flatten(value, Style.NONE, out, tr, 0, new Budget());
         return ItemText.of(capLength(out));
     }
 
@@ -241,17 +241,67 @@ public final class TextComponents {
         return true;
     }
 
+    /**
+     * What one {@link #read} may spend, shared by every node it visits, translation arguments
+     * included.
+     *
+     * <p>Depth and span caps alone do not bound the work. A translation whose format repeats an
+     * argument ({@code %1$s%1$s...}) nested a few levels deep multiplies at every level: a
+     * 543-character custom name built that way expanded to gigabytes and took the chat thread down
+     * with it. So every intermediate string is capped at {@link #MAX_LINE_CHARS}, and every read has
+     * one budget of characters produced and nodes visited; once it is spent the rest of the
+     * component is dropped. A truncated name is a cosmetic fault; an exhausted heap is not.
+     */
+    static final class Budget {
+
+        /** Nodes one read may visit. */
+        static final int MAX_NODES = 512;
+
+        /**
+         * Characters one read may produce, across arguments, formats and output together. Far
+         * beyond any real name or lore line, so it only ever stops an expansion.
+         */
+        static final int MAX_CHARS = 64 * MAX_LINE_CHARS;
+
+        private int nodes = MAX_NODES;
+        private int chars = MAX_CHARS;
+
+        /** Takes one node; {@code false} once none are left. */
+        boolean visit() {
+            if (nodes <= 0) {
+                return false;
+            }
+            nodes--;
+            return true;
+        }
+
+        /** {@code text} cut to what is left of the character budget, which it then spends. */
+        String spend(String text) {
+            if (chars <= 0 || text.isEmpty()) {
+                return "";
+            }
+            String kept = text.length() <= Math.min(chars, MAX_LINE_CHARS) ? text
+                    : text.substring(0, Math.min(chars, MAX_LINE_CHARS));
+            chars -= kept.length();
+            return kept;
+        }
+
+        boolean spent() {
+            return nodes <= 0 || chars <= 0;
+        }
+    }
+
     private static void flatten(Object node, Style inherited, List<ItemText.Span> out,
-            ItemTranslations tr, int depth) {
-        if (node == null || depth > MAX_DEPTH || out.size() >= MAX_SPANS) {
+            ItemTranslations tr, int depth, Budget budget) {
+        if (node == null || depth > MAX_DEPTH || out.size() >= MAX_SPANS || !budget.visit()) {
             return;
         }
         if (node instanceof String) {
-            out.add(inherited.span((String) node));
+            add(out, inherited, budget.spend((String) node));
             return;
         }
         if (node instanceof Number || node instanceof Boolean) {
-            out.add(inherited.span(String.valueOf(node)));
+            add(out, inherited, budget.spend(String.valueOf(node)));
             return;
         }
         List<Object> list = Snbt.asList(node);
@@ -261,11 +311,11 @@ public final class TextComponents {
             }
             // [a, b, c] is a with b and c as children: the rest inherit a's style, not each other's.
             Object head = list.get(0);
-            flatten(head, inherited, out, tr, depth + 1);
+            flatten(head, inherited, out, tr, depth + 1, budget);
             Map<String, Object> headMap = Snbt.asMap(head);
             Style siblings = headMap == null ? inherited : inherited.merge(headMap);
-            for (int i = 1; i < list.size(); i++) {
-                flatten(list.get(i), siblings, out, tr, depth + 1);
+            for (int i = 1; i < list.size() && !budget.spent(); i++) {
+                flatten(list.get(i), siblings, out, tr, depth + 1, budget);
             }
             return;
         }
@@ -274,27 +324,37 @@ public final class TextComponents {
             return;
         }
         Style style = inherited.merge(map);
-        String content = contentOf(map, tr, depth);
-        if (content != null && !content.isEmpty()) {
-            out.add(style.span(content));
+        String content = contentOf(map, tr, depth, budget);
+        if (content != null) {
+            add(out, style, budget.spend(content));
         }
         List<Object> extra = Snbt.asList(map.get("extra"));
         if (extra != null) {
             for (Object child : extra) {
-                flatten(child, style, out, tr, depth + 1);
+                if (budget.spent()) {
+                    break;
+                }
+                flatten(child, style, out, tr, depth + 1, budget);
             }
         }
     }
 
-    private static String contentOf(Map<String, Object> map, ItemTranslations tr, int depth) {
+    private static void add(List<ItemText.Span> out, Style style, String text) {
+        if (!text.isEmpty() && out.size() < MAX_SPANS) {
+            out.add(style.span(text));
+        }
+    }
+
+    private static String contentOf(Map<String, Object> map, ItemTranslations tr, int depth,
+            Budget budget) {
         Object text = map.get("text");
         if (text != null) {
-            return String.valueOf(text);
+            return cap(String.valueOf(text));
         }
         Object bare = map.get("");
         if (bare instanceof String) {
             // NBT's wrapper for a heterogeneous list element: {"": "text"}.
-            return (String) bare;
+            return cap((String) bare);
         }
         String key = Snbt.asString(map.get("translate"));
         if (key != null) {
@@ -307,30 +367,37 @@ public final class TextComponents {
             List<String> args = new ArrayList<String>();
             if (with != null) {
                 for (Object arg : with) {
+                    if (budget.spent() || args.size() >= 16) {
+                        break;
+                    }
                     List<ItemText.Span> argSpans = new ArrayList<ItemText.Span>();
-                    flatten(arg, Style.NONE, argSpans, tr, depth + 1);
-                    args.add(ItemText.of(argSpans).plain());
+                    flatten(arg, Style.NONE, argSpans, tr, depth + 1, budget);
+                    args.add(cap(ItemText.of(argSpans).plain()));
                 }
             }
-            return format(format, args);
+            return format(cap(format), args);
         }
         String keybind = Snbt.asString(map.get("keybind"));
         if (keybind != null) {
             String translated = tr.translate(keybind);
-            return translated != null ? translated : keybind;
+            return cap(translated != null ? translated : keybind);
         }
         return null;
     }
 
-    /** Java-style {@code %s} and {@code %1$s} substitution, as Minecraft's language files use. */
+    /**
+     * Java-style {@code %s} and {@code %1$s} substitution, as Minecraft's language files use. The
+     * result never exceeds {@link #MAX_LINE_CHARS}: appending stops at the cap, so a format that
+     * repeats an argument cannot multiply it.
+     */
     static String format(String format, List<String> args) {
         if (format.indexOf('%') < 0) {
-            return format;
+            return cap(format);
         }
         StringBuilder out = new StringBuilder();
         int next = 0;
         int i = 0;
-        while (i < format.length()) {
+        while (i < format.length() && out.length() < MAX_LINE_CHARS) {
             char c = format.charAt(i);
             if (c != '%' || i + 1 >= format.length()) {
                 out.append(c);
@@ -344,26 +411,34 @@ public final class TextComponents {
                 continue;
             }
             if (d == 's') {
-                out.append(next < args.size() ? args.get(next) : "");
+                append(out, next < args.size() ? args.get(next) : "");
                 next++;
                 i += 2;
                 continue;
             }
             int j = i + 1;
-            while (j < format.length() && Character.isDigit(format.charAt(j))) {
+            while (j < format.length() && j - i <= 3 && Character.isDigit(format.charAt(j))) {
                 j++;
             }
             if (j > i + 1 && j + 1 < format.length() && format.charAt(j) == '$'
                     && format.charAt(j + 1) == 's') {
                 int index = Integer.parseInt(format.substring(i + 1, j)) - 1;
-                out.append(index >= 0 && index < args.size() ? args.get(index) : "");
+                append(out, index >= 0 && index < args.size() ? args.get(index) : "");
                 i = j + 2;
                 continue;
             }
             out.append(c);
             i++;
         }
-        return out.toString();
+        return cap(out.toString());
+    }
+
+    /** Appends at most what keeps {@code out} within {@link #MAX_LINE_CHARS}. */
+    private static void append(StringBuilder out, String text) {
+        int room = MAX_LINE_CHARS - out.length();
+        if (room > 0) {
+            out.append(text, 0, Math.min(room, text.length()));
+        }
     }
 
     private static String cap(String text) {

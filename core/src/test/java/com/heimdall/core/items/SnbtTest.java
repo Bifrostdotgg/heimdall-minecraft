@@ -114,6 +114,24 @@ class SnbtTest {
     }
 
     @Test
+    void theDepthCapIsExact() throws Exception {
+        assertTrue(Snbt.asList(Snbt.parse(brackets(Snbt.MAX_DEPTH + 1))) != null,
+                "nesting up to the cap parses");
+        assertThrows(Snbt.SyntaxException.class, () -> Snbt.parse(brackets(Snbt.MAX_DEPTH + 2)));
+    }
+
+    private static String brackets(int n) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            out.append('[');
+        }
+        for (int i = 0; i < n; i++) {
+            out.append(']');
+        }
+        return out.toString();
+    }
+
+    @Test
     void syntaxErrorsNeverQuoteTheInput() {
         Snbt.SyntaxException failure = assertThrows(Snbt.SyntaxException.class,
                 () -> Snbt.parse("{secret:\"unterminated"));

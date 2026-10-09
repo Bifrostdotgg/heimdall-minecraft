@@ -85,6 +85,7 @@ class FrameBatcherTest {
 
         assertTrue(batcher.flush(bus));
         assertEquals(1, batcher.queuedCount(), "the carried item is still waiting");
+        assertTrue(batcher.hasQueued(), "and the backlog check sees it, with the queue itself empty");
 
         batcher.clear();
         assertEquals(0, batcher.queuedCount());

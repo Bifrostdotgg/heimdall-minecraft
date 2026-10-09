@@ -169,15 +169,20 @@ public final class HoverTags {
                 break;
             }
             Tag tag = tokenize(text, open + 1);
-            if (tag == null || tag.args.size() < 3
-                    || !"hover".equalsIgnoreCase(tag.args.get(0).trim())
-                    || !"show_item".equalsIgnoreCase(tag.args.get(1).trim())) {
+            if (tag == null) {
                 from = open + 1;
+                continue;
+            }
+            if (tag.args.size() < 3 || !"hover".equalsIgnoreCase(tag.args.get(0).trim())
+                    || !"show_item".equalsIgnoreCase(tag.args.get(1).trim())) {
+                // A whole tag that is not an item (show_text, show_entity): resume after it, so a
+                // show_item quoted inside its argument is not mistaken for a tag of its own.
+                from = tag.end;
                 continue;
             }
             ChatItem item = ShowItem.parse(tag.args.subList(2, tag.args.size()), translations);
             if (item == null) {
-                from = open + 1;
+                from = tag.end;
                 continue;
             }
             int end = regionEnd(text, tag.end);

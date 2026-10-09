@@ -1981,6 +1981,7 @@ class HeimdallBridgeModuleTest {
 
         volatile boolean available = true;
         volatile byte[] autoPng;
+        volatile Error translateThrows;
         final List<com.heimdall.core.items.ChatItem> rendered =
                 Collections.synchronizedList(new ArrayList<com.heimdall.core.items.ChatItem>());
         final List<java.util.concurrent.CompletableFuture<byte[]>> futures =
@@ -2001,6 +2002,10 @@ class HeimdallBridgeModuleTest {
 
         @Override
         public String translate(String key) {
+            Error failure = translateThrows;
+            if (failure != null) {
+                throw failure;
+            }
             return null;
         }
 
@@ -2107,24 +2112,59 @@ class HeimdallBridgeModuleTest {
             assertTrue(budgets.isEmpty(), "an ordinary line never waits on anything");
         }
 
+        private List<String> messages() {
+            List<String> out = new ArrayList<String>();
+            for (Payload line : relayedLines()) {
+                out.add(line.string("msg", ""));
+            }
+            return out;
+        }
+
         @Test
-        @DisplayName("an ordinary line said while an item line waits is not held behind it")
-        void ordinaryChatIsNotDelayed() {
+        @DisplayName("a plain line waits behind a pending item line, then both ship in order")
+        void plainChatKeepsItsPlaceBehindAnItemLine() {
             rig(null);
 
             say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
             say("Alex", "nice");
             runDrains();
+            assertTrue(relayedLines().isEmpty(), "held behind the item line said first");
+            assertEquals(2, module.heldLineCount(), "the item line and the plain one");
 
-            List<Payload> lines = relayedLines();
-            assertEquals(1, lines.size());
-            assertEquals("nice", lines.get(0).string("msg", ""));
+            images.futures.get(0).complete(fakePng(8));
+            runDrains();
+
+            assertEquals(Arrays.asList("[Spoon]", "nice"), messages());
+            assertEquals(1, relayedLines().get(0).children("items").size());
+            assertEquals(0, module.heldLineCount());
+        }
+
+        @Test
+        @DisplayName("a budget timeout releases the held lines in order")
+        void budgetTimeoutKeepsTheOrder() {
+            rig(null);
+
+            say("Steve", "before");
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            say("Alex", "after one");
+            say("Alex", "after two");
+            runDrains();
+            assertEquals(Arrays.asList("before"), messages(), "nothing pending ahead of it");
 
             runBudgets();
             runDrains();
-            assertEquals("[Spoon]", relayedLines().get(1).string("msg", ""));
+            assertEquals(Arrays.asList("before", "[Spoon]", "after one", "after two"), messages());
             assertEquals(Long.valueOf(HeimdallBridgeModule.ITEM_IMAGE_BUDGET_MS),
-                    budgetDelays.get(0));
+                    budgetDelays.get(0), "the plain lines never wait longer than the item's budget");
+        }
+
+        @Test
+        @DisplayName("with nothing pending a plain line goes straight through")
+        void noPendingItemMeansNoHolding() {
+            rig(null);
+            say("Steve", "hi");
+            assertEquals(0, module.heldLineCount());
+            assertEquals(1, module.queuedChatCount(), "queued for the batcher at once");
         }
 
         @Test
@@ -2294,7 +2334,7 @@ class HeimdallBridgeModuleTest {
         }
 
         @Test
-        @DisplayName("waiting lines are bounded; past the bound a line ships as text at once")
+        @DisplayName("past the pending bound a line is text-only, and still in order")
         void pendingLinesAreBounded() {
             rig(null);
 
@@ -2307,14 +2347,85 @@ class HeimdallBridgeModuleTest {
                     module.pendingItemLineCount());
 
             say("Alex", com.heimdall.core.testing.ItemCaptures.wardedJar());
-            Payload line = onlyLine();
-            assertEquals("[Warded Jar]", line.string("msg", ""));
-            assertFalse(line.has("items"));
+            assertEquals(HeimdallBridgeModule.MAX_PENDING_ITEM_LINES, images.rendered.size(),
+                    "the extra line draws nothing");
+            runDrains();
+            assertTrue(relayedLines().isEmpty(), "it waits its turn behind the pending lines");
 
             runBudgets();
             runDrains();
-            assertEquals(1 + HeimdallBridgeModule.MAX_PENDING_ITEM_LINES, relayedLines().size());
+            List<Payload> lines = relayedLines();
+            assertEquals(1 + HeimdallBridgeModule.MAX_PENDING_ITEM_LINES, lines.size());
+            Payload last = lines.get(lines.size() - 1);
+            assertEquals("[Warded Jar]", last.string("msg", ""));
+            assertFalse(last.has("items"));
             assertEquals(0, module.pendingItemLineCount());
+        }
+
+        @Test
+        @DisplayName("the held deque is bounded: past it the head ships with what finished")
+        void heldLinesAreBounded() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            for (int i = 0; i < HeimdallBridgeModule.MAX_QUEUE_SIZE; i++) {
+                say("Alex", "line " + i);
+            }
+
+            assertEquals(0, module.heldLineCount(), "the overflow forced the head out");
+            assertEquals(0, module.pendingItemLineCount());
+            assertTrue(budgets.size() == 1, "nobody waited for the budget");
+            runDrains();
+            List<String> messages = messages();
+            assertEquals("line " + (HeimdallBridgeModule.MAX_QUEUE_SIZE - 1),
+                    messages.get(messages.size() - 1), "order kept to the last line");
+
+            // The forced line's render finishing later changes nothing.
+            images.futures.get(0).complete(fakePng(8));
+            runBudgets();
+            runDrains();
+            assertEquals(messages.size(), relayedLines().size());
+        }
+
+        @Test
+        @DisplayName("a render from before a disable and re-enable is dropped, not shipped")
+        void staleRendersAreDropped() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            assertEquals(1, module.pendingItemLineCount());
+            disable();
+            enable();
+            assertEquals(0, module.pendingItemLineCount());
+            assertEquals(0, module.heldLineCount());
+
+            say("Alex", "fresh");
+            images.futures.get(0).complete(fakePng(8));
+            runBudgets();
+            runDrains();
+
+            assertEquals(Arrays.asList("fresh"), messages(),
+                    "the old cycle's line neither ships nor holds the new one back");
+            assertEquals(0, module.pendingItemLineCount(), "and its count is not decremented twice");
+        }
+
+        @Test
+        @DisplayName("a line carried to the next frame gets its own drain at once")
+        void aCarriedLineIsDrainedWithoutWaitingForTheTick() {
+            rig(null);
+            images.autoPng = fakePng(HeimdallBridgeModule.MAX_ITEM_PNG_BYTES);
+            String three = "<hover:show_item:stone:1>[a]</hover><hover:show_item:stone:2>[b]</hover>"
+                    + "<hover:show_item:stone:3>[c]";
+
+            say("Steve", "one " + three);
+            say("Alex", "two " + three);
+            runDrains();
+
+            List<RecordingTunnelBus.Sent> frames = tunnel.sent(HeimdallBridgeModule.FRAME_CHAT);
+            assertEquals(2, frames.size(), "the carried line went in a second drain, no tick needed");
+            assertTrue(frames.get(1).payload().children("lines").get(0).string("msg", "")
+                    .startsWith("two "));
+            assertEquals(0, module.queuedChatCount());
         }
 
         @Test
@@ -2435,6 +2546,19 @@ class HeimdallBridgeModuleTest {
                     .length() < HeimdallBridgeModule.MAX_CHAT_FRAME_BYTES);
             assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN,
                     "dropped 1 item image(s) so a relayed chat line fits"));
+        }
+
+        @Test
+        @DisplayName("an Error inside the rewrite relays the line verbatim and never escapes")
+        void anErrorInTheRewriteRelaysVerbatim() {
+            rig(null);
+            images.translateThrows = new OutOfMemoryError("simulated");
+            String line = "<hover:show_item:stone:1>[Stone]";
+
+            say("Steve", line);
+
+            assertEquals(line, onlyLine().string("msg", ""));
+            assertTrue(images.rendered.isEmpty());
         }
 
         @Test

@@ -23,6 +23,7 @@ import com.heimdall.core.tunnel.ProtocolModeListener;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -180,10 +181,15 @@ import net.kyori.adventure.text.Component;
  * in {@code items}. A line with no item hover is untouched, byte for byte. Departure D86.
  *
  * <p>An item line waits for its images for at most {@value #ITEM_IMAGE_BUDGET_MS} ms and then ships
- * with whatever finished; lines without items never wait for it, so an item line can reach the bot
- * after a later plain line (its {@code ts} still says when it was said). The wait holds the line in
- * memory for that budget and no longer, and at most {@value #MAX_PENDING_ITEM_LINES} lines at once;
- * beyond that a line ships as text. Images travel with the line and are not kept here.
+ * with whatever finished. Chat order is kept: every line passes through one FIFO staging deque in
+ * front of the chat batcher, so a line said after a pending item line waits behind it, for at most
+ * the remainder of that line's budget, and then both ship in the order they were said. With nothing
+ * pending a line goes straight to the batcher, adding no latency. The deque holds at most
+ * {@value #MAX_QUEUE_SIZE} lines (past that the head ships with whatever finished), at most
+ * {@value #MAX_PENDING_ITEM_LINES} item lines wait on renders at once (past that a line ships as
+ * text, still in order), and nothing outlives the budget. Images travel with the line and are not
+ * kept here. Join, leave and death are a separate frame family and their order relative to chat is
+ * not guaranteed.
  *
  * <h2>Threading</h2>
  *
@@ -373,6 +379,27 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     private final AtomicInteger pendingItemLines = new AtomicInteger();
 
     /**
+     * Guards {@link #held} and {@link #generation}, and is held across the hand-off to the chat
+     * batcher so two threads releasing lines can never interleave them. Never held while calling
+     * anything that can block: {@link #requestDrain()} runs after it is released.
+     */
+    private final Object orderLock = new Object();
+
+    /**
+     * Lines waiting, in the order they were said, because an item line ahead of them is still
+     * drawing. Empty whenever nothing is pending, which is the fast path. Guarded by
+     * {@link #orderLock}; bounded at {@value #MAX_QUEUE_SIZE}.
+     */
+    private final ArrayDeque<Slot> held = new ArrayDeque<Slot>();
+
+    /**
+     * Bumped by every enable and disable. A pending line remembers the generation it was said in,
+     * and a render finishing after a disable (or a disable and a re-enable) carries a stale one and
+     * is dropped rather than shipped into the next cycle. Written under {@link #orderLock}.
+     */
+    private volatile long generation;
+
+    /**
      * Where immediate drains are scheduled. {@code null} means {@code heimdall-sched}, the single
      * thread {@link #flush} already runs on, so a drain and a tick can never overlap. Tests
      * substitute a manual scheduler so a queued line stays queued until they say otherwise.
@@ -520,6 +547,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         // fresh enable starts from empty queues rather than whatever a previous cycle left behind.
         chat.clear();
         events.clear();
+        resetStaging();
         // A drain refused or abandoned by a previous cycle must not leave the request latched.
         drainRequested.set(false);
         lastDrainAtMs = 0L;
@@ -624,9 +652,19 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             context = null;
         }
         tunnel = null;
+        resetStaging();
         chat.clear();
         events.clear();
         forgetInventory();
+    }
+
+    /** Forgets every held line and pending render, so nothing crosses an enable/disable cycle. */
+    private void resetStaging() {
+        synchronized (orderLock) {
+            generation++;
+            held.clear();
+        }
+        pendingItemLines.set(0);
     }
 
     // ── Outbound ─────────────────────────────────────────────────────────────
@@ -682,8 +720,8 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         if (!HoverTags.mightContainItem(text)) {
             // Verbatim. Not trimmed, not normalised, not formatted - the bot renders, and a relay
             // that silently edited what a player typed is worse than one that does not relay at all.
-            enqueueLine(new ChatLine(message.senderUuid(), message.senderName(), text, channel,
-                    timestampMs, NO_ITEMS));
+            submit(Slot.ready(new ChatLine(message.senderUuid(), message.senderName(), text,
+                    channel, timestampMs, NO_ITEMS), generation));
             return;
         }
         ModuleContext ctx = context;
@@ -691,14 +729,15 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         HoverTags.Rewrite rewrite;
         try {
             rewrite = HoverTags.rewrite(text, images);
-        } catch (RuntimeException unexpected) {
-            // HoverTags never throws on any input; a translation source might. Either way the line
-            // still relays, exactly as it was.
+        } catch (Throwable unexpected) {
+            // HoverTags is bounded and never throws on any input; a translation source might, and
+            // this runs inside the platform's chat dispatch, where nothing may escape. Whatever went
+            // wrong, the line still relays, exactly as it was.
             rewrite = null;
         }
         if (rewrite == null) {
-            enqueueLine(new ChatLine(message.senderUuid(), message.senderName(), text, channel,
-                    timestampMs, NO_ITEMS));
+            submit(Slot.ready(new ChatLine(message.senderUuid(), message.senderName(), text,
+                    channel, timestampMs, NO_ITEMS), generation));
             return;
         }
         ChatLine textOnly = new ChatLine(message.senderUuid(), message.senderName(),
@@ -708,15 +747,90 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         // nothing is drawn for it at all.
         if (ctx == null || !itemImagesEnabled(ctx) || !imagesAccepted(tunnel)
                 || !available(images)) {
-            enqueueLine(textOnly);
+            submit(Slot.ready(textOnly, generation));
             return;
         }
         attachImages(ctx, images, textOnly, rewrite);
     }
 
-    private void enqueueLine(ChatLine line) {
-        chat.enqueue(line);
-        requestDrain();
+    /**
+     * Hands a line to the chat batcher in the order it was said.
+     *
+     * <p>The fast path, a ready line with nothing held, goes straight through: plain chat with no
+     * item pending pays one uncontended lock and nothing else. Otherwise the line joins the back of
+     * {@link #held} and every ready line at the front is released. Lines from a previous
+     * enable/disable cycle are dropped.
+     */
+    private void submit(Slot slot) {
+        boolean released;
+        synchronized (orderLock) {
+            if (slot.generation != generation) {
+                return;
+            }
+            if (held.isEmpty() && slot.line != null) {
+                chat.enqueue(slot.line);
+                released = true;
+            } else {
+                held.addLast(slot);
+                if (held.size() > MAX_QUEUE_SIZE) {
+                    forceShipHeadLocked();
+                }
+                released = releaseReadyLocked();
+            }
+        }
+        if (released) {
+            requestDrain();
+        }
+    }
+
+    /** Marks a pending slot ready with its finished line and releases whatever that unblocks. */
+    private void markReady(Slot slot, ChatLine line) {
+        boolean released;
+        synchronized (orderLock) {
+            if (slot.generation != generation || slot.line != null) {
+                return;
+            }
+            slot.line = line;
+            released = releaseReadyLocked();
+        }
+        if (released) {
+            requestDrain();
+        }
+    }
+
+    /** Moves every ready line at the head of {@link #held} to the batcher, in order. */
+    private boolean releaseReadyLocked() {
+        boolean any = false;
+        while (!held.isEmpty() && held.peekFirst().line != null) {
+            chat.enqueue(held.pollFirst().line);
+            any = true;
+        }
+        return any;
+    }
+
+    /**
+     * {@link #held} is over its bound: the head is an item line still drawing, so it ships now with
+     * whatever finished, and everything ready behind it follows.
+     */
+    private void forceShipHeadLocked() {
+        Slot head = held.peekFirst();
+        if (head == null || head.line != null || head.pending == null) {
+            return;
+        }
+        if (head.pending.markShipped()) {
+            releasePendingCount();
+            assemble(head);
+            head.line = head.finished;
+        }
+    }
+
+    private void releasePendingCount() {
+        while (true) {
+            int current = pendingItemLines.get();
+            if (current <= 0 || pendingItemLines.compareAndSet(current, current - 1)) {
+                return;
+            }
+        }
     }
 
     /**
@@ -746,10 +860,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                     + " items; dropped " + extra + " image(s)");
         }
 
+        long cycle = generation;
         if (pendingItemLines.incrementAndGet() > MAX_PENDING_ITEM_LINES) {
-            pendingItemLines.decrementAndGet();
+            releasePendingCount();
             ctx.logger().debug("too many chat lines waiting on item images; sent one as text");
-            enqueueLine(textOnly);
+            submit(Slot.ready(textOnly, cycle));
             return;
         }
 
@@ -758,15 +873,19 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             renders.add(startRender(images, item));
         }
         final PendingItemLine pending = new PendingItemLine(textOnly, names, renders);
+        final Slot slot = Slot.pending(pending, cycle);
+        // Into the order BEFORE any completion can fire: a render that is already done ships the
+        // line from inside whenComplete below, and it must find its place in the deque.
+        submit(slot);
         for (CompletableFuture<byte[]> render : renders) {
             // Plain whenComplete, never the executor-less *Async: this runs on whichever thread
             // finished the render (or inline, if it was already done), and all it does is a check
-            // and, once, a lock-free enqueue.
+            // and, once, a short locked hand-off.
             render.whenComplete(new BiConsumer<byte[], Throwable>() {
                 @Override
                 public void accept(byte[] png, Throwable failed) {
                     if (pending.allDone()) {
-                        shipPending(pending);
+                        shipPending(slot);
                     }
                 }
             });
@@ -777,7 +896,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         Runnable budget = new Runnable() {
             @Override
             public void run() {
-                shipPending(pending);
+                shipPending(slot);
             }
         };
         try {
@@ -790,7 +909,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             }
         } catch (RuntimeException refused) {
             // Shutting down: there is nobody to wait for, so ship what there is now.
-            shipPending(pending);
+            shipPending(slot);
         }
     }
 
@@ -806,13 +925,29 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     /**
      * Ships a pending item line with whatever images finished, once. Called by the last render to
-     * complete and by the budget timeout; the loser of that race does nothing.
+     * complete and by the budget timeout; the loser of that race does nothing. A line from a cycle
+     * that has since been disabled is dropped: its count and its place were reset with it.
      */
-    private void shipPending(PendingItemLine pending) {
+    private void shipPending(Slot slot) {
+        PendingItemLine pending = slot.pending;
         if (!pending.markShipped()) {
             return;
         }
-        pendingItemLines.decrementAndGet();
+        if (slot.generation != generation) {
+            return;
+        }
+        releasePendingCount();
+        assemble(slot);
+        markReady(slot, slot.finished);
+    }
+
+    /**
+     * Builds the finished line for a pending slot into {@code slot.finished}: the images that are
+     * ready, within the per-PNG cap and the frame budget, counts logged and nothing else. Written
+     * into the slot rather than returned, so no method here hands a chat line back out.
+     */
+    private void assemble(Slot slot) {
+        PendingItemLine pending = slot.pending;
         List<Payload> items = new ArrayList<Payload>();
         int missing = 0;
         int oversized = 0;
@@ -831,12 +966,6 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                     .put("png", Base64.getEncoder().encodeToString(png))
                     .build());
         }
-        ModuleContext ctx = context;
-        if (ctx == null) {
-            // Disabled while the images were drawing. The queue has been cleared and there is no
-            // flush to bound it, so the line goes nowhere, like anything else queued at disable.
-            return;
-        }
         ChatLine line = pending.line.withItems(items);
         int trimmed = 0;
         while (line.estimatedBytes() > MAX_CHAT_FRAME_BYTES - FRAME_OVERHEAD_BYTES
@@ -844,7 +973,12 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             line = line.withoutLargestItem();
             trimmed++;
         }
-        enqueueLine(line);
+        slot.finished = line;
+        ModuleContext ctx = context;
+        if (ctx == null) {
+            // Disabled while the images were drawing; the caller's generation check drops it.
+            return;
+        }
         final int attached = line.items.size();
         final int none = missing;
         if (trimmed > 0) {
@@ -1571,6 +1705,35 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     /**
+     * One place in the chat order: a line ready to go, or an item line still drawing. Exists while
+     * it waits in {@link #held}, which is at most the head item line's budget.
+     */
+    private static final class Slot {
+
+        final long generation;
+        final PendingItemLine pending;
+        /** Non-null once ready. Guarded by {@code orderLock}. */
+        ChatLine line;
+
+        /** The assembled line of a pending slot, set once by whichever thread shipped it. */
+        volatile ChatLine finished;
+
+        private Slot(long generation, PendingItemLine pending, ChatLine line) {
+            this.generation = generation;
+            this.pending = pending;
+            this.line = line;
+        }
+
+        static Slot ready(ChatLine line, long generation) {
+            return new Slot(generation, null, line);
+        }
+
+        static Slot pending(PendingItemLine pending, long generation) {
+            return new Slot(generation, pending, null);
+        }
+    }
+
+    /**
      * One join, leave or death, in flight.
      *
      * <p>{@code detail} carries the server's death message and is absent for everything else. It is
@@ -1636,6 +1799,13 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /** How many item lines are waiting on images. */
     int pendingItemLineCount() {
         return pendingItemLines.get();
+    }
+
+    /** How many lines are held behind a pending item line. */
+    int heldLineCount() {
+        synchronized (orderLock) {
+            return held.size();
+        }
     }
 
     /** How many chat lines are currently queued. */
