@@ -89,6 +89,9 @@ final class StubHttpApi {
      */
     private final Map<String, AtomicInteger> routeHits = new ConcurrentHashMap<>();
 
+    /** The raw query string of the last signed request per {@code "METHOD route"}, {@code ""} for none. */
+    private final Map<String, String> lastQueries = new ConcurrentHashMap<>();
+
     /**
      * Whether {@code POST role-sync/snapshot} exists. Off simulates a bot older than the plugin,
      * which answers the route with the dispatcher's ordinary 404.
@@ -145,6 +148,11 @@ final class StubHttpApi {
     /** Clears the escalation counters, so a test can replay {@code /offend} from a known state. */
     void resetInfractions() {
         infractionCounts.clear();
+    }
+
+    /** The raw query of the last signed request to {@code "METHOD route"}; {@code null} if none came. */
+    String lastRequestQuery(String methodAndRoute) {
+        return lastQueries.get(methodAndRoute);
     }
 
     /** How many signed requests reached {@code "METHOD route"}, for example {@code "POST offend"}. */
@@ -220,6 +228,7 @@ final class StubHttpApi {
             StubLog.debug(method + " " + signedPath);
             routeHits.computeIfAbsent(method + " " + route, key -> new AtomicInteger())
                     .incrementAndGet();
+            lastQueries.put(method + " " + route, uri.getRawQuery() == null ? "" : uri.getRawQuery());
 
             // The guild check is deliberately NOT hoisted here. On the bot, every route that
             // validates its body does so BEFORE loading the guild's config, so a request that is

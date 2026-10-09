@@ -256,7 +256,12 @@ public final class HeimdallApi {
 
     /** {@code GET plugin/latest} — the newest published release. */
     public CompletableFuture<PluginRelease> latestRelease() {
-        return gated(() -> client.latestRelease());
+        return latestRelease(false);
+    }
+
+    /** {@code GET plugin/latest}, asking the bot to skip its cache when {@code fresh}. */
+    public CompletableFuture<PluginRelease> latestRelease(final boolean fresh) {
+        return gated(() -> client.latestRelease(fresh));
     }
 
     /** {@code POST …/servers/{id}/config/import} — hand the dashboard a migrated v2 config, once. */

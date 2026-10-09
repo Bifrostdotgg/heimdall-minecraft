@@ -291,8 +291,10 @@ public final class UpdateWiring {
      * <p>The updater takes this rather than a {@link HeimdallApi} so its whole state machine is one
      * fake away from being testable, and so it cannot grow a second dependency on the API by
      * accident.
+     *
+     * <p>Package-private so {@code UpdateWiringFreshTest} can prove it forwards the flag.
      */
-    private static final class GatewayReleaseSource implements ReleaseSource {
+    static final class GatewayReleaseSource implements ReleaseSource {
 
         private final HeimdallApi api;
 
@@ -301,8 +303,8 @@ public final class UpdateWiring {
         }
 
         @Override
-        public CompletableFuture<PluginRelease> latestRelease() {
-            return api.latestRelease();
+        public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
+            return api.latestRelease(fresh);
         }
 
         @Override
@@ -315,8 +317,12 @@ public final class UpdateWiring {
         }
     }
 
-    /** {@link UpdateService} as the admin tree wants to see it. */
-    private static final class ServiceAdmin implements UpdateAdmin {
+    /**
+     * {@link UpdateService} as the admin tree wants to see it.
+     *
+     * <p>Package-private so {@code UpdateWiringFreshTest} can prove {@code /hd check} is fresh.
+     */
+    static final class ServiceAdmin implements UpdateAdmin {
 
         private final UpdateService service;
 
@@ -336,7 +342,8 @@ public final class UpdateWiring {
 
         @Override
         public boolean checkNow() {
-            return service.checkNow();
+            // /hd check: an operator asking by hand, so past the bot's release cache.
+            return service.checkNowFresh();
         }
 
         @Override
