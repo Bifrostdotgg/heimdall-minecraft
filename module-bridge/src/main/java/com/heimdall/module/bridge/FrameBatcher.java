@@ -8,7 +8,11 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * A bounded queue that ships what it holds as one frame a second, and throws away what it cannot.
+ * A bounded queue that ships what it holds as one frame per drain, and throws away what it cannot.
+ *
+ * <p>The bridge drains it the moment something is queued (see {@code HeimdallBridgeModule}'s
+ * immediate drain), and on a one-second tick as a safety net, so a quiet server's lines leave at
+ * once and a busy one's ride together in whatever frame is next.
  *
  * <p>Every mechanic here is {@code HeimdallConsoleModule}'s, transcribed rather than reinvented: a
  * one-second flush, a hard queue cap with drop-oldest, a per-flush batch cap, and drain-and-discard
@@ -47,8 +51,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * platform's event thread, a session listener on {@code heimdall-io} — and must stay what it is: an
  * offer onto a lock-free queue. It must not log, must not block and must not throw.
  *
- * <p>{@link #flush} runs on {@code heimdall-sched}, once a second, and is the only place a frame is
- * built. It takes the bus as an argument rather than reading a field, so the caller can snapshot a
+ * <p>{@link #flush} runs on {@code heimdall-sched} (an immediate drain or the one-second tick, never
+ * both at once: it is a single thread), and is the only place a frame is built. It takes the bus as an argument rather than reading a field, so the caller can snapshot a
  * reference a concurrent {@code disable()} might be clearing.
  *
  * @param <T> the queued item; a small immutable value, never a live handle

@@ -81,6 +81,12 @@ class HeimdallBridgeModuleTest {
     private HeimdallBridgeModule module;
     private int configVersion;
 
+    /**
+     * Immediate drains the module asked for, held until a test runs them. Every other test then sees
+     * the old, deterministic shape: nothing ships until it calls flush() or runDrains().
+     */
+    private final List<Runnable> pendingDrains = new ArrayList<Runnable>();
+
     /** Builds the whole rig for a role, since the relay default depends on it. */
     private void setUp(ServerRole role, Payload settings) {
         executors = new HeimdallExecutors(logger, 1);
@@ -105,7 +111,21 @@ class HeimdallBridgeModuleTest {
                 .platform(platform)
                 .build());
         module = new HeimdallBridgeModule();
+        pendingDrains.clear();
+        module.drainExecutorForTests(new java.util.concurrent.Executor() {
+            @Override
+            public void execute(Runnable command) {
+                pendingDrains.add(command);
+            }
+        });
         manager.register(module);
+    }
+
+    /** Runs the drains requested so far, including any a drain itself requests. */
+    private void runDrains() {
+        while (!pendingDrains.isEmpty()) {
+            pendingDrains.remove(0).run();
+        }
     }
 
     /**
@@ -567,6 +587,98 @@ class HeimdallBridgeModuleTest {
     }
 
     // ── bridge.chat ──────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("immediate send")
+    class ImmediateSend {
+
+        @Test
+        @DisplayName("a line asks for a drain at once and ships without waiting for the tick")
+        void aLineShipsImmediately() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "hello");
+
+            assertEquals(1, pendingDrains.size(), "one drain requested, not a one-second wait");
+            runDrains();
+            assertEquals(1, tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).size());
+            assertEquals(0, module.queuedChatCount());
+        }
+
+        @Test
+        @DisplayName("a burst queues ONE drain and ships as ONE frame")
+        void aBurstIsOneFrame() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "one");
+            say("Alex", "two");
+            say("Steve", "three");
+
+            assertEquals(1, pendingDrains.size());
+            runDrains();
+            List<RecordingTunnelBus.Sent> sent = tunnel.sent(HeimdallBridgeModule.FRAME_CHAT);
+            assertEquals(1, sent.size());
+            assertEquals(3, sent.get(0).payload().children("lines").size());
+        }
+
+        @Test
+        @DisplayName("a line after a drain ran asks for the next one")
+        void theNextLineAsksAgain() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "one");
+            runDrains();
+            say("Steve", "two");
+
+            assertEquals(1, pendingDrains.size());
+            runDrains();
+            assertEquals(2, tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).size());
+        }
+
+        @Test
+        @DisplayName("a backlog bigger than one frame keeps draining instead of waiting for the tick")
+        void aBacklogKeepsDraining() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            for (int i = 0; i < HeimdallBridgeModule.MAX_BATCH + 50; i++) {
+                say("Steve", "line " + i);
+            }
+            runDrains();
+
+            assertEquals(2, tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).size());
+            assertEquals(0, module.queuedChatCount());
+        }
+
+        @Test
+        @DisplayName("joins, leaves and deaths ship immediately too")
+        void eventsShipImmediately() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            allThreeKinds();
+
+            assertEquals(1, pendingDrains.size());
+            runDrains();
+            assertEquals(1, tunnel.sent(HeimdallBridgeModule.FRAME_EVENT).size());
+        }
+
+        @Test
+        @DisplayName("a drain does not run the inventory poll; only the one-second flush does")
+        void drainsLeaveTheInventoryAlone() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "hello");
+            runDrains();
+
+            assertTrue(tunnel.sent(HeimdallBridgeModule.FRAME_CHANNELS).isEmpty(),
+                    "the inventory goes out on the flush tick, never on a chat drain");
+        }
+    }
 
     @Nested
     @DisplayName("bridge.chat")
