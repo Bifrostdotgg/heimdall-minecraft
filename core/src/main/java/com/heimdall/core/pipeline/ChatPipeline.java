@@ -81,6 +81,33 @@ public final class ChatPipeline extends Pipeline<ChatMessage> {
         if (verdict.isDeny()) {
             return verdict;
         }
+        notifyObservers(message);
+        return verdict;
+    }
+
+    /**
+     * Runs the observers only, for a message whose verdict the caller has already obtained from
+     * {@link #dispatch}.
+     *
+     * <h3>Why this is split out</h3>
+     *
+     * <p>{@link #dispatchWithObservers} answers "may this be said?" and "who is watching?" at the
+     * same instant, which is right whenever both answers are known at the same instant. With a chat
+     * plugin that routes lines into channels they are not: the platform has to block a muted player
+     * early, before the chat plugin delivers anything, but it only learns which audience a line was
+     * addressed to <em>later</em>, from the chat plugin's own event. Relaying at the early point
+     * would publish a staff-channel line as public chat. So the platform calls {@link #dispatch}
+     * early, and this later, once the audience is known. Departure D85.
+     *
+     * <p><strong>The contract that keeps relay safe moves to the caller:</strong> call this only for
+     * a message whose {@link #dispatch} verdict was not a deny. Observers run only for messages
+     * that were allowed, and this method cannot check that for itself because it never sees the
+     * verdict.
+     */
+    public void notifyObservers(ChatMessage message) {
+        if (message == null) {
+            return;
+        }
         for (ChatObserver observer : observers) {
             try {
                 observer.onChat(message);
@@ -90,7 +117,6 @@ public final class ChatPipeline extends Pipeline<ChatMessage> {
                 logger.error("chat observer threw", e);
             }
         }
-        return verdict;
     }
 
     /** The observers, in order. A copy — the live list is never handed out. */

@@ -8,10 +8,13 @@ import com.heimdall.core.platform.ConsoleBridge;
 import com.heimdall.core.platform.Integrations;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.platform.PlayerDirectory;
+import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.platform.SchedulerBridge;
 import com.heimdall.platform.common.Log4jConsoleTap;
 import java.nio.file.Path;
 import java.util.concurrent.Executor;
+import java.util.function.Function;
+import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
 /**
@@ -37,6 +40,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     private final BukkitConsoleBridge console;
     private final BukkitCommandRegistrar commands;
     private final BukkitIntegrations integrations;
+    private final ChatControlChannels chatControl;
 
     /**
      * Builds every collaborator, and cleans up after itself if one of them throws.
@@ -71,7 +75,15 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
             this.consoleTap = builtTap;
             this.console = new BukkitConsoleBridge(logger, mainThread, consoleTap);
             this.commands = new BukkitCommandRegistrar(plugin, logger, messenger);
-            this.integrations = new BukkitIntegrations(logger, executors.io());
+            final BukkitPlayerDirectory directory = builtPlayers;
+            this.chatControl = ChatControlChannels.create(
+                    logger, plugin, new Function<Player, PlayerHandle>() {
+                        @Override
+                        public PlayerHandle apply(Player player) {
+                            return directory.wrap(player);
+                        }
+                    });
+            this.integrations = new BukkitIntegrations(logger, executors.io(), chatControl);
         } catch (Throwable halfBuilt) {
             closeQuietly(builtTap);
             closeQuietly(messenger);
@@ -130,6 +142,14 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     /** The messenger, so the command handler can answer a sender in components. */
     BukkitMessenger messenger() {
         return messenger;
+    }
+
+    /**
+     * The ChatControl integration, so the bootstrap can hand it the chat pipeline and the chat
+     * listener can ask it where a line is going.
+     */
+    ChatControlChannels chatControl() {
+        return chatControl;
     }
 
     /** The online-player list, so the session listener can wrap a player it was handed. */

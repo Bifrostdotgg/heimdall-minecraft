@@ -23,7 +23,11 @@ import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.TunnelSpiService;
 import java.io.File;
 import java.util.Collections;
+import java.util.function.IntSupplier;
 import org.bukkit.Bukkit;
+import org.bukkit.event.Event;
+import org.bukkit.event.EventPriority;
+import org.bukkit.plugin.EventExecutor;
 import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -92,6 +96,9 @@ final class BukkitBootstrap {
 
     /** The {@code /hd} and {@code /hwl} registrations, unbound on disable. */
     private Registration adminCommands = Registration.NONE;
+
+    /** Held so disable can release the main thread's chat relay state; see its close(). */
+    private BukkitChatListener chatListener;
 
     /** The updater's periodic check, its {@code update} subscription and its join notice. */
     private Registration updates = Registration.NONE;
@@ -195,6 +202,16 @@ final class BukkitBootstrap {
         });
         updates = Registration.NONE;
 
+        guarded("releasing chat relay state", new Runnable() {
+            @Override
+            public void run() {
+                if (chatListener != null) {
+                    chatListener.close();
+                }
+            }
+        });
+        chatListener = null;
+
         guarded("unregistering the admin command", new Runnable() {
             @Override
             public void run() {
@@ -280,9 +297,36 @@ final class BukkitBootstrap {
                 new BukkitLoginListener(
                         logger, runtime.loginPipeline(), platform.integrations().floodgate()),
                 plugin);
-        Bukkit.getPluginManager().registerEvents(
-                new BukkitChatListener(logger, runtime.chatPipeline(), platform.messenger()),
-                plugin);
+        // Before the chat listener, so the first line typed already knows whether ChatControl is
+        // deciding channels. attach() also registers ChatControl's channel hook when it is there.
+        platform.chatControl().attach(runtime.chatPipeline());
+        // Paper's AsyncChatEvent, looked up by name through the server's own loader: it fires after
+        // the legacy chat event, and on Paper that is where ChatControl does its work, so with
+        // ChatControl installed the untagged relay waits for it. Absent on Spigot. See D85.
+        final BukkitChatListener chat = new BukkitChatListener(
+                logger, runtime.chatPipeline(), platform.messenger(), platform.chatControl(),
+                BukkitChatListener.ModernChat.detect(Bukkit.class.getClassLoader()),
+                new IntSupplier() {
+                    @Override
+                    public int getAsInt() {
+                        return Bukkit.getOnlinePlayers().size();
+                    }
+                });
+        // The Paper hook first, then the legacy handlers: a line arriving between the two (only
+        // possible during a /reload or a plugin-manager load) would otherwise find the hook
+        // PENDING and be dropped.
+        chat.installModern(new BukkitChatListener.ModernRegistrar() {
+            @Override
+            public void register(Class<? extends Event> type, EventExecutor executor) {
+                // ignoreCancelled false: the handler must run for a cancelled line too, to release
+                // what the legacy handler parked; it checks cancellation itself.
+                Bukkit.getPluginManager().registerEvent(
+                        type, chat, EventPriority.MONITOR, executor, plugin, false);
+            }
+        });
+        Bukkit.getPluginManager().registerEvents(chat, plugin);
+        chatListener = chat;
+        logger.debug(() -> "chat relay: Paper chat hook " + chat.modernState());
         Bukkit.getPluginManager().registerEvents(
                 new BukkitCommandListener(logger, runtime.commandPipeline(), platform.messenger()),
                 plugin);

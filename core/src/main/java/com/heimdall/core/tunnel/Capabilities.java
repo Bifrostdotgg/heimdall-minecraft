@@ -48,6 +48,19 @@ public final class Capabilities {
     public static final String BRIDGE = "bridge@1";
 
     /**
+     * Chat-plugin channel awareness on the bridge: the optional {@code channel} key on
+     * {@code bridge.chat} lines and {@code bridge.discord} messages, the {@code chatChannels}
+     * allowlist in the bridge's settings, and the {@code bridge.channels} inventory frame.
+     *
+     * <p>Not a separately togglable module, in the same way {@link #STATUS} is not.
+     * {@code HeimdallBridgeModule} advertises this alongside {@link #BRIDGE}, so a bot that sees it
+     * knows this client will drop channel lines it was not told to relay and will route inbound
+     * messages by channel. A bot that only knows {@code bridge@1} never sends a channel and never
+     * reads one, and on a server without channels nothing changes. Departure D85.
+     */
+    public static final String CHAT_CHANNELS = "chatchannels@1";
+
+    /**
      * Native punishments: punish.apply / punish.revoke / punish.import, dupeip.query, and the local
      * mirror.
      *

@@ -1835,6 +1835,157 @@ operator always can.
 a `serverId` it already knows is now being presented by a different one, without ever being told a
 hostname or a filesystem path.
 
+### D85 - the bridge follows ChatControl's channels, and fails closed when it cannot see them
+
+**New in 3.1.**
+
+**Before:** the Bukkit chat listener relayed every line at `NORMAL` priority of
+`AsyncPlayerChatEvent`, through `dispatchWithObservers`. On a server running ChatControl channels
+that is before ChatControl has decided which channel a line belongs to (on Paper it decides in the
+Adventure chat event, which fires after the legacy one), and nothing in the plugin knew channels
+existed. A line typed into `staff` reached Discord as public chat, and a Discord message was shown to
+everybody online whatever channel its mapping was meant for.
+**Now:** the plugin knows about ChatControl's channels, tells the bot what they are, tags each
+channel line with its channel, and relays only the channels the bot says this server relays.
+
+**The seam.** `ChatMessage` gains an optional `channel()`, `ChatPipeline` gains `notifyObservers()`
+(the observer half of `dispatchWithObservers`, split out), and core gains `ChatChannels` behind a
+default `Integrations.chatChannels()` that answers `NONE`. Both proxies need no change: chat on a
+proxy is one room. ChatControl is reached reflectively from `:platform-bukkit`
+(`ChatControlChannels`), through its own class loader, because it is paid, unpublished, and not a
+dependency anything can compile against.
+
+**Where relay happens moved, and only when ChatControl is installed.** Without it the listener is
+unchanged. With it, `NORMAL` runs the checks only (`dispatch`), so a muted player is still blocked
+before anything is delivered, and relay happens later. Which path a line takes is decided once, at
+`LOWEST`, and carried to the later handlers in a per-thread state, so a ChatControl that becomes
+visible half-way through a line cannot make it relay twice.
+
+- **A line delivered into a channel** is relayed from ChatControl's own `ChannelPostChatEvent`, at
+  `MONITOR`. This also covers lines sent by command (`/ch send`), which never fire a Bukkit chat
+  event. It runs `dispatch` again, read-only, so a muted player whose line ChatControl delivered
+  anyway is still not relayed, and it never cancels ChatControl's event. `isCancelledSilently()`
+  lines (shadow-blocked by ChatControl's rules, visible only to the sender) are never relayed, and
+  only a `Player` sender is chat. A legacy chat line from a player ChatControl routes into a channel
+  (`Channel.isUsingChannels`) is never relayed from the chat listener.
+- **Any other line** is relayed untagged, but only once ChatControl has finished with it, and where
+  that happens differs by server:
+  - **Spigot:** ChatControl works in the legacy `AsyncPlayerChatEvent`, so the relay runs at that
+    event's `MONITOR`.
+  - **Paper:** ChatControl (default `Chat_Listener_Priority` `HIGH-MODERN`) does all of its work
+    in Paper's `AsyncChatEvent`: mutes, rules, the no-write checks, and private-message auto-mode,
+    which after `/tell bob` re-sends each chat line as a `/tell` and cancels the chat event.
+    Paper fires that event **after** the legacy one, on the same thread. In `ChatProcessor.process`
+    (PaperMC/Paper `main`, read for this change) the legacy async event is posted first, then the
+    sync `PlayerChatEvent` on the main thread if it has listeners (waited for), then
+    `processModern` posts `AsyncChatEvent` on the calling thread with the legacy cancelled flag
+    carried over. It is posted even when cancelled. Relaying at the legacy `MONITOR` would have
+    published private messages, ChatControl-muted players and rule-blocked lines under
+    ChatControl's default config. So where `AsyncChatEvent` exists, the legacy `MONITOR` only
+    **parks** the line in a `ThreadLocal`. A `MONITOR` executor on `AsyncChatEvent`, registered
+    by class name and reading only Bukkit's `Event`, `Cancellable` and `PlayerEvent` types plus
+    one reflective `viewers()` call treated as a plain collection (the Adventure `message()` is
+    never touched, so the shading problem of D43 does not arise), takes it back. It relays the
+    line only if the event is not cancelled and belongs to the same sender. The `ThreadLocal` is
+    reset at the legacy `LOWEST`, so a line that never reached the second half cannot be picked up
+    by a later one. If the class exists but the executor cannot be registered, nothing is relayed
+    untagged and that is logged once. It never falls back to the legacy `MONITOR`.
+
+**Shadow-blocks for players outside channels.** ChatControl can shadow-block a line without
+cancelling it, by shrinking its audience to the sender. So the untagged relay also drops a line whose
+audience has no players at all, or only the sender while somebody else is online: the legacy
+recipients on Spigot, the `AsyncChatEvent` viewers on Paper (where the console is also a viewer and
+is not counted). Only `Player` instances are counted. A genuinely private line nobody else could see
+is dropped by the same rule, which is the accepted direction.
+
+`ChatChannelProxyEvent`, ChatControl's event for a line forwarded from another backend, is
+deliberately not hooked: the backend it was typed on relays its own chat, so hooking it would relay
+every network line once per server. `ChatControlAPI.sendMessage` is deliberately not used for the
+inbound direction: it re-runs ChatControl's pipeline as the sender and fires the post event again,
+which would loop every Discord line straight back to Discord.
+
+**The switch is presence, not health.** If ChatControl is installed but a class Heimdall needs has
+moved (a ChatControl update), the integration reports `broken`, the untagged relay relays nothing
+and logs that once, and inbound messages are dropped. A broken hook that fell back to relaying at
+`NORMAL` would leak exactly when the code that understands channels stopped working.
+
+Two kinds of failure are told apart. A **resolution** failure (a missing class, method or field, a
+type that is not what it was, a linkage error, a hook that cannot be registered) is permanent for the
+boot. **ChatControl's own code throwing** while Heimdall calls it (an `InvocationTargetException`, for
+example `getOnlinePlayers()` racing a player who just quit) fails closed for that one call only: the
+member lookup comes back empty, the line is dropped, and a warning naming the exception's class (never
+its message) is logged at most once a minute. A channel *listing* that throws that way answers the
+last names read successfully, so an inventory poll sees no change and sends nothing, rather than
+telling the bot `{active, []}`. An `Error` from Heimdall's own chat pipeline inside the
+hook is logged as Heimdall's, and does not mark ChatControl broken.
+
+**Reloads fail closed.** A plugin manager (PlugMan, ServerUtils) can unload ChatControl and load a
+fresh copy in a new class loader, and the hook is bound to the old one. So once anything has been
+resolved, a disabled cached instance makes the integration ask Bukkit again on every call. ChatControl
+gone, or back as a different instance, is `broken` with a reason that says to restart the server. The
+same instance switched off in place is `none`: it is not routing chat, and it is still the same
+classes when it is switched back on.
+
+**The wire (`chatchannels@1`, a build capability declared alongside `bridge@1`, like `status@1`):**
+
+| Direction | Shape |
+|---|---|
+| `bridge.chat` line | optional `channel` string, present only for a channel line; omitted, never `null` or `""`, otherwise |
+| `bridge.discord` message | optional `channel` string |
+| `config.push` bridge settings | `chatChannels`: array of channel names this server relays; absent means empty |
+| `bridge.channels` (new, plugin to bot) | `{"state": "none" \| "active" \| "broken", "channels": [names]}` |
+
+`bridge.channels` is sent on the first flush after enable, on the first flush after every reconnect
+(a frame sent into a dying socket is lost silently, so the bot is assumed to know nothing after one),
+and whenever the state or the channel list changes, polled every five seconds from the existing
+one-second flush. Never otherwise.
+
+**The integration is only ever read from that flush.** Reading it can reach Bukkit's `getPlugin`,
+which is synchronized on the plugin manager, and the server holds that monitor while disabling
+plugins, which tears the tunnel down. So nothing that can run under another lock reads it: the tunnel's
+mode listener (called while the negotiator holds its own monitor) and `enable` (which can run under
+the module manager's lock) only *request* a report, and the flush on `heimdall-sched`, holding nothing,
+makes it. The bridge's own inventory lock is taken by that report alone, never while reading the
+integration, and "forget what the bot was told" is a lock-free flag the next report applies, so no
+thread ever waits on that lock. A stamp taken before each read keeps an older read from being sent
+after a newer one, including a newer read that found nothing changed. On the Bukkit side the
+integration likewise loads ChatControl's classes and registers its hook without holding its own lock.
+The hook is registered once, by whichever thread claims it; another thread that asks meanwhile waits
+up to two seconds for it rather than answering `none` for a ChatControl that may already be routing
+channels, and a longer stall fails closed for that call only (nothing routed or broadcast, the chat
+line dropped).
+
+**Both directions fail closed.** Outbound, a channel line is relayed only if its channel is in
+`chatChannels` (case-insensitive); an absent or empty setting relays no channel lines at all, so a
+missing config means silence, never a staff channel in Discord. Inbound, a message naming a channel is
+shown only to that channel's members, and dropped if the hook is not `active` or the channel is not
+known here; a message naming no channel is shown to everybody only when the state is `none`, and is
+dropped on an `active` or `broken` server, because "everybody" is not an audience anybody picked on a
+channelled server. Drops are counted in the debug line, never described.
+
+**Known limits, named.**
+
+- On Paper the untagged relay sends the text as the legacy event left it. Reading the
+  `AsyncChatEvent` component is avoided: Heimdall's relocated Adventure cannot name the server's
+  `Component` type directly. It would be achievable by reflection, through the server's own
+  serializer loaded by a class name built at runtime, but that is a second version-sensitive
+  reflective path for one case, so it is not taken. A ChatControl rule that *rewrites* a word in
+  the component (rather than blocking the line) is therefore not seen. Blocking, muting,
+  private-message auto-mode and shadow-blocking are all seen, through the cancelled flag and the
+  viewers.
+- On Paper with ChatControl installed and listeners on the sync `PlayerChatEvent`, Paper runs that
+  event on the main thread between the two async ones and the chat thread waits for it. If the main
+  thread stalls for longer than the five-second park expiry, the parked line has expired when
+  `AsyncChatEvent` finally fires, and it is dropped unrelayed (fails closed).
+- On Paper with ChatControl installed, a synthetic `AsyncPlayerChatEvent` that another plugin
+  fires on its own is not relayed untagged: no `AsyncChatEvent` follows it, so its parked line is
+  discarded when the thread is next touched (it expires after a few seconds, the next line's
+  `LOWEST` replaces it, and disable clears the main thread's).
+- The shadow-block check is a heuristic on audience size, and drops a legitimate line nobody else
+  could see.
+- A reloaded ChatControl pauses relay until the server restarts, rather than re-hooking into the new
+  class loader.
+
 ---
 
 ## Structure

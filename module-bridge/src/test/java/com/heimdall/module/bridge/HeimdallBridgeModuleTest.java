@@ -15,6 +15,8 @@ import com.heimdall.core.pipeline.ChatPipeline;
 import com.heimdall.core.pipeline.Interceptor;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.pipeline.Verdict;
+import com.heimdall.core.platform.ChatChannels;
+import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.remoteconfig.ConfigDocument;
 import com.heimdall.core.remoteconfig.RemoteConfig;
 import com.heimdall.core.session.PlayerSessionEvents;
@@ -23,8 +25,15 @@ import com.heimdall.core.testing.FakePlayer;
 import com.heimdall.core.testing.RecordingTunnelBus;
 import com.heimdall.core.tunnel.Capabilities;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Executor;
 import net.kyori.adventure.text.Component;
@@ -134,6 +143,135 @@ class HeimdallBridgeModuleTest {
         manager.reconcile(Collections.<String>emptySet());
     }
 
+    private void sayIn(String channel, String name, String message) {
+        chatPipeline.dispatchWithObservers(ChatMessage.inChannel(
+                UUID.nameUUIDFromBytes(name.getBytes()), name, message, channel));
+    }
+
+    private static Payload chatChannels(String... names) {
+        return Payload.builder()
+                .putStrings(HeimdallBridgeModule.SETTING_CHAT_CHANNELS, Arrays.asList(names))
+                .build();
+    }
+
+    /** The {@code bridge.chat} lines across every frame sent. */
+    private List<Payload> relayedLines() {
+        List<Payload> lines = new ArrayList<Payload>();
+        for (RecordingTunnelBus.Sent sent : tunnel.sent(HeimdallBridgeModule.FRAME_CHAT)) {
+            lines.addAll(sent.payload().children("lines"));
+        }
+        return lines;
+    }
+
+    /**
+     * A chat plugin's channels, steerable from a test.
+     *
+     * <p>Answers the way the interface promises the real integration does: names and members only
+     * while {@code active}, channel lookup case-insensitive.
+     */
+    private static final class FakeChannels implements ChatChannels {
+
+        private volatile State state = State.ACTIVE;
+        private volatile boolean membersIgnoreState;
+
+        /** When set, every call records whether the caller held this monitor. */
+        private volatile Object watchedLock;
+        private volatile int callsUnderWatchedLock;
+        private volatile int calls;
+
+        FakeChannels watching(Object lock) {
+            this.watchedLock = lock;
+            return this;
+        }
+
+        /**
+         * When armed, the next {@link #state()} captures the state at entry, signals
+         * {@link #entered}, and waits for {@link #release} before returning what it captured: a
+         * slow read whose answer is already stale by the time it is used.
+         */
+        private volatile boolean blockNextState;
+        private final java.util.concurrent.CountDownLatch entered =
+                new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.CountDownLatch release =
+                new java.util.concurrent.CountDownLatch(1);
+
+        FakeChannels blockingNextState() {
+            this.blockNextState = true;
+            return this;
+        }
+
+        private void observeCaller() {
+            calls++;
+            Object lock = watchedLock;
+            if (lock != null && Thread.holdsLock(lock)) {
+                callsUnderWatchedLock++;
+            }
+        }
+        private final Map<String, List<PlayerHandle>> channels =
+                Collections.synchronizedMap(new LinkedHashMap<String, List<PlayerHandle>>());
+
+        FakeChannels state(State value) {
+            this.state = value;
+            return this;
+        }
+
+        /**
+         * Answers members whatever the state says, which the interface forbids. Exists to prove the
+         * bridge applies its own ACTIVE gate rather than trusting the integration to.
+         */
+        FakeChannels lyingAboutMembers() {
+            this.membersIgnoreState = true;
+            return this;
+        }
+
+        FakeChannels channel(String name, PlayerHandle... members) {
+            channels.put(name, Arrays.asList(members));
+            return this;
+        }
+
+        @Override
+        public State state() {
+            observeCaller();
+            State captured = state;
+            if (blockNextState) {
+                blockNextState = false;
+                entered.countDown();
+                try {
+                    release.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return captured;
+        }
+
+        @Override
+        public List<String> channelNames() {
+            observeCaller();
+            if (state != State.ACTIVE) {
+                return Collections.emptyList();
+            }
+            synchronized (channels) {
+                return Collections.unmodifiableList(new ArrayList<String>(channels.keySet()));
+            }
+        }
+
+        @Override
+        public Optional<Collection<PlayerHandle>> members(String channel) {
+            if ((state != State.ACTIVE && !membersIgnoreState) || channel == null) {
+                return Optional.empty();
+            }
+            synchronized (channels) {
+                for (Map.Entry<String, List<PlayerHandle>> entry : channels.entrySet()) {
+                    if (entry.getKey().equalsIgnoreCase(channel)) {
+                        return Optional.<Collection<PlayerHandle>>of(entry.getValue());
+                    }
+                }
+            }
+            return Optional.empty();
+        }
+    }
+
     private void say(String name, String message) {
         chatPipeline.dispatchWithObservers(
                 ChatMessage.of(UUID.nameUUIDFromBytes(name.getBytes()), name, message));
@@ -180,8 +318,14 @@ class HeimdallBridgeModuleTest {
         setUp(ServerRole.STANDALONE, null);
 
         assertEquals("bridge", module.id());
-        assertEquals(Collections.singleton(Capabilities.BRIDGE), module.capabilities());
+        assertEquals(
+                new LinkedHashSet<String>(Arrays.asList(Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS)),
+                module.capabilities(),
+                "chat-channel awareness is a build capability of the bridge, declared whether or not "
+                        + "ChatControl is installed, like status@1 is of health");
         assertEquals("bridge@1", Capabilities.BRIDGE, "the capability string is a wire contract");
+        assertEquals("chatchannels@1", Capabilities.CHAT_CHANNELS,
+                "the capability string is a wire contract");
         assertEquals(Collections.<ServerRole>emptySet(), module.roles(),
                 "relay eligibility is the relayChat SETTING, not a roles() exclusion — a proxy "
                         + "excluded here would be INELIGIBLE with no dashboard toggle able to "
@@ -697,6 +841,11 @@ class HeimdallBridgeModuleTest {
         void emptyFlushIsSilent() {
             setUp(ServerRole.STANDALONE, null);
             enable();
+            // The first flush after enable reports the channel inventory once, by design; that frame
+            // is covered by its own suite. What this asserts is that a flush with nothing new has
+            // nothing to say.
+            module.flush();
+            tunnel.clearSent();
 
             module.flush();
 
@@ -849,6 +998,632 @@ class HeimdallBridgeModuleTest {
         }
     }
 
+    // ── Chat-plugin channels ─────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("channel lines: the chatChannels allowlist and the wire key")
+    class ChannelOutbound {
+
+        @Test
+        @DisplayName("an allowed channel line carries its channel on the wire")
+        void channelKeyOnTheWire() {
+            setUp(ServerRole.STANDALONE, chatChannels("global"));
+            enable();
+
+            sayIn("global", "Steve", "hello all");
+            module.flush();
+
+            List<Payload> lines = relayedLines();
+            assertEquals(1, lines.size());
+            assertEquals("global", lines.get(0).string("channel", ""));
+            assertEquals("hello all", lines.get(0).string("msg", ""));
+        }
+
+        @Test
+        @DisplayName("an ordinary line OMITS the channel key: not null, not empty")
+        void channelKeyOmittedWhenAbsent() {
+            setUp(ServerRole.STANDALONE, chatChannels("global"));
+            enable();
+
+            say("Steve", "plain chat");
+            module.flush();
+
+            List<Payload> lines = relayedLines();
+            assertEquals(1, lines.size());
+            assertFalse(lines.get(0).has("channel"),
+                    "the bot reads presence as 'this came from a channel'; an empty string would be "
+                            + "a channel with no name: " + lines.get(0));
+        }
+
+        @Test
+        @DisplayName("with NO chatChannels setting, every channel line is dropped and plain chat is not")
+        void absentSettingDropsEveryChannelLine() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            sayIn("staff", "Mod", "ban him");
+            sayIn("global", "Steve", "hi");
+            say("Alex", "plain chat");
+            module.flush();
+
+            List<Payload> lines = relayedLines();
+            assertEquals(1, lines.size(),
+                    "fail closed: a server the bot never told about channels relays none of them");
+            assertEquals("plain chat", lines.get(0).string("msg", ""));
+        }
+
+        @Test
+        @DisplayName("an empty chatChannels list is the same as an absent one")
+        void emptySettingDropsEveryChannelLine() {
+            setUp(ServerRole.STANDALONE, chatChannels());
+            enable();
+
+            sayIn("global", "Steve", "hi");
+            module.flush();
+
+            assertTrue(relayedLines().isEmpty());
+        }
+
+        @Test
+        @DisplayName("a channel not in the list stays in the game; a listed one is relayed")
+        void onlyListedChannelsRelay() {
+            setUp(ServerRole.STANDALONE, chatChannels("global", "trade"));
+            enable();
+
+            sayIn("staff", "Mod", "the staff-only line");
+            sayIn("global", "Steve", "hi");
+            sayIn("trade", "Alex", "wts diamonds");
+            module.flush();
+
+            List<String> relayed = new ArrayList<String>();
+            for (Payload line : relayedLines()) {
+                relayed.add(line.string("channel", "") + ":" + line.string("msg", ""));
+            }
+            assertEquals(Arrays.asList("global:hi", "trade:wts diamonds"), relayed,
+                    "a staff channel nobody mapped must never reach Discord");
+        }
+
+        @Test
+        @DisplayName("the allowlist compares case-insensitively, and the line keeps its own spelling")
+        void allowlistIsCaseInsensitive() {
+            setUp(ServerRole.STANDALONE, chatChannels("GLOBAL"));
+            enable();
+
+            sayIn("Global", "Steve", "hi");
+            module.flush();
+
+            List<Payload> lines = relayedLines();
+            assertEquals(1, lines.size());
+            assertEquals("Global", lines.get(0).string("channel", ""),
+                    "the wire carries the chat plugin's own name, not the setting's spelling");
+        }
+
+        @Test
+        @DisplayName("the allowlist is read live: a config push takes effect with no re-enable")
+        void allowlistIsLive() {
+            setUp(ServerRole.STANDALONE, chatChannels());
+            enable();
+
+            sayIn("global", "Steve", "before");
+            applySettings(chatChannels("global"));
+            sayIn("global", "Steve", "after");
+            applySettings(chatChannels());
+            sayIn("global", "Steve", "after removal");
+            module.flush();
+
+            List<String> relayed = new ArrayList<String>();
+            for (Payload line : relayedLines()) {
+                relayed.add(line.string("msg", ""));
+            }
+            assertEquals(Collections.singletonList("after"), relayed);
+        }
+
+        @Test
+        @DisplayName("a dropped channel line is not logged, by content or at all")
+        void droppedLinesAreNotLogged() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            sayIn("staff", "Mod", "correct-horse-battery-staple");
+            module.flush();
+
+            assertFalse(logger.records().toString().contains("correct-horse"),
+                    "chat content in a log file is the storage this feature promises not to do: "
+                            + logger.records());
+        }
+    }
+
+    @Nested
+    @DisplayName("bridge.discord routing by channel")
+    class ChannelInbound {
+
+        private Payload message(String text, String channel) {
+            Payload.Builder one = Payload.builder().put("text", text).put("ts", 1L);
+            if (channel != null) {
+                one.put("channel", channel);
+            }
+            return Payload.builder()
+                    .putChildren("messages", Collections.singletonList(one.build()))
+                    .build();
+        }
+
+        @Test
+        @DisplayName("ACTIVE + a known channel: only that channel's members see it")
+        void activeKnownChannelReachesMembersOnly() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer mod = platform.join(FakePlayer.named("Mod"));
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            platform.withChatChannels(new FakeChannels().channel("staff", mod));
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("[Discord] staff note", "staff"));
+
+            assertEquals(Collections.singletonList("[Discord] staff note"), mod.messageText());
+            assertTrue(steve.messageText().isEmpty(),
+                    "a staff channel's Discord side must not reach the whole server");
+        }
+
+        @Test
+        @DisplayName("ACTIVE + a channel lookup that ignores case still routes")
+        void activeChannelMatchIgnoresCase() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer mod = platform.join(FakePlayer.named("Mod"));
+            platform.withChatChannels(new FakeChannels().channel("Staff", mod));
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("note", "staff"));
+
+            assertEquals(Collections.singletonList("note"), mod.messageText());
+        }
+
+        @Test
+        @DisplayName("ACTIVE + an unknown channel: dropped, never widened to everyone")
+        void activeUnknownChannelIsDropped() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            platform.withChatChannels(new FakeChannels().channel("global", steve));
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("into a deleted channel", "staff"));
+
+            assertTrue(steve.messageText().isEmpty());
+            assertTrue(logger.records().toString().contains("dropped 1"),
+                    "a drop is counted, so silence is never mistaken for quiet: "
+                            + logger.records());
+            assertFalse(logger.records().toString().contains("deleted channel"),
+                    "and the count never names the message");
+        }
+
+        @Test
+        @DisplayName("a channel message on a server with NO channels in play is dropped")
+        void channelMessageWithoutChannelsIsDropped() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("for staff", "staff"));
+
+            assertTrue(steve.messageText().isEmpty(),
+                    "a message addressed to a channel that cannot be resolved is not everybody's");
+        }
+
+        @Test
+        @DisplayName("a channel message while the hook is BROKEN is dropped")
+        void channelMessageWhileBrokenIsDropped() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer mod = platform.join(FakePlayer.named("Mod"));
+            platform.withChatChannels(
+                    new FakeChannels().channel("staff", mod).state(ChatChannels.State.BROKEN));
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("for staff", "staff"));
+
+            assertTrue(mod.messageText().isEmpty());
+        }
+
+        private void assertLyingIntegrationIgnored(ChatChannels.State state) {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer mod = platform.join(FakePlayer.named("Mod"));
+            platform.withChatChannels(
+                    new FakeChannels().channel("staff", mod).state(state).lyingAboutMembers());
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("for staff", "staff"));
+
+            assertTrue(mod.messageText().isEmpty(),
+                    "an integration that hands out members while " + state + " must not be "
+                            + "believed: routing by channel needs the hook to be live");
+        }
+
+        @Test
+        @DisplayName("the bridge's own ACTIVE gate: members offered while BROKEN are ignored")
+        void activeGateIgnoresBrokenMembers() {
+            assertLyingIntegrationIgnored(ChatChannels.State.BROKEN);
+        }
+
+        @Test
+        @DisplayName("the bridge's own ACTIVE gate: members offered while NONE are ignored")
+        void activeGateIgnoresNoneMembers() {
+            assertLyingIntegrationIgnored(ChatChannels.State.NONE);
+        }
+
+        @Test
+        @DisplayName("NO channel on a server with no channels: everybody online, as before")
+        void noChannelNoneBroadcasts() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            FakePlayer alex = platform.join(FakePlayer.named("Alex"));
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("hello", null));
+
+            assertEquals(Collections.singletonList("hello"), steve.messageText());
+            assertEquals(Collections.singletonList("hello"), alex.messageText());
+            assertTrue(logger.records().toString().contains(
+                            "relayed 1 discord message(s) to 2 online player(s)"),
+                    "the connected smoke asserts on this exact wording: " + logger.records());
+        }
+
+        @Test
+        @DisplayName("NO channel on a server whose channels are ACTIVE: dropped")
+        void noChannelActiveIsDropped() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            platform.withChatChannels(new FakeChannels().channel("global", steve));
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("to nobody in particular", null));
+
+            assertTrue(steve.messageText().isEmpty(),
+                    "on a channelled server 'everybody' is not an audience anybody picked");
+        }
+
+        @Test
+        @DisplayName("NO channel while the hook is BROKEN: dropped, fail closed")
+        void noChannelBrokenIsDropped() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            platform.withChatChannels(new FakeChannels().state(ChatChannels.State.BROKEN));
+            enable();
+
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD, message("hello", null));
+
+            assertTrue(steve.messageText().isEmpty());
+        }
+
+        @Test
+        @DisplayName("the inbound cap still holds for channel-routed frames")
+        void capHoldsForChannelFrames() {
+            setUp(ServerRole.STANDALONE, null);
+            FakePlayer mod = platform.join(FakePlayer.named("Mod"));
+            platform.withChatChannels(new FakeChannels().channel("staff", mod));
+            enable();
+
+            List<Payload> many = new ArrayList<Payload>();
+            for (int i = 0; i < HeimdallBridgeModule.MAX_INBOUND_MESSAGES + 5; i++) {
+                many.add(Payload.builder().put("text", "n" + i).put("channel", "staff").build());
+            }
+            tunnel.push(HeimdallBridgeModule.FRAME_DISCORD,
+                    Payload.builder().putChildren("messages", many).build());
+
+            assertEquals(HeimdallBridgeModule.MAX_INBOUND_MESSAGES, mod.messageText().size());
+        }
+    }
+
+    @Nested
+    @DisplayName("bridge.channels inventory")
+    class ChannelInventory {
+
+        private List<Payload> inventories() {
+            List<Payload> out = new ArrayList<Payload>();
+            for (RecordingTunnelBus.Sent sent : tunnel.sent(HeimdallBridgeModule.FRAME_CHANNELS)) {
+                out.add(sent.payload());
+            }
+            return out;
+        }
+
+        private void pollOnce() {
+            for (int i = 0; i < HeimdallBridgeModule.INVENTORY_POLL_FLUSHES; i++) {
+                module.flush();
+            }
+        }
+
+        /** Enables, lets the first flush make the requested report, then forgets what was sent. */
+        private void enableAndSettle() {
+            enable();
+            module.flush();
+            tunnel.clearSent();
+        }
+
+        private Object inventoryLock() throws Exception {
+            java.lang.reflect.Field field =
+                    HeimdallBridgeModule.class.getDeclaredField("inventoryLock");
+            field.setAccessible(true);
+            return field.get(module);
+        }
+
+        @Test
+        @DisplayName("the first flush after enable reports 'none' when there is no chat plugin")
+        void enableReportsNone() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+            assertTrue(inventories().isEmpty(), "requested at enable, made on the flush");
+
+            module.flush();
+
+            List<Payload> sent = inventories();
+            assertEquals(1, sent.size());
+            assertEquals("none", sent.get(0).string("state", ""));
+            assertTrue(sent.get(0).hasArray("channels"), "an empty array, not an absent key");
+            assertTrue(sent.get(0).strings("channels").isEmpty());
+        }
+
+        @Test
+        @DisplayName("the first flush after enable reports 'active' with the channel names")
+        void enableReportsActive() {
+            setUp(ServerRole.STANDALONE, null);
+            platform.withChatChannels(new FakeChannels().channel("global").channel("staff"));
+            enable();
+            module.flush();
+
+            List<Payload> sent = inventories();
+            assertEquals(1, sent.size());
+            assertEquals("active", sent.get(0).string("state", ""));
+            assertEquals(Arrays.asList("global", "staff"), sent.get(0).strings("channels"));
+        }
+
+        @Test
+        @DisplayName("'broken' is reported with an empty channel list")
+        void enableReportsBroken() {
+            setUp(ServerRole.STANDALONE, null);
+            platform.withChatChannels(
+                    new FakeChannels().channel("global").state(ChatChannels.State.BROKEN));
+            enable();
+            module.flush();
+
+            List<Payload> sent = inventories();
+            assertEquals("broken", sent.get(0).string("state", ""));
+            assertTrue(sent.get(0).strings("channels").isEmpty());
+        }
+
+        @Test
+        @DisplayName("a reconnect resends it on the next flush, even though nothing changed")
+        void reconnectResends() {
+            setUp(ServerRole.STANDALONE, null);
+            platform.withChatChannels(new FakeChannels().channel("global"));
+            enableAndSettle();
+
+            tunnel.disconnected();
+            tunnel.reconnected();
+            assertTrue(inventories().isEmpty(), "never from the mode listener itself");
+
+            module.flush();
+
+            List<Payload> sent = inventories();
+            assertEquals(1, sent.size(),
+                    "what was sent before went to a socket that is gone; the bot may have restarted");
+            assertEquals("active", sent.get(0).string("state", ""));
+        }
+
+        @Test
+        @DisplayName("the mode listener and enable never call the integration (deadlock rule)")
+        void listenersNeverCallTheIntegration() {
+            // The negotiator calls mode listeners while holding its own monitor, and enable can run
+            // under the module manager's lock. The real integration can reach Bukkit's getPlugin,
+            // synchronized on the plugin manager, which the server holds while disabling plugins and
+            // tearing the tunnel down. So neither may call it: they only request a report.
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+
+            enable();
+            tunnel.disconnected();
+            tunnel.reconnected();
+            tunnel.mode(com.heimdall.core.tunnel.ProtocolMode.V2_COMPAT);
+
+            assertEquals(0, channels.calls,
+                    "the integration was called synchronously from enable or a mode change");
+
+            module.flush();
+            assertTrue(channels.calls > 0);
+            assertEquals(1, inventories().size(), "one report for everything requested");
+        }
+
+        @Test
+        @DisplayName("enabled while disconnected: nothing sent, then sent on the flush after connect")
+        void enabledWhileDisconnected() {
+            setUp(ServerRole.STANDALONE, null);
+            tunnel.connected(false);
+            enable();
+            module.flush();
+            assertTrue(inventories().isEmpty());
+
+            tunnel.connected(true);
+            module.flush();
+
+            assertEquals(1, inventories().size());
+        }
+
+        @Test
+        @DisplayName("a poll sends only when the state or the channel list changed")
+        void pollSendsOnlyOnChange() {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+            enableAndSettle();
+
+            pollOnce();
+            assertTrue(inventories().isEmpty(), "unchanged, so nothing to say");
+
+            channels.channel("trade");
+            pollOnce();
+            assertEquals(1, inventories().size(), "a ChatControl reload added a channel");
+            assertEquals(Arrays.asList("global", "trade"), inventories().get(0).strings("channels"));
+
+            tunnel.clearSent();
+            channels.state(ChatChannels.State.NONE);
+            pollOnce();
+            assertEquals(1, inventories().size(), "channels were switched off");
+            assertEquals("none", inventories().get(0).string("state", ""));
+
+            tunnel.clearSent();
+            pollOnce();
+            assertTrue(inventories().isEmpty());
+        }
+
+        @Test
+        @DisplayName("the poll runs every few flushes, not on every one")
+        void pollCadence() {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+            enableAndSettle();
+
+            channels.channel("trade");
+            for (int i = 0; i < HeimdallBridgeModule.INVENTORY_POLL_FLUSHES - 1; i++) {
+                module.flush();
+            }
+            assertTrue(inventories().isEmpty());
+            module.flush();
+            assertEquals(1, inventories().size());
+        }
+
+        @Test
+        @DisplayName("the integration is never called while inventoryLock is held")
+        void integrationIsNotCalledUnderTheLock() throws Exception {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+            channels.watching(inventoryLock());
+
+            enable();
+            module.flush();
+            channels.channel("trade");
+            pollOnce();
+            tunnel.disconnected();
+            tunnel.reconnected();
+            module.flush();
+
+            assertTrue(channels.calls > 0, "the fake must actually have been asked");
+            assertEquals(0, channels.callsUnderWatchedLock,
+                    "state() or channelNames() ran while inventoryLock was held");
+            assertEquals(3, inventories().size(), "enable, the change, and the reconnect");
+        }
+
+        @Test
+        @DisplayName("forgetting what the bot was told never waits on inventoryLock")
+        void forgetIsLockFree() throws Exception {
+            // forgetInventory runs from the mode listener (under the negotiator's monitor) and from
+            // disable (possibly under the server's plugin-manager monitor). If it ever took
+            // inventoryLock, a report holding that lock around a socket send could stall both.
+            setUp(ServerRole.STANDALONE, null);
+            enableAndSettle();
+            final Object lock = inventoryLock();
+            final java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
+            final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+            Thread holder = new Thread(() -> {
+                synchronized (lock) {
+                    held.countDown();
+                    try {
+                        done.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }, "lock-holder");
+            holder.start();
+            assertTrue(held.await(10, java.util.concurrent.TimeUnit.SECONDS));
+            try {
+                Thread forgetter = new Thread(() -> {
+                    tunnel.disconnected();
+                    disable();
+                }, "forgetter");
+                forgetter.start();
+                forgetter.join(2000);
+                assertFalse(forgetter.isAlive(),
+                        "a disconnect or a disable blocked on inventoryLock");
+            } finally {
+                done.countDown();
+                holder.join(10000);
+            }
+        }
+
+        @Test
+        @DisplayName("an older read that finishes after a newer report is not sent")
+        void olderReadIsNotSentAfterNewer() throws Exception {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+            enableAndSettle();
+
+            // A slow read starts while the state is ACTIVE...
+            channels.blockingNextState();
+            Thread slow = new Thread(() -> module.reportInventory(true), "slow-inventory-read");
+            slow.start();
+            assertTrue(channels.entered.await(10, java.util.concurrent.TimeUnit.SECONDS));
+
+            // ...the state changes and a newer read reports it...
+            channels.state(ChatChannels.State.NONE);
+            module.reportInventory(true);
+            assertEquals("none", inventories().get(inventories().size() - 1).string("state", ""));
+
+            // ...and then the slow one arrives with what it saw at the start.
+            channels.release.countDown();
+            slow.join(10000);
+
+            List<Payload> sent = inventories();
+            assertEquals("none", sent.get(sent.size() - 1).string("state", ""),
+                    "the bot must be left on the newest answer, not the slowest: " + sent);
+            assertEquals(1, sent.size(), "the stale read is dropped, not sent");
+        }
+
+        @Test
+        @DisplayName("X, a slow read of Y, then X again: the bot stays on X")
+        void flipFlopDoesNotSendTheStaleMiddle() throws Exception {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("global");
+            platform.withChatChannels(channels);
+            enableAndSettle();
+
+            // The bot holds X (active). A poll starts while the state is briefly Y (none)...
+            channels.state(ChatChannels.State.NONE);
+            channels.blockingNextState();
+            Thread slow = new Thread(() -> module.reportInventory(false), "slow-inventory-read");
+            slow.start();
+            assertTrue(channels.entered.await(10, java.util.concurrent.TimeUnit.SECONDS));
+
+            // ...it flips back to X, and a newer poll finds nothing changed...
+            channels.state(ChatChannels.State.ACTIVE);
+            module.reportInventory(false);
+
+            // ...then the slow poll arrives with Y.
+            channels.release.countDown();
+            slow.join(10000);
+
+            assertTrue(inventories().isEmpty(),
+                    "the newer read confirmed X; sending the older Y would leave the bot wrong: "
+                            + inventories());
+        }
+
+        @Test
+        @DisplayName("disable stops the reconnect resend: the mode listener is unwound")
+        void disableUnwindsTheModeListener() {
+            setUp(ServerRole.STANDALONE, null);
+            int before = tunnel.modeListenerCount();
+            enable();
+            assertEquals(before + 1, tunnel.modeListenerCount());
+
+            disable();
+            tunnel.clearSent();
+            tunnel.disconnected();
+            tunnel.reconnected();
+            module.flush();
+
+            assertEquals(before, tunnel.modeListenerCount());
+            assertTrue(inventories().isEmpty());
+        }
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
     @Nested
@@ -880,9 +1655,13 @@ class HeimdallBridgeModuleTest {
             setUp(ServerRole.STANDALONE, null);
             enable();
             disable();
+            tunnel.clearSent();
 
             say("Steve", "nobody is listening");
-            module.flush();
+            // Enough flushes to cross an inventory poll too: a disabled module reports nothing.
+            for (int i = 0; i < HeimdallBridgeModule.INVENTORY_POLL_FLUSHES; i++) {
+                module.flush();
+            }
 
             assertTrue(tunnel.sent().isEmpty());
         }

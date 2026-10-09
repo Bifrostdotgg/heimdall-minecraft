@@ -7,6 +7,7 @@ import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.pipeline.ChatMessage;
 import com.heimdall.core.pipeline.ChatObserver;
+import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
@@ -14,14 +15,23 @@ import com.heimdall.core.session.PlayerDeathListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.text.Msg;
 import com.heimdall.core.tunnel.Capabilities;
+import com.heimdall.core.tunnel.ProtocolMode;
+import com.heimdall.core.tunnel.ProtocolModeListener;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -134,6 +144,22 @@ import net.kyori.adventure.text.Component;
  * {@code onPlayerQuit} registrations, made from its own {@code ModuleContext}, so declining to
  * enqueue here cannot affect it. Skipping the enqueue is genuinely local to the relay.
  *
+ * <h2>Chat-plugin channels: a staff channel is not public chat</h2>
+ *
+ * <p>On a server running ChatControl channels, a line typed into {@code staff} was addressed to
+ * staff. The platform tags such a line with its channel ({@link ChatMessage#channel()}), and this
+ * module relays a tagged line <strong>only if that channel is in the {@code chatChannels}
+ * setting</strong>: the per-server allowlist the bot computes from every Discord mapping's picked
+ * channels. An absent or empty setting relays no channel lines at all, so the failure mode of a
+ * missing config is silence, never a leak. Untagged lines (ordinary chat, a player not using
+ * channels) are unaffected.
+ *
+ * <p>Inbound is the mirror image. A {@code bridge.discord} message naming a channel is shown only to
+ * that channel's members; one naming none is shown to everybody, but only on a server where channels
+ * are not in play, because on a channelled server "everybody" is not an audience anybody picked. And
+ * {@link #FRAME_CHANNELS} tells the bot what channels exist, so the dashboard has something to pick
+ * from. Departure D85.
+ *
  * <h2>Threading</h2>
  *
  * <p>The chat observer runs on whatever thread the platform dispatched chat on — Bukkit's async chat
@@ -201,6 +227,29 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     static final String FRAME_DISCORD = "bridge.discord";
 
     /**
+     * The chat-plugin channel inventory, plugin to bot: {@code {"state", "channels"}}.
+     *
+     * <p>Sent on the first flush after enable, again on the first flush after every reconnect (a
+     * frame sent into a dying socket is lost silently, so the bot is assumed to know nothing after
+     * one), and whenever the state or the channel list changes. Never otherwise. See
+     * {@link #reportInventory}.
+     */
+    static final String FRAME_CHANNELS = "bridge.channels";
+
+    /**
+     * The chat-plugin channels this server relays to Discord: a JSON array of channel names, read
+     * live like {@code relayChat}. Absent means an empty list, which relays no channel lines at all.
+     */
+    static final String SETTING_CHAT_CHANNELS = "chatChannels";
+
+    /**
+     * How many one-second flushes pass between inventory polls. A ChatControl reload is an operator
+     * action, so five seconds of lag before the dashboard sees a new channel is not worth a tighter
+     * loop of reflective calls.
+     */
+    static final int INVENTORY_POLL_FLUSHES = 5;
+
+    /**
      * Hard cap on queued items, per family. The design's number, and half the console module's for a
      * feed that is worth far less stale — see {@link FrameBatcher}.
      */
@@ -266,6 +315,44 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      */
     private final Object observerLock = new Object();
 
+    /**
+     * Guards what the bot was last told. Taken by {@link #reportInventory} alone, around the
+     * compare-and-send, and never while calling the channel integration (which can reach the
+     * server's plugin-manager lock). Nothing else takes it, so no thread can ever wait on it; see
+     * {@link #forgetInventory} for why that matters.
+     */
+    private final Object inventoryLock = new Object();
+
+    /**
+     * What the bot was last told, or {@code null} for "nothing yet, or nothing it can be assumed to
+     * still know". Guarded by {@link #inventoryLock}.
+     */
+    private ChatChannels.State reportedState;
+
+    /** The names that went with {@link #reportedState}. Guarded by {@link #inventoryLock}. */
+    private List<String> reportedNames = Collections.emptyList();
+
+    /** Flushes since the last inventory poll. Only {@code heimdall-sched} touches it. */
+    private int flushesSinceInventoryPoll;
+
+    /**
+     * Set by {@link #forgetInventory}; applied, and cleared, by the next report.
+     *
+     * <p>This and {@link #inventoryReportRequested} overlap on purpose: each alone makes a
+     * reconnect resend the inventory (one by making the next poll find a change, the other by
+     * forcing the next flush), so a cleanup may remove one, never both.
+     */
+    private final AtomicBoolean forgetRequested = new AtomicBoolean();
+
+    /** Set by enable and by a reconnect; the next flush makes a forced report and clears it. */
+    private final AtomicBoolean inventoryReportRequested = new AtomicBoolean();
+
+    /** Issued to each inventory read before it starts; see {@link #reportInventory}. */
+    private final AtomicLong inventoryStamp = new AtomicLong();
+
+    /** The stamp of the read that was last sent. Guarded by {@link #inventoryLock}. */
+    private long sentStamp;
+
     @Override
     public String id() {
         return ID;
@@ -273,7 +360,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     @Override
     public Set<String> capabilities() {
-        return Collections.singleton(Capabilities.BRIDGE);
+        // Both, always. CHAT_CHANNELS is a build capability like STATUS, not a module of its own: it
+        // tells the bot this client understands the channel key, the allowlist and the inventory
+        // frame, and it is true of this build whether or not ChatControl is installed.
+        return Collections.unmodifiableSet(new LinkedHashSet<String>(
+                Arrays.asList(Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS)));
     }
 
     @Override
@@ -341,12 +432,39 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             }
         });
 
+        // A reconnect means the bot may know nothing about this server's channels: whatever was sent
+        // before went to a socket that is gone, possibly to a bot that has since restarted. So the
+        // record of what it was told is wiped on the way down and a report is requested on the way
+        // up. Tracked by the context like every other registration here.
+        //
+        // Requested, never made here. The negotiator invokes this listener while holding its own
+        // monitor, and reading the channel integration can reach Bukkit's plugin manager, whose
+        // monitor the server holds while disabling plugins; a disable tears the tunnel down, which
+        // needs the negotiator's monitor. Reporting inline would be a deadlock at shutdown or
+        // /reload. The next flush, on heimdall-sched with no lock held, makes the report.
+        context.tunnel().onModeChange(new ProtocolModeListener() {
+            @Override
+            public void onModeChanged(ProtocolMode previous, ProtocolMode current) {
+                if (current == ProtocolMode.UNKNOWN) {
+                    forgetInventory();
+                } else {
+                    inventoryReportRequested.set(true);
+                }
+            }
+        });
+
         context.scheduleRepeating(new Runnable() {
             @Override
             public void run() {
                 flush();
             }
         }, FLUSH_PERIOD_MS, FLUSH_PERIOD_MS);
+
+        // The first report goes out on the first flush, a second from now, for the same reason as
+        // the reconnect above: enable can run under the module manager's own lock, and the server
+        // can hold its plugin-manager monitor while waiting for that lock during a disable.
+        forgetInventory();
+        inventoryReportRequested.set(true);
     }
 
     @Override
@@ -364,6 +482,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         tunnel = null;
         chat.clear();
         events.clear();
+        forgetInventory();
     }
 
     // ── Outbound ─────────────────────────────────────────────────────────────
@@ -385,13 +504,20 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 chatObserver = ctx.observeChat(new ChatObserver() {
                     @Override
                     public void onChat(ChatMessage message) {
-                        // Verbatim. Not trimmed, not normalised, not formatted — the bot renders,
+                        // A channel line is relayed only if this server was told to relay that
+                        // channel. Fail closed: a staff channel nobody mapped stays in the game.
+                        String channel = message.channel();
+                        if (channel != null && !channelAllowed(channel)) {
+                            return;
+                        }
+                        // Verbatim. Not trimmed, not normalised, not formatted - the bot renders,
                         // and a relay that silently edited what a player typed is worse than one
                         // that does not relay at all.
                         chat.enqueue(new ChatLine(
                                 message.senderUuid(),
                                 message.senderName(),
                                 message.message(),
+                                channel,
                                 System.currentTimeMillis()));
                     }
                 });
@@ -418,6 +544,31 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             return false;
         }
         return ctx.settings().bool(SETTING_RELAY_CHAT, defaultRelayChat(ctx.platform().role()));
+    }
+
+    /**
+     * Whether a channel line may be relayed: {@code channel} is in the {@code chatChannels} setting,
+     * compared case-insensitively.
+     *
+     * <p>Read live per line, like {@link #relayChat()}, so a dashboard change takes effect on the
+     * next {@code config.push} with nothing to reconcile. The list is a handful of names, so a scan
+     * per line costs nothing worth caching, and a cache would be one more thing that could go stale.
+     *
+     * <p>Case-insensitive because the names reach the setting through a dashboard picker rather than
+     * from ChatControl directly, and a difference in case is not a reason to silently drop a mapped
+     * channel. It cannot widen anything: a name only matches a channel the operator picked.
+     */
+    private boolean channelAllowed(String channel) {
+        ModuleContext ctx = context;
+        if (ctx == null) {
+            return false;
+        }
+        for (String allowed : ctx.settings().strings(SETTING_CHAT_CHANNELS)) {
+            if (allowed != null && allowed.equalsIgnoreCase(channel)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -486,12 +637,173 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
         chat.flush(bus);
         events.flush(bus);
+
+        // The inventory poll rides on the flush rather than a schedule of its own: one fewer
+        // registration to track, and the cadence only has to be roughly right. A requested report
+        // (enable, reconnect) is made here too, and forced: this is the one place the integration is
+        // read with no lock of Heimdall's, the tunnel's or the module manager's held.
+        boolean requested = inventoryReportRequested.getAndSet(false);
+        if (requested || ++flushesSinceInventoryPoll >= INVENTORY_POLL_FLUSHES) {
+            flushesSinceInventoryPoll = 0;
+            reportInventory(requested);
+        }
     }
+
+    // ── Channel inventory ────────────────────────────────────────────────────
+
+    /**
+     * Sends {@link #FRAME_CHANNELS} if the bot has not been told, or if what it was told has changed.
+     *
+     * <p><strong>Called from {@link #flush} only</strong> (and tests), never from a listener or a
+     * lifecycle method: see the comments in {@link #enable} for the locks that rule those out.
+     *
+     * <p>{@code force} sends regardless of what was last reported, and is what a requested report
+     * (enable, reconnect) uses. Either way nothing is recorded as sent while the tunnel is down: the frame would
+     * go nowhere, and recording it would suppress the resend the next poll would otherwise make.
+     *
+     * <p>Package-private so a test can drive a poll without running five flushes.
+     */
+    void reportInventory(boolean force) {
+        ModuleContext ctx = context;
+        TunnelBus bus = tunnel;
+        if (ctx == null || bus == null) {
+            return;
+        }
+        // Read OUTSIDE inventoryLock, always. The integration can reach the server's plugin manager
+        // (Bukkit's getPlugin is synchronized on it), and the server disables plugins while holding
+        // that same monitor; a disable reaches forgetInventory(), which takes inventoryLock. Reading
+        // under inventoryLock would be one half of a lock-order inversion, a deadlock at shutdown or
+        // /reload.
+        //
+        // The stamp is what reading under the lock used to buy: a forced report on the socket thread
+        // and a poll on heimdall-sched can each read, then reach the send in the opposite order. The
+        // stamp is taken before reading, so the read that started later carries the larger one, and
+        // an older read arriving after a newer send is dropped rather than overwriting it.
+        long stamp = inventoryStamp.incrementAndGet();
+        ChatChannels channels = chatChannels(ctx);
+        ChatChannels.State state = stateOf(channels);
+        List<String> names = Collections.emptyList();
+        if (state == ChatChannels.State.ACTIVE) {
+            try {
+                names = Collections.unmodifiableList(new ArrayList<String>(channels.channelNames()));
+            } catch (RuntimeException failed) {
+                // The interface says this cannot throw. If it does anyway, the honest report is that
+                // the channel plugin cannot be read, which is exactly what BROKEN means.
+                state = ChatChannels.State.BROKEN;
+            }
+        }
+
+        synchronized (inventoryLock) {
+            if (forgetRequested.getAndSet(false)) {
+                reportedState = null;
+                reportedNames = Collections.emptyList();
+            }
+            if (stamp < sentStamp) {
+                return;
+            }
+            if (!force && state == reportedState && names.equals(reportedNames)) {
+                // A newer read confirmed what the bot already has. Recording its stamp is what
+                // stops an older read still in flight (one that saw a state since reverted) from
+                // being sent after it: X, then a slow read of Y, then X again must leave the bot on X.
+                sentStamp = stamp;
+                return;
+            }
+            if (!bus.isConnected()) {
+                reportedState = null;
+                reportedNames = Collections.emptyList();
+                return;
+            }
+            bus.send(FRAME_CHANNELS, Payload.builder()
+                    .put("state", state.wireName())
+                    .putStrings("channels", names)
+                    .build());
+            reportedState = state;
+            reportedNames = names;
+            sentStamp = stamp;
+        }
+        final ChatChannels.State sent = state;
+        final int count = names.size();
+        ctx.logger().debug(() -> "reported chat channels to the bot: " + sent.wireName() + ", "
+                + count + " channel(s)");
+    }
+
+    /**
+     * Forgets what the bot was told, so the next report sends whatever it finds.
+     *
+     * <p>Lock-free: it only raises a flag that the next {@link #reportInventory} applies under
+     * {@link #inventoryLock}. This runs from the tunnel's mode listener, which the negotiator calls
+     * while holding its own monitor, and from disable, which can run under the server's
+     * plugin-manager monitor. Taking {@code inventoryLock} here would make those threads wait on a
+     * lock that is held around a socket send, and whether the WebSocket library's own locks could
+     * close that loop is not something this class can see. So nothing but
+     * {@link #reportInventory} ever takes {@code inventoryLock}, and nothing can wait on it.
+     */
+    private void forgetInventory() {
+        forgetRequested.set(true);
+    }
+
+    /** The platform's channel integration, never {@code null}. */
+    private static ChatChannels chatChannels(ModuleContext ctx) {
+        try {
+            ChatChannels channels = ctx.platform().integrations().chatChannels();
+            return channels == null ? BROKEN_CHANNELS : channels;
+        } catch (RuntimeException failed) {
+            return BROKEN_CHANNELS;
+        }
+    }
+
+    /** {@link ChatChannels#state()}, with a throw or a null treated as the BROKEN it would mean. */
+    private static ChatChannels.State stateOf(ChatChannels channels) {
+        try {
+            ChatChannels.State state = channels.state();
+            return state == null ? ChatChannels.State.BROKEN : state;
+        } catch (RuntimeException failed) {
+            return ChatChannels.State.BROKEN;
+        }
+    }
+
+    /**
+     * What a platform whose integration accessor threw, or answered {@code null}, is treated as. Fail
+     * closed: nothing routed by channel, nothing broadcast on the assumption that channels are not in
+     * play.
+     */
+    private static final ChatChannels BROKEN_CHANNELS = new ChatChannels() {
+        @Override
+        public State state() {
+            return State.BROKEN;
+        }
+
+        @Override
+        public List<String> channelNames() {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public Optional<Collection<PlayerHandle>> members(String channel) {
+            return Optional.empty();
+        }
+    };
 
     // ── Inbound ──────────────────────────────────────────────────────────────
 
     /**
-     * Renders {@code bridge.discord} and shows it to everybody online.
+     * Renders {@code bridge.discord} and shows it to the audience it was addressed to.
+     *
+     * <h2>Routing</h2>
+     *
+     * <p>Four cases, decided per message against one read of {@link ChatChannels#state()} per frame:
+     *
+     * <ul>
+     *   <li>a {@code channel}, with the hook {@code active} and the channel known here: that channel's
+     *       members only;
+     *   <li>a {@code channel} in any other situation: dropped, never widened to everyone;
+     *   <li>no {@code channel}, on a server with no channels in play ({@code none}): everybody
+     *       online, which is exactly what happened before channels existed;
+     *   <li>no {@code channel}, on a server whose channels are {@code active} or {@code broken}:
+     *       dropped. A mapping with no channels picked delivers nowhere on a channelled server.
+     * </ul>
+     *
+     * <p>A drop is counted in the debug line, never described.
      *
      * <p>Each {@code text} is a <strong>finished</strong> legacy-§ string. The bot resolved its
      * template and inserted the user's content after formatting, so nothing a Discord user types can
@@ -544,18 +856,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                     + "problem rather than a busy server.");
         }
 
-        Collection<PlayerHandle> online;
-        try {
-            online = ctx.platform().players().onlinePlayers();
-        } catch (RuntimeException raced) {
-            // The directory is allowed to throw rather than pretend the server is empty (see
-            // PlayerDirectory#onlinePlayers). A relayed line lost to that is one line; the next one
-            // is a second away.
-            ctx.logger().debug(() -> "could not read the online list for a Discord relay: " + raced);
-            return;
-        }
+        // Read once per frame, so every message in it is routed against the same answer.
+        ChatChannels channels = chatChannels(ctx);
+        ChatChannels.State state = stateOf(channels);
+
+        // Taken lazily: a frame of nothing but channel messages never needs the whole server.
+        Collection<PlayerHandle> online = null;
+        Set<UUID> reached = new HashSet<UUID>();
 
         int rendered = 0;
+        int unrouted = 0;
         int considered = 0;
         for (Payload message : messages) {
             if (considered++ >= MAX_INBOUND_MESSAGES) {
@@ -565,10 +875,49 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             if (text.isEmpty()) {
                 continue;
             }
+
+            Collection<PlayerHandle> audience;
+            String channel = message.string("channel", "");
+            if (!channel.isEmpty()) {
+                // Meant for one channel's members. Only deliverable when the hook is live and the
+                // channel exists here; anything else is dropped, never widened to everyone, because
+                // a staff channel's Discord side posting to the whole server is the leak this exists
+                // to prevent.
+                Optional<Collection<PlayerHandle>> members = state == ChatChannels.State.ACTIVE
+                        ? membersOf(channels, channel)
+                        : Optional.<Collection<PlayerHandle>>empty();
+                if (!members.isPresent()) {
+                    unrouted++;
+                    continue;
+                }
+                audience = members.get();
+            } else if (state != ChatChannels.State.NONE) {
+                // No channel named, on a server where channels are in play (or might be, if the hook
+                // is broken). A mapping with no channels picked delivers nowhere here: "everybody"
+                // is not an audience anybody chose on a channelled server.
+                unrouted++;
+                continue;
+            } else {
+                if (online == null) {
+                    try {
+                        online = ctx.platform().players().onlinePlayers();
+                    } catch (RuntimeException raced) {
+                        // The directory is allowed to throw rather than pretend the server is empty
+                        // (see PlayerDirectory#onlinePlayers). A relayed line lost to that is one
+                        // line; the next one is a second away.
+                        ctx.logger().debug(() -> "could not read the online list for a Discord "
+                                + "relay: " + raced);
+                        return;
+                    }
+                }
+                audience = online;
+            }
+
             Component component = Msg.legacy(text);
-            for (PlayerHandle player : online) {
+            for (PlayerHandle player : audience) {
                 try {
                     player.sendMessage(component);
+                    reached.add(player.uuid());
                 } catch (RuntimeException gone) {
                     // A player who left between the snapshot and the send is the ordinary race, not
                     // an error — and every handle already tolerates it. This is the belt for a
@@ -579,11 +928,27 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
 
         // Counts, never content. This line is also what the connected smoke asserts on, which is
-        // only possible because it says how MANY rather than what.
+        // only possible because it says how MANY rather than what. State is read once per frame, so
+        // a frame is either broadcast (everybody online, exactly as before channels existed) or
+        // routed by channel (the distinct members reached), never a mix of the two.
         final int count = rendered;
-        final int audience = online.size();
-        ctx.logger().debug(() -> "relayed " + count + " discord message(s) to " + audience
-                + " online player(s)");
+        final int audienceSize = online != null ? online.size() : reached.size();
+        final int dropped = unrouted;
+        final ChatChannels.State routedBy = state;
+        ctx.logger().debug(() -> "relayed " + count + " discord message(s) to " + audienceSize
+                + " online player(s)" + (dropped == 0 ? "" : "; dropped " + dropped
+                + " with no deliverable audience (chat channels: " + routedBy.wireName() + ")"));
+    }
+
+    /** {@link ChatChannels#members}, with a throw treated as "no such channel". */
+    private static Optional<Collection<PlayerHandle>> membersOf(
+            ChatChannels channels, String channel) {
+        try {
+            Optional<Collection<PlayerHandle>> members = channels.members(channel);
+            return members == null ? Optional.<Collection<PlayerHandle>>empty() : members;
+        } catch (RuntimeException failed) {
+            return Optional.empty();
+        }
     }
 
     // ── Wire values ──────────────────────────────────────────────────────────
@@ -600,24 +965,32 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         private final UUID uuid;
         private final String name;
         private final String message;
+        private final String channel;
         private final long timestampMs;
 
-        ChatLine(UUID uuid, String name, String message, long timestampMs) {
+        ChatLine(UUID uuid, String name, String message, String channel, long timestampMs) {
             this.uuid = uuid;
             this.name = name;
             this.message = message;
+            this.channel = channel;
             this.timestampMs = timestampMs;
         }
 
         Payload toPayload() {
-            return Payload.builder()
+            Payload.Builder builder = Payload.builder()
                     .put("uuid", uuid == null ? "" : uuid.toString())
                     .put("name", name == null ? "" : name)
                     // Verbatim: exactly what ChatMessage carried, which is exactly what the player
                     // typed.
                     .put("msg", message == null ? "" : message)
-                    .put("ts", timestampMs)
-                    .build();
+                    .put("ts", timestampMs);
+            if (channel != null && !channel.isEmpty()) {
+                // Omitted rather than sent as null or "" for ordinary chat: the bot reads presence
+                // as "this came from a chat-plugin channel", so an empty string would be a channel
+                // with no name rather than no channel.
+                builder.put("channel", channel);
+            }
+            return builder.build();
         }
 
         /**
@@ -628,7 +1001,8 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         @Override
         public String toString() {
             return "ChatLine{sender='" + name + "', length="
-                    + (message == null ? 0 : message.length()) + "}";
+                    + (message == null ? 0 : message.length())
+                    + (channel == null ? "" : ", channel='" + channel + "'") + "}";
         }
     }
 
