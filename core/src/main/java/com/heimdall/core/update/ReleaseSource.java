@@ -39,16 +39,6 @@ import java.util.concurrent.CompletableFuture;
 public interface ReleaseSource {
 
     /**
-     * The newest published release.
-     *
-     * <p>Never blocks the caller. The future completes exceptionally if the bot could not be
-     * reached or answered a failure; it may also complete with {@code null}, or with a release
-     * whose version is blank, when the bot has no release to report. {@link UpdateService} treats
-     * all three the same way — as "no answer", not as an error worth an operator's attention.
-     */
-    CompletableFuture<PluginRelease> latestRelease();
-
-    /**
      * The newest published release, optionally asking the bot to skip its cache.
      *
      * <p>{@code fresh} is for checks an operator asked for by hand ({@code /hd check},
@@ -57,11 +47,19 @@ public interface ReleaseSource {
      * looking for it. The periodic check never sets it: hundreds of servers on a timer must not each
      * reach GitHub through the bot.
      *
-     * <p>Defaults to the cached call, so a source that cannot ask for a fresh answer still answers.
-     * The same threading contract as {@link #latestRelease()}.
+     * <p>Abstract on purpose. As a default that ignored the flag, an adapter that forgot to pass it
+     * on would compile, pass, and quietly turn every {@code /hd check} back into a cached one.
+     *
+     * <p>Never blocks the caller. The future completes exceptionally if the bot could not be
+     * reached or answered a failure; it may also complete with {@code null}, or with a release
+     * whose version is blank, when the bot has no release to report. {@link UpdateService} treats
+     * all three the same way: as "no answer", not as an error worth an operator's attention.
      */
-    default CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
-        return latestRelease();
+    CompletableFuture<PluginRelease> latestRelease(boolean fresh);
+
+    /** {@link #latestRelease(boolean)} from the cache, which is what the periodic check uses. */
+    default CompletableFuture<PluginRelease> latestRelease() {
+        return latestRelease(false);
     }
 
     /**

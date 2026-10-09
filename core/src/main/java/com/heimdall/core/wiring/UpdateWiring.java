@@ -292,17 +292,13 @@ public final class UpdateWiring {
      * fake away from being testable, and so it cannot grow a second dependency on the API by
      * accident.
      */
-    private static final class GatewayReleaseSource implements ReleaseSource {
+    /** Package-private so {@code UpdateWiringFreshTest} can prove it forwards the flag. */
+    static final class GatewayReleaseSource implements ReleaseSource {
 
         private final HeimdallApi api;
 
         GatewayReleaseSource(HeimdallApi api) {
             this.api = api;
-        }
-
-        @Override
-        public CompletableFuture<PluginRelease> latestRelease() {
-            return api.latestRelease();
         }
 
         @Override
@@ -321,7 +317,8 @@ public final class UpdateWiring {
     }
 
     /** {@link UpdateService} as the admin tree wants to see it. */
-    private static final class ServiceAdmin implements UpdateAdmin {
+    /** Package-private so {@code UpdateWiringFreshTest} can prove {@code /hd check} is fresh. */
+    static final class ServiceAdmin implements UpdateAdmin {
 
         private final UpdateService service;
 

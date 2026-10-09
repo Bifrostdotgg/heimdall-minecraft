@@ -511,10 +511,32 @@ class StubBotApiClientTest {
         @Test
         void latestReleaseFresh() throws Exception {
             // ?fresh=1 is inside the signed path: a stub that verifies over path AND query, the
-            // way the bot does, must accept it and route it like the plain call.
+            // way the bot does, must accept it and route it like the plain call. And the flag must
+            // actually be on the wire, not merely signable.
             PluginRelease release = await(client.latestRelease(true));
 
             assertEquals("v3.0.0", release.version());
+            assertEquals("fresh=1", bot.lastRequestQuery("GET plugin/latest"));
+        }
+
+        @Test
+        void latestReleaseCachedSendsNoFlag() throws Exception {
+            await(client.latestRelease(false));
+            assertEquals("", bot.lastRequestQuery("GET plugin/latest"));
+
+            await(client.latestRelease());
+            assertEquals("", bot.lastRequestQuery("GET plugin/latest"));
+        }
+
+        @Test
+        void heimdallApiForwardsTheFlag() throws Exception {
+            HeimdallApi api = new HeimdallApi(client);
+
+            await(api.latestRelease(true));
+            assertEquals("fresh=1", bot.lastRequestQuery("GET plugin/latest"));
+
+            await(api.latestRelease(false));
+            assertEquals("", bot.lastRequestQuery("GET plugin/latest"));
         }
     }
 }

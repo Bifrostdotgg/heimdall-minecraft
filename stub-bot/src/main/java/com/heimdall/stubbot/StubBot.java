@@ -172,6 +172,14 @@ public final class StubBot implements AutoCloseable {
     }
 
     /**
+     * The raw query string of the last signed request to {@code "METHOD route"}: {@code ""} when it
+     * had none, {@code null} when no such request came.
+     */
+    public String lastRequestQuery(String methodAndRoute) {
+        return http.lastRequestQuery(methodAndRoute);
+    }
+
+    /**
      * Whether {@code POST role-sync/snapshot} exists. {@code false} answers it with a plain 404,
      * which is what a bot older than the plugin does.
      */

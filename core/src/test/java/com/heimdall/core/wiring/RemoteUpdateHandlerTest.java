@@ -52,7 +52,7 @@ class RemoteUpdateHandlerTest {
     private static ReleaseSource sourceFor(final String version) {
         return new ReleaseSource() {
             @Override
-            public CompletableFuture<PluginRelease> latestRelease() {
+            public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
                 return CompletableFuture.completedFuture(PluginRelease.builder()
                         .version(version)
                         .downloadUrl("https://github.com/x/y/releases/download/" + version + "/p.jar")

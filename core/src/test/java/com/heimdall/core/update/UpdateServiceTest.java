@@ -458,7 +458,8 @@ class UpdateServiceTest {
         }
 
         @Override
-        public CompletableFuture<PluginRelease> latestRelease() {
+        public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
+            freshFlags.add(fresh);
             calls.incrementAndGet();
             if (failure != null) {
                 CompletableFuture<PluginRelease> failed = new CompletableFuture<PluginRelease>();
@@ -468,12 +469,6 @@ class UpdateServiceTest {
                 return failed;
             }
             return CompletableFuture.completedFuture(release);
-        }
-
-        @Override
-        public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
-            freshFlags.add(fresh);
-            return latestRelease();
         }
 
         @Override
@@ -497,7 +492,7 @@ class UpdateServiceTest {
         }
 
         @Override
-        public CompletableFuture<PluginRelease> latestRelease() {
+        public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
             Throwable current = failure;
             if (current != null) {
                 CompletableFuture<PluginRelease> failed = new CompletableFuture<PluginRelease>();
