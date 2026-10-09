@@ -2066,7 +2066,11 @@ answers with `BukkitItemImages`:
   each is copied into `cache/packs/open/` once per change, on the asset thread, and the copy is
   opened. A pack whose copy is not ready yet, or failed (retried a minute later), is left out of the
   stack and of its fingerprint, so the rescan after the copy rebuilds it; unused copies are deleted
-  on the next rebuild. The server pack is the cache's own file and is opened in place. A server pack with no `resource-pack-sha1` is re-fetched once its copy
+  on the next rebuild. The server pack is the cache's own file and is opened in place, so each
+  fetch lands under a new name (`server-<url key>-<content hash>.zip`) instead of replacing the file
+  a stack may hold open (Windows forbids that); the superseded file is deleted after the stack has
+  switched, and any file younger than ten minutes is left for the fetch that may have just written
+  it. A server pack with no `resource-pack-sha1` is re-fetched once its copy
   is a day old; a failed fetch is retried after ten minutes, and the previous copy stays in use.
 - **Models resolve the way the client does:** `item_model`, then `items/<id>.json` evaluated against
   custom model data (`range_dispatch`, `select`, `condition`, `composite`, tints), then the
@@ -2131,7 +2135,11 @@ latency, and a line said after a pending item line waits behind it and ships aft
 both were said. A line therefore waits only while an item line ahead of it is drawing, and never
 longer than that line's budget, which began before it arrived. The budget timers run on the shared
 `heimdall-sched` thread, so the 750 ms is plus that thread's latency: a large frame being sent or a
-slow task ahead of the timer can delay it. The deque holds at most 500 lines
+slow task ahead of the timer can delay it. Finishing a line is total: if attaching its images fails
+in any way, an `Error` included, the line ships as its `[Name]` text in its place, so a held line can
+never be left claimed but unfinished. As a belt, an item line that has waited more than twice the
+budget (a timer that never ran, a finish that never came) is released as text the next time the
+deque moves, with a warning counting how many. The deque holds at most 500 lines
 (past that its head ships with whatever finished); at most eight item lines wait on renders at once,
 and past that a line ships text-only, still in order. Each pending line carries the enable cycle it
 was said in, and a render finishing after a disable is dropped rather than shipped into the next

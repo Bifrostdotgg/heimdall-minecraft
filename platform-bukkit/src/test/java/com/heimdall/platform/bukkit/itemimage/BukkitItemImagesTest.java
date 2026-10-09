@@ -230,6 +230,50 @@ class BukkitItemImagesTest {
     }
 
     @Test
+    void aFailedPackCopyWaitsAMinuteBeforeTheNextAttempt() throws Exception {
+        Path generated = server.resolve("plugins/ItemsAdder/output/generated.zip");
+        Files.createDirectories(generated.getParent());
+        Files.write(generated, Fixtures.zip(Fixtures.files("pack.mcmeta", "{}")));
+        // A file where the copies' directory should be: every copy fails.
+        Path packs = server.resolve("plugins/Heimdall/cache/packs");
+        Files.createDirectories(packs);
+        Files.write(packs.resolve("open"), new byte[] {1});
+        Files.write(server.resolve("plugins/Heimdall/item-images.yml"),
+                Fixtures.utf8("download-vanilla-assets: false\n"));
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        service.rescanNanos = 0L;
+        final java.util.concurrent.atomic.AtomicLong now =
+                new java.util.concurrent.atomic.AtomicLong(5_000_000L);
+        service.clock = new java.util.function.LongSupplier() {
+            @Override
+            public long getAsLong() {
+                return now.get();
+            }
+        };
+
+        renderUntil(service, 1);
+        for (int i = 0; i < 5; i++) {
+            service.render(ChatItem.builder("stone").build()).get(10, TimeUnit.SECONDS);
+        }
+        Thread.sleep(100);
+        assertEquals(1, service.copyAttempts.get(), "within the minute: not retried per rescan");
+
+        now.addAndGet(BukkitItemImages.COPY_RETRY_MS + 1);
+        renderUntil(service, 2);
+        assertEquals(2, service.copyAttempts.get(), "a minute later: tried again");
+    }
+
+    private static void renderUntil(BukkitItemImages service, int attempts) throws Exception {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (service.copyAttempts.get() < attempts && System.currentTimeMillis() < deadline) {
+            service.render(ChatItem.builder("stone").build()).get(10, TimeUnit.SECONDS);
+            Thread.sleep(20);
+        }
+        // Let the failed attempt finish recording its time before the caller looks again.
+        Thread.sleep(100);
+    }
+
+    @Test
     void afterCloseNothingRenders() throws Exception {
         BukkitItemImages service = build(new Fixtures.FakeHttp());
         service.close();

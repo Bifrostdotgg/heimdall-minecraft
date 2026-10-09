@@ -786,7 +786,8 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             // Same rule as the rewrite: the line relays, and nothing escapes into chat dispatch.
             warnItemFailure(unexpected);
             try {
-                if (attempt.slot != null) {
+                if (attempt.slot != null && attempt.slot.placed) {
+                    // Already in the order: finish it there, never add a second copy.
                     shipPending(attempt.slot);
                 } else {
                     if (attempt.reserved) {
@@ -824,23 +825,55 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             }
             if (held.isEmpty() && slot.line != null) {
                 chat.enqueue(slot.line);
+                slot.placed = true;
                 released = true;
             } else {
                 held.addLast(slot);
+                slot.placed = true;
                 if (held.size() > MAX_QUEUE_SIZE) {
                     forced = claimHeadLocked();
                 }
                 released = releaseReadyLocked();
             }
         }
-        if (released) {
-            requestDrain();
-        }
+        afterRelease(released);
         if (forced != null) {
             // Assembled (base64, logging) outside the lock; the head stays in place until then,
             // so the order is unchanged, and the deque may sit a line or two over its bound.
-            assemble(forced);
-            markReady(forced, forced.finished);
+            finishSlot(forced);
+        }
+    }
+
+    /**
+     * Finishes a claimed slot, totally: whatever {@link #assemble} does, including throwing, the
+     * slot is marked ready with its images or, failing that, with its text-only line. A claimed
+     * slot left without a line would stop {@link #held} at its head forever, since nothing else
+     * may claim it again.
+     */
+    private void finishSlot(Slot slot) {
+        ChatLine done = slot.pending.line;
+        try {
+            assemble(slot);
+            if (slot.finished != null) {
+                done = slot.finished;
+            }
+        } catch (Throwable failed) {
+            warnItemFailure(failed);
+        } finally {
+            markReady(slot, done);
+        }
+    }
+
+    /** After a release: asks for a drain, and reports any line the watchdog had to let go. */
+    private void afterRelease(boolean released) {
+        if (released) {
+            requestDrain();
+        }
+        int overdue = watchdogReleases.getAndSet(0);
+        ModuleContext ctx = context;
+        if (overdue > 0 && ctx != null) {
+            ctx.logger().warn(overdue + " chat line(s) with items waited past twice the image "
+                    + "budget and were relayed as text");
         }
     }
 
@@ -854,19 +887,49 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             slot.line = line;
             released = releaseReadyLocked();
         }
-        if (released) {
-            requestDrain();
-        }
+        afterRelease(released);
     }
 
-    /** Moves every ready line at the head of {@link #held} to the batcher, in order. */
+    /**
+     * Moves every ready line at the head of {@link #held} to the batcher, in order.
+     *
+     * <p>Also the watchdog: a head item line that has waited more than twice the image budget is
+     * released as its text-only line, whoever (if anyone) still holds its claim. The budget timer
+     * and the render callbacks normally finish a line long before; this is the belt for a timer
+     * that never ran or a finish that never came, so the deque can never stall behind one line.
+     * A late finish then finds the slot ready and does nothing.
+     */
     private boolean releaseReadyLocked() {
         boolean any = false;
-        while (!held.isEmpty() && held.peekFirst().line != null) {
+        while (!held.isEmpty()) {
+            Slot head = held.peekFirst();
+            if (head.line == null && head.pending != null
+                    && nanoNow() - head.arrivedNanos > 2 * TimeUnit.MILLISECONDS.toNanos(
+                            ITEM_IMAGE_BUDGET_MS)) {
+                if (head.pending.markShipped() && pendingItemLines.get() > 0) {
+                    pendingItemLines.decrementAndGet();
+                }
+                head.line = head.pending.line;
+                watchdogReleases.incrementAndGet();
+            }
+            if (head.line == null) {
+                break;
+            }
             chat.enqueue(held.pollFirst().line);
             any = true;
         }
         return any;
+    }
+
+    /** Lines the watchdog released since the last report; see {@link #afterRelease}. */
+    private final AtomicInteger watchdogReleases = new AtomicInteger();
+
+    /** A monotonic clock for the watchdog; tests substitute one. {@code null} is the real one. */
+    private volatile java.util.function.LongSupplier nanoClock;
+
+    private long nanoNow() {
+        java.util.function.LongSupplier clock = nanoClock;
+        return clock != null ? clock.getAsLong() : System.nanoTime();
     }
 
     /**
@@ -893,7 +956,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * Under {@link #orderLock}, like the reset, so a disable landing between the check and the
      * increment cannot leave a count from an old cycle in the new one.
      */
-    private boolean reservePending(long cycle) {
+    boolean reservePending(long cycle) {
         synchronized (orderLock) {
             if (cycle != generation || pendingItemLines.get() >= MAX_PENDING_ITEM_LINES) {
                 return false;
@@ -904,7 +967,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     /** Returns a pending place, but only if {@code cycle} is still the current one. */
-    private void releasePendingCount(long cycle) {
+    void releasePendingCount(long cycle) {
         synchronized (orderLock) {
             if (cycle == generation && pendingItemLines.get() > 0) {
                 pendingItemLines.decrementAndGet();
@@ -946,17 +1009,24 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             return;
         }
         attempt.reserved = true;
+        Error injected = attachFailureForTests;
+        if (injected != null) {
+            attachFailureForTests = null;
+            throw injected;
+        }
 
         List<CompletableFuture<byte[]>> renders = new ArrayList<CompletableFuture<byte[]>>();
         for (ChatItem item : distinct) {
             renders.add(startRender(images, item));
         }
         final PendingItemLine pending = new PendingItemLine(textOnly, names, renders);
-        final Slot slot = Slot.pending(pending, cycle);
+        final Slot slot = Slot.pending(pending, cycle, nanoNow());
+        // Known to the unwind before it is placed: if submit throws, the unwind looks at
+        // slot.placed to decide between finishing it in the order and relaying it as text.
+        attempt.slot = slot;
         // Into the order BEFORE any completion can fire: a render that is already done ships the
         // line from inside whenComplete below, and it must find its place in the deque.
         submit(slot);
-        attempt.slot = slot;
         for (CompletableFuture<byte[]> render : renders) {
             // Plain whenComplete, never the executor-less *Async: this runs on whichever thread
             // finished the render (or inline, if it was already done), and all it does is a check
@@ -1023,8 +1093,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 pendingItemLines.decrementAndGet();
             }
         }
-        assemble(slot);
-        markReady(slot, slot.finished);
+        finishSlot(slot);
     }
 
     /**
@@ -1033,6 +1102,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * into the slot rather than returned, so no method here hands a chat line back out.
      */
     private void assemble(Slot slot) {
+        Error injected = assembleFailureForTests;
+        if (injected != null) {
+            assembleFailureForTests = null;
+            throw injected;
+        }
         PendingItemLine pending = slot.pending;
         List<Payload> items = new ArrayList<Payload>();
         int missing = 0;
@@ -1798,24 +1872,29 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
         final long generation;
         final PendingItemLine pending;
+        /** When a pending slot was said, by the module's monotonic clock; for the watchdog. */
+        final long arrivedNanos;
         /** Non-null once ready. Guarded by {@code orderLock}. */
         ChatLine line;
+        /** Set once the slot is in the order (or straight through it). Written under the lock. */
+        volatile boolean placed;
 
         /** The assembled line of a pending slot, set once by whichever thread shipped it. */
         volatile ChatLine finished;
 
-        private Slot(long generation, PendingItemLine pending, ChatLine line) {
+        private Slot(long generation, PendingItemLine pending, ChatLine line, long arrivedNanos) {
             this.generation = generation;
             this.pending = pending;
             this.line = line;
+            this.arrivedNanos = arrivedNanos;
         }
 
         static Slot ready(ChatLine line, long generation) {
-            return new Slot(generation, null, line);
+            return new Slot(generation, null, line, 0L);
         }
 
-        static Slot pending(PendingItemLine pending, long generation) {
-            return new Slot(generation, pending, null);
+        static Slot pending(PendingItemLine pending, long generation, long arrivedNanos) {
+            return new Slot(generation, pending, null, arrivedNanos);
         }
     }
 
@@ -1885,6 +1964,22 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /** How many item lines are waiting on images. */
     int pendingItemLineCount() {
         return pendingItemLines.get();
+    }
+
+    /** Makes the next {@link #assemble} throw {@code failure}, once. */
+    volatile Error assembleFailureForTests;
+
+    /** Makes the next {@link #attachImages} throw {@code failure} after reserving, once. */
+    volatile Error attachFailureForTests;
+
+    /** Substitutes the watchdog's monotonic clock. */
+    void nanoClockForTests(java.util.function.LongSupplier clock) {
+        this.nanoClock = clock;
+    }
+
+    /** The current enable cycle. */
+    long generationForTests() {
+        return generation;
     }
 
     /** How many lines are held behind a pending item line. */

@@ -316,6 +316,11 @@ final class PackSources {
      * Re-downloads when the URL or the expected SHA-1 changes, and, for a pack with no SHA-1 to pin
      * it, once the copy is a day old (the URL may serve new contents). A SHA-1 mismatch is an error
      * and leaves nothing behind. Blocking: the asset thread only.
+     *
+     * <p>Every fetch lands under a new name, {@code server-<url key>-<content hash>.zip}, and never
+     * replaces a file in place: the stack opens the server pack where it lies, and on Windows a file
+     * held open cannot be replaced or deleted. The superseded file is removed by
+     * {@link #pruneServerPacks} once the stack has switched to the new one.
      */
     Path serverPack(HttpSource http) throws IOException {
         Properties properties = new Properties();
@@ -333,12 +338,13 @@ final class PackSources {
         String sha1 = properties.getProperty("resource-pack-sha1", "").trim().toLowerCase(Locale.ROOT);
         String key = VanillaAssets.sha1((url + "|" + sha1).getBytes(StandardCharsets.UTF_8));
         Path packs = cacheDir.resolve("packs");
-        Path target = packs.resolve("server-" + key.substring(0, 16) + ".zip");
-        if (Files.isRegularFile(target)) {
+        String prefix = "server-" + key.substring(0, 16) + "-";
+        Path current = newest(packs, prefix);
+        if (current != null) {
             boolean stale = sha1.isEmpty() && System.currentTimeMillis()
-                    - Files.getLastModifiedTime(target).toMillis() > UNHASHED_PACK_MAX_AGE_MS;
+                    - Files.getLastModifiedTime(current).toMillis() > UNHASHED_PACK_MAX_AGE_MS;
             if (!stale) {
-                return target;
+                return current;
             }
         }
         Files.createDirectories(packs);
@@ -350,9 +356,20 @@ final class PackSources {
             if (!sha1.isEmpty() && !sha1.equals(VanillaAssets.sha1(partial))) {
                 throw new AssetException("the server resource pack does not match resource-pack-sha1");
             }
-            // The stack opens its own copy of this file, never this one, so replacing it is safe.
-            Files.move(partial, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-            removeSuperseded(packs, target);
+            String content = VanillaAssets.sha1(partial).substring(0, 12);
+            Path target = packs.resolve(prefix + content + ".zip");
+            if (Files.isRegularFile(target)) {
+                // Same bytes as a file we already have: keep that one, and mark it fresh. The
+                // touch may fail on a file held open; then the next prepare simply fetches again.
+                try {
+                    Files.setLastModifiedTime(target, java.nio.file.attribute.FileTime.fromMillis(
+                            System.currentTimeMillis()));
+                } catch (IOException heldOpen) {
+                    // See above.
+                }
+                return target;
+            }
+            Files.move(partial, target);
             logger.info("item images: using the server resource pack ("
                     + Files.size(target) + " bytes)");
             return target;
@@ -361,16 +378,50 @@ final class PackSources {
         }
     }
 
-    /** Deletes earlier server packs once a new URL or hash has replaced them. Best effort. */
-    private static void removeSuperseded(Path packs, Path current) {
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(packs, "server-*.zip")) {
-            for (Path old : stream) {
-                if (!old.equals(current)) {
-                    Files.deleteIfExists(old);
+    /** The most recently written {@code <prefix>*.zip} in {@code packs}, or {@code null}. */
+    private static Path newest(Path packs, String prefix) throws IOException {
+        if (!Files.isDirectory(packs)) {
+            return null;
+        }
+        Path best = null;
+        long bestTime = Long.MIN_VALUE;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(packs, prefix + "*.zip")) {
+            for (Path candidate : stream) {
+                long time = Files.getLastModifiedTime(candidate).toMillis();
+                if (best == null || time > bestTime) {
+                    best = candidate;
+                    bestTime = time;
                 }
             }
-        } catch (IOException | RuntimeException ignored) {
-            // A file still open elsewhere is removed on a later download.
+        }
+        return best;
+    }
+
+    /**
+     * Deletes every downloaded server pack except {@code keep}, once the stack no longer has the
+     * others open. A file younger than {@link VanillaAssets#LEFTOVER_AGE_MS} is left alone: it may
+     * be a fetch the asset thread finished a moment ago and has not published yet. A file that
+     * cannot be deleted (still open on Windows) is tried at the next rebuild.
+     */
+    void pruneServerPacks(Path keep) {
+        Path packs = cacheDir.resolve("packs");
+        if (!Files.isDirectory(packs)) {
+            return;
+        }
+        long cutoff = System.currentTimeMillis() - VanillaAssets.LEFTOVER_AGE_MS;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(packs, "server-*.zip")) {
+            for (Path old : stream) {
+                if (old.equals(keep) || Files.getLastModifiedTime(old).toMillis() >= cutoff) {
+                    continue;
+                }
+                try {
+                    Files.deleteIfExists(old);
+                } catch (IOException stillOpen) {
+                    // Next rebuild.
+                }
+            }
+        } catch (IOException ignored) {
+            // Best effort.
         }
     }
 }

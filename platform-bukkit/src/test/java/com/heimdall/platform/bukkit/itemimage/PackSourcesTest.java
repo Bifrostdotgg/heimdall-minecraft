@@ -202,13 +202,50 @@ class PackSourcesTest {
         assertEquals(first, second);
         assertEquals(1, http.requests.size(), "cached by URL and hash, not refetched");
 
-        // A new URL replaces the old download rather than accumulating beside it.
+        // A new URL lands beside the old download, and the old one goes once the stack moves on.
         Files.write(server.resolve("server.properties"), Fixtures.utf8(
                 "resource-pack=https\\://packs.example/v2.zip\n"));
         http.serve("https://packs.example/v2.zip", pack("v2"));
         Path third = sources().serverPack(http);
+        assertTrue(Files.isRegularFile(third));
+        assertTrue(Files.exists(first), "not deleted under a stack that may hold it open");
+        Files.setLastModifiedTime(first, FileTime.fromMillis(System.currentTimeMillis()
+                - 2 * VanillaAssets.LEFTOVER_AGE_MS));
+        sources().pruneServerPacks(third);
         assertFalse(Files.exists(first));
         assertTrue(Files.isRegularFile(third));
+    }
+
+    @Test
+    void aStaleServerPackIsRefetchedWhileTheOldOneIsHeldOpen() throws Exception {
+        Files.write(server.resolve("server.properties"), Fixtures.utf8(
+                "resource-pack=https\\://packs.example/pack.zip\n"));
+        Fixtures.FakeHttp http = new Fixtures.FakeHttp()
+                .serve("https://packs.example/pack.zip", pack("v1"));
+        Path first = sources().serverPack(http);
+        Files.setLastModifiedTime(first, FileTime.fromMillis(System.currentTimeMillis()
+                - 2 * PackSources.UNHASHED_PACK_MAX_AGE_MS));
+        byte[] v2 = pack("v2-longer");
+        http.serve("https://packs.example/pack.zip", v2);
+
+        // The stack opens the server pack in place; on Windows that handle forbids replacing or
+        // deleting the file, which is what the refetch used to try.
+        java.util.zip.ZipFile held = new java.util.zip.ZipFile(first.toFile());
+        Path again;
+        try {
+            again = sources().serverPack(http);
+            assertNotEquals(first, again, "a new name, never a replacement in place");
+            assertTrue(java.util.Arrays.equals(v2, Files.readAllBytes(again)));
+            sources().pruneServerPacks(again);
+        } finally {
+            held.close();
+        }
+        // Once the old stack has let go, the next rebuild's prune removes it.
+        sources().pruneServerPacks(again);
+        assertFalse(Files.exists(first));
+        assertTrue(Files.exists(again));
+        assertEquals(again, sources().serverPack(http), "fresh: no third fetch");
+        assertEquals(2, http.requests.size());
     }
 
     @Test

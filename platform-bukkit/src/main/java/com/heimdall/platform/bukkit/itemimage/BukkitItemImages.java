@@ -128,6 +128,13 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     private final java.util.Map<Path, Long> copyFailedAt =
             new java.util.concurrent.ConcurrentHashMap<Path, Long>();
 
+    /** How long a pack whose copy failed waits before the next attempt. */
+    static final long COPY_RETRY_MS = 60_000L;
+
+    /** Copies attempted; for the retry gate's test. */
+    final java.util.concurrent.atomic.AtomicInteger copyAttempts =
+            new java.util.concurrent.atomic.AtomicInteger();
+
     /** Rescan interval; a field so a test can rescan on every render. */
     volatile long rescanNanos = TimeUnit.SECONDS.toNanos(RESCAN_SECONDS);
 
@@ -589,6 +596,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         closeStack();
         // After the old stack's zips are closed: Windows cannot delete an open file.
         sources.pruneCopies(fresh.copies());
+        sources.pruneServerPacks(serverPack);
         stack = fresh;
         renderer = new CardRenderer(fresh);
         stackGeneration = generation;
@@ -604,7 +612,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     /** Copies a pack zip on the asset thread, then has the render thread rebuild the stack. */
     private void requestCopy(final Path zip) {
         Long failed = copyFailedAt.get(zip);
-        if (closed || (failed != null && System.currentTimeMillis() - failed < 60_000L)
+        if (closed || (failed != null && clock.getAsLong() - failed < COPY_RETRY_MS)
                 || !copying.add(zip)) {
             return;
         }
@@ -613,10 +621,11 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 @Override
                 public void run() {
                     try {
+                        copyAttempts.incrementAndGet();
                         sources.privateCopy(zip);
                         copyFailedAt.remove(zip);
                     } catch (Throwable error) {
-                        copyFailedAt.put(zip, System.currentTimeMillis());
+                        copyFailedAt.put(zip, clock.getAsLong());
                         logger.debug(() -> "item images: copying a pack failed ("
                                 + AssetException.describe(error) + "); retrying in a minute");
                     } finally {

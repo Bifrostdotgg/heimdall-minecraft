@@ -90,6 +90,10 @@ class HeimdallBridgeModuleTest {
     /** The delay each requested drain asked for, in request order. */
     private final List<Long> drainDelays = new ArrayList<Long>();
 
+    /** The watchdog's clock; see setUp. */
+    private final java.util.concurrent.atomic.AtomicLong testNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+
     /** When set, the next drain request throws this, as a refusing or broken scheduler would. */
     private RuntimeException nextDrainFailure;
 
@@ -117,6 +121,15 @@ class HeimdallBridgeModuleTest {
                 .platform(platform)
                 .build());
         module = new HeimdallBridgeModule();
+        // A manual monotonic clock, so the held-line watchdog fires only when a test says so and
+        // never because a slow machine took a while.
+        testNanos.set(0L);
+        module.nanoClockForTests(new java.util.function.LongSupplier() {
+            @Override
+            public long getAsLong() {
+                return testNanos.get();
+            }
+        });
         pendingDrains.clear();
         drainDelays.clear();
         nextDrainFailure = null;
@@ -2646,6 +2659,127 @@ class HeimdallBridgeModuleTest {
             assertEquals(1, warnings);
             runDrains();
             assertEquals(2, relayedLines().size(), "both relayed as typed");
+        }
+
+        private int count(List<String> messages, String wanted) {
+            int n = 0;
+            for (String message : messages) {
+                if (wanted.equals(message)) {
+                    n++;
+                }
+            }
+            return n;
+        }
+
+        @Test
+        @DisplayName("an assemble failure on the budget path ships text, in order, and never stalls")
+        void anAssembleFailureOnTheBudgetPathDoesNotStall() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            say("Alex", "nice");
+            module.assembleFailureForTests = new OutOfMemoryError("simulated");
+            runBudgets();
+            say("Alex", "later");
+            runDrains();
+
+            assertEquals(Arrays.asList("[Spoon]", "nice", "later"), messages());
+            assertFalse(relayedLines().get(0).has("items"), "the text-only line stood in");
+            assertEquals(0, module.heldLineCount());
+            assertEquals(0, module.pendingItemLineCount());
+            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN,
+                    "java.lang.OutOfMemoryError"));
+
+            images.futures.get(0).complete(fakePng(8));
+            runDrains();
+            assertEquals(3, relayedLines().size(), "a late render adds nothing");
+        }
+
+        @Test
+        @DisplayName("an assemble failure on the forced-head path neither stalls nor duplicates")
+        void anAssembleFailureOnTheForcedHeadPathDoesNotDuplicate() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            for (int i = 0; i < HeimdallBridgeModule.MAX_QUEUE_SIZE - 1; i++) {
+                say("Alex", "line " + i);
+            }
+            module.assembleFailureForTests = new OutOfMemoryError("simulated");
+            say("Alex", com.heimdall.core.testing.ItemCaptures.wardedJar());
+            runDrains();
+            assertEquals(HeimdallBridgeModule.MAX_QUEUE_SIZE, relayedLines().size(),
+                    "the forced head and everything behind it, released");
+            assertEquals("[Spoon]", messages().get(0));
+
+            images.futures.get(1).complete(fakePng(8));
+            runDrains();
+            List<String> messages = messages();
+            assertEquals(HeimdallBridgeModule.MAX_QUEUE_SIZE + 1, messages.size());
+            assertEquals(1, count(messages, "[Warded Jar]"), "the line in flight is not duplicated");
+            assertEquals(1, count(messages, "[Spoon]"));
+            assertEquals("[Warded Jar]", messages.get(messages.size() - 1));
+            assertEquals(0, module.heldLineCount());
+            assertEquals(0, module.pendingItemLineCount());
+        }
+
+        @Test
+        @DisplayName("the watchdog releases a head held past twice the budget, once")
+        void theWatchdogReleasesAnOverdueHead() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            say("Alex", "waiting");
+            runDrains();
+            assertTrue(relayedLines().isEmpty());
+
+            // The budget timer never runs here. Time passes beyond twice the budget.
+            testNanos.addAndGet(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
+                    2 * HeimdallBridgeModule.ITEM_IMAGE_BUDGET_MS) + 1);
+            say("Alex", "later");
+            runDrains();
+
+            assertEquals(Arrays.asList("[Spoon]", "waiting", "later"), messages());
+            assertEquals(0, module.pendingItemLineCount());
+            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "twice the image budget"));
+
+            images.futures.get(0).complete(fakePng(8));
+            runBudgets();
+            runDrains();
+            assertEquals(3, relayedLines().size(), "a late finish finds the slot done");
+        }
+
+        @Test
+        @DisplayName("a throw after reserving and before submitting returns the pending place")
+        void anUnwindBeforeSubmitReturnsThePlace() {
+            rig(null);
+            module.attachFailureForTests = new AssertionError("simulated");
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            runDrains();
+
+            assertEquals(Arrays.asList("[Spoon]"), messages(), "relayed once, as text");
+            assertEquals(0, module.pendingItemLineCount());
+            assertEquals(0, module.heldLineCount());
+            assertTrue(images.rendered.isEmpty());
+        }
+
+        @Test
+        @DisplayName("a stale cycle can neither reserve nor release a place in the new one")
+        void staleReservationsAreRefused() {
+            rig(null);
+            long old = module.generationForTests();
+            disable();
+            enable();
+            long current = module.generationForTests();
+
+            assertFalse(module.reservePending(old));
+            assertEquals(0, module.pendingItemLineCount());
+            assertTrue(module.reservePending(current));
+            assertEquals(1, module.pendingItemLineCount());
+            module.releasePendingCount(old);
+            assertEquals(1, module.pendingItemLineCount(), "not the old cycle's to return");
+            module.releasePendingCount(current);
+            assertEquals(0, module.pendingItemLineCount());
         }
 
         @Test
