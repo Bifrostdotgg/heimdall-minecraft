@@ -10,6 +10,7 @@ import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.platform.SchedulerBridge;
+import com.heimdall.platform.bukkit.itemimage.BukkitItemImages;
 import com.heimdall.platform.common.Log4jConsoleTap;
 import java.nio.file.Path;
 import java.util.concurrent.Executor;
@@ -41,6 +42,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     private final BukkitCommandRegistrar commands;
     private final BukkitIntegrations integrations;
     private final ChatControlChannels chatControl;
+    private final BukkitItemImages itemImages;
 
     /**
      * Builds every collaborator, and cleans up after itself if one of them throws.
@@ -83,7 +85,11 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
                             return directory.wrap(player);
                         }
                     });
-            this.integrations = new BukkitIntegrations(logger, executors.io(), chatControl);
+            // Builds nothing heavy: two idle executors and some paths. No asset is touched, and no
+            // thread started, until the bridge asks for an image or prepares.
+            this.itemImages = BukkitItemImages.create(logger, plugin);
+            this.integrations = new BukkitIntegrations(
+                    logger, executors.io(), chatControl, itemImages);
         } catch (Throwable halfBuilt) {
             closeQuietly(builtTap);
             closeQuietly(messenger);
@@ -219,5 +225,8 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
         // has been disabled is how a reload leaks one per cycle.
         consoleTap.close();
         messenger.close();
+        // Stops the asset and render threads and closes any open pack zips, so a /reload does not
+        // leave file handles on a regenerated ItemsAdder pack.
+        closeQuietly(itemImages);
     }
 }
