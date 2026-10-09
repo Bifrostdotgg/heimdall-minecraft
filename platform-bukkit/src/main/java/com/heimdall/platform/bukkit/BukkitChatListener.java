@@ -80,7 +80,10 @@ import org.bukkit.plugin.EventExecutor;
  * nothing but Bukkit's own {@link Event}, {@link Cancellable} and {@link PlayerEvent} types, so the
  * shading problem above never arises) takes it back and relays it only if that event was not
  * cancelled. The ThreadLocal is also reset at LOWEST, so nothing parked by an event that never
- * reached the second half can be picked up by a later one.
+ * reached the second half can be picked up by a later one, and a parked line older than
+ * {@link #PARK_TTL_NANOS} is discarded when next touched. A synthetic legacy chat event another
+ * plugin fires on Paper is therefore never relayed untagged while ChatControl is installed: no
+ * Paper event follows it.
  *
  * <p>On both, a line whose audience ChatControl shrank to the sender alone while other players are
  * online is not relayed: that is how ChatControl shadow-blocks a line without cancelling it (only the
@@ -125,6 +128,16 @@ final class BukkitChatListener implements Listener {
     private final IntSupplier onlineCount;
 
     private volatile ModernState modernState;
+
+    /**
+     * How long a parked line waits for its {@code AsyncChatEvent} before it is discarded unrelayed.
+     * Paper posts that event straight after the legacy one on the same thread, so a real hand-off
+     * takes microseconds; anything older is a line no Paper event is coming for.
+     */
+    static final long PARK_TTL_NANOS = 5_000_000_000L;
+
+    /** {@link #PARK_TTL_NANOS}, overridable by the tests. */
+    volatile long parkTtlNanos = PARK_TTL_NANOS;
 
     /**
      * This thread's line in flight: the one decision about which path it takes, and, on Paper, the
@@ -312,6 +325,13 @@ final class BukkitChatListener implements Listener {
                 case HOOKED:
                     // Paper: ChatControl has not even started. Park it for onModernChat.
                     state.pending = message;
+                    state.parkedAt = System.nanoTime();
+                    return;
+                case PENDING:
+                    // The hook is about to be installed (the bootstrap does it before this listener
+                    // is registered, so this is a /reload or plugin-manager window at most). Drop
+                    // this line and say nothing: the once-per-boot error below is for a hook that
+                    // will never come, and spending it here would hide that one.
                     return;
                 default:
                     if (reportedModernUnavailable.compareAndSet(false, true)) {
@@ -347,6 +367,12 @@ final class BukkitChatListener implements Listener {
             return;
         }
         state.pending = null;
+        if (System.nanoTime() - state.parkedAt >= parkTtlNanos) {
+            // Parked by a legacy event no Paper event followed (another plugin firing a synthetic
+            // AsyncPlayerChatEvent), and only now touched. Whatever this event is, it is not that
+            // line's, and the line is not relayed.
+            return;
+        }
         try {
             if (event instanceof Cancellable && ((Cancellable) event).isCancelled()) {
                 return;
@@ -408,6 +434,16 @@ final class BukkitChatListener implements Listener {
         return fresh;
     }
 
+    /**
+     * Releases this thread's state. Called on disable, which runs on the main thread: that is the
+     * one thread a synthetic legacy chat event could have parked a line on with no later chat event
+     * ever coming to replace it, and an entry left there would pin this plugin's class loader across
+     * a /reload. Chat threads release theirs at the next line's LOWEST.
+     */
+    void close() {
+        current.remove();
+    }
+
     /** Whether relay waits for a later handler: true exactly when ChatControl is installed. */
     private boolean deferRelay() {
         return chatControl != null && chatControl.installed();
@@ -422,6 +458,9 @@ final class BukkitChatListener implements Listener {
 
         /** The untagged copy parked for {@link #onModernChat}; cleared when taken. */
         ChatMessage pending;
+
+        /** {@link System#nanoTime()} when {@link #pending} was parked. */
+        long parkedAt;
 
         ChatState(AsyncPlayerChatEvent event, boolean deferred) {
             this.event = new WeakReference<AsyncPlayerChatEvent>(event);

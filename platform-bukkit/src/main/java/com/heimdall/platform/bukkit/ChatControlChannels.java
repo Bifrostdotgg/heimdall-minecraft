@@ -173,6 +173,9 @@ final class ChatControlChannels implements ChatChannels {
     /** Whether the post-event listener is registered. Guarded by {@link #lock} for writes. */
     private volatile boolean hooked;
 
+    /** The channel names last read successfully; see {@link #channelNames()}. */
+    private volatile List<String> lastNames;
+
     ChatControlChannels(
             HeimdallLogger logger,
             Environment environment,
@@ -251,13 +254,30 @@ final class ChatControlChannels implements ChatChannels {
         return Boolean.TRUE.equals(enabled) ? State.ACTIVE : State.NONE;
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>When ChatControl's own code throws while listing (a one-call failure, not a broken API),
+     * this answers the names it last read successfully rather than an empty list. An empty list next
+     * to an {@code active} state would tell the bot every channel had vanished; the last good answer
+     * makes an inventory poll compare equal and send nothing, which is "skip this poll". Before any
+     * successful read there is nothing to fall back on, and the answer is empty.
+     */
     @Override
     public List<String> channelNames() {
         if (state() != State.ACTIVE) {
             return Collections.emptyList();
         }
         List<String> names = names(api);
-        return names == null ? Collections.<String>emptyList() : names;
+        if (names != null) {
+            lastNames = names;
+            return names;
+        }
+        if (brokenBecause != null) {
+            return Collections.emptyList();
+        }
+        List<String> previous = lastNames;
+        return previous == null ? Collections.<String>emptyList() : previous;
     }
 
     @Override
@@ -480,9 +500,12 @@ final class ChatControlChannels implements ChatChannels {
      * member, an access or linkage error, a type that is not what it was, an argument the method no
      * longer takes) means the API moved, and the integration is broken for good.
      *
+     * <p>Package-private so a test can pin the classification itself: the stand-in classes can
+     * produce an {@link InvocationTargetException} naturally, but not every shape of a moved API.
+     *
      * @return {@code true} if the integration is now broken
      */
-    private boolean fail(String what, Throwable failure) {
+    boolean fail(String what, Throwable failure) {
         if (failure instanceof InvocationTargetException) {
             warnTransient(what, ((InvocationTargetException) failure).getCause());
             return false;

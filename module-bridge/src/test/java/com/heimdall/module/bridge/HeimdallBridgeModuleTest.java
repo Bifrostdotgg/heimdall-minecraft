@@ -173,6 +173,24 @@ class HeimdallBridgeModuleTest {
 
         private volatile State state = State.ACTIVE;
         private volatile boolean membersIgnoreState;
+
+        /** When set, every call records whether the caller held this monitor. */
+        private volatile Object watchedLock;
+        private volatile int callsUnderWatchedLock;
+        private volatile int calls;
+
+        FakeChannels watching(Object lock) {
+            this.watchedLock = lock;
+            return this;
+        }
+
+        private void observeCaller() {
+            calls++;
+            Object lock = watchedLock;
+            if (lock != null && Thread.holdsLock(lock)) {
+                callsUnderWatchedLock++;
+            }
+        }
         private final Map<String, List<PlayerHandle>> channels =
                 Collections.synchronizedMap(new LinkedHashMap<String, List<PlayerHandle>>());
 
@@ -197,11 +215,13 @@ class HeimdallBridgeModuleTest {
 
         @Override
         public State state() {
+            observeCaller();
             return state;
         }
 
         @Override
         public List<String> channelNames() {
+            observeCaller();
             if (state != State.ACTIVE) {
                 return Collections.emptyList();
             }
@@ -1393,6 +1413,32 @@ class HeimdallBridgeModuleTest {
             assertTrue(inventories().isEmpty());
             module.flush();
             assertEquals(1, inventories().size());
+        }
+
+        @Test
+        @DisplayName("the integration is never called while inventoryLock is held (no deadlock)")
+        void integrationIsNotCalledUnderTheLock() throws Exception {
+            // The real integration can reach Bukkit's getPlugin, synchronized on the plugin manager,
+            // and the server disables plugins while holding that monitor; a disable reaches
+            // forgetInventory(), which takes inventoryLock. Calling the integration under
+            // inventoryLock is therefore half of a deadlock at shutdown or /reload.
+            setUp(ServerRole.STANDALONE, null);
+            java.lang.reflect.Field field =
+                    HeimdallBridgeModule.class.getDeclaredField("inventoryLock");
+            field.setAccessible(true);
+            FakeChannels channels = new FakeChannels().channel("global").watching(field.get(module));
+            platform.withChatChannels(channels);
+
+            enable();
+            channels.channel("trade");
+            pollOnce();
+            tunnel.disconnected();
+            tunnel.reconnected();
+
+            assertTrue(channels.calls > 0, "the fake must actually have been asked");
+            assertEquals(0, channels.callsUnderWatchedLock,
+                    "state() or channelNames() ran while inventoryLock was held");
+            assertEquals(3, inventories().size(), "enable, the change, and the reconnect");
         }
 
         @Test

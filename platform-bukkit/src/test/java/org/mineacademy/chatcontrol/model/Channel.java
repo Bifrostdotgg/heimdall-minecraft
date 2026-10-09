@@ -27,6 +27,9 @@ public final class Channel {
     /** Test steering: when set, {@link #isUsingChannels} throws it. */
     public static volatile RuntimeException failUsing;
 
+    /** Test steering: when set, {@link #getChannelNames} throws it. */
+    public static volatile RuntimeException failChannelNames;
+
     private static final List<Channel> LOADED = new CopyOnWriteArrayList<Channel>();
     private static final Set<UUID> USING = ConcurrentHashMap.newKeySet();
 
@@ -44,6 +47,7 @@ public final class Channel {
         USING.clear();
         failOnlinePlayers = null;
         failUsing = null;
+        failChannelNames = null;
     }
 
     /** Test steering: loads a channel. */
@@ -69,6 +73,10 @@ public final class Channel {
     }
 
     public static List<String> getChannelNames() {
+        RuntimeException failure = failChannelNames;
+        if (failure != null) {
+            throw failure;
+        }
         List<String> names = new ArrayList<String>();
         for (Channel channel : LOADED) {
             names.add(channel.name);

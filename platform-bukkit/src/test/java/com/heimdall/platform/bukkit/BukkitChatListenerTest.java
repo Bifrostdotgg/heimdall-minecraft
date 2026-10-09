@@ -492,6 +492,56 @@ class BukkitChatListenerTest {
         }
 
         @Test
+        @DisplayName("before the hook is installed (PENDING), a line is dropped quietly")
+        void pendingDropsWithoutSpendingTheOnceOnlyError() {
+            withChatControl(Boolean.FALSE);
+            BukkitChatListener listener =
+                    listener(BukkitChatListener.ModernChat.of(FakePaperChatEvent.class));
+            assertEquals(BukkitChatListener.ModernState.PENDING, listener.modernState());
+
+            fire(listener, chat(steve, "during a reload"));
+            assertTrue(relayed.isEmpty(), "fail closed while the hook is not there yet");
+            assertTrue(logger.at(LogLevel.SEVERE).isEmpty(),
+                    "the once-per-boot error is for a hook that will never come: "
+                            + logger.records());
+
+            listener.installModern((type, executor) -> {
+                throw new IllegalStateException("plugin not enabled");
+            });
+            fire(listener, chat(steve, "after it failed"));
+            assertEquals(1, logger.messagesAt(LogLevel.SEVERE).stream()
+                    .filter(line -> line.contains("AsyncChatEvent is present but not hooked")).count(),
+                    "still available to report the real failure: " + logger.records());
+        }
+
+        @Test
+        @DisplayName("a parked line no Paper event came for expires instead of waiting forever")
+        void parkedLineExpires() {
+            withChatControl(Boolean.FALSE);
+            BukkitChatListener listener = paper();
+            listener.parkTtlNanos = 0L;
+
+            fire(listener, chat(steve, "a synthetic legacy event"));
+            listener.onModernChat(new FakePaperChatEvent(steve, steve, bystander));
+
+            assertTrue(relayed.isEmpty(),
+                    "older than the hand-off window: not this event's line, not relayed");
+        }
+
+        @Test
+        @DisplayName("close() releases this thread's parked line")
+        void closeReleasesTheThreadsState() {
+            withChatControl(Boolean.FALSE);
+            BukkitChatListener listener = paper();
+
+            fire(listener, chat(steve, "parked on the main thread"));
+            listener.close();
+            listener.onModernChat(new FakePaperChatEvent(steve, steve, bystander));
+
+            assertTrue(relayed.isEmpty());
+        }
+
+        @Test
         @DisplayName("a class that is present but not the event it should be counts as unhookable")
         void wrongShapeIsUnusable() {
             assertNull(BukkitChatListener.ModernChat.detect(new ClassLoader(null) {

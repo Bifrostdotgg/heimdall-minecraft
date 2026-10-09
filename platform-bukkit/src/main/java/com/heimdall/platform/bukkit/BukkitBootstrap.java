@@ -97,6 +97,9 @@ final class BukkitBootstrap {
     /** The {@code /hd} and {@code /hwl} registrations, unbound on disable. */
     private Registration adminCommands = Registration.NONE;
 
+    /** Held so disable can release the main thread's chat relay state; see its close(). */
+    private BukkitChatListener chatListener;
+
     /** The updater's periodic check, its {@code update} subscription and its join notice. */
     private Registration updates = Registration.NONE;
 
@@ -199,6 +202,16 @@ final class BukkitBootstrap {
         });
         updates = Registration.NONE;
 
+        guarded("releasing chat relay state", new Runnable() {
+            @Override
+            public void run() {
+                if (chatListener != null) {
+                    chatListener.close();
+                }
+            }
+        });
+        chatListener = null;
+
         guarded("unregistering the admin command", new Runnable() {
             @Override
             public void run() {
@@ -299,7 +312,9 @@ final class BukkitBootstrap {
                         return Bukkit.getOnlinePlayers().size();
                     }
                 });
-        Bukkit.getPluginManager().registerEvents(chat, plugin);
+        // The Paper hook first, then the legacy handlers: a line arriving between the two (only
+        // possible during a /reload or a plugin-manager load) would otherwise find the hook
+        // PENDING and be dropped.
         chat.installModern(new BukkitChatListener.ModernRegistrar() {
             @Override
             public void register(Class<? extends Event> type, EventExecutor executor) {
@@ -309,6 +324,8 @@ final class BukkitBootstrap {
                         type, chat, EventPriority.MONITOR, executor, plugin, false);
             }
         });
+        Bukkit.getPluginManager().registerEvents(chat, plugin);
+        chatListener = chat;
         logger.debug(() -> "chat relay: Paper chat hook " + chat.modernState());
         Bukkit.getPluginManager().registerEvents(
                 new BukkitCommandListener(logger, runtime.commandPipeline(), platform.messenger()),

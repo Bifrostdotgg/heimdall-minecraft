@@ -525,6 +525,60 @@ class ChatControlChannelsTest {
     }
 
     @Test
+    @DisplayName("listing channels throwing keeps the last good names, so a poll sends nothing new")
+    void throwingNamesKeepsTheLastInventory() {
+        Channel.create("global");
+        Channel.create("staff");
+        ChatControlChannels channels = active();
+        assertEquals(Arrays.asList("global", "staff"), channels.channelNames());
+
+        Channel.failChannelNames = new IllegalStateException("mid-reload");
+
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+        assertEquals(Arrays.asList("global", "staff"), channels.channelNames(),
+                "{active, []} would tell the bot every channel vanished");
+    }
+
+    @Test
+    @DisplayName("listing channels throwing before any good read answers empty, not a guess")
+    void throwingNamesWithNoHistoryIsEmpty() {
+        Channel.create("global");
+        ChatControlChannels channels = active();
+        Channel.failChannelNames = new IllegalStateException("not loaded yet");
+
+        assertTrue(channels.channelNames().isEmpty());
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+    }
+
+    @Test
+    @DisplayName("a reflective failure that is not ChatControl's own code throwing is permanent")
+    void nonInvocationFailuresArePermanent() {
+        for (Throwable moved : Arrays.<Throwable>asList(
+                new IllegalArgumentException("object is not an instance of declaring class"),
+                new IllegalAccessException("not public"),
+                new NoSuchMethodError("getOnlinePlayers"),
+                new ClassCastException("not a Channel"),
+                new NullPointerException("static method became an instance method"))) {
+            logger.clear();
+            ChatControlChannels channels = active();
+
+            assertTrue(channels.fail("reading something", moved), moved.toString());
+            assertEquals(ChatChannels.State.BROKEN, channels.state(), moved.toString());
+            assertEquals(ChatChannels.State.BROKEN, channels.state(), "and it stays broken");
+        }
+    }
+
+    @Test
+    @DisplayName("only an InvocationTargetException is a one-call failure")
+    void invocationTargetIsTransient() {
+        ChatControlChannels channels = active();
+
+        assertFalse(channels.fail("reading something", new java.lang.reflect
+                .InvocationTargetException(new IllegalStateException("player quit"))));
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+    }
+
+    @Test
     @DisplayName("an Error from Heimdall's own pipeline is not blamed on ChatControl")
     void pipelineErrorDoesNotBreakTheIntegration() throws Exception {
         pipeline.register(message -> {

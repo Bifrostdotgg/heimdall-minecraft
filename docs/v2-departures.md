@@ -1914,7 +1914,9 @@ type that is not what it was, a linkage error, a hook that cannot be registered)
 boot. **ChatControl's own code throwing** while Heimdall calls it (an `InvocationTargetException`, for
 example `getOnlinePlayers()` racing a player who just quit) fails closed for that one call only: the
 member lookup comes back empty, the line is dropped, and a warning naming the exception's class (never
-its message) is logged at most once a minute. An `Error` from Heimdall's own chat pipeline inside the
+its message) is logged at most once a minute. A channel *listing* that throws that way answers the
+last names read successfully, so an inventory poll sees no change and sends nothing, rather than
+telling the bot `{active, []}`. An `Error` from Heimdall's own chat pipeline inside the
 hook is logged as Heimdall's, and does not mark ChatControl broken.
 
 **Reloads fail closed.** A plugin manager (PlugMan, ServerUtils) can unload ChatControl and load a
@@ -1935,7 +1937,10 @@ classes when it is switched back on.
 
 `bridge.channels` is sent at enable, on every reconnect (a frame sent into a dying socket is lost
 silently, so the bot is assumed to know nothing after one), and whenever the state or the channel
-list changes, polled every five seconds from the existing one-second flush. Never otherwise.
+list changes, polled every five seconds from the existing one-second flush. Never otherwise. The
+integration is read outside the bridge's own lock, because it can reach Bukkit's plugin-manager
+monitor, which the server holds while disabling plugins (and a disable takes the bridge's lock); a
+stamp taken before each read keeps an older read from being sent after a newer one.
 
 **Both directions fail closed.** Outbound, a channel line is relayed only if its channel is in
 `chatChannels` (case-insensitive); an absent or empty setting relays no channel lines at all, so a
@@ -1947,10 +1952,18 @@ channelled server. Drops are counted in the debug line, never described.
 
 **Known limits, named.**
 
-- On Paper the untagged relay sends the text as the legacy event left it. A ChatControl rule that
-  *rewrites* a word in the `AsyncChatEvent` component (rather than blocking the line) is not seen,
-  because reading the component is exactly what shading forbids. Blocking, muting, private-message
-  auto-mode and shadow-blocking are all seen, through the cancelled flag and the viewers.
+- On Paper the untagged relay sends the text as the legacy event left it. Reading the
+  `AsyncChatEvent` component is avoided: Heimdall's relocated Adventure cannot name the server's
+  `Component` type directly. It would be achievable by reflection, through the server's own
+  serializer loaded by a class name built at runtime, but that is a second version-sensitive
+  reflective path for one case, so it is not taken. A ChatControl rule that *rewrites* a word in
+  the component (rather than blocking the line) is therefore not seen. Blocking, muting,
+  private-message auto-mode and shadow-blocking are all seen, through the cancelled flag and the
+  viewers.
+- On Paper with ChatControl installed, a synthetic `AsyncPlayerChatEvent` that another plugin
+  fires on its own is not relayed untagged: no `AsyncChatEvent` follows it, so its parked line is
+  discarded when the thread is next touched (it expires after a few seconds, the next line's
+  `LOWEST` replaces it, and disable clears the main thread's).
 - The shadow-block check is a heuristic on audience size, and drops a legitimate line nobody else
   could see.
 - A reloaded ChatControl pauses relay until the server restarts, rather than re-hooking into the new

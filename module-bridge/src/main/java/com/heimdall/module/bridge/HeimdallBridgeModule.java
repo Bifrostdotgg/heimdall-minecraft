@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -312,7 +313,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      */
     private final Object observerLock = new Object();
 
-    /** Serialises {@link #reportInventory}, which runs from enable, the socket thread and the flush. */
+    /**
+     * Guards what the bot was last told. Held only around the compare-and-send in
+     * {@link #reportInventory} and in {@link #forgetInventory}; never while calling the channel
+     * integration, which can reach the server's plugin-manager lock.
+     */
     private final Object inventoryLock = new Object();
 
     /**
@@ -326,6 +331,12 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     /** Flushes since the last inventory poll. Only {@code heimdall-sched} touches it. */
     private int flushesSinceInventoryPoll;
+
+    /** Issued to each inventory read before it starts; see {@link #reportInventory}. */
+    private final AtomicLong inventoryStamp = new AtomicLong();
+
+    /** The stamp of the read that was last sent. Guarded by {@link #inventoryLock}. */
+    private long sentStamp;
 
     @Override
     public String id() {
@@ -629,26 +640,34 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         if (ctx == null || bus == null) {
             return;
         }
-        ChatChannels.State state;
-        List<String> names;
-        // Read and sent under one lock. Reading outside it would let a forced report on the socket
-        // thread and a poll on heimdall-sched each read, then send in the opposite order, leaving the
-        // bot holding the older of the two inventories.
-        synchronized (inventoryLock) {
-            ChatChannels channels = chatChannels(ctx);
-            state = stateOf(channels);
-            names = Collections.emptyList();
-            if (state == ChatChannels.State.ACTIVE) {
-                try {
-                    names = Collections.unmodifiableList(
-                            new ArrayList<String>(channels.channelNames()));
-                } catch (RuntimeException failed) {
-                    // The interface says this cannot throw. If it does anyway, the honest report is
-                    // that the channel plugin cannot be read, which is exactly what BROKEN means.
-                    state = ChatChannels.State.BROKEN;
-                }
+        // Read OUTSIDE inventoryLock, always. The integration can reach the server's plugin manager
+        // (Bukkit's getPlugin is synchronized on it), and the server disables plugins while holding
+        // that same monitor; a disable reaches forgetInventory(), which takes inventoryLock. Reading
+        // under inventoryLock would be one half of a lock-order inversion, a deadlock at shutdown or
+        // /reload.
+        //
+        // The stamp is what reading under the lock used to buy: a forced report on the socket thread
+        // and a poll on heimdall-sched can each read, then reach the send in the opposite order. The
+        // stamp is taken before reading, so the read that started later carries the larger one, and
+        // an older read arriving after a newer send is dropped rather than overwriting it.
+        long stamp = inventoryStamp.incrementAndGet();
+        ChatChannels channels = chatChannels(ctx);
+        ChatChannels.State state = stateOf(channels);
+        List<String> names = Collections.emptyList();
+        if (state == ChatChannels.State.ACTIVE) {
+            try {
+                names = Collections.unmodifiableList(new ArrayList<String>(channels.channelNames()));
+            } catch (RuntimeException failed) {
+                // The interface says this cannot throw. If it does anyway, the honest report is that
+                // the channel plugin cannot be read, which is exactly what BROKEN means.
+                state = ChatChannels.State.BROKEN;
             }
+        }
 
+        synchronized (inventoryLock) {
+            if (stamp < sentStamp) {
+                return;
+            }
             if (!force && state == reportedState && names.equals(reportedNames)) {
                 return;
             }
@@ -663,6 +682,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                     .build());
             reportedState = state;
             reportedNames = names;
+            sentStamp = stamp;
         }
         final ChatChannels.State sent = state;
         final int count = names.size();
@@ -670,7 +690,13 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 + count + " channel(s)");
     }
 
-    /** Forgets what the bot was told, so the next report sends whatever it finds. */
+    /**
+     * Forgets what the bot was told, so the next report sends whatever it finds.
+     *
+     * <p>Takes only {@link #inventoryLock}, and nothing that holds it ever calls out of this class
+     * (see {@link #reportInventory}), so this is safe from a disable running under the server's own
+     * plugin-manager lock.
+     */
     private void forgetInventory() {
         synchronized (inventoryLock) {
             reportedState = null;
