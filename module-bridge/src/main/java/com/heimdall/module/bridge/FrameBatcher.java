@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A bounded queue that ships what it holds as one frame per drain, and throws away what it cannot.
@@ -45,6 +46,19 @@ import java.util.concurrent.atomic.AtomicInteger;
  * never which. That is the same shape as {@code ChatPipeline}'s own relay-only guarantee, one layer
  * out.
  *
+ * <h2>A byte budget per frame, as well as a count</h2>
+ *
+ * <p>With a {@link Sizer}, a drain also stops before the item that would take the frame's
+ * estimated encoded size past {@code maxFrameBytes}. That item is carried, whole, to the front of
+ * the next frame: an item is never split and never reordered. One item alone over the budget still
+ * ships, by itself, so a caller that must never send one has to shrink it before
+ * {@link #enqueue} (the bridge does, for item images). The reason is the bot's tunnel: it closes the
+ * socket on a frame over its payload cap, which would cost every line in the frame and the
+ * connection with them. Departure D86.
+ *
+ * <p>The carried item counts as queued and is cleared with the queue. It sits outside the
+ * drop-oldest bound, which can therefore be exceeded by exactly one.
+ *
  * <h2>Threading</h2>
  *
  * <p>{@link #enqueue} is called from wherever the event arrived — a chat observer runs on the
@@ -65,21 +79,42 @@ final class FrameBatcher<T> {
         Payload encode(T item);
     }
 
+    /** An upper estimate of one item's encoded size in bytes, for the per-frame budget. */
+    interface Sizer<T> {
+        long estimatedBytes(T item);
+    }
+
     private final String frameType;
     private final String arrayKey;
     private final Encoder<T> encoder;
     private final int maxQueue;
     private final int maxBatch;
+    private final Sizer<T> sizer;
+    private final long maxFrameBytes;
 
     private final ConcurrentLinkedQueue<T> queue = new ConcurrentLinkedQueue<T>();
     private final AtomicInteger queued = new AtomicInteger();
 
+    /**
+     * The item a previous drain stopped before because it did not fit the byte budget. Only the
+     * draining thread sets it; {@link #clear} may empty it from any thread.
+     */
+    private final AtomicReference<T> carried = new AtomicReference<T>();
+
     FrameBatcher(String frameType, String arrayKey, Encoder<T> encoder, int maxQueue, int maxBatch) {
+        this(frameType, arrayKey, encoder, maxQueue, maxBatch, null, Long.MAX_VALUE);
+    }
+
+    /** As above, with a per-frame byte budget measured by {@code sizer}. */
+    FrameBatcher(String frameType, String arrayKey, Encoder<T> encoder, int maxQueue, int maxBatch,
+            Sizer<T> sizer, long maxFrameBytes) {
         this.frameType = frameType;
         this.arrayKey = arrayKey;
         this.encoder = encoder;
         this.maxQueue = maxQueue;
         this.maxBatch = maxBatch;
+        this.sizer = sizer;
+        this.maxFrameBytes = maxFrameBytes;
     }
 
     /**
@@ -113,15 +148,29 @@ final class FrameBatcher<T> {
      * @return {@code true} if a frame was actually sent
      */
     boolean flush(TunnelBus bus) {
-        if (bus == null || queue.isEmpty()) {
+        if (bus == null || (queue.isEmpty() && carried.get() == null)) {
             return false;
         }
 
         List<T> batch = new ArrayList<T>(maxBatch);
+        long bytes = 0L;
         for (int i = 0; i < maxBatch; i++) {
-            T item = queue.poll();
+            T item = carried.getAndSet(null);
             if (item == null) {
-                break;
+                item = queue.poll();
+                if (item == null) {
+                    break;
+                }
+            }
+            if (sizer != null) {
+                long size = Math.max(0L, sizer.estimatedBytes(item));
+                if (!batch.isEmpty() && bytes + size > maxFrameBytes) {
+                    // Next frame, first in line: never split, never reordered. Still counted as
+                    // queued, so the bridge's backlog check asks for another drain straight away.
+                    carried.set(item);
+                    break;
+                }
+                bytes += size;
             }
             queued.decrementAndGet();
             batch.add(item);
@@ -154,18 +203,23 @@ final class FrameBatcher<T> {
      * its increment and leave the counter off by one for good.
      */
     void clear() {
+        // The carried item is still counted as queued (flush stops before decrementing it).
+        if (carried.getAndSet(null) != null) {
+            queued.decrementAndGet();
+        }
         while (queue.poll() != null) {
             queued.decrementAndGet();
         }
     }
 
     /**
-     * Whether anything is queued, read from the queue itself rather than the counter, which can be
-     * transiently off by one while an enqueue or a clear is mid-way. The bridge's backlog re-check
-     * uses this so a queued line can never hide behind a counter that has not caught up.
+     * Whether anything is queued, read from the queue itself (and the item a budget-limited drain
+     * carried over) rather than the counter, which can be transiently off by one while an enqueue or
+     * a clear is mid-way. The bridge's backlog re-check uses this so a queued line can never hide
+     * behind a counter that has not caught up.
      */
     boolean hasQueued() {
-        return !queue.isEmpty();
+        return carried.get() != null || !queue.isEmpty();
     }
 
     /**

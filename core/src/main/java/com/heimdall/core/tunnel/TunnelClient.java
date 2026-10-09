@@ -350,6 +350,13 @@ public final class TunnelClient implements TunnelBus {
         return negotiator.mode();
     }
 
+    /** From the {@code accepted} list of this connection's {@code identify_ack}; cleared on close. */
+    @Override
+    public boolean peerAccepts(String capability) {
+        return capability != null && isConnected()
+                && negotiator.acceptedCapabilities().contains(capability);
+    }
+
     @Override
     public boolean isConnected() {
         TunnelSocket current = socket;

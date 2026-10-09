@@ -1,6 +1,8 @@
 package com.heimdall.module.bridge;
 
 import com.heimdall.core.config.ServerRole;
+import com.heimdall.core.items.ChatItem;
+import com.heimdall.core.items.HoverTags;
 import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.module.HeimdallModule;
@@ -8,6 +10,7 @@ import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.pipeline.ChatMessage;
 import com.heimdall.core.pipeline.ChatObserver;
 import com.heimdall.core.platform.ChatChannels;
+import com.heimdall.core.platform.ItemImages;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
@@ -22,18 +25,24 @@ import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -162,6 +171,20 @@ import net.kyori.adventure.text.Component;
  * {@link #FRAME_CHANNELS} tells the bot what channels exist, so the dashboard has something to pick
  * from. Departure D85.
  *
+ * <h2>Items shown in chat: the one edit to a relayed line</h2>
+ *
+ * <p>ChatControl's {@code [item]} puts a MiniMessage {@code show_item} hover into the line. Each
+ * well-formed one, with the text it decorates, is replaced by the plain {@code [Name]} the players
+ * saw ({@link HoverTags}), and where the platform can draw ({@link ItemImages}, Bukkit backends
+ * only) and the {@code itemImages} setting allows, the line also carries a tooltip-card PNG per item
+ * in {@code items}. A line with no item hover is untouched, byte for byte. Departure D86.
+ *
+ * <p>An item line waits for its images for at most {@value #ITEM_IMAGE_BUDGET_MS} ms and then ships
+ * with whatever finished; lines without items never wait for it, so an item line can reach the bot
+ * after a later plain line (its {@code ts} still says when it was said). The wait holds the line in
+ * memory for that budget and no longer, and at most {@value #MAX_PENDING_ITEM_LINES} lines at once;
+ * beyond that a line ships as text. Images travel with the line and are not kept here.
+ *
  * <h2>Threading</h2>
  *
  * <p>The chat observer runs on whatever thread the platform dispatched chat on — Bukkit's async chat
@@ -246,6 +269,44 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     static final String SETTING_CHAT_CHANNELS = "chatChannels";
 
     /**
+     * Whether this server attaches tooltip images to lines that show an item. Flat boolean,
+     * per-server, read live; default on. Off still rewrites each item hover to {@code [Name]}: that
+     * part is about the text being readable, not about images. Departure D86.
+     */
+    static final String SETTING_ITEM_IMAGES = "itemImages";
+
+    /** The default for {@link #SETTING_ITEM_IMAGES}. */
+    static final boolean DEFAULT_ITEM_IMAGES = true;
+
+    /** Images attached to one line at most; the rest are dropped and counted. The wire contract. */
+    static final int MAX_ITEMS_PER_LINE = 4;
+
+    /** Largest PNG attached, before base64. A bigger one is dropped and counted. The wire contract. */
+    static final int MAX_ITEM_PNG_BYTES = 512 * 1024;
+
+    /**
+     * How long an item line waits for its images before shipping with whatever finished. Long
+     * enough for a cached or warm render, short enough that the line still reads as live.
+     */
+    static final long ITEM_IMAGE_BUDGET_MS = 750L;
+
+    /**
+     * Item lines allowed to wait for images at once. Past this a line ships as text straight away:
+     * a burst of item spam must not turn into a growing set of held lines.
+     */
+    static final int MAX_PENDING_ITEM_LINES = 8;
+
+    /**
+     * The most a {@code bridge.chat} frame may carry, by estimated encoded size: 3 MiB, under the
+     * new bot's 4 MiB tunnel cap with room for the envelope. A line that would push a frame past it
+     * waits for the next frame; a line that alone would exceed it loses its largest images first.
+     */
+    static final long MAX_CHAT_FRAME_BYTES = 3L * 1024 * 1024;
+
+    /** What a frame's envelope and array punctuation are allowed, inside {@link #MAX_CHAT_FRAME_BYTES}. */
+    static final long FRAME_OVERHEAD_BYTES = 4L * 1024;
+
+    /**
      * How many one-second flushes pass between inventory polls. A ChatControl reload is an operator
      * action, so five seconds of lag before the dashboard sees a new channel is not worth a tighter
      * loop of reflective calls.
@@ -303,6 +364,15 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     /**
+     * Where item-image budget timeouts are scheduled. {@code null} means {@code heimdall-sched}.
+     * Tests substitute a manual one so "the budget ran out" happens when they say.
+     */
+    private volatile DrainScheduler budgetScheduler;
+
+    /** Item lines currently waiting for images. Bounded by {@link #MAX_PENDING_ITEM_LINES}. */
+    private final AtomicInteger pendingItemLines = new AtomicInteger();
+
+    /**
      * Where immediate drains are scheduled. {@code null} means {@code heimdall-sched}, the single
      * thread {@link #flush} already runs on, so a drain and a tick can never overlap. Tests
      * substitute a manual scheduler so a queued line stays queued until they say otherwise.
@@ -334,9 +404,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             FRAME_CHAT, "lines", new FrameBatcher.Encoder<ChatLine>() {
                 @Override
                 public Payload encode(ChatLine line) {
-                    return line.toPayload();
+                    // Checked again at the wire, not only when the line was queued: a reconnect in
+                    // between can land on an older bot that would close the socket on an image.
+                    return line.toPayload(imagesAccepted(tunnel));
                 }
-            }, MAX_QUEUE_SIZE, MAX_BATCH);
+            }, MAX_QUEUE_SIZE, MAX_BATCH, new FrameBatcher.Sizer<ChatLine>() {
+                @Override
+                public long estimatedBytes(ChatLine line) {
+                    return line.estimatedBytes();
+                }
+            }, MAX_CHAT_FRAME_BYTES - FRAME_OVERHEAD_BYTES);
 
     private final FrameBatcher<SessionEvent> events = new FrameBatcher<SessionEvent>(
             FRAME_EVENT, "events", new FrameBatcher.Encoder<SessionEvent>() {
@@ -422,8 +499,10 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         // Both, always. CHAT_CHANNELS is a build capability like STATUS, not a module of its own: it
         // tells the bot this client understands the channel key, the allowlist and the inventory
         // frame, and it is true of this build whether or not ChatControl is installed.
-        return Collections.unmodifiableSet(new LinkedHashSet<String>(
-                Arrays.asList(Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS)));
+        // ITEM_IMAGES likewise: it says this client rewrites item hovers and may attach `items`. A
+        // proxy or an image-less backend declares it too and simply never attaches any.
+        return Collections.unmodifiableSet(new LinkedHashSet<String>(Arrays.asList(
+                Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS, Capabilities.ITEM_IMAGES)));
     }
 
     @Override
@@ -449,13 +528,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         this.tunnel = context.tunnel();
 
         reconcileChatObserver();
+        prepareItemImages();
         context.onConfigChanged(new ModuleConfigListener() {
             @Override
             public void onModuleConfigChanged(
                     String moduleId, ModuleConfig previous, ModuleConfig current) {
                 // Fired on the socket's reading thread and fired only on a real change, so this is
-                // as cheap as it looks: a boolean read and, at most, one registration.
+                // as cheap as it looks: a boolean read and, at most, one registration. Preparing
+                // item images only submits work to the renderer's own thread.
                 reconcileChatObserver();
+                prepareItemImages();
             }
         });
 
@@ -572,16 +654,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                         if (channel != null && !channelAllowed(channel)) {
                             return;
                         }
-                        // Verbatim. Not trimmed, not normalised, not formatted - the bot renders,
-                        // and a relay that silently edited what a player typed is worse than one
-                        // that does not relay at all.
-                        chat.enqueue(new ChatLine(
-                                message.senderUuid(),
-                                message.senderName(),
-                                message.message(),
-                                channel,
-                                System.currentTimeMillis()));
-                        requestDrain();
+                        relayLine(message, channel);
                     }
                 });
             } else if (!wanted && chatObserver != Registration.NONE) {
@@ -592,6 +665,269 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 // not a policy violation. Turning relay off stops NEW messages being taken, which
                 // is what the setting means.
             }
+        }
+    }
+
+    /**
+     * Queues one observed line: verbatim when it shows no item, otherwise with each item hover
+     * replaced by {@code [Name]} and, where possible, tooltip images attached.
+     *
+     * <p>Runs on the chat thread, so it keeps the observer's rules: no blocking, no throwing, and
+     * nothing logged that carries text. The rewrite is string work bounded by {@link HoverTags}; the
+     * rendering happens on the platform's own executor and is only waited for off this thread.
+     */
+    private void relayLine(ChatMessage message, String channel) {
+        long timestampMs = System.currentTimeMillis();
+        String text = message.message();
+        if (!HoverTags.mightContainItem(text)) {
+            // Verbatim. Not trimmed, not normalised, not formatted - the bot renders, and a relay
+            // that silently edited what a player typed is worse than one that does not relay at all.
+            enqueueLine(new ChatLine(message.senderUuid(), message.senderName(), text, channel,
+                    timestampMs, NO_ITEMS));
+            return;
+        }
+        ModuleContext ctx = context;
+        ItemImages images = itemImages(ctx);
+        HoverTags.Rewrite rewrite;
+        try {
+            rewrite = HoverTags.rewrite(text, images);
+        } catch (RuntimeException unexpected) {
+            // HoverTags never throws on any input; a translation source might. Either way the line
+            // still relays, exactly as it was.
+            rewrite = null;
+        }
+        if (rewrite == null) {
+            enqueueLine(new ChatLine(message.senderUuid(), message.senderName(), text, channel,
+                    timestampMs, NO_ITEMS));
+            return;
+        }
+        ChatLine textOnly = new ChatLine(message.senderUuid(), message.senderName(),
+                rewrite.text(), channel, timestampMs, NO_ITEMS);
+        // Only to a bot that accepted itemimages@1 in this connection's handshake. A released bot
+        // closes its socket on a frame over its (1 MiB) payload cap, so it gets the [Name] text and
+        // nothing is drawn for it at all.
+        if (ctx == null || !itemImagesEnabled(ctx) || !imagesAccepted(tunnel)
+                || !available(images)) {
+            enqueueLine(textOnly);
+            return;
+        }
+        attachImages(ctx, images, textOnly, rewrite);
+    }
+
+    private void enqueueLine(ChatLine line) {
+        chat.enqueue(line);
+        requestDrain();
+    }
+
+    /**
+     * Starts one render per distinct item (at most {@value #MAX_ITEMS_PER_LINE}) and ships the line
+     * when they have all finished or {@value #ITEM_IMAGE_BUDGET_MS} ms have passed, whichever is
+     * first. Exactly one of those ships it.
+     */
+    private void attachImages(
+            final ModuleContext ctx, ItemImages images, final ChatLine textOnly,
+            HoverTags.Rewrite rewrite) {
+        // One image per distinct item: the same item shown twice is the same picture.
+        Map<String, Integer> seen = new HashMap<String, Integer>();
+        List<ChatItem> distinct = new ArrayList<ChatItem>();
+        List<String> names = new ArrayList<String>();
+        for (int i = 0; i < rewrite.items().size(); i++) {
+            ChatItem item = rewrite.items().get(i);
+            if (seen.put(item.cacheKey(), i) == null) {
+                distinct.add(item);
+                names.add(rewrite.names().get(i));
+            }
+        }
+        final int extra = Math.max(0, distinct.size() - MAX_ITEMS_PER_LINE);
+        if (extra > 0) {
+            distinct = distinct.subList(0, MAX_ITEMS_PER_LINE);
+            names = names.subList(0, MAX_ITEMS_PER_LINE);
+            ctx.logger().debug(() -> "a chat line showed more than " + MAX_ITEMS_PER_LINE
+                    + " items; dropped " + extra + " image(s)");
+        }
+
+        if (pendingItemLines.incrementAndGet() > MAX_PENDING_ITEM_LINES) {
+            pendingItemLines.decrementAndGet();
+            ctx.logger().debug("too many chat lines waiting on item images; sent one as text");
+            enqueueLine(textOnly);
+            return;
+        }
+
+        List<CompletableFuture<byte[]>> renders = new ArrayList<CompletableFuture<byte[]>>();
+        for (ChatItem item : distinct) {
+            renders.add(startRender(images, item));
+        }
+        final PendingItemLine pending = new PendingItemLine(textOnly, names, renders);
+        for (CompletableFuture<byte[]> render : renders) {
+            // Plain whenComplete, never the executor-less *Async: this runs on whichever thread
+            // finished the render (or inline, if it was already done), and all it does is a check
+            // and, once, a lock-free enqueue.
+            render.whenComplete(new BiConsumer<byte[], Throwable>() {
+                @Override
+                public void accept(byte[] png, Throwable failed) {
+                    if (pending.allDone()) {
+                        shipPending(pending);
+                    }
+                }
+            });
+        }
+        if (pending.isShipped()) {
+            return;
+        }
+        Runnable budget = new Runnable() {
+            @Override
+            public void run() {
+                shipPending(pending);
+            }
+        };
+        try {
+            DrainScheduler scheduler = budgetScheduler;
+            if (scheduler != null) {
+                scheduler.schedule(budget, ITEM_IMAGE_BUDGET_MS);
+            } else {
+                ctx.executors().scheduler()
+                        .schedule(budget, ITEM_IMAGE_BUDGET_MS, TimeUnit.MILLISECONDS);
+            }
+        } catch (RuntimeException refused) {
+            // Shutting down: there is nobody to wait for, so ship what there is now.
+            shipPending(pending);
+        }
+    }
+
+    /** {@link ItemImages#render}, with a throw or a {@code null} future turned into "no image". */
+    private static CompletableFuture<byte[]> startRender(ItemImages images, ChatItem item) {
+        try {
+            CompletableFuture<byte[]> render = images.render(item);
+            return render != null ? render : CompletableFuture.<byte[]>completedFuture(null);
+        } catch (Throwable failed) {
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    /**
+     * Ships a pending item line with whatever images finished, once. Called by the last render to
+     * complete and by the budget timeout; the loser of that race does nothing.
+     */
+    private void shipPending(PendingItemLine pending) {
+        if (!pending.markShipped()) {
+            return;
+        }
+        pendingItemLines.decrementAndGet();
+        List<Payload> items = new ArrayList<Payload>();
+        int missing = 0;
+        int oversized = 0;
+        for (int i = 0; i < pending.renders.size(); i++) {
+            byte[] png = finishedPng(pending.renders.get(i));
+            if (png == null || png.length == 0) {
+                missing++;
+                continue;
+            }
+            if (png.length > MAX_ITEM_PNG_BYTES) {
+                oversized++;
+                continue;
+            }
+            items.add(Payload.builder()
+                    .put("name", pending.names.get(i))
+                    .put("png", Base64.getEncoder().encodeToString(png))
+                    .build());
+        }
+        ModuleContext ctx = context;
+        if (ctx == null) {
+            // Disabled while the images were drawing. The queue has been cleared and there is no
+            // flush to bound it, so the line goes nowhere, like anything else queued at disable.
+            return;
+        }
+        ChatLine line = pending.line.withItems(items);
+        int trimmed = 0;
+        while (line.estimatedBytes() > MAX_CHAT_FRAME_BYTES - FRAME_OVERHEAD_BYTES
+                && !line.items.isEmpty()) {
+            line = line.withoutLargestItem();
+            trimmed++;
+        }
+        enqueueLine(line);
+        final int attached = line.items.size();
+        final int none = missing;
+        if (trimmed > 0) {
+            ctx.logger().warn("dropped " + trimmed + " item image(s) so a relayed chat line fits "
+                    + "the " + MAX_CHAT_FRAME_BYTES + "-byte frame budget");
+        }
+        if (oversized > 0) {
+            ctx.logger().warn("dropped " + oversized + " item image(s) larger than "
+                    + MAX_ITEM_PNG_BYTES + " bytes from a relayed chat line");
+        }
+        ctx.logger().debug(() -> "relayed a chat line with " + attached + " item image(s)"
+                + (none == 0 ? "" : "; " + none + " not ready or failed"));
+    }
+
+    /** A render's PNG if it has finished successfully, else {@code null}. Never waits. */
+    private static byte[] finishedPng(CompletableFuture<byte[]> render) {
+        if (!render.isDone() || render.isCompletedExceptionally() || render.isCancelled()) {
+            return null;
+        }
+        try {
+            return render.getNow(null);
+        } catch (RuntimeException failed) {
+            return null;
+        }
+    }
+
+    /** Whether the bot on {@code bus} accepted {@code itemimages@1}; false for no bus. */
+    private static boolean imagesAccepted(TunnelBus bus) {
+        if (bus == null) {
+            return false;
+        }
+        try {
+            return bus.peerAccepts(Capabilities.ITEM_IMAGES);
+        } catch (RuntimeException failed) {
+            return false;
+        }
+    }
+
+    /** Whether item images are wanted on this server, read live like {@link #relayChat()}. */
+    private static boolean itemImagesEnabled(ModuleContext ctx) {
+        return ctx.settings().bool(SETTING_ITEM_IMAGES, DEFAULT_ITEM_IMAGES);
+    }
+
+    /** The platform's renderer, never {@code null}. */
+    private static ItemImages itemImages(ModuleContext ctx) {
+        if (ctx == null) {
+            return ItemImages.NONE;
+        }
+        try {
+            ItemImages images = ctx.platform().integrations().itemImages();
+            return images == null ? ItemImages.NONE : images;
+        } catch (RuntimeException failed) {
+            return ItemImages.NONE;
+        }
+    }
+
+    private static boolean available(ItemImages images) {
+        try {
+            return images.available();
+        } catch (RuntimeException failed) {
+            return false;
+        }
+    }
+
+    /**
+     * Asks the renderer to get its assets ready, when images are wanted and relay is on. Called at
+     * enable and on every config change; {@link ItemImages#prepare} is idempotent and non-blocking,
+     * so a repeat costs nothing. With {@code itemImages} off nothing is prepared, which is what keeps
+     * a server that opted out from ever downloading the vanilla assets.
+     */
+    private void prepareItemImages() {
+        ModuleContext ctx = context;
+        if (ctx == null || !relayChat() || !itemImagesEnabled(ctx)) {
+            return;
+        }
+        ItemImages images = itemImages(ctx);
+        try {
+            if (images.available()) {
+                images.prepare();
+            }
+        } catch (RuntimeException failed) {
+            ctx.logger().debug(() -> "item image renderer could not start preparing: "
+                    + failed.getClass().getName());
         }
     }
 
@@ -1084,16 +1420,80 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         private final String message;
         private final String channel;
         private final long timestampMs;
+        private final List<Payload> items;
+        private final long estimatedBytes;
 
-        ChatLine(UUID uuid, String name, String message, String channel, long timestampMs) {
+        ChatLine(UUID uuid, String name, String message, String channel, long timestampMs,
+                List<Payload> items) {
             this.uuid = uuid;
             this.name = name;
             this.message = message;
             this.channel = channel;
             this.timestampMs = timestampMs;
+            this.items = items == null ? NO_ITEMS : items;
+            long estimate = 160L + jsonBytes(name) + jsonBytes(message) + jsonBytes(channel);
+            for (Payload item : this.items) {
+                estimate += 32L + jsonBytes(item.string("name", ""))
+                        + jsonBytes(item.string("png", ""));
+            }
+            this.estimatedBytes = estimate;
         }
 
-        Payload toPayload() {
+        /** An upper estimate of this line's encoded size, computed once. */
+        long estimatedBytes() {
+            return estimatedBytes;
+        }
+
+        /** This line without its largest image. */
+        ChatLine withoutLargestItem() {
+            if (items.isEmpty()) {
+                return this;
+            }
+            int largest = 0;
+            for (int i = 1; i < items.size(); i++) {
+                if (items.get(i).string("png", "").length()
+                        > items.get(largest).string("png", "").length()) {
+                    largest = i;
+                }
+            }
+            List<Payload> kept = new ArrayList<Payload>(items);
+            kept.remove(largest);
+            return withItems(kept);
+        }
+
+        /**
+         * Bytes a string can take in the frame's JSON, pessimistically: escapes, including the HTML
+         * characters a JSON writer may escape, count as six.
+         */
+        static long jsonBytes(String text) {
+            if (text == null) {
+                return 0L;
+            }
+            long bytes = 2L;
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                if (c < 0x20 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&'
+                        || c == '=' || c == '\'') {
+                    bytes += 6;
+                } else if (c < 0x80) {
+                    bytes += 1;
+                } else if (c < 0x800) {
+                    bytes += 2;
+                } else {
+                    bytes += 3;
+                }
+            }
+            return bytes;
+        }
+
+        /** This line with {@code attached} as its item images. */
+        ChatLine withItems(List<Payload> attached) {
+            return new ChatLine(uuid, name, message, channel, timestampMs,
+                    attached == null || attached.isEmpty()
+                            ? NO_ITEMS : Collections.unmodifiableList(attached));
+        }
+
+        Payload toPayload(boolean withImages) {
             Payload.Builder builder = Payload.builder()
                     .put("uuid", uuid == null ? "" : uuid.toString())
                     .put("name", name == null ? "" : name)
@@ -1107,6 +1507,12 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 // with no name rather than no channel.
                 builder.put("channel", channel);
             }
+            if (withImages && !items.isEmpty()) {
+                // Omitted entirely for a line with no images, and for a bot that did not accept
+                // itemimages@1, so an ordinary line stays exactly
+                // the shape a bot without itemimages@1 already reads.
+                builder.putChildren("items", items);
+            }
             return builder.build();
         }
 
@@ -1119,7 +1525,48 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         public String toString() {
             return "ChatLine{sender='" + name + "', length="
                     + (message == null ? 0 : message.length())
-                    + (channel == null ? "" : ", channel='" + channel + "'") + "}";
+                    + (channel == null ? "" : ", channel='" + channel + "'")
+                    + (items.isEmpty() ? "" : ", items=" + items.size()) + "}";
+        }
+    }
+
+    /** The empty item list every ordinary line carries. */
+    private static final List<Payload> NO_ITEMS = Collections.emptyList();
+
+    /**
+     * An item line waiting for its images. Exists for at most {@value #ITEM_IMAGE_BUDGET_MS} ms: the
+     * budget timeout ships it if the renders have not. Holds the line and the futures, nothing else.
+     */
+    private static final class PendingItemLine {
+
+        final ChatLine line;
+        final List<String> names;
+        final List<CompletableFuture<byte[]>> renders;
+        private final AtomicBoolean shipped = new AtomicBoolean();
+
+        PendingItemLine(ChatLine line, List<String> names,
+                List<CompletableFuture<byte[]>> renders) {
+            this.line = line;
+            this.names = new ArrayList<String>(names);
+            this.renders = renders;
+        }
+
+        boolean allDone() {
+            for (CompletableFuture<byte[]> render : renders) {
+                if (!render.isDone()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** {@code true} for exactly one caller. */
+        boolean markShipped() {
+            return shipped.compareAndSet(false, true);
+        }
+
+        boolean isShipped() {
+            return shipped.get();
         }
     }
 
@@ -1179,6 +1626,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /** Routes immediate drains through {@code scheduler} instead of {@code heimdall-sched}. */
     void drainSchedulerForTests(DrainScheduler scheduler) {
         this.drainScheduler = scheduler;
+    }
+
+    /** Routes item-image budget timeouts through {@code scheduler} instead of {@code heimdall-sched}. */
+    void budgetSchedulerForTests(DrainScheduler scheduler) {
+        this.budgetScheduler = scheduler;
+    }
+
+    /** How many item lines are waiting on images. */
+    int pendingItemLineCount() {
+        return pendingItemLines.get();
     }
 
     /** How many chat lines are currently queued. */

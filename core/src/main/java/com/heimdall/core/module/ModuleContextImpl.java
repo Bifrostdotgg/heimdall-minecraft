@@ -295,5 +295,10 @@ final class ModuleContextImpl implements ModuleContext {
         public boolean isConnected() {
             return delegate.isConnected();
         }
+
+        @Override
+        public boolean peerAccepts(String capability) {
+            return delegate.peerAccepts(capability);
+        }
     }
 }

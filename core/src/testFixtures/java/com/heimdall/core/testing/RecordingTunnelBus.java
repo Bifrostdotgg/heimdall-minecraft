@@ -87,6 +87,10 @@ public final class RecordingTunnelBus implements TunnelBus {
     private volatile boolean connected = true;
     private volatile ProtocolMode mode = ProtocolMode.V3;
 
+    /** What the fake bot accepted in its handshake. Empty by default, like a bot that said nothing. */
+    private final java.util.Set<String> accepted =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     /** Everything sent, oldest first. */
     public List<Sent> sent() {
         return Collections.unmodifiableList(new ArrayList<Sent>(sent));
@@ -175,6 +179,23 @@ public final class RecordingTunnelBus implements TunnelBus {
     /** Says the link is up again. */
     public RecordingTunnelBus reconnected() {
         return connected(true);
+    }
+
+    /** Makes the fake bot accept {@code capabilities}, as an {@code identify_ack} would. */
+    public RecordingTunnelBus accepting(String... capabilities) {
+        accepted.addAll(java.util.Arrays.asList(capabilities));
+        return this;
+    }
+
+    /** Forgets every accepted capability, as a reconnect to an older bot would. */
+    public RecordingTunnelBus acceptingNothing() {
+        accepted.clear();
+        return this;
+    }
+
+    @Override
+    public boolean peerAccepts(String capability) {
+        return connected && capability != null && accepted.contains(capability);
     }
 
     public RecordingTunnelBus mode(ProtocolMode value) {

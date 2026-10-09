@@ -61,6 +61,18 @@ public final class Capabilities {
     public static final String CHAT_CHANNELS = "chatchannels@1";
 
     /**
+     * Item images on the bridge: a {@code bridge.chat} line may carry
+     * {@code items: [{name, png}]}, at most four, each {@code png} standard base64 of a PNG of at most
+     * 512 KiB, and the line's {@code msg} has each ChatControl item hover replaced by the plain
+     * {@code [Name]}. The bridge's {@code itemImages} setting (default on) switches rendering off.
+     *
+     * <p>A build capability declared alongside {@link #BRIDGE}, like {@link #CHAT_CHANNELS}. It is
+     * declared on every platform: a proxy, or a backend that cannot draw, simply never attaches
+     * {@code items}, which is a line a bot that knows this capability already handles. Departure D86.
+     */
+    public static final String ITEM_IMAGES = "itemimages@1";
+
+    /**
      * Native punishments: punish.apply / punish.revoke / punish.import, dupeip.query, and the local
      * mirror.
      *
