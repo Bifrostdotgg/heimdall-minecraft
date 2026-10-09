@@ -29,6 +29,11 @@ import java.util.Properties;
  *   <li>Vanilla, last.
  * </ol>
  *
+ * <p>A pack zip is never opened where it lies. ItemsAdder, Nexo and Oraxen rewrite their zips when
+ * they rebuild, and an open handle (on Windows, a lock) on their file would get in their way for as
+ * long as the stack lives. So each zip is copied into {@code cache/packs/open/} once per change and
+ * the copy is what is opened; copies no longer in use are deleted when the stack is rebuilt.
+ *
  * <p>Discovery is a handful of {@code stat} calls, cheap enough to repeat every few seconds; the
  * {@link #fingerprint} of what it found (paths, sizes, modification times) is what decides whether
  * the stack has to be rebuilt, so a pack that ItemsAdder regenerates is picked up without a restart
@@ -36,8 +41,13 @@ import java.util.Properties;
  */
 final class PackSources {
 
-    /** Largest server resource pack downloaded. */
+    /** Largest server resource pack downloaded, and largest pack zip copied. */
     static final long MAX_SERVER_PACK_BYTES = 250L * 1024 * 1024;
+
+    /** How long a server pack with no {@code resource-pack-sha1} is trusted before it is re-fetched. */
+    static final long UNHASHED_PACK_MAX_AGE_MS = 24L * 60 * 60 * 1000;
+
+    private final String instance = Long.toHexString(new java.security.SecureRandom().nextLong());
 
     private final HeimdallLogger logger;
     private final Path serverRoot;
@@ -156,11 +166,17 @@ final class PackSources {
      */
     PackStack open(List<Candidate> candidates, Path vanilla, int packFormat) {
         List<AssetRoot> roots = new ArrayList<AssetRoot>();
+        java.util.Set<Path> copies = new java.util.HashSet<Path>();
         for (Candidate candidate : candidates) {
             try {
-                AssetRoot root = candidate.zip
-                        ? new AssetRoot.Zip(candidate.path)
-                        : new AssetRoot.Directory(candidate.path);
+                AssetRoot root;
+                if (candidate.zip) {
+                    Path copy = privateCopy(candidate.path);
+                    copies.add(copy);
+                    root = new AssetRoot.Zip(copy);
+                } else {
+                    root = new AssetRoot.Directory(candidate.path);
+                }
                 roots.add(AssetRoot.WithOverlays.of(root, packFormat));
             } catch (IOException | RuntimeException unreadable) {
                 final String name = String.valueOf(candidate.path.getFileName());
@@ -171,15 +187,86 @@ final class PackSources {
         if (vanilla != null) {
             roots.add(new AssetRoot.Directory(vanilla));
         }
-        return new PackStack(roots, fingerprint(candidates, vanilla) + "|format:" + packFormat);
+        return new PackStack(roots, fingerprint(candidates, vanilla) + "|format:" + packFormat,
+                copies);
+    }
+
+    /** The cache's copy of a pack zip, made once per (path, size, modification time). */
+    Path privateCopy(Path zip) throws IOException {
+        long size = Files.size(zip);
+        if (size > MAX_SERVER_PACK_BYTES) {
+            throw new AssetException("a pack zip is larger than " + MAX_SERVER_PACK_BYTES + " bytes");
+        }
+        long modified = Files.getLastModifiedTime(zip).toMillis();
+        Path dir = cacheDir.resolve("packs").resolve("open");
+        String key = VanillaAssets.sha1(zip.toAbsolutePath().toString()
+                .getBytes(StandardCharsets.UTF_8)).substring(0, 12);
+        Path copy = dir.resolve(key + "-" + size + "-" + modified + ".zip");
+        if (Files.isRegularFile(copy) && Files.size(copy) == size) {
+            return copy;
+        }
+        Files.createDirectories(dir);
+        Path partial = dir.resolve(".copy-" + instance + "-" + Long.toHexString(System.nanoTime()));
+        try {
+            Files.copy(zip, partial, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            Files.move(partial, copy, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            return copy;
+        } finally {
+            Files.deleteIfExists(partial);
+        }
+    }
+
+    /** Deletes download partials a crashed run left, once they are too old to be anyone's. */
+    private static void sweepOldPartials(Path packs) {
+        long cutoff = System.currentTimeMillis() - VanillaAssets.LEFTOVER_AGE_MS;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(packs, ".download-*")) {
+            for (Path partial : stream) {
+                if (Files.getLastModifiedTime(partial).toMillis() < cutoff) {
+                    Files.deleteIfExists(partial);
+                }
+            }
+        } catch (IOException ignored) {
+            // Best effort.
+        }
+    }
+
+    /**
+     * Deletes pack copies no stack uses any more, and copy leftovers older than
+     * {@link VanillaAssets#LEFTOVER_AGE_MS}. Called after the previous stack has been closed, since
+     * an open zip cannot be deleted on Windows; a file that still cannot be is tried next time.
+     */
+    void pruneCopies(java.util.Set<Path> inUse) {
+        Path dir = cacheDir.resolve("packs").resolve("open");
+        if (!Files.isDirectory(dir)) {
+            return;
+        }
+        long cutoff = System.currentTimeMillis() - VanillaAssets.LEFTOVER_AGE_MS;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
+            for (Path child : stream) {
+                String name = child.getFileName().toString();
+                boolean stale = name.startsWith(".copy-")
+                        ? Files.getLastModifiedTime(child).toMillis() < cutoff
+                        : !inUse.contains(child);
+                if (stale) {
+                    try {
+                        Files.deleteIfExists(child);
+                    } catch (IOException stillOpen) {
+                        // Next rebuild.
+                    }
+                }
+            }
+        } catch (IOException ignored) {
+            // Best effort.
+        }
     }
 
     // ── server.properties ────────────────────────────────────────────────────
 
     /**
      * Downloads the pack {@code server.properties} names, if any, into the cache, and returns it.
-     * Re-downloads only when the URL or the expected SHA-1 changes; a SHA-1 mismatch is an error and
-     * leaves nothing behind. Blocking: the asset thread only.
+     * Re-downloads when the URL or the expected SHA-1 changes, and, for a pack with no SHA-1 to pin
+     * it, once the copy is a day old (the URL may serve new contents). A SHA-1 mismatch is an error
+     * and leaves nothing behind. Blocking: the asset thread only.
      */
     Path serverPack(HttpSource http) throws IOException {
         Properties properties = new Properties();
@@ -199,16 +286,23 @@ final class PackSources {
         Path packs = cacheDir.resolve("packs");
         Path target = packs.resolve("server-" + key.substring(0, 16) + ".zip");
         if (Files.isRegularFile(target)) {
-            return target;
+            boolean stale = sha1.isEmpty() && System.currentTimeMillis()
+                    - Files.getLastModifiedTime(target).toMillis() > UNHASHED_PACK_MAX_AGE_MS;
+            if (!stale) {
+                return target;
+            }
         }
         Files.createDirectories(packs);
-        Path partial = packs.resolve(".download-" + Long.toHexString(System.nanoTime()));
+        sweepOldPartials(packs);
+        Path partial = packs.resolve(".download-" + instance + "-"
+                + Long.toHexString(System.nanoTime()));
         try {
             http.download(url, partial, MAX_SERVER_PACK_BYTES);
             if (!sha1.isEmpty() && !sha1.equals(VanillaAssets.sha1(partial))) {
-                throw new IOException("the server resource pack does not match resource-pack-sha1");
+                throw new AssetException("the server resource pack does not match resource-pack-sha1");
             }
-            Files.move(partial, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            // The stack opens its own copy of this file, never this one, so replacing it is safe.
+            Files.move(partial, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             removeSuperseded(packs, target);
             logger.info("item images: using the server resource pack ("
                     + Files.size(target) + " bytes)");

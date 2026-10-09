@@ -70,9 +70,18 @@ final class VanillaAssets {
     static final long MAX_EXTRACTED_BYTES = 512L * 1024 * 1024;
     static final int MAX_EXTRACTED_ENTRIES = 100_000;
 
+    /** Leftover temporary files younger than this may belong to another live server; left alone. */
+    static final long LEFTOVER_AGE_MS = 10L * 60 * 1000;
+
     private final HeimdallLogger logger;
     private final HttpSource http;
     private final Path root;
+
+    /**
+     * Tags this instance's temporary files, so two servers sharing a plugin folder (or a quick
+     * restart overlapping the old process) never mistake each other's in-flight files for leftovers.
+     */
+    private final String instance = Long.toHexString(new java.security.SecureRandom().nextLong());
 
     VanillaAssets(HeimdallLogger logger, HttpSource http, Path root) {
         this.logger = logger;
@@ -109,47 +118,50 @@ final class VanillaAssets {
         Map<String, Object> manifest = json(http.get(MANIFEST_URL, MAX_MANIFEST_BYTES));
         Map<String, Object> entry = pickVersion(manifest, version);
         if (entry == null) {
-            throw new IOException("no release at or below " + version + " in Mojang's manifest");
+            throw new AssetException("no release at or below " + version + " in Mojang's manifest");
         }
         String resolvedId = Snbt.asString(entry.get("id"));
         String versionUrl = Snbt.asString(entry.get("url"));
         if (versionUrl == null) {
-            throw new IOException("the manifest entry for " + resolvedId + " has no url");
+            throw new AssetException("the manifest entry for " + resolvedId + " has no url");
         }
         byte[] versionBytes = http.get(versionUrl, MAX_VERSION_BYTES);
         String expectedVersionSha1 = Snbt.asString(entry.get("sha1"));
-        if (expectedVersionSha1 != null && !expectedVersionSha1.equalsIgnoreCase(sha1(versionBytes))) {
-            throw new IOException("the version document for " + resolvedId
+        // Fail closed: a manifest entry that vouches for nothing is not a chain this cache trusts.
+        if (expectedVersionSha1 == null
+                || !expectedVersionSha1.equalsIgnoreCase(sha1(versionBytes))) {
+            throw new AssetException("the version document for " + resolvedId
                     + " does not match the manifest's SHA-1");
         }
         Map<String, Object> client = Snbt.asMap(
                 at(json(versionBytes), "downloads", "client"));
         if (client == null) {
-            throw new IOException("the version document for " + resolvedId + " has no client");
+            throw new AssetException("the version document for " + resolvedId + " has no client");
         }
         String jarUrl = Snbt.asString(client.get("url"));
         String jarSha1 = Snbt.asString(client.get("sha1"));
         Double declared = Snbt.asDouble(client.get("size"), null);
         if (jarUrl == null || jarSha1 == null || declared == null) {
-            throw new IOException("the client download for " + resolvedId + " is incomplete");
+            throw new AssetException("the client download for " + resolvedId + " is incomplete");
         }
         long size = declared.longValue();
         if (size <= 0 || size > MAX_CLIENT_JAR_BYTES) {
-            throw new IOException("the client jar for " + resolvedId + " declares " + size
+            throw new AssetException("the client jar for " + resolvedId + " declares " + size
                     + " bytes, outside the accepted range");
         }
 
         String stamp = Long.toHexString(System.nanoTime());
-        Path jar = root.resolve(".download-" + safeName(version) + "-" + stamp + ".jar");
-        Path staging = root.resolve(".staging-" + safeName(version) + "-" + stamp);
+        Path jar = root.resolve(".download-" + instance + "-" + safeName(version) + "-" + stamp
+                + ".jar");
+        Path staging = root.resolve(".staging-" + instance + "-" + safeName(version) + "-" + stamp);
         try {
             long written = http.download(jarUrl, jar, size);
             if (written != size) {
-                throw new IOException("the client jar for " + resolvedId + " is " + written
+                throw new AssetException("the client jar for " + resolvedId + " is " + written
                         + " bytes, the version document says " + size);
             }
             if (!jarSha1.equalsIgnoreCase(sha1(jar))) {
-                throw new IOException("the client jar for " + resolvedId
+                throw new AssetException("the client jar for " + resolvedId
                         + " does not match its SHA-1");
             }
             int files = extract(jar, staging);
@@ -289,6 +301,11 @@ final class VanillaAssets {
 
     /** Extracts the wanted entries of {@code jar} into {@code target}; returns how many. */
     static int extract(Path jar, Path target) throws IOException {
+        return extract(jar, target, MAX_EXTRACTED_ENTRIES, MAX_EXTRACTED_BYTES);
+    }
+
+    /** {@link #extract(Path, Path)} with explicit caps, for the cap tests. */
+    static int extract(Path jar, Path target, int maxEntries, long maxBytes) throws IOException {
         Files.createDirectories(target);
         Path base = target.toAbsolutePath().normalize();
         int count = 0;
@@ -303,10 +320,10 @@ final class VanillaAssets {
                 }
                 Path out = base.resolve(name).normalize();
                 if (!out.startsWith(base)) {
-                    throw new IOException("a client jar entry points outside the cache");
+                    throw new AssetException("a client jar entry points outside the cache");
                 }
-                if (++count > MAX_EXTRACTED_ENTRIES) {
-                    throw new IOException("more than " + MAX_EXTRACTED_ENTRIES + " entries");
+                if (++count > maxEntries) {
+                    throw new AssetException("more than " + maxEntries + " entries");
                 }
                 Files.createDirectories(out.getParent());
                 try (InputStream in = zip.getInputStream(entry);
@@ -315,9 +332,9 @@ final class VanillaAssets {
                     int read;
                     while ((read = in.read(buffer)) > 0) {
                         total += read;
-                        if (total > MAX_EXTRACTED_BYTES) {
-                            throw new IOException("extracted assets exceed "
-                                    + MAX_EXTRACTED_BYTES + " bytes");
+                        if (total > maxBytes) {
+                            throw new AssetException("extracted assets exceed " + maxBytes
+                                    + " bytes");
                         }
                         os.write(buffer, 0, read);
                     }
@@ -356,11 +373,11 @@ final class VanillaAssets {
             Map<String, Object> map = Snbt.asMap(Snbt.parse(new String(bytes, StandardCharsets.UTF_8),
                     (int) Math.min(Integer.MAX_VALUE, MAX_MANIFEST_BYTES * 2)));
             if (map == null) {
-                throw new IOException("expected a JSON object");
+                throw new AssetException("expected a JSON object");
             }
             return map;
         } catch (Snbt.SyntaxException malformed) {
-            throw new IOException("malformed JSON: " + malformed.getMessage());
+            throw new AssetException("malformed JSON: " + malformed.getMessage());
         }
     }
 
@@ -422,16 +439,21 @@ final class VanillaAssets {
         return name.startsWith(".") ? "_" + name : name;
     }
 
-    /** Removes leftover staging directories and jars from a previous crash. */
+    /**
+     * Removes staging directories and jars a crashed run left behind: only ones older than
+     * {@link #LEFTOVER_AGE_MS}, because a younger one may be another live process mid-download.
+     */
     void sweepLeftovers() {
         if (!Files.isDirectory(root)) {
             return;
         }
+        long cutoff = System.currentTimeMillis() - LEFTOVER_AGE_MS;
         List<Path> leftovers = new ArrayList<Path>();
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(root)) {
             for (Path child : stream) {
                 String name = child.getFileName().toString();
-                if (name.startsWith(".staging-") || name.startsWith(".download-")) {
+                if ((name.startsWith(".staging-") || name.startsWith(".download-"))
+                        && Files.getLastModifiedTime(child).toMillis() < cutoff) {
                     leftovers.add(child);
                 }
             }
@@ -445,6 +467,40 @@ final class VanillaAssets {
                 // Best effort; the next sweep tries again.
             }
         }
+    }
+
+    /**
+     * Deletes every complete version cache other than {@code current}: after an upgrade the old
+     * version's assets are dead weight. Incomplete directories are left to {@link #ensure}, which
+     * rebuilds or deletes them; dot-prefixed temporaries to {@link #sweepLeftovers}.
+     *
+     * @return how many were removed
+     */
+    int pruneOthers(Path current) {
+        if (current == null || !Files.isDirectory(root)) {
+            return 0;
+        }
+        List<Path> stale = new ArrayList<Path>();
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(root)) {
+            for (Path child : stream) {
+                if (!child.getFileName().toString().startsWith(".") && Files.isDirectory(child)
+                        && !child.equals(current) && isComplete(child)) {
+                    stale.add(child);
+                }
+            }
+        } catch (IOException ignored) {
+            return 0;
+        }
+        int removed = 0;
+        for (Path dir : stale) {
+            try {
+                deleteTree(dir);
+                removed++;
+            } catch (IOException ignored) {
+                // Best effort; tried again on the next prepare.
+            }
+        }
+        return removed;
     }
 
     static void deleteTree(Path dir) throws IOException {

@@ -109,6 +109,28 @@ class BukkitItemImagesTest {
     }
 
     @Test
+    void anOversizedCardIsRedrawnAtHalfScale() throws Exception {
+        BukkitItemImages normal = build(new Fixtures.FakeHttp());
+        byte[] full = normal.render(wardedJar()).get(10, TimeUnit.SECONDS);
+        normal.close();
+
+        BukkitItemImages strict = build(new Fixtures.FakeHttp());
+        strict.preferredMaxPngBytes = 1;
+        byte[] half = strict.render(wardedJar()).get(10, TimeUnit.SECONDS);
+
+        int fullWidth = ImageIO.read(new ByteArrayInputStream(full)).getWidth();
+        int halfWidth = ImageIO.read(new ByteArrayInputStream(half)).getWidth();
+        assertEquals(fullWidth / 2, halfWidth);
+    }
+
+    @Test
+    void theRenderCacheKeyIsAHashNotTheText() {
+        String key = BukkitItemImages.sha256(wardedJar().cacheKey());
+        assertEquals(64, key.length());
+        assertFalse(key.contains("Warded"));
+    }
+
+    @Test
     void afterCloseNothingRenders() throws Exception {
         BukkitItemImages service = build(new Fixtures.FakeHttp());
         service.close();

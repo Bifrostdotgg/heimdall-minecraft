@@ -89,6 +89,54 @@ class PackSourcesTest {
     }
 
     @Test
+    void packZipsAreOpenedFromPrivateCopiesSoTheOriginalsStayFree() throws Exception {
+        Path generated = plugins().resolve("ItemsAdder/output/generated.zip");
+        Files.createDirectories(generated.getParent());
+        Files.write(generated, pack("itemsadder"));
+        PackSources sources = sources();
+
+        PackStack stack = sources.open(sources.discover(null, null), null, 55);
+        try {
+            Files.delete(generated);
+            Files.write(generated, pack("rebuilt"));
+            String lang = new String(stack.read("assets/minecraft/lang/en_us.json", 1024), "UTF-8");
+            assertTrue(lang.contains("itemsadder"), "the open stack reads its own copy");
+            assertEquals(1, stack.copies().size());
+        } finally {
+            stack.close();
+        }
+
+        PackStack rebuilt = sources.open(sources.discover(null, null), null, 55);
+        try {
+            sources.pruneCopies(rebuilt.copies());
+            Path open = plugins().resolve("Heimdall/cache/packs/open");
+            assertEquals(1, Files.list(open).count(), "the superseded copy is gone");
+        } finally {
+            rebuilt.close();
+        }
+    }
+
+    @Test
+    void anUnhashedServerPackIsRefetchedOnceStale() throws Exception {
+        Files.write(server.resolve("server.properties"), Fixtures.utf8(
+                "resource-pack=https\\://packs.example/pack.zip\n"));
+        Fixtures.FakeHttp http = new Fixtures.FakeHttp()
+                .serve("https://packs.example/pack.zip", pack("v1"));
+        Path first = sources().serverPack(http);
+        assertEquals(first, sources().serverPack(http));
+        assertEquals(1, http.requests.size(), "fresh: not refetched");
+
+        Files.setLastModifiedTime(first, FileTime.fromMillis(System.currentTimeMillis()
+                - 2 * PackSources.UNHASHED_PACK_MAX_AGE_MS));
+        byte[] v2 = pack("v2");
+        http.serve("https://packs.example/pack.zip", v2);
+        Path again = sources().serverPack(http);
+
+        assertEquals(2, http.requests.size(), "a day old with nothing to pin it: refetched");
+        assertTrue(java.util.Arrays.equals(v2, Files.readAllBytes(again)));
+    }
+
+    @Test
     void aProtectedItemsAdderZipFallsBackToTheUncompressedOutput() throws Exception {
         Path generated = plugins().resolve("ItemsAdder/output/generated.zip");
         Files.createDirectories(generated.getParent());

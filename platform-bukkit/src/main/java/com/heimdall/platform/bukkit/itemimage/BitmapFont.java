@@ -35,9 +35,18 @@ import java.util.Set;
  * on it and taller accented glyphs reach above it, as in game. Bold is the glyph drawn again one GUI
  * pixel right, adding one to the advance; italic shears each row by {@code 1 - 0.25 * y}.
  *
+ * <p>Loading only indexes the font files; each sheet is decoded the first time one of its glyphs is
+ * drawn, once per pack stack, and a sheet that will not decode is remembered as such.
+ *
  * <p>Render thread only.
  */
 final class BitmapFont {
+
+    /** Font definition files followed through {@code reference} providers, at most. */
+    static final int MAX_FONT_DEPTH = 8;
+
+    /** Providers read per font file, at most. */
+    static final int MAX_PROVIDERS = 256;
 
     /** One glyph: where it is on its sheet and how it sits on the line. */
     static final class Glyph {
@@ -68,39 +77,95 @@ final class BitmapFont {
         }
     }
 
-    private final Map<Integer, Glyph> glyphs;
-    private final boolean fromAssets;
+    /**
+     * A bitmap provider's sheet, decoded on first use. A sheet that fails to decode is remembered
+     * as failed, so a broken file costs one attempt per stack, not one per character.
+     */
+    static final class Sheet {
+        final String path;
+        final int rows;
+        final int columns;
+        final double height;
+        final double ascent;
+        private BufferedImage image;
+        private boolean tried;
 
-    private BitmapFont(Map<Integer, Glyph> glyphs, boolean fromAssets) {
-        this.glyphs = glyphs;
-        this.fromAssets = fromAssets;
-    }
+        Sheet(String path, int rows, int columns, double height, double ascent) {
+            this.path = path;
+            this.rows = rows;
+            this.columns = columns;
+            this.height = height;
+            this.ascent = ascent;
+        }
 
-    /** Whether the glyphs came from real assets rather than the built-in stand-in. */
-    boolean fromAssets() {
-        return fromAssets;
-    }
-
-    /** Loads {@code minecraft:default}; never {@code null}. */
-    static BitmapFont load(PackStack stack, Textures textures, Deadline deadline) {
-        Map<Integer, Glyph> glyphs = new HashMap<Integer, Glyph>();
-        addFont(stack, textures, "minecraft:default", glyphs, new HashSet<String>(), deadline, 0);
-        if (!glyphs.containsKey((int) 'A')) {
-            BufferedImage ascii = textures.load("assets/minecraft/textures/font/ascii.png");
-            if (ascii != null) {
-                addLegacyAscii(ascii, glyphs);
+        BufferedImage image(Textures textures) {
+            if (!tried) {
+                tried = true;
+                image = textures.load(path);
+                if (image != null && (image.getWidth() / columns <= 0
+                        || image.getHeight() / rows <= 0)) {
+                    image = null;
+                }
             }
+            return image;
         }
-        boolean fromAssets = glyphs.containsKey((int) 'A');
-        if (!glyphs.containsKey((int) ' ')) {
-            glyphs.put((int) ' ', new Glyph(null, 0, 0, 0, 0, 1, 0, 4));
+
+        boolean failed() {
+            return tried && image == null;
         }
-        return new BitmapFont(glyphs, fromAssets);
     }
 
-    private static void addFont(PackStack stack, Textures textures, String id,
-            Map<Integer, Glyph> glyphs, Set<String> visited, Deadline deadline, int depth) {
-        if (depth > 8 || !visited.add(id)) {
+    /** Where a character lives: a sheet, a row and a column. */
+    private static final class Slot {
+        final Sheet sheet;
+        final int row;
+        final int column;
+
+        Slot(Sheet sheet, int row, int column) {
+            this.sheet = sheet;
+            this.row = row;
+            this.column = column;
+        }
+    }
+
+    private final Textures textures;
+    private final Map<Integer, Slot> slots;
+    private final Map<Integer, Glyph> glyphs;
+
+    private BitmapFont(Textures textures, Map<Integer, Slot> slots, Map<Integer, Glyph> spaces) {
+        this.textures = textures;
+        this.slots = slots;
+        this.glyphs = spaces;
+    }
+
+    /** Whether real glyph sheets were found for the letters (they may still fail to decode). */
+    boolean fromAssets() {
+        return slots.containsKey((int) 'A');
+    }
+
+    /**
+     * Indexes {@code minecraft:default}: reads the font JSON files and records which sheet holds
+     * each character, decoding nothing. Bounded by {@value #MAX_FONT_DEPTH} levels of references
+     * and {@value #MAX_PROVIDERS} providers per file, so it needs no render deadline; it runs once
+     * per pack stack. Never {@code null}.
+     */
+    static BitmapFont load(PackStack stack, Textures textures) {
+        Map<Integer, Slot> slots = new HashMap<Integer, Slot>();
+        Map<Integer, Glyph> spaces = new HashMap<Integer, Glyph>();
+        addFont(stack, "minecraft:default", slots, spaces, new HashSet<String>(), 0);
+        if (!slots.containsKey((int) 'A') && stack.read(
+                "assets/minecraft/textures/font/ascii.png", Textures.MAX_FILE_BYTES) != null) {
+            addLegacyAscii(slots);
+        }
+        if (!spaces.containsKey((int) ' ')) {
+            spaces.put((int) ' ', new Glyph(null, 0, 0, 0, 0, 1, 0, 4));
+        }
+        return new BitmapFont(textures, slots, spaces);
+    }
+
+    private static void addFont(PackStack stack, String id, Map<Integer, Slot> slots,
+            Map<Integer, Glyph> spaces, Set<String> visited, int depth) {
+        if (depth > MAX_FONT_DEPTH || !visited.add(id)) {
             return;
         }
         Map<String, Object> font = Snbt.asMap(stack.json(ModelResolver.path(id, "font", ".json")));
@@ -108,15 +173,18 @@ final class BitmapFont {
         if (providers == null) {
             return;
         }
+        int seen = 0;
         for (Object element : providers) {
-            deadline.check();
+            if (++seen > MAX_PROVIDERS) {
+                break;
+            }
             Map<String, Object> provider = Snbt.asMap(element);
             if (provider == null) {
                 continue;
             }
             String type = ModelResolver.strip(Snbt.asString(provider.get("type")));
             if ("bitmap".equals(type)) {
-                addBitmap(textures, provider, glyphs);
+                addBitmap(provider, slots);
             } else if ("space".equals(type)) {
                 Map<String, Object> advances = Snbt.asMap(provider.get("advances"));
                 if (advances != null) {
@@ -126,79 +194,54 @@ final class BitmapFont {
                         }
                         int cp = entry.getKey().codePointAt(0);
                         Double advance = Snbt.asDouble(entry.getValue(), null);
-                        if (advance != null && !glyphs.containsKey(cp)) {
-                            glyphs.put(cp, new Glyph(null, 0, 0, 0, 0, 1, 0, advance));
+                        if (advance != null && !spaces.containsKey(cp) && !slots.containsKey(cp)) {
+                            spaces.put(cp, new Glyph(null, 0, 0, 0, 0, 1, 0, advance));
                         }
                     }
                 }
             } else if ("reference".equals(type) || "include".equals(type)) {
                 String reference = Snbt.asString(provider.get("id"));
                 if (reference != null) {
-                    addFont(stack, textures, reference, glyphs, visited, deadline, depth + 1);
+                    addFont(stack, reference, slots, spaces, visited, depth + 1);
                 }
             }
             // ttf, unihex, legacy_unicode: not drawn; the built-in set covers ASCII gaps.
         }
     }
 
-    private static void addBitmap(Textures textures, Map<String, Object> provider,
-            Map<Integer, Glyph> glyphs) {
+    private static void addBitmap(Map<String, Object> provider, Map<Integer, Slot> slots) {
         String file = Snbt.asString(provider.get("file"));
         List<Object> rows = Snbt.asList(provider.get("chars"));
-        if (file == null || rows == null || rows.isEmpty()) {
-            return;
-        }
-        BufferedImage sheet = textures.load(ModelResolver.path(file, "textures", ""));
-        if (sheet == null) {
+        if (file == null || rows == null || rows.isEmpty() || rows.size() > 256) {
             return;
         }
         int columns = 0;
         int[][] codepoints = new int[rows.size()][];
         for (int r = 0; r < rows.size(); r++) {
             String row = Snbt.asString(rows.get(r));
-            codepoints[r] = row == null ? new int[0] : row.codePoints().toArray();
+            codepoints[r] = row == null ? new int[0] : row.codePoints().limit(256).toArray();
             columns = Math.max(columns, codepoints[r].length);
         }
         if (columns == 0) {
             return;
         }
-        int cellWidth = sheet.getWidth() / columns;
-        int cellHeight = sheet.getHeight() / rows.size();
-        if (cellWidth <= 0 || cellHeight <= 0) {
-            return;
-        }
-        double height = Snbt.asDouble(provider.get("height"), 8.0);
-        double ascent = Snbt.asDouble(provider.get("ascent"), 7.0);
-        double scale = height / cellHeight;
+        Sheet sheet = new Sheet(ModelResolver.path(file, "textures", ""), rows.size(), columns,
+                Snbt.asDouble(provider.get("height"), 8.0), Snbt.asDouble(provider.get("ascent"), 7.0));
         for (int r = 0; r < codepoints.length; r++) {
             for (int c = 0; c < codepoints[r].length; c++) {
                 int cp = codepoints[r][c];
-                if (cp == 0 || glyphs.containsKey(cp)) {
-                    continue;
+                if (cp != 0 && !slots.containsKey(cp)) {
+                    slots.put(cp, new Slot(sheet, r, c));
                 }
-                int x = c * cellWidth;
-                int y = r * cellHeight;
-                int width = contentWidth(sheet, x, y, cellWidth, cellHeight);
-                double advance = (int) (0.5 + width * scale) + 1;
-                glyphs.put(cp, new Glyph(sheet, x, y, cellWidth, cellHeight, scale, ascent, advance));
             }
         }
     }
 
     /** {@code textures/font/ascii.png} before 1.13: a 16 by 16 grid indexed by character code. */
-    private static void addLegacyAscii(BufferedImage sheet, Map<Integer, Glyph> glyphs) {
-        int cellWidth = sheet.getWidth() / 16;
-        int cellHeight = sheet.getHeight() / 16;
-        if (cellWidth <= 0 || cellHeight <= 0) {
-            return;
-        }
-        double scale = 8.0 / cellHeight;
+    private static void addLegacyAscii(Map<Integer, Slot> slots) {
+        Sheet sheet = new Sheet("assets/minecraft/textures/font/ascii.png", 16, 16, 8.0, 7.0);
         for (int cp = 33; cp < 127; cp++) {
-            int x = (cp % 16) * cellWidth;
-            int y = (cp / 16) * cellHeight;
-            int width = contentWidth(sheet, x, y, cellWidth, cellHeight);
-            glyphs.put(cp, new Glyph(sheet, x, y, cellWidth, cellHeight, scale, 7,
-                    (int) (0.5 + width * scale) + 1));
+            slots.put(cp, new Slot(sheet, cp / 16, cp % 16));
         }
     }
 
@@ -219,12 +262,31 @@ final class BitmapFont {
         if (glyph != null) {
             return glyph;
         }
-        glyph = Builtin.glyph(cp);
-        if (glyph != null) {
-            return glyph;
+        Slot slot = slots.get(cp);
+        if (slot != null) {
+            BufferedImage image = slot.sheet.image(textures);
+            if (image != null) {
+                int cellWidth = image.getWidth() / slot.sheet.columns;
+                int cellHeight = image.getHeight() / slot.sheet.rows;
+                int x = slot.column * cellWidth;
+                int y = slot.row * cellHeight;
+                double scale = slot.sheet.height / cellHeight;
+                int width = contentWidth(image, x, y, cellWidth, cellHeight);
+                glyph = new Glyph(image, x, y, cellWidth, cellHeight, scale, slot.sheet.ascent,
+                        (int) (0.5 + width * scale) + 1);
+                glyphs.put(cp, glyph);
+                return glyph;
+            }
         }
-        Glyph question = glyphs.get((int) '?');
-        return question != null ? question : Builtin.glyph('?');
+        glyph = Builtin.glyph(cp);
+        if (glyph == null && cp != '?') {
+            glyph = glyph('?');
+        }
+        if (glyph == null) {
+            glyph = Builtin.glyph('?');
+        }
+        glyphs.put(cp, glyph);
+        return glyph;
     }
 
     /** Advance of one character, in GUI pixels. */

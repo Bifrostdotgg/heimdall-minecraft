@@ -48,14 +48,19 @@ class VanillaAssetsTest {
 
     /** A fake Mojang serving {@code jar} described as {@code jarSha1}/{@code size}. */
     private Fixtures.FakeHttp mojang(byte[] jar, String jarSha1, long size, boolean badVersionSha) {
+        return mojang(jar, jarSha1, size, badVersionSha, false);
+    }
+
+    private Fixtures.FakeHttp mojang(byte[] jar, String jarSha1, long size, boolean badVersionSha,
+            boolean noVersionSha) {
         String versionDoc = "{\"id\":\"1.21.5\",\"downloads\":{\"client\":{\"url\":\"" + JAR_URL
                 + "\",\"sha1\":\"" + jarSha1 + "\",\"size\":" + size + "}}}";
         byte[] versionBytes = Fixtures.utf8(versionDoc);
         String versionSha = badVersionSha ? repeat('0', 40) : VanillaAssets.sha1(versionBytes);
         String manifest = "{\"latest\":{\"release\":\"1.21.5\"},\"versions\":["
                 + "{\"id\":\"25w20a\",\"type\":\"snapshot\",\"url\":\"https://x/snap.json\",\"sha1\":\"x\"},"
-                + "{\"id\":\"1.21.5\",\"type\":\"release\",\"url\":\"" + VERSION_URL + "\",\"sha1\":\""
-                + versionSha + "\"},"
+                + "{\"id\":\"1.21.5\",\"type\":\"release\",\"url\":\"" + VERSION_URL + "\""
+                + (noVersionSha ? "" : ",\"sha1\":\"" + versionSha + "\"") + "},"
                 + "{\"id\":\"1.21.4\",\"type\":\"release\",\"url\":\"https://x/1.21.4.json\",\"sha1\":\"x\"}]}";
         return new Fixtures.FakeHttp()
                 .serve(VanillaAssets.MANIFEST_URL, Fixtures.utf8(manifest))
@@ -141,6 +146,64 @@ class VanillaAssetsTest {
 
         assertThrows(IOException.class, () -> assets.ensure("1.21.5"));
         assertNull(assets.cached("1.21.5"));
+    }
+
+    @Test
+    void aManifestEntryWithoutASha1FailsClosed() {
+        byte[] jar = clientJar();
+        VanillaAssets assets = new VanillaAssets(logger,
+                mojang(jar, VanillaAssets.sha1(jar), jar.length, false, true), temp);
+
+        assertThrows(IOException.class, () -> assets.ensure("1.21.5"));
+        assertNull(assets.cached("1.21.5"));
+    }
+
+    @Test
+    void theExtractionCapsAreExact() throws Exception {
+        Path jar = temp.resolve("client.jar");
+        Files.write(jar, Fixtures.zip(Fixtures.files(
+                "assets/minecraft/models/a.json", "1234",
+                "assets/minecraft/models/b.json", "5678",
+                "assets/minecraft/sounds/ignored.ogg", "not counted")));
+
+        assertEquals(2, VanillaAssets.extract(jar, temp.resolve("ok-entries"), 2, 1000));
+        assertThrows(IOException.class,
+                () -> VanillaAssets.extract(jar, temp.resolve("too-many"), 1, 1000));
+        assertEquals(2, VanillaAssets.extract(jar, temp.resolve("ok-bytes"), 10, 8));
+        assertThrows(IOException.class,
+                () -> VanillaAssets.extract(jar, temp.resolve("too-big"), 10, 7));
+    }
+
+    @Test
+    void completeOlderVersionsArePrunedAndIncompleteOnesLeftToEnsure() throws Exception {
+        Fixtures.write(temp.resolve("1.21.4"), Fixtures.files(
+                VanillaAssets.MARKER, repeat('b', 40) + " 1.21.4\n", "version.json", "{}"));
+        Fixtures.write(temp.resolve("1.21.3"), Fixtures.files("version.json", "{}"));
+        byte[] jar = clientJar();
+        VanillaAssets assets = new VanillaAssets(logger,
+                mojang(jar, VanillaAssets.sha1(jar), jar.length, false), temp);
+
+        Path current = assets.ensure("1.21.5");
+        assertEquals(1, assets.pruneOthers(current));
+
+        assertFalse(Files.exists(temp.resolve("1.21.4")));
+        assertTrue(Files.isDirectory(temp.resolve("1.21.3")));
+        assertNotNull(assets.cached("1.21.5"));
+    }
+
+    @Test
+    void onlyOldLeftoversAreSwept() throws Exception {
+        Path fresh = Fixtures.write(temp.resolve(".staging-other-1.21.5-1"),
+                Fixtures.files("a.txt", "x")).resolve("a.txt").getParent();
+        Path old = temp.resolve(".download-other-1.21.5-2.jar");
+        Files.write(old, new byte[] {1});
+        Files.setLastModifiedTime(old, java.nio.file.attribute.FileTime.fromMillis(
+                System.currentTimeMillis() - 2 * VanillaAssets.LEFTOVER_AGE_MS));
+
+        new VanillaAssets(logger, new Fixtures.FakeHttp(), temp).sweepLeftovers();
+
+        assertTrue(Files.exists(fresh), "may belong to another live process");
+        assertFalse(Files.exists(old));
     }
 
     @Test

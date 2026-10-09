@@ -42,7 +42,10 @@ import org.bukkit.plugin.Plugin;
  * failure yields no image. The bridge waits far less than that for its line, so a slow first render
  * costs that one image and warms the caches for the next. Rendered PNGs are kept in a small LRU keyed
  * by the pack stack's fingerprint and the item's normalised model, so the same item shown twice is
- * drawn once. A card that encodes larger than {@value #PREFERRED_MAX_PNG_BYTES} bytes is redrawn at
+ * drawn once. The cache key is a SHA-256 of the item's normalised model, never its text, and an
+ * entry lives at most {@value #CACHE_TTL_MS} ms: a picture of an item, not a record of it, and not
+ * kept past the conversation it was shown in. A card that encodes larger than
+ * {@value #PREFERRED_MAX_PNG_BYTES} bytes is redrawn at
  * half scale.
  *
  * <h2>Configuration</h2>
@@ -75,6 +78,12 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     static final int SCALE = 2;
     static final long PREPARE_RETRY_MS = 10L * 60 * 1000;
 
+    /** After a successful prepare, the next one (cheap unless a pack URL went stale) is a day out. */
+    static final long PREPARE_REFRESH_MS = 24L * 60 * 60 * 1000;
+
+    /** How long a rendered card is kept. */
+    static final long CACHE_TTL_MS = 10L * 60 * 1000;
+
     /** The optional local file, in the plugin's folder. */
     static final String CONFIG_FILE = "item-images.yml";
 
@@ -94,7 +103,8 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     private volatile boolean closed;
 
     private final AtomicBoolean preparing = new AtomicBoolean();
-    private volatile boolean prepared;
+    /** Cards over this many bytes are redrawn at scale 1. A field so a test can lower it. */
+    volatile int preferredMaxPngBytes = PREFERRED_MAX_PNG_BYTES;
     private final AtomicLong nextPrepareAt = new AtomicLong(Long.MIN_VALUE);
     private final AtomicInteger assetGeneration = new AtomicInteger();
 
@@ -110,8 +120,19 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     private int stackGeneration = -1;
     private long nextScanAt;
     private long cacheBytes;
-    private final LinkedHashMap<String, byte[]> cache =
-            new LinkedHashMap<String, byte[]>(32, 0.75f, true);
+    private final LinkedHashMap<String, Cached> cache =
+            new LinkedHashMap<String, Cached>(32, 0.75f, true);
+
+    /** A rendered card and when it was drawn. */
+    private static final class Cached {
+        final byte[] png;
+        final long drawnAt;
+
+        Cached(byte[] png, long drawnAt) {
+            this.png = png;
+            this.drawnAt = drawnAt;
+        }
+    }
 
     BukkitItemImages(HeimdallLogger logger, Path dataDir, Path pluginsDir, Path serverRoot,
             HttpSource http, ItemDefaults defaults, String version) {
@@ -202,7 +223,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             return;
         }
         long now = System.currentTimeMillis();
-        if (prepared || now < nextPrepareAt.get() || !preparing.compareAndSet(false, true)) {
+        if (now < nextPrepareAt.get() || !preparing.compareAndSet(false, true)) {
             return;
         }
         try {
@@ -290,22 +311,31 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 dir = vanilla.ensure(version);
             } catch (IOException | RuntimeException error) {
                 failed = true;
+                // AssetException messages are ours (host, version, size); anything else is named
+                // by class only, since a transport message can carry a full URL.
                 logger.warn("item images: could not fetch the vanilla " + version
-                        + " assets (" + error + "); vanilla icons will be placeholders. "
-                        + "Retrying in 10 minutes.");
+                        + " assets (" + AssetException.describe(error) + "); vanilla icons will "
+                        + "be placeholders. Retrying in 10 minutes.");
+            }
+        }
+        if (dir != null) {
+            final int pruned = vanilla.pruneOthers(dir);
+            if (pruned > 0) {
+                logger.debug(() -> "item images: removed " + pruned + " old asset version(s)");
             }
         }
         try {
-            serverPack = sources.serverPack(http);
+            Path pack = sources.serverPack(http);
+            serverPack = pack;
         } catch (IOException | RuntimeException error) {
-            logger.warn("item images: could not fetch the server resource pack (" + error + ")");
+            // The previous copy, if any, stays in use until a fetch succeeds.
+            failed = true;
+            logger.warn("item images: could not fetch the server resource pack ("
+                    + AssetException.describe(error) + "). Retrying in 10 minutes.");
         }
         vanillaDir = dir;
-        if (failed) {
-            nextPrepareAt.set(System.currentTimeMillis() + PREPARE_RETRY_MS);
-        } else {
-            prepared = true;
-        }
+        nextPrepareAt.set(System.currentTimeMillis()
+                + (failed ? PREPARE_RETRY_MS : PREPARE_REFRESH_MS));
         assetGeneration.incrementAndGet();
         // Warm the stack (and with it the English names the chat rewrite uses) now, rather than on
         // the first item someone shows.
@@ -336,13 +366,13 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         try {
             Deadline deadline = Deadline.in(RENDER_BUDGET_MS);
             refreshStack(false);
-            String key = stack.fingerprint() + "\n" + item.cacheKey();
-            byte[] cached = cache.get(key);
+            String key = stack.fingerprint() + "\n" + sha256(item.cacheKey());
+            byte[] cached = cached(key);
             if (cached != null) {
                 return cached;
             }
             byte[] png = renderer.render(item, this, defaults, SCALE, deadline);
-            if (png.length > PREFERRED_MAX_PNG_BYTES) {
+            if (png.length > preferredMaxPngBytes) {
                 // Far larger than a card should be (a huge lore block, a noisy HD texture): half
                 // scale rather than ship something near the wire cap.
                 png = renderer.render(item, this, defaults, 1, deadline);
@@ -365,13 +395,57 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         }
     }
 
+    /** A live cached card, or {@code null}; an expired one is dropped on the way. */
+    private byte[] cached(String key) {
+        Cached entry = cache.get(key);
+        if (entry == null) {
+            return null;
+        }
+        if (System.currentTimeMillis() - entry.drawnAt > CACHE_TTL_MS) {
+            cache.remove(key);
+            cacheBytes -= entry.png.length;
+            return null;
+        }
+        return entry.png;
+    }
+
     private void remember(String key, byte[] png) {
-        cache.put(key, png);
+        long now = System.currentTimeMillis();
+        Cached previous = cache.put(key, new Cached(png, now));
+        if (previous != null) {
+            cacheBytes -= previous.png.length;
+        }
         cacheBytes += png.length;
-        java.util.Iterator<Map.Entry<String, byte[]>> eldest = cache.entrySet().iterator();
-        while ((cache.size() > CACHE_ENTRIES || cacheBytes > CACHE_BYTES) && eldest.hasNext()) {
-            cacheBytes -= eldest.next().getValue().length;
+        java.util.Iterator<Map.Entry<String, Cached>> eldest = cache.entrySet().iterator();
+        while (eldest.hasNext()) {
+            Cached entry = eldest.next().getValue();
+            boolean expired = now - entry.drawnAt > CACHE_TTL_MS;
+            boolean over = cache.size() > CACHE_ENTRIES || cacheBytes > CACHE_BYTES;
+            if (!expired && !over) {
+                continue;
+            }
+            if (entry.png == png) {
+                continue;
+            }
+            cacheBytes -= entry.png.length;
             eldest.remove();
+        }
+    }
+
+    /** The cache key for an item: a SHA-256 of its normalised model, so no text is held as a key. */
+    static String sha256(String text) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(64);
+            for (byte b : digest) {
+                out.append(Character.forDigit((b >> 4) & 0xF, 16))
+                        .append(Character.forDigit(b & 0xF, 16));
+            }
+            return out.toString();
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            // Every Java platform is required to provide SHA-256.
+            throw new IllegalStateException(impossible);
         }
     }
 
@@ -393,6 +467,8 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         }
         PackStack fresh = sources.open(candidates, vanillaNow, format);
         closeStack();
+        // After the old stack's zips are closed: Windows cannot delete an open file.
+        sources.pruneCopies(fresh.copies());
         stack = fresh;
         renderer = new CardRenderer(fresh);
         stackGeneration = generation;
@@ -420,11 +496,18 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
      */
     private static final class AwtProbe {
 
-        static boolean works() {
+        /**
+         * Exercises every AWT path a render uses: an ARGB image, a {@code Graphics2D} (the icon's
+         * affine draws), and a real PNG encode through the same in-memory stream a card uses. A
+         * runtime that has the classes but cannot rasterise or encode fails here, once, rather
+         * than on every render.
+         */
+        static boolean works() throws java.io.IOException {
             java.awt.image.BufferedImage image =
                     new java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB);
             image.setRGB(0, 0, 0xFF000000);
-            return javax.imageio.ImageIO.getImageWritersByFormatName("png").hasNext();
+            image.createGraphics().dispose();
+            return CardRenderer.encode(image).length > 0;
         }
     }
 }

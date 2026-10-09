@@ -81,12 +81,17 @@ final class CardRenderer {
     private final PackStack stack;
     private final Textures textures;
     private final ModelResolver models;
-    private BitmapFont font;
+    private final BitmapFont font;
 
+    /**
+     * Built once per pack stack, on the render thread, outside any single render's budget: the
+     * font index is read here, so a slow first card never spends its deadline loading fonts.
+     */
     CardRenderer(PackStack stack) {
         this.stack = stack;
         this.textures = new Textures(stack);
         this.models = new ModelResolver(stack);
+        this.font = BitmapFont.load(stack, textures);
     }
 
     /** One tooltip line with the defaults its runs fall back to. */
@@ -105,10 +110,32 @@ final class CardRenderer {
     /** The PNG for {@code item} at {@code scale}. */
     byte[] render(ChatItem item, ItemTranslations translations, ItemDefaults defaults, int scale,
             Deadline deadline) throws IOException {
-        BufferedImage card = draw(item, translations, defaults, scale, deadline);
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        if (!ImageIO.write(card, "png", out)) {
+        return encode(draw(item, translations, defaults, scale, deadline));
+    }
+
+    /**
+     * PNG bytes for {@code image}, through an in-memory image stream: never ImageIO's disk cache,
+     * and without touching its global {@code setUseCache} for the rest of the server.
+     */
+    static byte[] encode(BufferedImage image) throws IOException {
+        java.util.Iterator<javax.imageio.ImageWriter> writers =
+                ImageIO.getImageWritersByFormatName("png");
+        if (!writers.hasNext()) {
             throw new IOException("no PNG writer");
+        }
+        javax.imageio.ImageWriter writer = writers.next();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try {
+            javax.imageio.stream.MemoryCacheImageOutputStream stream =
+                    new javax.imageio.stream.MemoryCacheImageOutputStream(out);
+            try {
+                writer.setOutput(stream);
+                writer.write(image);
+            } finally {
+                stream.close();
+            }
+        } finally {
+            writer.dispose();
         }
         return out.toByteArray();
     }
@@ -118,7 +145,7 @@ final class CardRenderer {
         int maxDamage = item.maxDamage() != null ? item.maxDamage()
                 : Math.max(0, defaults.maxDurability(item.id()));
         List<Line> lines = lines(item, translations, defaults, maxDamage);
-        BitmapFont f = font(deadline);
+        BitmapFont f = font;
 
         ModelResolver.Icon icon = models.resolve(item, maxDamage, deadline);
         boolean glint = item.glintOverride() != null ? item.glintOverride()
@@ -302,13 +329,6 @@ final class CardRenderer {
     }
 
     // ── Text ─────────────────────────────────────────────────────────────────
-
-    private BitmapFont font(Deadline deadline) {
-        if (font == null) {
-            font = BitmapFont.load(stack, textures, deadline);
-        }
-        return font;
-    }
 
     static double width(Line line, BitmapFont font) {
         double width = 0;

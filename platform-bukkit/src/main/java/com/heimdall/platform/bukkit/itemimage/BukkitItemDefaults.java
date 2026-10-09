@@ -20,7 +20,9 @@ import org.bukkit.Material;
  * module compiles against has neither. Before that, or when the call fails, a short table of the
  * types that are not common stands in.
  *
- * <p>Answers are memoised per id. Thread-safe.
+ * <p>Answers are memoised only for ids the server's {@link Material} resolves: that set is finite,
+ * while the ids a hover can carry are whatever a player's item says, and memoising those would be a
+ * map that grows with every made-up id. Thread-safe.
  */
 final class BukkitItemDefaults implements ItemDefaults {
 
@@ -49,10 +51,18 @@ final class BukkitItemDefaults implements ItemDefaults {
         if (known != null) {
             return known;
         }
-        int value = 0;
+        Material material;
         try {
-            Material material = material(id);
-            value = material == null ? 0 : Math.max(0, material.getMaxDurability());
+            material = material(id);
+        } catch (Throwable unavailable) {
+            return 0;
+        }
+        if (material == null) {
+            return 0;
+        }
+        int value;
+        try {
+            value = Math.max(0, material.getMaxDurability());
         } catch (Throwable unavailable) {
             value = 0;
         }
@@ -70,7 +80,15 @@ final class BukkitItemDefaults implements ItemDefaults {
         if (value == null) {
             value = tableRarity(id);
         }
-        rarity.put(id, value == null ? "" : value);
+        boolean resolves;
+        try {
+            resolves = material(id) != null;
+        } catch (Throwable unavailable) {
+            resolves = false;
+        }
+        if (resolves) {
+            rarity.put(id, value == null ? "" : value);
+        }
         return value;
     }
 

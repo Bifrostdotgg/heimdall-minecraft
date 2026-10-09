@@ -2019,6 +2019,15 @@ hidden components from `tooltip_display`, `show_in_tooltip:false` or `HideFlags`
 in the 1.21.4 four-list shape, item model, rarity, glint override, dye and potion colours). It is
 platform-free and never logs a name or a lore line.
 
+**The rewrite runs inline on the chat thread, so it is bounded in work, not only in shape.** A
+translation whose format repeats its argument (`%1$s%1$s...`) nested a few levels deep multiplies at
+every level: a 543-character custom name built that way expanded without limit. Every intermediate
+string (each argument's text, each format's result) is capped at 1024 characters, and each component
+read has one budget of nodes visited and characters produced, after which the rest is dropped. A
+tokenised hover that is not `show_item` is skipped whole, so an item quoted inside a `show_text`
+argument is not taken for a tag. Anything that still goes wrong, an `Error` included, is caught
+around the rewrite and the line relays verbatim; nothing escapes into the platform's chat dispatch.
+
 **Drawn on the backend only, behind `Integrations.itemImages()`.** A default method answering
 `ItemImages.NONE`, like `chatChannels()` in D85, so both proxies need no change. The Bukkit family
 answers with `BukkitItemImages`:
@@ -2031,14 +2040,24 @@ answers with `BukkitItemImages`:
   `plugins/Heimdall/cache/assets/<version>/`. Extraction goes to a staging directory, a marker file
   holding the jar's SHA-1 is written last, and the directory is renamed into place; a directory
   without the marker is a crash mid-extraction and is deleted, never read. The jar is deleted. Every
-  read and the extraction are size-capped, and entry names cannot escape the cache.
+  read and the extraction are size-capped, and entry names cannot escape the cache. A manifest entry
+  without a SHA-1 fails closed. Temporary files carry a per-instance id, and only ones older than ten
+  minutes are swept, so two servers on one folder never delete each other's downloads. Once a
+  version's cache is in place, complete caches of other versions are deleted. Every transfer has
+  connect and read timeouts plus a wall-clock cap (two minutes for a document, five for a download),
+  and a redirect from https to http is refused. Log lines name the exception class and the host,
+  never a full URL (a pack URL can carry a token).
 - **Resource packs, in the order they win:** the operator's folder (`pack-folder`, default
   `plugins/Heimdall/item-images/packs/`), the `server.properties` pack (downloaded and checked against
   `resource-pack-sha1` when set), ItemsAdder's `output/generated.zip` (or `output_uncompressed/` when
   the zip is protected), Nexo's and Oraxen's built packs, then vanilla. Zips are read through their
   central directory; `pack.mcmeta` overlays apply for the running pack format (read from the client
   jar's `version.json`). Discovery is re-run at most every ten seconds and the stack rebuilt only
-  when a file's size or modification time changed.
+  when a file's size or modification time changed. A zip is never opened where it lies: ItemsAdder,
+  Nexo and Oraxen rewrite theirs, and an open handle (a lock, on Windows) would be in their way, so
+  each is copied into `cache/packs/open/` once per change and the copy is opened; unused copies are
+  deleted on the next rebuild. A server pack with no `resource-pack-sha1` is re-fetched once its copy
+  is a day old; a failed fetch is retried after ten minutes, and the previous copy stays in use.
 - **Models resolve the way the client does:** `item_model`, then `items/<id>.json` evaluated against
   custom model data (`range_dispatch`, `select`, `condition`, `composite`, tints), then the
   pre-1.21.4 `overrides`; parent chains and texture variables are followed with caps. Flat sprites
@@ -2054,10 +2073,18 @@ answers with `BukkitItemImages`:
   rarity, the type's English name) come from the server's `Material`, a reflective
   `ItemType#getItemRarity()` on 1.20.5+ (else a small table), and the language data.
 - **Off the chat thread, bounded:** one render thread with a queue of 16 (refused past that), a 3 s
-  budget per render checked between steps, an LRU of rendered PNGs keyed by the pack stack's
-  fingerprint and the item's normalised model, and a redraw at half scale for a card that encodes
-  over 256 KiB. A JVM without a usable `java.awt` answers `available() == false` and the bridge relays
-  text. Local knobs, in an optional `plugins/Heimdall/item-images.yml`: `download-vanilla-assets`
+  budget per render checked between steps, and a redraw at half scale for a card that encodes over
+  256 KiB. Font files are indexed once per pack stack, outside any render's budget, and each glyph
+  sheet is decoded on first use (a sheet that fails is remembered). Textures are bounded before
+  decoding (file size, then the header's dimensions), the first animation frame is copied out of its
+  strip, model textures are shrunk to the icon's 32 pixels, and the texture cache is bounded at 32 MB
+  of decoded pixels. The probe for `java.awt` makes an image, a `Graphics2D` and a real PNG; a JVM
+  that fails it answers `available() == false` and the bridge relays text. Images are read and
+  written through in-memory ImageIO streams, never ImageIO's disk cache or its global setting.
+- **The render cache keeps pictures, not records.** It is keyed by the pack stack's fingerprint and a
+  SHA-256 of the item's normalised model (never the text), bounded at 128 cards or 16 MB, and an
+  entry lives at most ten minutes.
+- **Configuration:** Local knobs, in an optional `plugins/Heimdall/item-images.yml`: `download-vanilla-assets`
   (default `true`) and `pack-folder`.
 
 **The wire (`itemimages@1`, a build capability declared alongside `bridge@1`):**
@@ -2083,16 +2110,23 @@ A single line that alone would exceed the budget loses its largest images, one a
 fits; the count is logged, the text is never touched. `FrameBatcher` gains an optional sizer for
 this; the event batcher is unchanged.
 
-**Ordinary chat never waits.** An item line waits for its images at most 750 ms and then ships with
-whatever finished. Lines without items do not queue behind it, so an item line can reach the bot
-after a plain line said just after it (its `ts` still records when it was said). At most eight item
-lines wait at once; past that a line ships as text straight away. `prepare()` is called when the
+**Chat keeps its order, and waits only boundedly for it.** An item line waits for its images at most
+750 ms and then ships with whatever finished. Every relayed line passes through one FIFO staging
+deque in front of the chat batcher: with nothing pending a line goes straight through, adding no
+latency, and a line said after a pending item line waits behind it and ships after it, in the order
+both were said. A line therefore waits only while an item line ahead of it is drawing, and never
+longer than that line's budget, which began before it arrived. The deque holds at most 500 lines
+(past that its head ships with whatever finished); at most eight item lines wait on renders at once,
+and past that a line ships text-only, still in order. Each pending line carries the enable cycle it
+was said in, and a render finishing after a disable is dropped rather than shipped into the next
+cycle; enable and disable empty the deque. Join, leave and death are a separate frame family
+(`bridge.event`), and their order relative to chat is not guaranteed. `prepare()` is called when the
 module is enabled or reconfigured with images on, so the vanilla download happens before the first
 item is shown, and never on a server that turned `itemImages` off.
 
-**Relay-only still holds.** Nothing is stored: the images travel with the line, the waiting line
-lives for the 750 ms budget and no longer, and the render cache holds pixels keyed by what was drawn,
-not a record of who showed what. No log line carries a name, lore or the line; counts, sizes,
+**Relay-only still holds.** Nothing is stored: the images travel with the line, a held line lives
+for at most the budget of the item line ahead of it, and the render cache holds pixels for ten
+minutes under a hash of what was drawn, not a record of who showed what. No log line carries a name, lore or the line; counts, sizes,
 versions and file names only.
 
 **Verified against fixtures, not yet against a server.** The parser is tested on the two captures

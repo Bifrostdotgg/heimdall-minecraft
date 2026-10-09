@@ -27,10 +27,21 @@ final class PackStack implements Closeable {
 
     private final List<AssetRoot> roots;
     private final String fingerprint;
+    private final java.util.Set<java.nio.file.Path> copies;
 
     PackStack(List<AssetRoot> roots, String fingerprint) {
+        this(roots, fingerprint, Collections.<java.nio.file.Path>emptySet());
+    }
+
+    PackStack(List<AssetRoot> roots, String fingerprint, java.util.Set<java.nio.file.Path> copies) {
         this.roots = Collections.unmodifiableList(new ArrayList<AssetRoot>(roots));
         this.fingerprint = fingerprint;
+        this.copies = Collections.unmodifiableSet(copies);
+    }
+
+    /** The private zip copies this stack has open, so a rebuild knows which to keep. */
+    java.util.Set<java.nio.file.Path> copies() {
+        return copies;
     }
 
     /** What the stack was built from; part of every render-cache key. */
