@@ -6,6 +6,7 @@ import com.heimdall.core.http.BedrockIdentity;
 import com.heimdall.core.http.BedrockIdentityProvider;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.platform.ConsoleBridge;
+import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.Integrations;
 import com.heimdall.core.platform.LogLine;
 import com.heimdall.core.platform.LuckPermsBridge;
@@ -67,6 +68,7 @@ public final class FakePlatform implements PlatformFacade {
     private volatile BedrockIdentityProvider floodgate = BedrockIdentityProvider.NONE;
     private volatile Function<PlayerHandle, Payload> describer;
     private volatile CompletableFuture<Payload> traceProbe;
+    private volatile ChatChannels chatChannels = ChatChannels.NONE;
     private volatile boolean deferLater;
     private volatile boolean deferMainThread;
     private final List<Runnable> mainThreadQueue =
@@ -128,6 +130,15 @@ public final class FakePlatform implements PlatformFacade {
      */
     public FakePlatform withTraceProbe(CompletableFuture<Payload> answer) {
         this.traceProbe = answer;
+        return this;
+    }
+
+    /**
+     * Supplies a chat plugin's channels, as the Bukkit ChatControl integration would. Defaults to
+     * {@link ChatChannels#NONE}, which is what every platform without one answers.
+     */
+    public FakePlatform withChatChannels(ChatChannels channels) {
+        this.chatChannels = channels == null ? ChatChannels.NONE : channels;
         return this;
     }
 
@@ -506,6 +517,11 @@ public final class FakePlatform implements PlatformFacade {
                         ? fixed
                         : CompletableFuture.completedFuture(
                                 Payload.builder().put("error", "no platform").build());
+            }
+
+            @Override
+            public ChatChannels chatChannels() {
+                return chatChannels;
             }
         };
     }

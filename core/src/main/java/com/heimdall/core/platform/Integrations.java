@@ -9,8 +9,8 @@ import java.util.concurrent.CompletableFuture;
 /**
  * The other plugins Heimdall talks to, behind one seam.
  *
- * <p>All three are optional, all three are reached reflectively by the platform module, and none of
- * them is a compile-time dependency of anything that ships. That is what keeps "core is
+ * <p>All of them are optional, all of them are reached reflectively by the platform module, and
+ * none of them is a compile-time dependency of anything that ships. That is what keeps "core is
  * platform-free" a checkable claim: reflection is invisible to the conformance rules, so it is
  * confined to the platform modules by construction rather than by habit (departure D9).
  *
@@ -51,4 +51,18 @@ public interface Integrations {
      * @return the probe result, or a payload carrying an {@code error} key
      */
     CompletableFuture<Payload> traceProbe(UUID playerUuid);
+
+    /**
+     * A chat plugin's channels, if one is installed and running them.
+     *
+     * <p>A default method so the platforms with no such integration (both proxies) need no change:
+     * {@link ChatChannels#NONE} is "chat is one public room", which is exactly what a proxy sees.
+     * The Bukkit family overrides it with a reflective ChatControl integration, resolved lazily and
+     * retried while unresolved for the same load-order reason as {@link #luckPerms()}. Departure D85.
+     *
+     * <p>Never {@code null}.
+     */
+    default ChatChannels chatChannels() {
+        return ChatChannels.NONE;
+    }
 }

@@ -350,6 +350,72 @@ class PipelineTest {
     }
 
     @Test
+    @DisplayName("dispatch alone runs the checks and never the observers")
+    void dispatchDoesNotNotify() {
+        // The early half of the split a channelled server needs: the platform blocks at its early
+        // event, and only learns the audience later. If dispatch relayed, a staff-channel line
+        // would reach Discord as public chat before anyone knew it was a staff line.
+        ChatPipeline pipeline = new ChatPipeline(logger);
+        final List<String> seen = new ArrayList<String>();
+        pipeline.observe(message -> seen.add(message.message()));
+
+        assertFalse(pipeline.dispatch(hello()).isDeny());
+        assertTrue(seen.isEmpty());
+    }
+
+    @Test
+    @DisplayName("notifyObservers runs every observer, in order, with the message as given")
+    void notifyObserversRunsTheObservers() {
+        ChatPipeline pipeline = new ChatPipeline(logger);
+        final List<String> seen = new ArrayList<String>();
+        pipeline.observe(m -> seen.add("first:" + m.message() + "@" + m.channel()));
+        pipeline.observe(m -> seen.add("second:" + m.message() + "@" + m.channel()));
+
+        pipeline.notifyObservers(ChatMessage.inChannel(
+                UUID.fromString("11111111-2222-3333-4444-555555555555"), "Steve", "hello", "staff"));
+
+        assertEquals(Arrays.asList("first:hello@staff", "second:hello@staff"), seen);
+    }
+
+    @Test
+    @DisplayName("notifyObservers contains a throwing observer exactly as dispatchWithObservers does")
+    void notifyObserversContainsAThrowingObserver() {
+        ChatPipeline pipeline = new ChatPipeline(logger);
+        final List<String> seen = new ArrayList<String>();
+        pipeline.observe(message -> {
+            throw new IllegalStateException("relay is down");
+        });
+        pipeline.observe(message -> seen.add(message.message()));
+
+        pipeline.notifyObservers(hello());
+        pipeline.notifyObservers(null);
+
+        assertEquals(Collections.singletonList("hello"), seen,
+                "one broken observer must not starve the rest, and a null is a no-op, not a crash");
+        assertTrue(logger.logged(LogLevel.SEVERE, "chat observer threw"));
+    }
+
+    @Test
+    @DisplayName("a channel is optional: of() has none, inChannel() carries it, blank means none")
+    void chatMessageChannel() {
+        UUID uuid = UUID.fromString("11111111-2222-3333-4444-555555555555");
+
+        assertEquals(null, ChatMessage.of(uuid, "Steve", "hi").channel());
+        assertEquals("staff", ChatMessage.inChannel(uuid, "Steve", "hi", "staff").channel());
+        assertEquals(null, ChatMessage.inChannel(uuid, "Steve", "hi", null).channel());
+        assertEquals(null, ChatMessage.inChannel(uuid, "Steve", "hi", "  ").channel(),
+                "a blank channel would go on the wire as a channel nobody can map");
+        assertEquals("Staff Chat",
+                ChatMessage.inChannel(uuid, "Steve", "hi", "Staff Chat").channel(),
+                "the chat plugin's own spelling, verbatim");
+
+        String rendered = ChatMessage.inChannel(uuid, "Steve", "the secret plan", "staff").toString();
+        assertTrue(rendered.contains("staff"), rendered);
+        assertFalse(rendered.contains("secret"),
+                "naming the channel in a log is fine; the body never is: " + rendered);
+    }
+
+    @Test
     void chatObserversCanBeUnregistered() {
         ChatPipeline pipeline = new ChatPipeline(logger);
         final List<String> seen = new ArrayList<String>();
