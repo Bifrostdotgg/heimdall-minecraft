@@ -5,6 +5,7 @@ import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.Integrations;
+import com.heimdall.core.platform.ItemImages;
 import com.heimdall.core.platform.LuckPermsBridge;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.LuckPermsSupport;
@@ -35,12 +36,15 @@ final class BukkitIntegrations implements Integrations {
     private final Executor ioExecutor;
     private final BedrockIdentityProvider floodgate;
     private final ChatControlChannels chatControl;
+    private final ItemImages itemImages;
 
     BukkitIntegrations(
-            HeimdallLogger logger, Executor ioExecutor, ChatControlChannels chatControl) {
+            HeimdallLogger logger, Executor ioExecutor, ChatControlChannels chatControl,
+            ItemImages itemImages) {
         this.logger = logger;
         this.ioExecutor = ioExecutor;
         this.chatControl = chatControl;
+        this.itemImages = itemImages == null ? ItemImages.NONE : itemImages;
         // Fixed at construction: this answers a classpath question, which cannot change while the
         // JVM is running. LuckPerms is the opposite case — a plugin that registers a service on its
         // own schedule — so it is resolved lazily and retried until it appears.
@@ -89,6 +93,16 @@ final class BukkitIntegrations implements Integrations {
     @Override
     public ChatChannels chatChannels() {
         return chatControl;
+    }
+
+    /**
+     * Tooltip-card images for items shown in chat. A backend is the only place with items, packs and
+     * the client assets to draw them; {@code available()} is false where {@code java.awt} is not
+     * usable, and the bridge then relays text. Departure D86.
+     */
+    @Override
+    public ItemImages itemImages() {
+        return itemImages;
     }
 
     @Override
