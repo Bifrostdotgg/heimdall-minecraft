@@ -8,7 +8,11 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * A bounded queue that ships what it holds as one frame a second, and throws away what it cannot.
+ * A bounded queue that ships what it holds as one frame per drain, and throws away what it cannot.
+ *
+ * <p>The bridge drains it the moment something is queued (see {@code HeimdallBridgeModule}'s
+ * immediate drain), and on a one-second tick as a safety net, so a quiet server's lines leave at
+ * once and a busy one's ride together in whatever frame is next.
  *
  * <p>Every mechanic here is {@code HeimdallConsoleModule}'s, transcribed rather than reinvented: a
  * one-second flush, a hard queue cap with drop-oldest, a per-flush batch cap, and drain-and-discard
@@ -47,9 +51,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * platform's event thread, a session listener on {@code heimdall-io} — and must stay what it is: an
  * offer onto a lock-free queue. It must not log, must not block and must not throw.
  *
- * <p>{@link #flush} runs on {@code heimdall-sched}, once a second, and is the only place a frame is
- * built. It takes the bus as an argument rather than reading a field, so the caller can snapshot a
- * reference a concurrent {@code disable()} might be clearing.
+ * <p>{@link #flush} runs on {@code heimdall-sched} (an immediate drain or the one-second tick,
+ * never both at once: it is a single thread), and is the only place a frame is built. It takes the
+ * bus as an argument rather than reading a field, so the caller can snapshot a reference a
+ * concurrent {@code disable()} might be clearing.
  *
  * @param <T> the queued item; a small immutable value, never a live handle
  */
@@ -139,10 +144,28 @@ final class FrameBatcher<T> {
         return true;
     }
 
-    /** Empties the queue. Called on enable and on disable, so a cycle never replays a stale batch. */
+    /**
+     * Empties the queue. Called on enable and on disable, so a cycle never replays a stale batch.
+     *
+     * <p>Polls and decrements once per item rather than resetting the counter: every successful
+     * {@code add} is then matched by exactly one increment and every successful {@code poll} by
+     * exactly one decrement, so the count settles back to the queue's size even when an enqueue or
+     * a drain overlaps the clear. A reset to zero could land between an enqueue's {@code add} and
+     * its increment and leave the counter off by one for good.
+     */
     void clear() {
-        queue.clear();
-        queued.set(0);
+        while (queue.poll() != null) {
+            queued.decrementAndGet();
+        }
+    }
+
+    /**
+     * Whether anything is queued, read from the queue itself rather than the counter, which can be
+     * transiently off by one while an enqueue or a clear is mid-way. The bridge's backlog re-check
+     * uses this so a queued line can never hide behind a counter that has not caught up.
+     */
+    boolean hasQueued() {
+        return !queue.isEmpty();
     }
 
     /**

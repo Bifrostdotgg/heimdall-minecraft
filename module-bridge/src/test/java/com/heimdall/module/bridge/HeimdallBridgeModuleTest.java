@@ -81,6 +81,18 @@ class HeimdallBridgeModuleTest {
     private HeimdallBridgeModule module;
     private int configVersion;
 
+    /**
+     * Immediate drains the module asked for, held until a test runs them. Every other test then sees
+     * the old, deterministic shape: nothing ships until it calls flush() or runDrains().
+     */
+    private final List<Runnable> pendingDrains = new ArrayList<Runnable>();
+
+    /** The delay each requested drain asked for, in request order. */
+    private final List<Long> drainDelays = new ArrayList<Long>();
+
+    /** When set, the next drain request throws this, as a refusing or broken scheduler would. */
+    private RuntimeException nextDrainFailure;
+
     /** Builds the whole rig for a role, since the relay default depends on it. */
     private void setUp(ServerRole role, Payload settings) {
         executors = new HeimdallExecutors(logger, 1);
@@ -105,7 +117,29 @@ class HeimdallBridgeModuleTest {
                 .platform(platform)
                 .build());
         module = new HeimdallBridgeModule();
+        pendingDrains.clear();
+        drainDelays.clear();
+        nextDrainFailure = null;
+        module.drainSchedulerForTests(new HeimdallBridgeModule.DrainScheduler() {
+            @Override
+            public void schedule(Runnable drain, long delayMs) {
+                RuntimeException failure = nextDrainFailure;
+                if (failure != null) {
+                    nextDrainFailure = null;
+                    throw failure;
+                }
+                drainDelays.add(delayMs);
+                pendingDrains.add(drain);
+            }
+        });
         manager.register(module);
+    }
+
+    /** Runs the drains requested so far, including any a drain itself requests. */
+    private void runDrains() {
+        while (!pendingDrains.isEmpty()) {
+            pendingDrains.remove(0).run();
+        }
     }
 
     /**
@@ -567,6 +601,167 @@ class HeimdallBridgeModuleTest {
     }
 
     // ── bridge.chat ──────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("immediate send")
+    class ImmediateSend {
+
+        @Test
+        @DisplayName("a line asks for a drain at once and ships without waiting for the tick")
+        void aLineShipsImmediately() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "hello");
+
+            assertEquals(1, pendingDrains.size(), "one drain requested, not a one-second wait");
+            runDrains();
+            assertEquals(1, tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).size());
+            assertEquals(0, module.queuedChatCount());
+        }
+
+        @Test
+        @DisplayName("a burst queues ONE drain and ships as ONE frame")
+        void aBurstIsOneFrame() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "one");
+            say("Alex", "two");
+            say("Steve", "three");
+
+            assertEquals(1, pendingDrains.size());
+            runDrains();
+            List<RecordingTunnelBus.Sent> sent = tunnel.sent(HeimdallBridgeModule.FRAME_CHAT);
+            assertEquals(1, sent.size());
+            assertEquals(3, sent.get(0).payload().children("lines").size());
+        }
+
+        @Test
+        @DisplayName("a line after a drain ran asks for the next one")
+        void theNextLineAsksAgain() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "one");
+            runDrains();
+            say("Steve", "two");
+
+            assertEquals(1, pendingDrains.size());
+            runDrains();
+            assertEquals(2, tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).size());
+        }
+
+        @Test
+        @DisplayName("a backlog bigger than one frame keeps draining instead of waiting for the tick")
+        void aBacklogKeepsDraining() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            for (int i = 0; i < HeimdallBridgeModule.MAX_BATCH + 50; i++) {
+                say("Steve", "line " + i);
+            }
+            runDrains();
+
+            assertEquals(2, tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).size());
+            assertEquals(0, module.queuedChatCount());
+        }
+
+        @Test
+        @DisplayName("joins, leaves and deaths ship immediately too")
+        void eventsShipImmediately() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            allThreeKinds();
+
+            assertEquals(1, pendingDrains.size());
+            runDrains();
+            assertEquals(1, tunnel.sent(HeimdallBridgeModule.FRAME_EVENT).size());
+        }
+
+        @Test
+        @DisplayName("the first drain is immediate; one straight after another is spaced")
+        void drainsAreSpaced() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "one");
+            assertEquals(Long.valueOf(0L), drainDelays.get(0), "a quiet line leaves at once");
+            runDrains();
+            say("Steve", "two");
+
+            long delay = drainDelays.get(1);
+            assertTrue(delay > 0L && delay <= HeimdallBridgeModule.MIN_DRAIN_SPACING_MS,
+                    "a drain right after a drain waits out the spacing, got " + delay);
+        }
+
+        @Test
+        @DisplayName("a refused drain does not latch: the next line asks again")
+        void aRefusedDrainDoesNotLatch() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            nextDrainFailure = new java.util.concurrent.RejectedExecutionException("shutting down");
+            say("Steve", "refused");
+            assertTrue(pendingDrains.isEmpty());
+
+            say("Steve", "accepted");
+            assertEquals(1, pendingDrains.size(), "the request flag was reset by the refusal");
+            runDrains();
+            assertEquals(2, relayedLines().size());
+        }
+
+        @Test
+        @DisplayName("a scheduler that throws unexpectedly does not latch either")
+        void anUnexpectedSchedulerFailureDoesNotLatch() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            nextDrainFailure = new IllegalStateException("scheduler broken");
+            say("Steve", "lost to the failure");
+            assertTrue(pendingDrains.isEmpty());
+
+            say("Steve", "accepted");
+            assertEquals(1, pendingDrains.size(), "the request flag was reset by the failure");
+        }
+
+        @Test
+        @DisplayName("a re-enable starts with no drain latched and no spacing owed")
+        void reEnableResetsTheDrainState() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            // One drain ran (so a spacing is owed) and one was requested but never ran (so the
+            // request flag is latched) when the module went down.
+            say("Steve", "ran");
+            runDrains();
+            say("Steve", "abandoned");
+            disable();
+            pendingDrains.clear();
+            drainDelays.clear();
+
+            enable();
+            say("Steve", "after re-enable");
+
+            assertEquals(1, pendingDrains.size(), "the abandoned request did not stay latched");
+            assertEquals(Long.valueOf(0L), drainDelays.get(0),
+                    "the previous cycle's last drain owes this one no spacing");
+        }
+
+        @Test
+        @DisplayName("a drain does not run the inventory poll; only the one-second flush does")
+        void drainsLeaveTheInventoryAlone() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            say("Steve", "hello");
+            runDrains();
+
+            assertTrue(tunnel.sent(HeimdallBridgeModule.FRAME_CHANNELS).isEmpty(),
+                    "the inventory goes out on the flush tick, never on a chat drain");
+        }
+    }
 
     @Nested
     @DisplayName("bridge.chat")

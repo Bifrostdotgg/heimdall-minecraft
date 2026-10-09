@@ -30,6 +30,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import net.kyori.adventure.text.Component;
@@ -163,9 +165,10 @@ import net.kyori.adventure.text.Component;
  * <h2>Threading</h2>
  *
  * <p>The chat observer runs on whatever thread the platform dispatched chat on — Bukkit's async chat
- * thread, a proxy's event executor — and does one thing: offer onto a lock-free queue. Join, quit
- * and death listeners run on {@code heimdall-io} and do the same. {@link #flush()} runs on
- * {@code heimdall-sched} once a second and is the only place a frame is built; it snapshots the
+ * thread, a proxy's event executor — and does two things: offer onto a lock-free queue, and ask for
+ * an immediate drain (a compare-and-set and an executor offer). Join, quit and death listeners run on
+ * {@code heimdall-io} and do the same. The drain and the one-second {@link #flush()} both run on the
+ * single {@code heimdall-sched} thread and are the only places a frame is built; they snapshot the
  * tunnel into a local before using it, because a scheduled flush can still be mid-run when
  * {@link #disable()} clears the field (cancelling a {@code ScheduledFuture} does not interrupt a run
  * already in progress).
@@ -270,6 +273,62 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     /** How often {@link #flush} runs. The console module's cadence, and the design's. */
     private static final long FLUSH_PERIOD_MS = 1000L;
+
+    /**
+     * Set while an immediate drain is queued on {@code heimdall-sched}, so a burst of lines queues
+     * ONE drain rather than one per line.
+     *
+     * <p>Chat used to wait for the one-second {@link #flush} tick, and the bot then waited for its
+     * own one-second tick, so a line took up to two seconds to reach Discord while a Discord message
+     * reached the channel instantly: conversations crossed in flight. A line now asks for a drain
+     * the moment it is queued. Lines that arrive while that drain is waiting to run ride in the same
+     * frame, which is where the batching now comes from: only as much as the moment requires.
+     */
+    private final AtomicBoolean drainRequested = new AtomicBoolean();
+
+    /**
+     * Shortest gap between two drains. Without it, sustained chat (a spam bot, a broadcast plugin)
+     * became one frame per line, each a full route through the gateway and the bot. Fifty
+     * milliseconds is below anything a reader notices and still packs a flood into about twenty
+     * frames a second.
+     */
+    static final long MIN_DRAIN_SPACING_MS = 50L;
+
+    /** When the last drain started, in {@code System.nanoTime()} milliseconds; 0 for never. */
+    private volatile long lastDrainAtMs;
+
+    /** Schedules an immediate drain. The production one is {@code heimdall-sched}. */
+    interface DrainScheduler {
+        void schedule(Runnable drain, long delayMs);
+    }
+
+    /**
+     * Where immediate drains are scheduled. {@code null} means {@code heimdall-sched}, the single
+     * thread {@link #flush} already runs on, so a drain and a tick can never overlap. Tests
+     * substitute a manual scheduler so a queued line stays queued until they say otherwise.
+     */
+    private volatile DrainScheduler drainScheduler;
+
+    private final Runnable drainNow = new Runnable() {
+        @Override
+        public void run() {
+            lastDrainAtMs = nowMs();
+            // Cleared BEFORE draining, so a line queued while this runs can ask for the next drain.
+            // The backlog check below is the belt for the same case: whatever is still queued once
+            // this drain has shipped asks again rather than waiting for the tick.
+            drainRequested.set(false);
+            drainQueues();
+            // A drain ships at most MAX_BATCH per family. A burst bigger than that asks again
+            // straight away rather than leaving the rest for the tick.
+            if (chat.hasQueued() || events.hasQueued()) {
+                requestDrain();
+            }
+        }
+    };
+
+    private static long nowMs() {
+        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
+    }
 
     private final FrameBatcher<ChatLine> chat = new FrameBatcher<ChatLine>(
             FRAME_CHAT, "lines", new FrameBatcher.Encoder<ChatLine>() {
@@ -382,6 +441,9 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         // fresh enable starts from empty queues rather than whatever a previous cycle left behind.
         chat.clear();
         events.clear();
+        // A drain refused or abandoned by a previous cycle must not leave the request latched.
+        drainRequested.set(false);
+        lastDrainAtMs = 0L;
 
         this.context = context;
         this.tunnel = context.tunnel();
@@ -519,6 +581,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                                 message.message(),
                                 channel,
                                 System.currentTimeMillis()));
+                        requestDrain();
                     }
                 });
             } else if (!wanted && chatObserver != Registration.NONE) {
@@ -592,6 +655,43 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             return;
         }
         events.enqueue(SessionEvent.of(kind, player, detail, timestampMs));
+        requestDrain();
+    }
+
+    /**
+     * Asks for the queues to be shipped now, on {@code heimdall-sched}.
+     *
+     * <p>Called from wherever a line or event arrived, so it keeps {@link FrameBatcher#enqueue}'s
+     * rules: no blocking, no logging, no throwing. An executor that refuses (shutting down) simply
+     * leaves the line to the one-second tick, or to {@link #disable}'s clear, and resets the request
+     * so the next line can try again.
+     *
+     * <p>Spaced at least {@link #MIN_DRAIN_SPACING_MS} after the previous drain, so a quiet line
+     * still leaves at once and a flood is packed rather than shipped line by line.
+     */
+    private void requestDrain() {
+        if (context == null || !drainRequested.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            long last = lastDrainAtMs;
+            long delayMs = last == 0L ? 0L : Math.max(0L, last + MIN_DRAIN_SPACING_MS - nowMs());
+            DrainScheduler scheduler = drainScheduler;
+            if (scheduler != null) {
+                scheduler.schedule(drainNow, delayMs);
+                return;
+            }
+            ModuleContext ctx = context;
+            if (ctx == null) {
+                drainRequested.set(false);
+                return;
+            }
+            ctx.executors().scheduler().schedule(drainNow, delayMs, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException shuttingDown) {
+            drainRequested.set(false);
+        } catch (RuntimeException unexpected) {
+            drainRequested.set(false);
+        }
     }
 
     /**
@@ -637,7 +737,24 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
         chat.flush(bus);
         events.flush(bus);
+        flushTail();
+    }
 
+    /**
+     * Ships the chat and event queues and nothing else: the immediate path. The inventory poll stays
+     * on the one-second {@link #flush} so its cadence does not speed up with chat.
+     */
+    void drainQueues() {
+        TunnelBus bus = tunnel;
+        if (bus == null) {
+            return;
+        }
+        chat.flush(bus);
+        events.flush(bus);
+    }
+
+    /** The once-a-second part of {@link #flush}: the channel inventory poll. */
+    private void flushTail() {
         // The inventory poll rides on the flush rather than a schedule of its own: one fewer
         // registration to track, and the cadence only has to be roughly right. A requested report
         // (enable, reconnect) is made here too, and forced: this is the one place the integration is
@@ -1058,6 +1175,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     // ── Visible for testing ──────────────────────────────────────────────────
+
+    /** Routes immediate drains through {@code scheduler} instead of {@code heimdall-sched}. */
+    void drainSchedulerForTests(DrainScheduler scheduler) {
+        this.drainScheduler = scheduler;
+    }
 
     /** How many chat lines are currently queued. */
     int queuedChatCount() {
