@@ -2381,7 +2381,7 @@ class HeimdallBridgeModuleTest {
             rig(null);
 
             say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
-            for (int i = 0; i < HeimdallBridgeModule.MAX_QUEUE_SIZE; i++) {
+            for (int i = 0; i < HeimdallBridgeModule.MAX_HELD_LINES; i++) {
                 say("Alex", "line " + i);
             }
 
@@ -2390,7 +2390,11 @@ class HeimdallBridgeModuleTest {
             assertTrue(budgets.size() == 1, "nobody waited for the budget");
             runDrains();
             List<String> messages = messages();
-            assertEquals("line " + (HeimdallBridgeModule.MAX_QUEUE_SIZE - 1),
+            assertEquals("[Spoon]", messages.get(0),
+                    "the forced line itself is delivered, not pushed out of the batcher");
+            assertEquals(HeimdallBridgeModule.MAX_HELD_LINES + 1, messages.size());
+            assertTrue(HeimdallBridgeModule.MAX_HELD_LINES + 1 <= HeimdallBridgeModule.MAX_QUEUE_SIZE);
+            assertEquals("line " + (HeimdallBridgeModule.MAX_HELD_LINES - 1),
                     messages.get(messages.size() - 1), "order kept to the last line");
 
             // The forced line's render finishing later changes nothing.
@@ -2701,20 +2705,20 @@ class HeimdallBridgeModuleTest {
             rig(null);
 
             say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
-            for (int i = 0; i < HeimdallBridgeModule.MAX_QUEUE_SIZE - 1; i++) {
+            for (int i = 0; i < HeimdallBridgeModule.MAX_HELD_LINES - 1; i++) {
                 say("Alex", "line " + i);
             }
             module.assembleFailureForTests = new OutOfMemoryError("simulated");
             say("Alex", com.heimdall.core.testing.ItemCaptures.wardedJar());
             runDrains();
-            assertEquals(HeimdallBridgeModule.MAX_QUEUE_SIZE, relayedLines().size(),
+            assertEquals(HeimdallBridgeModule.MAX_HELD_LINES, relayedLines().size(),
                     "the forced head and everything behind it, released");
             assertEquals("[Spoon]", messages().get(0));
 
             images.futures.get(1).complete(fakePng(8));
             runDrains();
             List<String> messages = messages();
-            assertEquals(HeimdallBridgeModule.MAX_QUEUE_SIZE + 1, messages.size());
+            assertEquals(HeimdallBridgeModule.MAX_HELD_LINES + 1, messages.size());
             assertEquals(1, count(messages, "[Warded Jar]"), "the line in flight is not duplicated");
             assertEquals(1, count(messages, "[Spoon]"));
             assertEquals("[Warded Jar]", messages.get(messages.size() - 1));
@@ -2779,6 +2783,61 @@ class HeimdallBridgeModuleTest {
             module.releasePendingCount(old);
             assertEquals(1, module.pendingItemLineCount(), "not the old cycle's to return");
             module.releasePendingCount(current);
+            assertEquals(0, module.pendingItemLineCount());
+        }
+
+        @Test
+        @DisplayName("a throw after the slot is placed finishes it in place: no duplicate, no stall")
+        void anUnwindAfterPlacementFinishesTheSlotInPlace() {
+            rig(null);
+            module.afterReleaseFailureForTests = new AssertionError("simulated");
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            say("Alex", "after");
+            runDrains();
+
+            assertEquals(Arrays.asList("[Spoon]", "after"), messages(),
+                    "shipped once, from its place in the order");
+            assertEquals(0, module.heldLineCount());
+            assertEquals(0, module.pendingItemLineCount());
+
+            images.futures.get(0).complete(fakePng(8));
+            runBudgets();
+            runDrains();
+            assertEquals(2, relayedLines().size(), "nothing ships twice");
+        }
+
+        @Test
+        @DisplayName("the watchdog never double-counts a line another thread is finishing")
+        void theWatchdogRespectsAClaimInProgress() {
+            rig(null);
+            final long budgetNanos = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(
+                    HeimdallBridgeModule.ITEM_IMAGE_BUDGET_MS);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            testNanos.set(budgetNanos + budgetNanos / 3);
+            say("Alex", com.heimdall.core.testing.ItemCaptures.wardedJar());
+            assertEquals(2, module.pendingItemLineCount());
+
+            // While the spoon's finish is assembling (claimed, not yet ready), time passes the
+            // spoon's watchdog limit but not the jar's, and another line moves the deque.
+            module.duringAssembleForTests = new Runnable() {
+                @Override
+                public void run() {
+                    testNanos.set(2 * budgetNanos + 1);
+                    say("Alex", "later");
+                }
+            };
+            images.futures.get(0).complete(fakePng(8));
+
+            assertEquals(1, module.pendingItemLineCount(),
+                    "the spoon was counted out once, by its own finish; the jar still waits");
+            runDrains();
+            assertEquals(Arrays.asList("[Spoon]"), messages());
+
+            images.futures.get(1).complete(fakePng(8));
+            runDrains();
+            assertEquals(Arrays.asList("[Spoon]", "[Warded Jar]", "later"), messages());
             assertEquals(0, module.pendingItemLineCount());
         }
 

@@ -274,6 +274,36 @@ class BukkitItemImagesTest {
     }
 
     @Test
+    void aStackRebuildPrunesSupersededServerPacks() throws Exception {
+        Files.write(server.resolve("server.properties"), Fixtures.utf8(
+                "resource-pack=https\\://packs.example/pack.zip\n"));
+        Files.createDirectories(server.resolve("plugins/Heimdall"));
+        Files.write(server.resolve("plugins/Heimdall/item-images.yml"),
+                Fixtures.utf8("download-vanilla-assets: false\n"));
+        Path packs = server.resolve("plugins/Heimdall/cache/packs");
+        Files.createDirectories(packs);
+        Path superseded = packs.resolve("server-0000000000000000-000000000000.zip");
+        Files.write(superseded, Fixtures.zip(Fixtures.files("pack.mcmeta", "{}")));
+        Files.setLastModifiedTime(superseded, java.nio.file.attribute.FileTime.fromMillis(
+                System.currentTimeMillis() - 2 * VanillaAssets.LEFTOVER_AGE_MS));
+        BukkitItemImages service = build(new Fixtures.FakeHttp().serve(
+                "https://packs.example/pack.zip", Fixtures.zip(Fixtures.files(
+                        "assets/minecraft/lang/en_us.json",
+                        "{\"item.minecraft.stone\":\"Served\"}"))));
+        service.rescanNanos = 0L;
+
+        long deadline = System.currentTimeMillis() + 10_000;
+        while ((Files.exists(superseded) || !"Served".equals(service.translate("item.minecraft.stone")))
+                && System.currentTimeMillis() < deadline) {
+            service.render(ChatItem.builder("stone").build()).get(10, TimeUnit.SECONDS);
+            Thread.sleep(20);
+        }
+
+        assertEquals("Served", service.translate("item.minecraft.stone"), "the new pack is in use");
+        assertFalse(Files.exists(superseded), "and the rebuild pruned the old one");
+    }
+
+    @Test
     void afterCloseNothingRenders() throws Exception {
         BukkitItemImages service = build(new Fixtures.FakeHttp());
         service.close();

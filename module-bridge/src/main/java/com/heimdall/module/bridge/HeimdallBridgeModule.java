@@ -185,7 +185,7 @@ import net.kyori.adventure.text.Component;
  * front of the chat batcher, so a line said after a pending item line waits behind it, for at most
  * the remainder of that line's budget, and then both ship in the order they were said. With nothing
  * pending a line goes straight to the batcher, adding no latency. The deque holds at most
- * {@value #MAX_QUEUE_SIZE} lines (past that the head ships with whatever finished), at most
+ * {@value #MAX_HELD_LINES} lines (past that the head ships with whatever finished), at most
  * {@value #MAX_PENDING_ITEM_LINES} item lines wait on renders at once (past that a line ships as
  * text, still in order), and nothing outlives the budget. Images travel with the line and are not
  * kept here. Join, leave and death are a separate frame family and their order relative to chat is
@@ -375,6 +375,14 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      */
     private volatile DrainScheduler budgetScheduler;
 
+    /**
+     * Lines {@link #held} may hold, the head included, before the head is forced out. One under
+     * the chat batcher's {@value #MAX_QUEUE_SIZE}: a forced release hands the whole deque to the
+     * batcher at once, and the batcher drops its oldest past its cap, which would be the very item
+     * line the force was meant to deliver.
+     */
+    static final int MAX_HELD_LINES = MAX_QUEUE_SIZE - 1;
+
     /** Item lines currently waiting for images. Bounded by {@link #MAX_PENDING_ITEM_LINES}. */
     private final AtomicInteger pendingItemLines = new AtomicInteger();
 
@@ -388,7 +396,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /**
      * Lines waiting, in the order they were said, because an item line ahead of them is still
      * drawing. Empty whenever nothing is pending, which is the fast path. Guarded by
-     * {@link #orderLock}; bounded at {@value #MAX_QUEUE_SIZE}.
+     * {@link #orderLock}; bounded at {@value #MAX_HELD_LINES}.
      */
     private final ArrayDeque<Slot> held = new ArrayDeque<Slot>();
 
@@ -830,7 +838,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             } else {
                 held.addLast(slot);
                 slot.placed = true;
-                if (held.size() > MAX_QUEUE_SIZE) {
+                if (held.size() > MAX_HELD_LINES) {
                     forced = claimHeadLocked();
                 }
                 released = releaseReadyLocked();
@@ -866,6 +874,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     /** After a release: asks for a drain, and reports any line the watchdog had to let go. */
     private void afterRelease(boolean released) {
+        Error injected = afterReleaseFailureForTests;
+        if (injected != null) {
+            afterReleaseFailureForTests = null;
+            throw injected;
+        }
         if (released) {
             requestDrain();
         }
@@ -1102,6 +1115,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * into the slot rather than returned, so no method here hands a chat line back out.
      */
     private void assemble(Slot slot) {
+        Runnable during = duringAssembleForTests;
+        if (during != null) {
+            duringAssembleForTests = null;
+            during.run();
+        }
         Error injected = assembleFailureForTests;
         if (injected != null) {
             assembleFailureForTests = null;
@@ -1968,6 +1986,12 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     /** Makes the next {@link #assemble} throw {@code failure}, once. */
     volatile Error assembleFailureForTests;
+
+    /** Makes the next {@link #afterRelease} throw {@code failure}, once. */
+    volatile Error afterReleaseFailureForTests;
+
+    /** Runs at the start of the next {@link #assemble}, once, to interleave with a finish. */
+    volatile Runnable duringAssembleForTests;
 
     /** Makes the next {@link #attachImages} throw {@code failure} after reserving, once. */
     volatile Error attachFailureForTests;

@@ -2139,8 +2139,9 @@ slow task ahead of the timer can delay it. Finishing a line is total: if attachi
 in any way, an `Error` included, the line ships as its `[Name]` text in its place, so a held line can
 never be left claimed but unfinished. As a belt, an item line that has waited more than twice the
 budget (a timer that never ran, a finish that never came) is released as text the next time the
-deque moves, with a warning counting how many. The deque holds at most 500 lines
-(past that its head ships with whatever finished); at most eight item lines wait on renders at once,
+deque moves, with a warning counting how many. The deque holds at most 499 lines
+(past that its head ships with whatever finished), one under the chat batcher's drop-oldest cap so
+a forced release can never push out the very line it forces; at most eight item lines wait on renders at once,
 and past that a line ships text-only, still in order. Each pending line carries the enable cycle it
 was said in, and a render finishing after a disable is dropped rather than shipped into the next
 cycle; enable and disable empty the deque. Join, leave and death are a separate frame family

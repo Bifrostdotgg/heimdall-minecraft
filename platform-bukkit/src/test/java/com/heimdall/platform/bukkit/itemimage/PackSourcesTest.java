@@ -217,6 +217,55 @@ class PackSourcesTest {
     }
 
     @Test
+    void pruningKeepsTheCurrentPackAndSparesYoungOnes() throws Exception {
+        Path packs = plugins().resolve("Heimdall/cache/packs");
+        Files.createDirectories(packs);
+        long old = System.currentTimeMillis() - 2 * VanillaAssets.LEFTOVER_AGE_MS;
+        Path kept = packs.resolve("server-aaaaaaaaaaaaaaaa-111111111111.zip");
+        Path stale = packs.resolve("server-aaaaaaaaaaaaaaaa-222222222222.zip");
+        Path young = packs.resolve("server-bbbbbbbbbbbbbbbb-333333333333.zip");
+        Path other = packs.resolve("not-a-server-pack.zip");
+        for (Path file : new Path[] {kept, stale, young, other}) {
+            Files.write(file, new byte[] {1});
+        }
+        Files.setLastModifiedTime(kept, FileTime.fromMillis(old));
+        Files.setLastModifiedTime(stale, FileTime.fromMillis(old));
+        Files.setLastModifiedTime(other, FileTime.fromMillis(old));
+
+        sources().pruneServerPacks(kept);
+
+        assertTrue(Files.exists(kept), "the pack in use survives however old it is");
+        assertFalse(Files.exists(stale), "an old superseded pack goes");
+        assertTrue(Files.exists(young), "a fresh one may be a fetch not yet published");
+        assertTrue(Files.exists(other), "only server packs are this method's business");
+    }
+
+    @Test
+    void theNewestFetchByTimeIsTheOneUsed() throws Exception {
+        Files.write(server.resolve("server.properties"), Fixtures.utf8(
+                "resource-pack=https\\://packs.example/pack.zip\n"));
+        long dayAgo = System.currentTimeMillis() - 2 * PackSources.UNHASHED_PACK_MAX_AGE_MS;
+        byte[] a = pack("content-a");
+        byte[] b = pack("content-b-is-longer");
+        Fixtures.FakeHttp http = new Fixtures.FakeHttp().serve("https://packs.example/pack.zip", a);
+
+        Path first = sources().serverPack(http);
+        Files.setLastModifiedTime(first, FileTime.fromMillis(dayAgo));
+        http.serve("https://packs.example/pack.zip", b);
+        Path second = sources().serverPack(http);
+        assertNotEquals(first, second);
+        Files.setLastModifiedTime(second, FileTime.fromMillis(dayAgo + 1000));
+        http.serve("https://packs.example/pack.zip", a);
+        Path third = sources().serverPack(http);
+
+        assertEquals(first, third, "content A again reuses A's file, marked fresh");
+        assertEquals(3, http.requests.size());
+        assertEquals(first, sources().serverPack(http),
+                "the newest by time wins over B, whatever the names sort as");
+        assertEquals(3, http.requests.size(), "and it is fresh, so nothing is fetched");
+    }
+
+    @Test
     void aStaleServerPackIsRefetchedWhileTheOldOneIsHeldOpen() throws Exception {
         Files.write(server.resolve("server.properties"), Fixtures.utf8(
                 "resource-pack=https\\://packs.example/pack.zip\n"));
