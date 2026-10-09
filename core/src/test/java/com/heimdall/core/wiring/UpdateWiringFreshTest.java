@@ -2,10 +2,16 @@ package com.heimdall.core.wiring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import com.heimdall.core.concurrent.HeimdallExecutors;
+import com.heimdall.core.http.ApiClient;
+import com.heimdall.core.http.ApiSettings;
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.update.ReleaseSource;
 import com.heimdall.core.update.UpdateService;
+import com.heimdall.stubbot.StubBot;
+import com.heimdall.stubbot.StubBotConfig;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -25,12 +31,47 @@ class UpdateWiringFreshTest {
 
     private final RecordingLogger logger = new RecordingLogger(true);
     private ScheduledExecutorService scheduler;
+    private StubBot bot;
+    private HeimdallExecutors executors;
 
     @AfterEach
     void stop() {
         if (scheduler != null) {
             scheduler.shutdownNow();
         }
+        if (executors != null) {
+            executors.shutdown(2000);
+        }
+        if (bot != null) {
+            bot.close();
+        }
+    }
+
+    @Test
+    @DisplayName("/hd check reaches the bot as plugin/latest?fresh=1, end to end")
+    void checkIsFreshOnTheWire() {
+        bot = StubBot.start(StubBotConfig.withDemoFixtures().bindHost("127.0.0.1").port(0));
+        executors = new HeimdallExecutors(logger, 2);
+        ApiClient client = new ApiClient(logger, ApiSettings.builder()
+                .baseUrl(bot.baseUrl())
+                .guildId(StubBotConfig.DEFAULT_GUILD_ID)
+                .apiKey(StubBotConfig.DEFAULT_API_KEY)
+                .serverId("survival")
+                .timeoutMs(5000)
+                .retries(2)
+                .retryDelayMs(25)
+                .build(), executors.io());
+        scheduler = Executors.newSingleThreadScheduledExecutor();
+        UpdateService service = new UpdateService(logger, "3.0.0",
+                new UpdateWiring.GatewayReleaseSource(new HeimdallApi(client)), null, null, scheduler);
+
+        // The real admin adapter, the real service, the real gateway source and the real client.
+        new UpdateWiring.ServiceAdmin(service).checkNow();
+        assertEquals("fresh=1", bot.lastRequestQuery("GET plugin/latest"));
+
+        // And the periodic path's call through the same source stays cached.
+        service.checkNow();
+        assertEquals("", bot.lastRequestQuery("GET plugin/latest"));
     }
 
     @Test
