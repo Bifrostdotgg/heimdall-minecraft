@@ -123,6 +123,29 @@ class TextComponentsTest {
     }
 
     @Test
+    void aWideArgumentFanOutCannotEmptyTheName() {
+        // Each argument is itself a fan-out of 16 wide arguments: together far more than the
+        // argument pool, all for a translation whose format shows none of them.
+        StringBuilder wide = new StringBuilder();
+        for (int i = 0; i < TextComponents.MAX_LINE_CHARS; i++) {
+            wide.append('w');
+        }
+        StringBuilder inner = new StringBuilder("{translate:\"i\",fallback:\"%s\",with:[");
+        for (int i = 0; i < 16; i++) {
+            inner.append(i == 0 ? "" : ",").append('"').append(wide).append('"');
+        }
+        inner.append("]}");
+        StringBuilder outer = new StringBuilder("{translate:\"o\",fallback:\"\",with:[");
+        for (int i = 0; i < 16; i++) {
+            outer.append(i == 0 ? "" : ",").append(inner);
+        }
+        outer.append("]}");
+        ItemText text = TextComponents.read(snbt("[" + outer + ",\"Spoon\"]"),
+                ItemTranslations.NONE);
+        assertEquals("Spoon", text.plain(), "the name survives the arguments' spending");
+    }
+
+    @Test
     void anAbsurdArgumentIndexIsText() {
         assertEquals("%99999999999$s", TextComponents.format("%99999999999$s",
                 new ArrayList<String>()));

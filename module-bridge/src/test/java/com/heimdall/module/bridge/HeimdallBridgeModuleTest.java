@@ -2562,6 +2562,93 @@ class HeimdallBridgeModuleTest {
         }
 
         @Test
+        @DisplayName("every text-only gate still queues behind a pending item line")
+        void textOnlyGatesKeepTheOrder() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            images.available = false;
+            say("Alex", "unavailable <hover:show_item:stone:1>[x]");
+            images.available = true;
+            tunnel.acceptingNothing();
+            say("Alex", "old bot <hover:show_item:dirt:1>[x]");
+            tunnel.accepting(Capabilities.ITEM_IMAGES);
+            applySettings(Payload.builder()
+                    .put(HeimdallBridgeModule.SETTING_ITEM_IMAGES, false).build());
+            say("Alex", "setting off <hover:show_item:sand:1>[x]");
+            runDrains();
+            assertTrue(relayedLines().isEmpty(), "all three wait behind the drawing line");
+            assertEquals(1, images.rendered.size(), "and none of them drew anything");
+
+            images.futures.get(0).complete(fakePng(8));
+            runDrains();
+            assertEquals(Arrays.asList("[Spoon]", "unavailable [Stone]", "old bot [Dirt]",
+                    "setting off [Sand]"), messages());
+        }
+
+        @Test
+        @DisplayName("a stale cycle's render never decrements the new cycle's pending count")
+        void staleRendersDoNotTouchTheNewCount() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            disable();
+            enable();
+            say("Alex", com.heimdall.core.testing.ItemCaptures.wardedJar());
+            assertEquals(1, module.pendingItemLineCount());
+
+            images.futures.get(0).complete(fakePng(8));
+            assertEquals(1, module.pendingItemLineCount(), "the old render is not this cycle's");
+
+            images.futures.get(1).complete(fakePng(8));
+            assertEquals(0, module.pendingItemLineCount());
+            runDrains();
+            assertEquals(Arrays.asList("[Warded Jar]"), messages());
+        }
+
+        @Test
+        @DisplayName("an Error part-way through attaching images ships the line and is not rethrown")
+        void anErrorWhileAttachingShipsTheLine() {
+            rig(null);
+            module.budgetSchedulerForTests(new HeimdallBridgeModule.DrainScheduler() {
+                @Override
+                public void schedule(Runnable task, long delayMs) {
+                    throw new AssertionError("simulated scheduler failure");
+                }
+            });
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            say("Alex", "after");
+
+            runDrains();
+            assertEquals(Arrays.asList("[Spoon]", "after"), messages());
+            assertEquals(0, module.pendingItemLineCount());
+            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "java.lang.AssertionError"));
+        }
+
+        @Test
+        @DisplayName("a rewrite failure warns once a minute, by class name only")
+        void rewriteFailuresAreRateLimitedAndTextFree() {
+            rig(null);
+            images.translateThrows = new StackOverflowError("Spoon secret");
+
+            say("Steve", "<hover:show_item:stone:1>[Stone]");
+            say("Steve", "<hover:show_item:stone:2>[Stone]");
+
+            int warnings = 0;
+            for (com.heimdall.core.log.RecordingLogger.Record record : logger.records()) {
+                if (record.message.contains("java.lang.StackOverflowError")) {
+                    warnings++;
+                    assertFalse(record.message.contains("secret"), record.message);
+                    assertFalse(record.message.contains("show_item"), record.message);
+                }
+            }
+            assertEquals(1, warnings);
+            runDrains();
+            assertEquals(2, relayedLines().size(), "both relayed as typed");
+        }
+
+        @Test
         @DisplayName("a channel line keeps its channel and gets its images")
         void channelLinesKeepTheirChannel() {
             rig(chatChannels("trade"));

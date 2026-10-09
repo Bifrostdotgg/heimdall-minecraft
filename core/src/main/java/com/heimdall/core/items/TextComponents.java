@@ -111,7 +111,7 @@ public final class TextComponents {
             }
         }
         List<ItemText.Span> out = new ArrayList<ItemText.Span>();
-        flatten(value, Style.NONE, out, tr, 0, new Budget());
+        flatten(value, Style.NONE, out, tr, 0, new Budget(), new Budget());
         return ItemText.of(capLength(out));
     }
 
@@ -249,8 +249,10 @@ public final class TextComponents {
      * argument ({@code %1$s%1$s...}) nested a few levels deep multiplies at every level: a
      * 543-character custom name built that way expanded to gigabytes and took the chat thread down
      * with it. So every intermediate string is capped at {@link #MAX_LINE_CHARS}, and every read has
-     * one budget of characters produced and nodes visited; once it is spent the rest of the
-     * component is dropped. A truncated name is a cosmetic fault; an exhausted heap is not.
+     * budgets of characters produced and nodes visited; once one is spent the rest of what it pays
+     * for is dropped. There are two per read: one for the line itself and one shared by every
+     * translation argument, so a wide fan-out of arguments cannot spend the line's share and leave
+     * an empty name. A truncated name is a cosmetic fault; an exhausted heap is not.
      */
     static final class Budget {
 
@@ -292,7 +294,7 @@ public final class TextComponents {
     }
 
     private static void flatten(Object node, Style inherited, List<ItemText.Span> out,
-            ItemTranslations tr, int depth, Budget budget) {
+            ItemTranslations tr, int depth, Budget budget, Budget args) {
         if (node == null || depth > MAX_DEPTH || out.size() >= MAX_SPANS || !budget.visit()) {
             return;
         }
@@ -311,11 +313,11 @@ public final class TextComponents {
             }
             // [a, b, c] is a with b and c as children: the rest inherit a's style, not each other's.
             Object head = list.get(0);
-            flatten(head, inherited, out, tr, depth + 1, budget);
+            flatten(head, inherited, out, tr, depth + 1, budget, args);
             Map<String, Object> headMap = Snbt.asMap(head);
             Style siblings = headMap == null ? inherited : inherited.merge(headMap);
             for (int i = 1; i < list.size() && !budget.spent(); i++) {
-                flatten(list.get(i), siblings, out, tr, depth + 1, budget);
+                flatten(list.get(i), siblings, out, tr, depth + 1, budget, args);
             }
             return;
         }
@@ -324,7 +326,7 @@ public final class TextComponents {
             return;
         }
         Style style = inherited.merge(map);
-        String content = contentOf(map, tr, depth, budget);
+        String content = contentOf(map, tr, depth, budget, args);
         if (content != null) {
             add(out, style, budget.spend(content));
         }
@@ -334,7 +336,7 @@ public final class TextComponents {
                 if (budget.spent()) {
                     break;
                 }
-                flatten(child, style, out, tr, depth + 1, budget);
+                flatten(child, style, out, tr, depth + 1, budget, args);
             }
         }
     }
@@ -346,7 +348,7 @@ public final class TextComponents {
     }
 
     private static String contentOf(Map<String, Object> map, ItemTranslations tr, int depth,
-            Budget budget) {
+            Budget budget, Budget args) {
         Object text = map.get("text");
         if (text != null) {
             return cap(String.valueOf(text));
@@ -364,18 +366,20 @@ public final class TextComponents {
                 format = fallback != null ? fallback : key;
             }
             List<Object> with = Snbt.asList(map.get("with"));
-            List<String> args = new ArrayList<String>();
+            List<String> values = new ArrayList<String>();
             if (with != null) {
                 for (Object arg : with) {
-                    if (budget.spent() || args.size() >= 16) {
+                    if (args.spent() || values.size() >= 16) {
                         break;
                     }
+                    // Arguments spend their own pool, never the line's: a fan-out of wide
+                    // arguments can exhaust it, and the text around them still renders.
                     List<ItemText.Span> argSpans = new ArrayList<ItemText.Span>();
-                    flatten(arg, Style.NONE, argSpans, tr, depth + 1, budget);
-                    args.add(cap(ItemText.of(argSpans).plain()));
+                    flatten(arg, Style.NONE, argSpans, tr, depth + 1, args, args);
+                    values.add(cap(ItemText.of(argSpans).plain()));
                 }
             }
-            return format(cap(format), args);
+            return format(cap(format), values);
         }
         String keybind = Snbt.asString(map.get("keybind"));
         if (keybind != null) {

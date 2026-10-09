@@ -663,8 +663,36 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         synchronized (orderLock) {
             generation++;
             held.clear();
+            pendingItemLines.set(0);
         }
-        pendingItemLines.set(0);
+    }
+
+    /** At most one warning a minute for a line whose item handling failed. */
+    private final AtomicLong nextItemFailureWarnAt = new AtomicLong(Long.MIN_VALUE);
+
+    /**
+     * Notes, at most once a minute, that a line's item handling threw and the line relayed anyway.
+     * Names the throwable's class only: its message could carry the line.
+     *
+     * <p>Never rethrows. This runs inside the platform's chat dispatch, and {@code ChatPipeline}
+     * catches only {@link RuntimeException} around an observer: an {@link Error} let out of here
+     * would skip every observer after this one.
+     */
+    private void warnItemFailure(Throwable failure) {
+        long now = System.nanoTime();
+        long next = nextItemFailureWarnAt.get();
+        if (next != Long.MIN_VALUE && now - next < 0) {
+            return;
+        }
+        if (!nextItemFailureWarnAt.compareAndSet(next, now + TimeUnit.MINUTES.toNanos(1))) {
+            return;
+        }
+        ModuleContext ctx = context;
+        if (ctx != null) {
+            ctx.logger().warn("handling a chat line's items failed ("
+                    + failure.getClass().getName() + "); the line was relayed without them. "
+                    + "Repeats are reported at most once a minute.");
+        }
     }
 
     // ── Outbound ─────────────────────────────────────────────────────────────
@@ -732,7 +760,8 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         } catch (Throwable unexpected) {
             // HoverTags is bounded and never throws on any input; a translation source might, and
             // this runs inside the platform's chat dispatch, where nothing may escape. Whatever went
-            // wrong, the line still relays, exactly as it was.
+            // wrong, the line still relays, exactly as it was, and nothing is rethrown.
+            warnItemFailure(unexpected);
             rewrite = null;
         }
         if (rewrite == null) {
@@ -750,7 +779,32 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             submit(Slot.ready(textOnly, generation));
             return;
         }
-        attachImages(ctx, images, textOnly, rewrite);
+        Attempt attempt = new Attempt();
+        try {
+            attachImages(ctx, images, textOnly, rewrite, attempt);
+        } catch (Throwable unexpected) {
+            // Same rule as the rewrite: the line relays, and nothing escapes into chat dispatch.
+            warnItemFailure(unexpected);
+            try {
+                if (attempt.slot != null) {
+                    shipPending(attempt.slot);
+                } else {
+                    if (attempt.reserved) {
+                        releasePendingCount(attempt.generation);
+                    }
+                    submit(Slot.ready(textOnly, attempt.generation));
+                }
+            } catch (Throwable alsoFailed) {
+                // Nothing more can be done for this one line without risking the chat thread.
+            }
+        }
+    }
+
+    /** How far {@link #attachImages} got, so a failure part-way can be unwound exactly. */
+    private final class Attempt {
+        final long generation = HeimdallBridgeModule.this.generation;
+        boolean reserved;
+        Slot slot;
     }
 
     /**
@@ -763,6 +817,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      */
     private void submit(Slot slot) {
         boolean released;
+        Slot forced = null;
         synchronized (orderLock) {
             if (slot.generation != generation) {
                 return;
@@ -773,13 +828,19 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             } else {
                 held.addLast(slot);
                 if (held.size() > MAX_QUEUE_SIZE) {
-                    forceShipHeadLocked();
+                    forced = claimHeadLocked();
                 }
                 released = releaseReadyLocked();
             }
         }
         if (released) {
             requestDrain();
+        }
+        if (forced != null) {
+            // Assembled (base64, logging) outside the lock; the head stays in place until then,
+            // so the order is unchanged, and the deque may sit a line or two over its bound.
+            assemble(forced);
+            markReady(forced, forced.finished);
         }
     }
 
@@ -809,26 +870,44 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     /**
-     * {@link #held} is over its bound: the head is an item line still drawing, so it ships now with
-     * whatever finished, and everything ready behind it follows.
+     * {@link #held} is over its bound: the head is an item line still drawing, so it is claimed to
+     * ship now with whatever finished. Only the claim happens under the lock; the caller assembles
+     * it and marks it ready afterwards.
+     *
+     * @return the claimed head, or {@code null} if it was not a pending line or is already claimed
      */
-    private void forceShipHeadLocked() {
+    private Slot claimHeadLocked() {
         Slot head = held.peekFirst();
-        if (head == null || head.line != null || head.pending == null) {
-            return;
+        if (head == null || head.line != null || head.pending == null
+                || !head.pending.markShipped()) {
+            return null;
         }
-        if (head.pending.markShipped()) {
-            releasePendingCount();
-            assemble(head);
-            head.line = head.finished;
+        if (pendingItemLines.get() > 0) {
+            pendingItemLines.decrementAndGet();
+        }
+        return head;
+    }
+
+    /**
+     * Reserves one of the {@value #MAX_PENDING_ITEM_LINES} pending places for {@code cycle}.
+     * Under {@link #orderLock}, like the reset, so a disable landing between the check and the
+     * increment cannot leave a count from an old cycle in the new one.
+     */
+    private boolean reservePending(long cycle) {
+        synchronized (orderLock) {
+            if (cycle != generation || pendingItemLines.get() >= MAX_PENDING_ITEM_LINES) {
+                return false;
+            }
+            pendingItemLines.incrementAndGet();
+            return true;
         }
     }
 
-    private void releasePendingCount() {
-        while (true) {
-            int current = pendingItemLines.get();
-            if (current <= 0 || pendingItemLines.compareAndSet(current, current - 1)) {
-                return;
+    /** Returns a pending place, but only if {@code cycle} is still the current one. */
+    private void releasePendingCount(long cycle) {
+        synchronized (orderLock) {
+            if (cycle == generation && pendingItemLines.get() > 0) {
+                pendingItemLines.decrementAndGet();
             }
         }
     }
@@ -840,7 +919,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      */
     private void attachImages(
             final ModuleContext ctx, ItemImages images, final ChatLine textOnly,
-            HoverTags.Rewrite rewrite) {
+            HoverTags.Rewrite rewrite, Attempt attempt) {
         // One image per distinct item: the same item shown twice is the same picture.
         Map<String, Integer> seen = new HashMap<String, Integer>();
         List<ChatItem> distinct = new ArrayList<ChatItem>();
@@ -860,13 +939,13 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                     + " items; dropped " + extra + " image(s)");
         }
 
-        long cycle = generation;
-        if (pendingItemLines.incrementAndGet() > MAX_PENDING_ITEM_LINES) {
-            releasePendingCount();
+        long cycle = attempt.generation;
+        if (!reservePending(cycle)) {
             ctx.logger().debug("too many chat lines waiting on item images; sent one as text");
             submit(Slot.ready(textOnly, cycle));
             return;
         }
+        attempt.reserved = true;
 
         List<CompletableFuture<byte[]>> renders = new ArrayList<CompletableFuture<byte[]>>();
         for (ChatItem item : distinct) {
@@ -877,6 +956,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         // Into the order BEFORE any completion can fire: a render that is already done ships the
         // line from inside whenComplete below, and it must find its place in the deque.
         submit(slot);
+        attempt.slot = slot;
         for (CompletableFuture<byte[]> render : renders) {
             // Plain whenComplete, never the executor-less *Async: this runs on whichever thread
             // finished the render (or inline, if it was already done), and all it does is a check
@@ -933,10 +1013,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         if (!pending.markShipped()) {
             return;
         }
-        if (slot.generation != generation) {
-            return;
+        synchronized (orderLock) {
+            // Checked and decremented together: a stale cycle's render must never decrement the
+            // count of the cycle that replaced it.
+            if (slot.generation != generation) {
+                return;
+            }
+            if (pendingItemLines.get() > 0) {
+                pendingItemLines.decrementAndGet();
+            }
         }
-        releasePendingCount();
         assemble(slot);
         markReady(slot, slot.finished);
     }
@@ -1012,7 +1098,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
         try {
             return bus.peerAccepts(Capabilities.ITEM_IMAGES);
-        } catch (RuntimeException failed) {
+        } catch (Throwable failed) {
             return false;
         }
     }
@@ -1030,7 +1116,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         try {
             ItemImages images = ctx.platform().integrations().itemImages();
             return images == null ? ItemImages.NONE : images;
-        } catch (RuntimeException failed) {
+        } catch (Throwable failed) {
             return ItemImages.NONE;
         }
     }
@@ -1038,7 +1124,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     private static boolean available(ItemImages images) {
         try {
             return images.available();
-        } catch (RuntimeException failed) {
+        } catch (Throwable failed) {
             return false;
         }
     }
