@@ -320,7 +320,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             drainQueues();
             // A drain ships at most MAX_BATCH per family. A burst bigger than that asks again
             // straight away rather than leaving the rest for the tick.
-            if (chat.queuedCount() > 0 || events.queuedCount() > 0) {
+            if (chat.hasQueued() || events.hasQueued()) {
                 requestDrain();
             }
         }

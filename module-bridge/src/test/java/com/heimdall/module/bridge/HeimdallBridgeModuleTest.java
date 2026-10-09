@@ -90,8 +90,8 @@ class HeimdallBridgeModuleTest {
     /** The delay each requested drain asked for, in request order. */
     private final List<Long> drainDelays = new ArrayList<Long>();
 
-    /** When set, the next drain request is refused as a shutting-down executor would. */
-    private boolean rejectNextDrain;
+    /** When set, the next drain request throws this, as a refusing or broken scheduler would. */
+    private RuntimeException nextDrainFailure;
 
     /** Builds the whole rig for a role, since the relay default depends on it. */
     private void setUp(ServerRole role, Payload settings) {
@@ -119,13 +119,14 @@ class HeimdallBridgeModuleTest {
         module = new HeimdallBridgeModule();
         pendingDrains.clear();
         drainDelays.clear();
-        rejectNextDrain = false;
+        nextDrainFailure = null;
         module.drainSchedulerForTests(new HeimdallBridgeModule.DrainScheduler() {
             @Override
             public void schedule(Runnable drain, long delayMs) {
-                if (rejectNextDrain) {
-                    rejectNextDrain = false;
-                    throw new java.util.concurrent.RejectedExecutionException("shutting down");
+                RuntimeException failure = nextDrainFailure;
+                if (failure != null) {
+                    nextDrainFailure = null;
+                    throw failure;
                 }
                 drainDelays.add(delayMs);
                 pendingDrains.add(drain);
@@ -701,7 +702,7 @@ class HeimdallBridgeModuleTest {
             setUp(ServerRole.STANDALONE, null);
             enable();
 
-            rejectNextDrain = true;
+            nextDrainFailure = new java.util.concurrent.RejectedExecutionException("shutting down");
             say("Steve", "refused");
             assertTrue(pendingDrains.isEmpty());
 
@@ -709,6 +710,43 @@ class HeimdallBridgeModuleTest {
             assertEquals(1, pendingDrains.size(), "the request flag was reset by the refusal");
             runDrains();
             assertEquals(2, relayedLines().size());
+        }
+
+        @Test
+        @DisplayName("a scheduler that throws unexpectedly does not latch either")
+        void anUnexpectedSchedulerFailureDoesNotLatch() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            nextDrainFailure = new IllegalStateException("scheduler broken");
+            say("Steve", "lost to the failure");
+            assertTrue(pendingDrains.isEmpty());
+
+            say("Steve", "accepted");
+            assertEquals(1, pendingDrains.size(), "the request flag was reset by the failure");
+        }
+
+        @Test
+        @DisplayName("a re-enable starts with no drain latched and no spacing owed")
+        void reEnableResetsTheDrainState() {
+            setUp(ServerRole.STANDALONE, null);
+            enable();
+
+            // One drain ran (so a spacing is owed) and one was requested but never ran (so the
+            // request flag is latched) when the module went down.
+            say("Steve", "ran");
+            runDrains();
+            say("Steve", "abandoned");
+            disable();
+            pendingDrains.clear();
+            drainDelays.clear();
+
+            enable();
+            say("Steve", "after re-enable");
+
+            assertEquals(1, pendingDrains.size(), "the abandoned request did not stay latched");
+            assertEquals(Long.valueOf(0L), drainDelays.get(0),
+                    "the previous cycle's last drain owes this one no spacing");
         }
 
         @Test

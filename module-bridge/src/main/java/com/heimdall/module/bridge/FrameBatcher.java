@@ -144,10 +144,28 @@ final class FrameBatcher<T> {
         return true;
     }
 
-    /** Empties the queue. Called on enable and on disable, so a cycle never replays a stale batch. */
+    /**
+     * Empties the queue. Called on enable and on disable, so a cycle never replays a stale batch.
+     *
+     * <p>Polls and decrements once per item rather than resetting the counter: every successful
+     * {@code add} is then matched by exactly one increment and every successful {@code poll} by
+     * exactly one decrement, so the count settles back to the queue's size even when an enqueue or
+     * a drain overlaps the clear. A reset to zero could land between an enqueue's {@code add} and
+     * its increment and leave the counter off by one for good.
+     */
     void clear() {
-        queue.clear();
-        queued.set(0);
+        while (queue.poll() != null) {
+            queued.decrementAndGet();
+        }
+    }
+
+    /**
+     * Whether anything is queued, read from the queue itself rather than the counter, which can be
+     * transiently off by one while an enqueue or a clear is mid-way. The bridge's backlog re-check
+     * uses this so a queued line can never hide behind a counter that has not caught up.
+     */
+    boolean hasQueued() {
+        return !queue.isEmpty();
     }
 
     /**
@@ -157,8 +175,6 @@ final class FrameBatcher<T> {
      * class javadoc.
      */
     int queuedCount() {
-        // Never below zero: clear() racing a drain's decrements can leave the counter at -1, and an
-        // undercount would hide the last queued item from the bridge's backlog re-check.
-        return Math.max(0, queued.get());
+        return queued.get();
     }
 }
