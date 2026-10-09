@@ -335,7 +335,13 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /** Flushes since the last inventory poll. Only {@code heimdall-sched} touches it. */
     private int flushesSinceInventoryPoll;
 
-    /** Set by {@link #forgetInventory}; applied, and cleared, by the next report. */
+    /**
+     * Set by {@link #forgetInventory}; applied, and cleared, by the next report.
+     *
+     * <p>This and {@link #inventoryReportRequested} overlap on purpose: each alone makes a
+     * reconnect resend the inventory (one by making the next poll find a change, the other by
+     * forcing the next flush), so a cleanup may remove one, never both.
+     */
     private final AtomicBoolean forgetRequested = new AtomicBoolean();
 
     /** Set by enable and by a reconnect; the next flush makes a forced report and clears it. */

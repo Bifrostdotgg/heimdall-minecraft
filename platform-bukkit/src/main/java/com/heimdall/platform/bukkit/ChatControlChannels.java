@@ -15,6 +15,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import org.bukkit.Bukkit;
@@ -177,6 +179,15 @@ final class ChatControlChannels implements ChatChannels {
     /** Claimed by the one thread that attempts the registration; never released. */
     private final AtomicBoolean registrationClaimed = new AtomicBoolean();
 
+    /** Released when that one attempt ends, either way. */
+    private final CountDownLatch registrationDone = new CountDownLatch(1);
+
+    /**
+     * How long a caller waits for a registration in progress on another thread before failing
+     * closed for that call. Package-private so the tests can shorten it.
+     */
+    volatile long registrationWaitMillis = 2000L;
+
     /** The channel names last read successfully; see {@link #channelNames()}. */
     private volatile List<String> lastNames;
 
@@ -226,6 +237,19 @@ final class ChatControlChannels implements ChatChannels {
 
     @Override
     public State state() {
+        State state = currentState();
+        // null: registration is still in progress on another thread after the bounded wait. Fail
+        // closed: BROKEN routes nothing by channel and broadcasts nothing, and it is not recorded,
+        // so the next call answers normally once the registration lands.
+        return state == null ? State.BROKEN : state;
+    }
+
+    /**
+     * {@link #state()}, except that it answers {@code null} when the hook registration is still in
+     * progress on another thread after {@link #registrationWaitMillis}. Each caller maps that to its
+     * own fail-closed answer.
+     */
+    private State currentState() {
         // Looked up first: the lookup is where a reload is noticed, and it marks the integration
         // broken, so checking brokenBecause before it would answer NONE for that one call.
         Plugin plugin = chatControl();
@@ -242,9 +266,21 @@ final class ChatControlChannels implements ChatChannels {
             return brokenBecause != null ? State.BROKEN : State.NONE;
         }
         if (!hooked) {
-            // No pipeline yet (bootstrap has not attached), so nothing could be relayed with a
-            // channel. Not ACTIVE: that state promises the hook is live.
-            return brokenBecause != null ? State.BROKEN : State.NONE;
+            if (pipeline == null || !registrationClaimed.get()) {
+                // No pipeline yet (bootstrap has not attached), so nothing could be relayed with a
+                // channel. Not ACTIVE: that state promises the hook is live.
+                return brokenBecause != null ? State.BROKEN : State.NONE;
+            }
+            // Another thread is inside registerEvent right now. ChatControl may already be routing
+            // channels, so NONE would be a lie (inbound, it would broadcast an untagged Discord
+            // message to everybody). Wait for it, briefly: registerEvent takes only the event's own
+            // HandlerList monitor, which no caller here holds.
+            if (!awaitRegistration()) {
+                return null;
+            }
+            if (brokenBecause != null || !hooked) {
+                return State.BROKEN;
+            }
         }
         Object enabled;
         try {
@@ -269,7 +305,14 @@ final class ChatControlChannels implements ChatChannels {
      */
     @Override
     public List<String> channelNames() {
-        if (state() != State.ACTIVE) {
+        State state = currentState();
+        if (state == null) {
+            // Registration still in progress: keep the last good inventory, as for a one-call
+            // failure below.
+            List<String> previous = lastNames;
+            return previous == null ? Collections.<String>emptyList() : previous;
+        }
+        if (state != State.ACTIVE) {
             return Collections.emptyList();
         }
         List<String> names = names(api);
@@ -286,7 +329,7 @@ final class ChatControlChannels implements ChatChannels {
 
     @Override
     public Optional<Collection<PlayerHandle>> members(String channel) {
-        if (channel == null || channel.isEmpty() || state() != State.ACTIVE) {
+        if (channel == null || channel.isEmpty() || currentState() != State.ACTIVE) {
             return Optional.empty();
         }
         Api resolved = api;
@@ -333,7 +376,11 @@ final class ChatControlChannels implements ChatChannels {
      * given that ChatControl is installed.
      */
     UntaggedRelay untaggedRelay(Player player) {
-        State state = state();
+        State state = currentState();
+        if (state == null) {
+            // The hook is still registering after the bounded wait: drop this one line.
+            return UntaggedRelay.TRANSIENT;
+        }
         if (state == State.BROKEN) {
             return UntaggedRelay.BROKEN;
         }
@@ -470,9 +517,12 @@ final class ChatControlChannels implements ChatChannels {
             }
         }
         if (!hooked && pipeline != null && registrationClaimed.compareAndSet(false, true)) {
-            // One attempt, ever, by whichever thread claims it. Another thread arriving meanwhile
-            // sees hooked=false and answers NONE for that call, which is the truth until this lands.
+            // One attempt, ever, by whichever thread claims it: a second registration would relay
+            // every channel line twice. Another thread arriving meanwhile waits on
+            // registrationDone (see currentState) rather than answering for a hook that may
+            // already be live; the latch is released however this ends.
             final Api bound = resolved;
+            boolean registered = false;
             try {
                 environment.register(bound.postEvent, new Listener() {
                 }, new EventExecutor() {
@@ -482,13 +532,28 @@ final class ChatControlChannels implements ChatChannels {
                     }
                 });
                 hooked = true;
-                logger.info("ChatControl detected: Discord relay follows its chat channels");
+                registered = true;
             } catch (Throwable failed) {
                 markBroken("registering the ChatControl channel listener failed", failed);
+            } finally {
+                registrationDone.countDown();
+            }
+            if (!registered) {
                 return null;
             }
+            logger.info("ChatControl detected: Discord relay follows its chat channels");
         }
         return brokenBecause != null ? null : resolved;
+    }
+
+    /** Waits for the one registration attempt to end; {@code false} on timeout or interrupt. */
+    private boolean awaitRegistration() {
+        try {
+            return registrationDone.await(registrationWaitMillis, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /** Channel names, or {@code null} after marking the integration broken. */

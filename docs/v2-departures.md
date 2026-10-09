@@ -1950,6 +1950,10 @@ integration, and "forget what the bot was told" is a lock-free flag the next rep
 thread ever waits on that lock. A stamp taken before each read keeps an older read from being sent
 after a newer one, including a newer read that found nothing changed. On the Bukkit side the
 integration likewise loads ChatControl's classes and registers its hook without holding its own lock.
+The hook is registered once, by whichever thread claims it; another thread that asks meanwhile waits
+up to two seconds for it rather than answering `none` for a ChatControl that may already be routing
+channels, and a longer stall fails closed for that call only (nothing routed or broadcast, the chat
+line dropped).
 
 **Both directions fail closed.** Outbound, a channel line is relayed only if its channel is in
 `chatChannels` (case-insensitive); an absent or empty setting relays no channel lines at all, so a

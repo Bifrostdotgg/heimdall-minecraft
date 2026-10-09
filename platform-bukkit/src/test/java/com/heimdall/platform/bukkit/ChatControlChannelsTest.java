@@ -67,9 +67,27 @@ class ChatControlChannelsTest {
         volatile Plugin chatControl;
         volatile ClassLoader loader = ChatControlChannelsTest.class.getClassLoader();
         volatile RuntimeException registerFailure;
-        final List<Class<? extends Event>> registered = new ArrayList<Class<? extends Event>>();
+        final List<Class<? extends Event>> registered = java.util.Collections.synchronizedList(
+                new ArrayList<Class<? extends Event>>());
         volatile EventExecutor executor;
         int lookups;
+
+        /** When set, register() signals {@link #registerEntered} and waits on this gate. */
+        volatile java.util.concurrent.CountDownLatch registerGate;
+        final java.util.concurrent.CountDownLatch registerEntered =
+                new java.util.concurrent.CountDownLatch(1);
+
+        /** Every plugin a class loader was asked for, in order. */
+        final List<Plugin> loaderRequests =
+                java.util.Collections.synchronizedList(new ArrayList<Plugin>());
+
+        /** Run once, inside the next loaderOf, to stage something happening mid-load. */
+        volatile Runnable duringNextLoad;
+
+        java.util.concurrent.CountDownLatch gateRegistration() {
+            registerGate = new java.util.concurrent.CountDownLatch(1);
+            return registerGate;
+        }
 
         @Override
         public Plugin findChatControl() {
@@ -79,12 +97,27 @@ class ChatControlChannelsTest {
 
         @Override
         public ClassLoader loaderOf(Plugin plugin) {
+            loaderRequests.add(plugin);
+            Runnable hook = duringNextLoad;
+            duringNextLoad = null;
+            if (hook != null) {
+                hook.run();
+            }
             return loader;
         }
 
         @Override
         public void register(
                 Class<? extends Event> type, Listener listener, EventExecutor executor) {
+            registerEntered.countDown();
+            java.util.concurrent.CountDownLatch gate = registerGate;
+            if (gate != null) {
+                try {
+                    gate.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
             if (registerFailure != null) {
                 throw registerFailure;
             }
@@ -406,6 +439,119 @@ class ChatControlChannelsTest {
 
         assertEquals(ChatChannels.State.BROKEN, channels.state());
         assertTrue(logger.logged(LogLevel.SEVERE, "ChatControl channel integration disabled"));
+    }
+
+    // ── Registration in progress ─────────────────────────────────────────────
+
+    /** Starts {@code attach} on another thread and returns once it is inside registerEvent. */
+    private Thread attachInBackground(ChatControlChannels channels) throws Exception {
+        Thread registering = new Thread(() -> channels.attach(pipeline), "registering");
+        registering.start();
+        assertTrue(environment.registerEntered.await(10, java.util.concurrent.TimeUnit.SECONDS));
+        return registering;
+    }
+
+    @Test
+    @DisplayName("while another thread is registering the hook, callers wait instead of answering none")
+    void registrationInProgressIsWaitedFor() throws Exception {
+        environment.chatControl = plugin(true);
+        Settings.Channels.ENABLED = Boolean.TRUE;
+        ChatControlChannels channels = channels();
+        java.util.concurrent.CountDownLatch gate = environment.gateRegistration();
+        Thread registering = attachInBackground(channels);
+
+        Thread releaser = new Thread(() -> {
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            gate.countDown();
+        }, "releaser");
+        releaser.start();
+
+        assertEquals(ChatChannels.State.ACTIVE, channels.state(),
+                "NONE here would broadcast an untagged Discord message while ChatControl is "
+                        + "already routing channels");
+        registering.join(10000);
+        releaser.join(10000);
+    }
+
+    @Test
+    @DisplayName("a registration that outlasts the wait fails closed for that call, and only that call")
+    void registrationTimeoutFailsClosed() throws Exception {
+        environment.chatControl = plugin(true);
+        Settings.Channels.ENABLED = Boolean.TRUE;
+        Channel.create("staff").member(player("Mod"), ChannelMode.WRITE);
+        ChatControlChannels channels = channels();
+        channels.registrationWaitMillis = 50L;
+        java.util.concurrent.CountDownLatch gate = environment.gateRegistration();
+        Thread registering = attachInBackground(channels);
+        try {
+            assertEquals(ChatChannels.State.BROKEN, channels.state(), "never NONE");
+            assertFalse(channels.members("staff").isPresent());
+            assertEquals(ChatControlChannels.UntaggedRelay.TRANSIENT,
+                    channels.untaggedRelay(player("Steve")), "drop the line, do not report broken");
+            assertEquals(null, channels.brokenReason(), "and nothing is recorded as broken");
+        } finally {
+            gate.countDown();
+            registering.join(10000);
+        }
+
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+        assertTrue(logger.at(LogLevel.SEVERE).isEmpty(), logger.records().toString());
+    }
+
+    @Test
+    @DisplayName("two threads racing to hook ChatControl register it exactly once")
+    void concurrentRegistrationHappensOnce() throws Exception {
+        environment.chatControl = plugin(true);
+        Settings.Channels.ENABLED = Boolean.TRUE;
+        Channel staff = Channel.create("staff");
+        ChatControlChannels channels = channels();
+        java.util.concurrent.CountDownLatch gate = environment.gateRegistration();
+        Thread first = attachInBackground(channels);
+
+        Thread second = new Thread(channels::state, "second");
+        second.start();
+        Thread.sleep(200);
+        gate.countDown();
+        first.join(10000);
+        second.join(10000);
+
+        assertEquals(1, environment.registered.size(),
+                "a second registration would relay every channel line twice");
+        environment.fire(new ChannelPostChatEvent(staff, player("Steve"), "hi", false));
+        assertEquals(1, relayed.size());
+    }
+
+    @Test
+    @DisplayName("handles loaded from a ChatControl replaced mid-load are discarded, not hooked")
+    void replacedMidLoadIsDiscarded() {
+        Plugin first = plugin(true);
+        Plugin second = plugin(true);
+        environment.chatControl = first;
+        Settings.Channels.ENABLED = Boolean.TRUE;
+        ChatControlChannels channels = channels();
+        environment.duringNextLoad = () -> {
+            // A plugin manager reloads ChatControl while the first resolution is loading classes.
+            when(first.isEnabled()).thenReturn(false);
+            environment.chatControl = second;
+            channels.installed();
+        };
+
+        channels.attach(pipeline);
+
+        assertEquals(Collections.singletonList(first), new ArrayList<Plugin>(environment.loaderRequests));
+        assertTrue(environment.registered.isEmpty(),
+                "the handles belong to the old copy's class loader; hooking them would listen on "
+                        + "an event class the new copy never fires");
+
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+        assertEquals(Arrays.asList(first, second),
+                new ArrayList<Plugin>(environment.loaderRequests),
+                "the next call starts over with the new copy");
+        assertEquals(1, environment.registered.size());
     }
 
     // ── Reloads ──────────────────────────────────────────────────────────────

@@ -1511,6 +1511,44 @@ class HeimdallBridgeModuleTest {
         }
 
         @Test
+        @DisplayName("forgetting what the bot was told never waits on inventoryLock")
+        void forgetIsLockFree() throws Exception {
+            // forgetInventory runs from the mode listener (under the negotiator's monitor) and from
+            // disable (possibly under the server's plugin-manager monitor). If it ever took
+            // inventoryLock, a report holding that lock around a socket send could stall both.
+            setUp(ServerRole.STANDALONE, null);
+            enableAndSettle();
+            final Object lock = inventoryLock();
+            final java.util.concurrent.CountDownLatch held = new java.util.concurrent.CountDownLatch(1);
+            final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+            Thread holder = new Thread(() -> {
+                synchronized (lock) {
+                    held.countDown();
+                    try {
+                        done.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }, "lock-holder");
+            holder.start();
+            assertTrue(held.await(10, java.util.concurrent.TimeUnit.SECONDS));
+            try {
+                Thread forgetter = new Thread(() -> {
+                    tunnel.disconnected();
+                    disable();
+                }, "forgetter");
+                forgetter.start();
+                forgetter.join(2000);
+                assertFalse(forgetter.isAlive(),
+                        "a disconnect or a disable blocked on inventoryLock");
+            } finally {
+                done.countDown();
+                holder.join(10000);
+            }
+        }
+
+        @Test
         @DisplayName("an older read that finishes after a newer report is not sent")
         void olderReadIsNotSentAfterNewer() throws Exception {
             setUp(ServerRole.STANDALONE, null);
