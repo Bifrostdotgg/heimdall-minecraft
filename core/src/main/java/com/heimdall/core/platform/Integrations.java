@@ -65,4 +65,17 @@ public interface Integrations {
     default ChatChannels chatChannels() {
         return ChatChannels.NONE;
     }
+
+    /**
+     * Tooltip images for items shown in chat, if this platform can draw them.
+     *
+     * <p>A default method for the same reason as {@link #chatChannels()}: both proxies have no items
+     * and need no change, and {@link ItemImages#NONE} makes a line with an item hover relay as text
+     * only. The Bukkit family overrides it. Departure D86.
+     *
+     * <p>Never {@code null}.
+     */
+    default ItemImages itemImages() {
+        return ItemImages.NONE;
+    }
 }

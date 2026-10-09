@@ -93,4 +93,19 @@ public interface TunnelBus {
      * @return a handle that unsubscribes; closing it twice is a no-op
      */
     Registration onModeChange(ProtocolModeListener listener);
+
+    /**
+     * Whether the bot on the other end accepted {@code capability} in this connection's handshake.
+     *
+     * <p>For a capability whose frames a bot that does not know it would <em>reject</em> rather
+     * than ignore. The bridge's {@code itemimages@1} is the case that needed it: a released bot
+     * closes the socket on a frame over its payload cap, so image-bearing lines go only to a bot
+     * that said it handles them. Departure D86.
+     *
+     * <p>{@code false} while disconnected, before the handshake completes, and on any bus that cannot
+     * tell (the default): a caller gating on this fails closed.
+     */
+    default boolean peerAccepts(String capability) {
+        return false;
+    }
 }

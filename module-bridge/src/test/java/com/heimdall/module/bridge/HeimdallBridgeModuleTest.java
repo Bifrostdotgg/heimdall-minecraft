@@ -352,10 +352,14 @@ class HeimdallBridgeModuleTest {
 
         assertEquals("bridge", module.id());
         assertEquals(
-                new LinkedHashSet<String>(Arrays.asList(Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS)),
+                new LinkedHashSet<String>(Arrays.asList(Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS,
+                        Capabilities.ITEM_IMAGES)),
                 module.capabilities(),
-                "chat-channel awareness is a build capability of the bridge, declared whether or not "
-                        + "ChatControl is installed, like status@1 is of health");
+                "chat-channel awareness and item images are build capabilities of the bridge, "
+                        + "declared whether or not ChatControl is installed or images can be drawn, "
+                        + "like status@1 is of health");
+        assertEquals("itemimages@1", Capabilities.ITEM_IMAGES,
+                "the capability string is a wire contract");
         assertEquals("bridge@1", Capabilities.BRIDGE, "the capability string is a wire contract");
         assertEquals("chatchannels@1", Capabilities.CHAT_CHANNELS,
                 "the capability string is a wire contract");
@@ -1927,5 +1931,485 @@ class HeimdallBridgeModuleTest {
                 "FrameBatcher's queue is the single place a chat line rests, and nothing here may "
                         + "return anything that could carry one out — including behind a type "
                         + "variable, which is exactly what a name-matching guard cannot see");
+    }
+
+    // ── Item images (D86) ────────────────────────────────────────────────────
+
+    /**
+     * A renderer the test drives: each render is a future the test completes (or never does), and
+     * every call is counted. {@code autoPng} answers immediately instead.
+     */
+    private static final class FakeItemImages implements com.heimdall.core.platform.ItemImages {
+
+        volatile boolean available = true;
+        volatile byte[] autoPng;
+        final List<com.heimdall.core.items.ChatItem> rendered =
+                Collections.synchronizedList(new ArrayList<com.heimdall.core.items.ChatItem>());
+        final List<java.util.concurrent.CompletableFuture<byte[]>> futures =
+                Collections.synchronizedList(
+                        new ArrayList<java.util.concurrent.CompletableFuture<byte[]>>());
+        final java.util.concurrent.atomic.AtomicInteger prepares =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        @Override
+        public boolean available() {
+            return available;
+        }
+
+        @Override
+        public void prepare() {
+            prepares.incrementAndGet();
+        }
+
+        @Override
+        public String translate(String key) {
+            return null;
+        }
+
+        @Override
+        public java.util.concurrent.CompletableFuture<byte[]> render(
+                com.heimdall.core.items.ChatItem item) {
+            rendered.add(item);
+            byte[] png = autoPng;
+            java.util.concurrent.CompletableFuture<byte[]> future = png != null
+                    ? java.util.concurrent.CompletableFuture.completedFuture(png)
+                    : new java.util.concurrent.CompletableFuture<byte[]>();
+            futures.add(future);
+            return future;
+        }
+    }
+
+    /** A recognisable fake PNG: the signature then {@code length - 8} filler bytes. */
+    private static byte[] fakePng(int length) {
+        byte[] png = new byte[length];
+        byte[] signature = {(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+        System.arraycopy(signature, 0, png, 0, Math.min(signature.length, length));
+        return png;
+    }
+
+    @Nested
+    @DisplayName("item images")
+    class ItemImagesOnTheWire {
+
+        private FakeItemImages images;
+        private final List<Runnable> budgets = new ArrayList<Runnable>();
+        private final List<Long> budgetDelays = new ArrayList<Long>();
+
+        private void rig(Payload settings) {
+            rig(settings, true);
+        }
+
+        private void rig(Payload settings, boolean botAcceptsImages) {
+            setUp(ServerRole.STANDALONE, settings);
+            if (botAcceptsImages) {
+                tunnel.accepting(Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS,
+                        Capabilities.ITEM_IMAGES);
+            } else {
+                tunnel.accepting(Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS);
+            }
+            images = new FakeItemImages();
+            platform.withItemImages(images);
+            module.budgetSchedulerForTests(new HeimdallBridgeModule.DrainScheduler() {
+                @Override
+                public void schedule(Runnable task, long delayMs) {
+                    budgetDelays.add(delayMs);
+                    budgets.add(task);
+                }
+            });
+            enable();
+        }
+
+        private void runBudgets() {
+            while (!budgets.isEmpty()) {
+                budgets.remove(0).run();
+            }
+        }
+
+        private Payload onlyLine() {
+            runDrains();
+            List<Payload> lines = relayedLines();
+            assertEquals(1, lines.size(), "exactly one line reached the wire");
+            return lines.get(0);
+        }
+
+        @Test
+        @DisplayName("the Spoon capture ships as [Spoon] with one {name, png} item")
+        void spoonShipsWithItsImage() {
+            rig(null);
+            byte[] png = fakePng(64);
+            images.autoPng = png;
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+
+            Payload line = onlyLine();
+            assertEquals("[Spoon]", line.string("msg", ""));
+            List<Payload> items = line.children("items");
+            assertEquals(1, items.size());
+            assertEquals("Spoon", items.get(0).string("name", ""));
+            assertEquals(java.util.Base64.getEncoder().encodeToString(png),
+                    items.get(0).string("png", ""), "standard base64, no data: prefix");
+            assertEquals(new LinkedHashSet<String>(Arrays.asList("name", "png")),
+                    items.get(0).keys(), "each item is exactly {name, png}");
+            assertEquals(0, module.pendingItemLineCount());
+        }
+
+        @Test
+        @DisplayName("a line with no item hover is unchanged byte for byte and carries no items key")
+        void ordinaryLinesAreUntouched() {
+            rig(null);
+            images.autoPng = fakePng(16);
+            String typed = "  <gray>[not an item]  show me &aplz  ";
+
+            say("Steve", typed);
+
+            Payload line = onlyLine();
+            assertEquals(typed, line.string("msg", ""));
+            assertFalse(line.has("items"), "an ordinary line keeps the shape every bot reads");
+            assertTrue(images.rendered.isEmpty());
+            assertTrue(budgets.isEmpty(), "an ordinary line never waits on anything");
+        }
+
+        @Test
+        @DisplayName("an ordinary line said while an item line waits is not held behind it")
+        void ordinaryChatIsNotDelayed() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            say("Alex", "nice");
+            runDrains();
+
+            List<Payload> lines = relayedLines();
+            assertEquals(1, lines.size());
+            assertEquals("nice", lines.get(0).string("msg", ""));
+
+            runBudgets();
+            runDrains();
+            assertEquals("[Spoon]", relayedLines().get(1).string("msg", ""));
+            assertEquals(Long.valueOf(HeimdallBridgeModule.ITEM_IMAGE_BUDGET_MS),
+                    budgetDelays.get(0));
+        }
+
+        @Test
+        @DisplayName("when the budget runs out the line ships as text only")
+        void budgetTimeoutShipsTextOnly() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.wardedJar());
+            runDrains();
+            assertTrue(relayedLines().isEmpty(), "waits for its image, within the budget");
+            assertEquals(1, module.pendingItemLineCount());
+
+            runBudgets();
+            Payload line = onlyLine();
+            assertEquals("[Warded Jar]", line.string("msg", ""));
+            assertFalse(line.has("items"));
+            assertEquals(0, module.pendingItemLineCount());
+
+            // A render finishing after the line shipped changes nothing.
+            images.futures.get(0).complete(fakePng(32));
+            runDrains();
+            assertEquals(1, relayedLines().size(), "shipped exactly once");
+        }
+
+        @Test
+        @DisplayName("renders that finish before the budget ship the line at once")
+        void finishedRendersShipBeforeTheBudget() {
+            rig(null);
+
+            say("Steve", "a " + com.heimdall.core.testing.ItemCaptures.spoon() + "</hover> b "
+                    + com.heimdall.core.testing.ItemCaptures.wardedJar());
+            assertEquals(2, images.futures.size());
+            images.futures.get(0).complete(fakePng(10));
+            runDrains();
+            assertTrue(relayedLines().isEmpty(), "one of two still drawing");
+            images.futures.get(1).complete(fakePng(20));
+
+            Payload line = onlyLine();
+            assertEquals("a [Spoon] b [Warded Jar]", line.string("msg", ""));
+            List<Payload> items = line.children("items");
+            assertEquals(Arrays.asList("Spoon", "Warded Jar"),
+                    Arrays.asList(items.get(0).string("name", ""), items.get(1).string("name", "")));
+        }
+
+        @Test
+        @DisplayName("a budget timeout keeps the images that did finish")
+        void partialImagesSurviveTheBudget() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon() + "</hover>"
+                    + com.heimdall.core.testing.ItemCaptures.wardedJar());
+            images.futures.get(1).complete(fakePng(10));
+            runBudgets();
+
+            List<Payload> items = onlyLine().children("items");
+            assertEquals(1, items.size());
+            assertEquals("Warded Jar", items.get(0).string("name", ""));
+        }
+
+        @Test
+        @DisplayName("a failed render costs its image, never the line")
+        void failedRendersShipText() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            images.futures.get(0).completeExceptionally(new IllegalStateException("boom"));
+
+            Payload line = onlyLine();
+            assertEquals("[Spoon]", line.string("msg", ""));
+            assertFalse(line.has("items"));
+        }
+
+        @Test
+        @DisplayName("at most four images per line; extras are dropped, not rendered")
+        void atMostFourItems() {
+            rig(null);
+            images.autoPng = fakePng(8);
+            StringBuilder line = new StringBuilder();
+            for (int i = 1; i <= 6; i++) {
+                line.append("<hover:show_item:stone:").append(i).append(">[Stone]</hover> ");
+            }
+
+            say("Steve", line.toString());
+
+            Payload relayed = onlyLine();
+            assertEquals(HeimdallBridgeModule.MAX_ITEMS_PER_LINE, images.rendered.size());
+            assertEquals(HeimdallBridgeModule.MAX_ITEMS_PER_LINE,
+                    relayed.children("items").size());
+            assertEquals("[Stone] [Stone] [Stone] [Stone] [Stone] [Stone] ",
+                    relayed.string("msg", ""), "every hover is still rewritten");
+        }
+
+        @Test
+        @DisplayName("the same item shown twice is drawn once")
+        void duplicatesAreDrawnOnce() {
+            rig(null);
+            images.autoPng = fakePng(8);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon() + "</hover> and "
+                    + com.heimdall.core.testing.ItemCaptures.spoon());
+
+            Payload line = onlyLine();
+            assertEquals("[Spoon] and [Spoon]", line.string("msg", ""));
+            assertEquals(1, images.rendered.size());
+            assertEquals(1, line.children("items").size());
+        }
+
+        @Test
+        @DisplayName("an image over 512 KiB is dropped and counted")
+        void oversizedImagesAreDropped() {
+            rig(null);
+            images.autoPng = fakePng(HeimdallBridgeModule.MAX_ITEM_PNG_BYTES + 1);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+
+            Payload line = onlyLine();
+            assertEquals("[Spoon]", line.string("msg", ""));
+            assertFalse(line.has("items"));
+            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "dropped 1 item image"));
+        }
+
+        @Test
+        @DisplayName("exactly 512 KiB is still allowed")
+        void theCapIsInclusive() {
+            rig(null);
+            images.autoPng = fakePng(HeimdallBridgeModule.MAX_ITEM_PNG_BYTES);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+
+            assertEquals(1, onlyLine().children("items").size());
+        }
+
+        @Test
+        @DisplayName("itemImages=false rewrites the text and draws nothing")
+        void settingOffRendersNothing() {
+            rig(Payload.builder().put(HeimdallBridgeModule.SETTING_ITEM_IMAGES, false).build());
+            images.autoPng = fakePng(8);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+
+            Payload line = onlyLine();
+            assertEquals("[Spoon]", line.string("msg", ""));
+            assertFalse(line.has("items"));
+            assertTrue(images.rendered.isEmpty());
+            assertEquals(0, images.prepares.get(), "an opted-out server never prepares assets");
+        }
+
+        @Test
+        @DisplayName("enable prepares the renderer when images are wanted")
+        void enablePrepares() {
+            rig(null);
+            assertTrue(images.prepares.get() >= 1);
+        }
+
+        @Test
+        @DisplayName("a platform that cannot draw still rewrites the text")
+        void unavailableRendererStillRewrites() {
+            rig(null);
+            images.available = false;
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.wardedJar());
+
+            Payload line = onlyLine();
+            assertEquals("[Warded Jar]", line.string("msg", ""));
+            assertFalse(line.has("items"));
+            assertTrue(images.rendered.isEmpty());
+        }
+
+        @Test
+        @DisplayName("waiting lines are bounded; past the bound a line ships as text at once")
+        void pendingLinesAreBounded() {
+            rig(null);
+
+            for (int i = 0; i < HeimdallBridgeModule.MAX_PENDING_ITEM_LINES; i++) {
+                say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            }
+            runDrains();
+            assertTrue(relayedLines().isEmpty());
+            assertEquals(HeimdallBridgeModule.MAX_PENDING_ITEM_LINES,
+                    module.pendingItemLineCount());
+
+            say("Alex", com.heimdall.core.testing.ItemCaptures.wardedJar());
+            Payload line = onlyLine();
+            assertEquals("[Warded Jar]", line.string("msg", ""));
+            assertFalse(line.has("items"));
+
+            runBudgets();
+            runDrains();
+            assertEquals(1 + HeimdallBridgeModule.MAX_PENDING_ITEM_LINES, relayedLines().size());
+            assertEquals(0, module.pendingItemLineCount());
+        }
+
+        @Test
+        @DisplayName("a line whose renders finish after disable goes nowhere")
+        void disabledWhileDrawing() {
+            rig(null);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            disable();
+            images.futures.get(0).complete(fakePng(8));
+            runBudgets();
+            runDrains();
+            module.flush();
+
+            assertTrue(relayedLines().isEmpty());
+        }
+
+        @Test
+        @DisplayName("no log line names the item or quotes the line")
+        void logsCarryCountsOnly() {
+            rig(null);
+            images.autoPng = fakePng(HeimdallBridgeModule.MAX_ITEM_PNG_BYTES + 1);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon() + "</hover>"
+                    + com.heimdall.core.testing.ItemCaptures.wardedJar());
+            onlyLine();
+
+            for (com.heimdall.core.log.RecordingLogger.Record record : logger.records()) {
+                assertFalse(record.message.contains("Spoon"), record.message);
+                assertFalse(record.message.contains("Warded"), record.message);
+                assertFalse(record.message.contains("show_item"), record.message);
+            }
+        }
+
+        @Test
+        @DisplayName("a bot that did not accept itemimages@1 gets [Name] text and nothing is drawn")
+        void releasedBotsGetTextOnly() {
+            rig(null, false);
+            images.autoPng = fakePng(8);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+
+            Payload line = onlyLine();
+            assertEquals("[Spoon]", line.string("msg", ""));
+            assertFalse(line.has("items"));
+            assertTrue(images.rendered.isEmpty(), "nothing is rendered for a bot that cannot take it");
+            assertTrue(budgets.isEmpty(), "and the line never waits");
+        }
+
+        @Test
+        @DisplayName("a reconnect to an older bot between render and send strips the images")
+        void capabilityIsCheckedAgainAtTheWire() {
+            rig(null);
+            images.autoPng = fakePng(8);
+
+            say("Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+            tunnel.acceptingNothing();
+
+            Payload line = onlyLine();
+            assertEquals("[Spoon]", line.string("msg", ""));
+            assertFalse(line.has("items"));
+        }
+
+        /** Four distinct items in one line, so four images ride on it. */
+        private String fourItems(String prefix) {
+            StringBuilder line = new StringBuilder(prefix);
+            for (int i = 1; i <= 4; i++) {
+                line.append("<hover:show_item:stone:").append(i).append(">[Stone]</hover>");
+            }
+            return line.toString();
+        }
+
+        @Test
+        @DisplayName("image lines that would overflow a frame go to the next one, in order")
+        void framesStayUnderTheByteBudget() {
+            rig(null);
+            images.autoPng = fakePng(HeimdallBridgeModule.MAX_ITEM_PNG_BYTES);
+
+            say("Steve", fourItems("first "));
+            say("Alex", fourItems("second "));
+            say("Steve", "plain after");
+            runDrains();
+
+            List<RecordingTunnelBus.Sent> frames = tunnel.sent(HeimdallBridgeModule.FRAME_CHAT);
+            assertEquals(2, frames.size(), "two image-heavy lines cannot share a 3 MiB frame");
+            for (RecordingTunnelBus.Sent frame : frames) {
+                assertTrue(frame.payload().toJson().length()
+                                < HeimdallBridgeModule.MAX_CHAT_FRAME_BYTES,
+                        "every frame stays under the budget");
+            }
+            List<Payload> first = frames.get(0).payload().children("lines");
+            List<Payload> second = frames.get(1).payload().children("lines");
+            assertEquals(1, first.size());
+            assertTrue(first.get(0).string("msg", "").startsWith("first "));
+            assertEquals(4, first.get(0).children("items").size(), "a line is never split");
+            assertEquals(2, second.size());
+            assertTrue(second.get(0).string("msg", "").startsWith("second "));
+            assertEquals("plain after", second.get(1).string("msg", ""), "order is preserved");
+            assertEquals(0, module.queuedChatCount());
+        }
+
+        @Test
+        @DisplayName("a line that alone exceeds the budget drops its largest images until it fits")
+        void anOversizedLineLosesImagesNotText() {
+            rig(null);
+            images.autoPng = fakePng(HeimdallBridgeModule.MAX_ITEM_PNG_BYTES);
+            StringBuilder filler = new StringBuilder();
+            for (int i = 0; i < 400_000; i++) {
+                filler.append('x');
+            }
+
+            say("Steve", fourItems(filler.toString()));
+
+            Payload line = onlyLine();
+            assertEquals(3, line.children("items").size());
+            assertTrue(line.string("msg", "").startsWith(filler.toString()), "the text is intact");
+            assertTrue(tunnel.sent(HeimdallBridgeModule.FRAME_CHAT).get(0).payload().toJson()
+                    .length() < HeimdallBridgeModule.MAX_CHAT_FRAME_BYTES);
+            assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN,
+                    "dropped 1 item image(s) so a relayed chat line fits"));
+        }
+
+        @Test
+        @DisplayName("a channel line keeps its channel and gets its images")
+        void channelLinesKeepTheirChannel() {
+            rig(chatChannels("trade"));
+            images.autoPng = fakePng(8);
+
+            sayIn("trade", "Steve", com.heimdall.core.testing.ItemCaptures.spoon());
+
+            Payload line = onlyLine();
+            assertEquals("trade", line.string("channel", ""));
+            assertEquals(1, line.children("items").size());
+        }
     }
 }

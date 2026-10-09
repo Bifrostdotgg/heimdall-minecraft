@@ -1,0 +1,1 @@
+<hover:show_item:netherite_shovel:1:unbreakable:{}:enchantments:'{"minecraft:efficiency":5,"minecraft:silk_touch":1,"vane_enchantments:unbreakable":1}':repair_cost:7:custom_name:'"Spoon"':tooltip_display:'{hidden_components:["minecraft:unbreakable"]}'><gray>[<white>Spoon<gray>]
