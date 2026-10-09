@@ -3,6 +3,7 @@ package com.heimdall.platform.bukkit;
 import com.heimdall.core.http.BedrockIdentityProvider;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
+import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.Integrations;
 import com.heimdall.core.platform.LuckPermsBridge;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
@@ -17,11 +18,12 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 
 /**
- * The three optional plugins, on the Bukkit side.
+ * The optional plugins, on the Bukkit side.
  *
  * <p>LuckPerms and Floodgate are handled by {@code :platform-common} — neither needs a Bukkit type
  * and writing them twice is what let v2's two copies drift. Trace is genuinely Bukkit-only: it
- * probes a player's <em>client</em>, and a proxy has no client connection to inspect.
+ * probes a player's <em>client</em>, and a proxy has no client connection to inspect. So is
+ * ChatControl, whose channels only exist on the backend that runs it ({@link ChatControlChannels}).
  */
 final class BukkitIntegrations implements Integrations {
 
@@ -32,10 +34,13 @@ final class BukkitIntegrations implements Integrations {
     private final HeimdallLogger logger;
     private final Executor ioExecutor;
     private final BedrockIdentityProvider floodgate;
+    private final ChatControlChannels chatControl;
 
-    BukkitIntegrations(HeimdallLogger logger, Executor ioExecutor) {
+    BukkitIntegrations(
+            HeimdallLogger logger, Executor ioExecutor, ChatControlChannels chatControl) {
         this.logger = logger;
         this.ioExecutor = ioExecutor;
+        this.chatControl = chatControl;
         // Fixed at construction: this answers a classpath question, which cannot change while the
         // JVM is running. LuckPerms is the opposite case — a plugin that registers a service on its
         // own schedule — so it is resolved lazily and retried until it appears.
@@ -75,6 +80,15 @@ final class BukkitIntegrations implements Integrations {
     @Override
     public BedrockIdentityProvider floodgate() {
         return floodgate;
+    }
+
+    /**
+     * ChatControl's channels. Answers {@link ChatChannels.State#NONE} on a server without it, so a
+     * caller never has to ask whether it is installed first. Departure D85.
+     */
+    @Override
+    public ChatChannels chatChannels() {
+        return chatControl;
     }
 
     @Override

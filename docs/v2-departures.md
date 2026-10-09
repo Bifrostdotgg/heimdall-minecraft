@@ -1835,6 +1835,77 @@ operator always can.
 a `serverId` it already knows is now being presented by a different one, without ever being told a
 hostname or a filesystem path.
 
+### D85 - the bridge follows ChatControl's channels, and fails closed when it cannot see them
+
+**New in 3.1.**
+
+**Before:** the Bukkit chat listener relayed every line at `NORMAL` priority of
+`AsyncPlayerChatEvent`, through `dispatchWithObservers`. On a server running ChatControl channels
+that is before ChatControl has decided which channel a line belongs to (on Paper it decides in the
+Adventure chat event, which fires after the legacy one), and nothing in the plugin knew channels
+existed. A line typed into `staff` reached Discord as public chat, and a Discord message was shown to
+everybody online whatever channel its mapping was meant for.
+**Now:** the plugin knows about ChatControl's channels, tells the bot what they are, tags each
+channel line with its channel, and relays only the channels the bot says this server relays.
+
+**The seam.** `ChatMessage` gains an optional `channel()`, `ChatPipeline` gains `notifyObservers()`
+(the observer half of `dispatchWithObservers`, split out), and core gains `ChatChannels` behind a
+default `Integrations.chatChannels()` that answers `NONE`. Both proxies need no change: chat on a
+proxy is one room. ChatControl is reached reflectively from `:platform-bukkit`
+(`ChatControlChannels`), through its own class loader, because it is paid, unpublished, and not a
+dependency anything can compile against.
+
+**Where relay happens moved, and only when ChatControl is installed.** Without it the listener is
+unchanged. With it, `NORMAL` runs the checks only (`dispatch`), so a muted player is still blocked
+before anything is delivered, and relay happens later from one of two places:
+
+- ChatControl's own `ChannelPostChatEvent`, at `MONITOR`, for a line delivered into a channel. This
+  also covers lines sent by command (`/ch send`), which never fire a Bukkit chat event. It runs
+  `dispatch` again, read-only, so a muted player whose line ChatControl delivered anyway is still
+  not relayed, and never cancels ChatControl's event. `isCancelledSilently()` lines (shadow-blocked
+  by ChatControl's rules, visible only to the sender) are never relayed, and only a `Player` sender
+  is chat.
+- A second `AsyncPlayerChatEvent` handler at `MONITOR`, untagged, for a player ChatControl is not
+  routing into a channel (`Channel.isUsingChannels` false, or channels switched off).
+
+`ChatChannelProxyEvent`, ChatControl's event for a line forwarded from another backend, is
+deliberately not hooked: the backend it was typed on relays its own chat, so hooking it would relay
+every network line once per server. `ChatControlAPI.sendMessage` is deliberately not used for the
+inbound direction: it re-runs ChatControl's pipeline as the sender and fires the post event again,
+which would loop every Discord line straight back to Discord.
+
+**The switch is presence, not health.** If ChatControl is installed but a class Heimdall needs has
+moved (a ChatControl update), the integration reports `broken`, the untagged handler relays nothing
+and logs that once, and inbound messages are dropped. A broken hook that fell back to relaying at
+`NORMAL` would leak exactly when the code that understands channels stopped working.
+
+**The wire (`chatchannels@1`, a build capability declared alongside `bridge@1`, like `status@1`):**
+
+| Direction | Shape |
+|---|---|
+| `bridge.chat` line | optional `channel` string, present only for a channel line; omitted, never `null` or `""`, otherwise |
+| `bridge.discord` message | optional `channel` string |
+| `config.push` bridge settings | `chatChannels`: array of channel names this server relays; absent means empty |
+| `bridge.channels` (new, plugin to bot) | `{"state": "none" \| "active" \| "broken", "channels": [names]}` |
+
+`bridge.channels` is sent at enable, on every reconnect (a frame sent into a dying socket is lost
+silently, so the bot is assumed to know nothing after one), and whenever the state or the channel
+list changes, polled every five seconds from the existing one-second flush. Never otherwise.
+
+**Both directions fail closed.** Outbound, a channel line is relayed only if its channel is in
+`chatChannels` (case-insensitive); an absent or empty setting relays no channel lines at all, so a
+missing config means silence, never a staff channel in Discord. Inbound, a message naming a channel is
+shown only to that channel's members, and dropped if the hook is not `active` or the channel is not
+known here; a message naming no channel is shown to everybody only when the state is `none`, and is
+dropped on an `active` or `broken` server, because "everybody" is not an audience anybody picked on a
+channelled server. Drops are counted in the debug line, never described.
+
+**Known limit, named.** For a player who is *not* in a channel, on Paper, the untagged relay still
+runs at the legacy event's `MONITOR`, which is before ChatControl's own processing in the Adventure
+event. A line ChatControl's rules later block for such a player can therefore still be relayed. That
+is no worse than before this change, and channel lines, the case this entry exists for, are relayed
+from ChatControl's post-delivery event, after every rule has run.
+
 ---
 
 ## Structure

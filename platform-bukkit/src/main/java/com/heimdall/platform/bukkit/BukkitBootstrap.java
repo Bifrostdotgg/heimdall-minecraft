@@ -280,8 +280,12 @@ final class BukkitBootstrap {
                 new BukkitLoginListener(
                         logger, runtime.loginPipeline(), platform.integrations().floodgate()),
                 plugin);
+        // Before the chat listener, so the first line typed already knows whether ChatControl is
+        // deciding channels. attach() also registers ChatControl's channel hook when it is there.
+        platform.chatControl().attach(runtime.chatPipeline());
         Bukkit.getPluginManager().registerEvents(
-                new BukkitChatListener(logger, runtime.chatPipeline(), platform.messenger()),
+                new BukkitChatListener(
+                        logger, runtime.chatPipeline(), platform.messenger(), platform.chatControl()),
                 plugin);
         Bukkit.getPluginManager().registerEvents(
                 new BukkitCommandListener(logger, runtime.commandPipeline(), platform.messenger()),

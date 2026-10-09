@@ -15,6 +15,14 @@ description: Discord-to-Minecraft whitelist, role sync, punishments and console 
 # methods exist. On servers that lack them, BukkitMainThread is unchanged.
 folia-supported: true
 
+# Load order only, never a requirement: Heimdall runs the same with or without
+# ChatControl. Asking for it to enable first means the chat-channel hook (see
+# ChatControlChannels) registers at our own enable on an ordinary boot, so the
+# first line anybody types already knows which channel it went to. Nothing
+# depends on that order being honoured: the integration resolves lazily and
+# keeps retrying while ChatControl is missing (departure D85).
+softdepend: [ChatControl]
+
 # Commands that must exist the moment the plugin loads live here. Bukkit fixes a
 # descriptor command's existence at load time; a Disabled stub is the only unbind
 # those names get, and that stub would swallow /ban on a LiteBans hook install.
