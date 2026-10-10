@@ -129,19 +129,25 @@ public interface ShellContext {
     boolean deliverUnclaimed(String requestId, String type, Payload payload);
 
     /**
-     * Extracts the core from a release jar the updater has downloaded <strong>and verified</strong>,
-     * checks it against the hash the build recorded next to it, and says whether it can be swapped
-     * in live: built for this shell's contract, and not the core already running.
+     * Re-checks a release jar the updater downloaded against {@code expectedSha256} (the file on
+     * disk is hashed again, here, so a jar replaced after the download is refused), extracts its
+     * core, checks that against the hash the build recorded next to it, and says whether it can be
+     * swapped in live: built for this shell's contract, and not the core already running.
+     *
+     * <p>A {@code null} or malformed {@code expectedSha256} is refused: a live swap runs what it is
+     * given, and nothing could vouch for this jar.
      *
      * <p>Blocking (it reads and writes a few megabytes); never call it on a server thread. Never
      * throws: an unusable jar comes back as {@link StagedCore#unusable}.
      */
-    StagedCore stageRelease(Path releaseJar);
+    StagedCore stageRelease(Path releaseJar, String expectedSha256);
 
     /**
-     * Starts a live swap to {@code staged} on the shell's swap thread and returns at once. The
-     * calling core is stopped by it, so anything the caller still wants to say (a command reply, a
-     * dashboard answer) must be said <em>before</em> this is called.
+     * Requests a live swap to {@code staged} and returns at once. The swap runs on the shell's swap
+     * thread and is held back for {@link ShellContract#SWAP_SETTLE_MS} first, so the caller can
+     * still report the outcome of this call (a command reply, a dashboard answer) before the swap
+     * stops it. The answer is therefore whether the swap was accepted, and a caller can say so
+     * truthfully.
      *
      * @param audience a platform command sender to report the outcome to, or {@code null} for the
      *     console only; the outcome is always logged

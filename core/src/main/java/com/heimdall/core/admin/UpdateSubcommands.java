@@ -76,7 +76,6 @@ final class UpdateSubcommands {
         }
     }
 
-    /** {@code /hd update} — download the newest release and stage it for the next restart. */
     /**
      * {@code swap}: applies a core an operator staged by hand. Listed here so help and completion
      * show it, but the shell answers it before any core sees it, because it has to work with no
@@ -101,11 +100,21 @@ final class UpdateSubcommands {
 
         @Override
         public void run(CommandSource source, List<String> args, AdminContext context) {
+            // The same gate the shell applies, as a belt: the admin tree is already behind
+            // heimdall.admin, and this costs one call.
+            if (!source.hasPermission(AdminCommand.PERMISSION)) {
+                source.sendMessage(Msg.legacy("§cYou do not have permission to use that."));
+                return;
+            }
             source.sendMessage(Msg.legacy("§eSwapping is done by Heimdall's shell, and this "
                     + "server's shell did not answer. Install the current release and restart."));
         }
     }
 
+    /**
+     * {@code /hd update}: download the newest release, install it for the next restart, and swap
+     * its core in live when it is verified and fits this shell (departure D87).
+     */
     static final class Update implements AdminSubcommand {
 
         @Override
@@ -142,10 +151,12 @@ final class UpdateSubcommands {
             context.async(new Runnable() {
                 @Override
                 public void run() {
-                    source.sendMessage(Msg.legacy("§a" + updates.updateNow()));
-                    // After the reply: the swap stops this core. The shell reports the outcome to the
-                    // same sender (departure D87).
-                    updates.startPendingSwap(source.nativeSender());
+                    // A live swap, if there is one, is requested inside updateNow and the message
+                    // says whether it was accepted. The shell holds a requested swap back long
+                    // enough for this reply to go out first, then reports the outcome to the same
+                    // sender (departure D87).
+                    String said = updates.updateNow(source.nativeSender());
+                    source.sendMessage(Msg.legacy("§a" + said));
                 }
             });
         }

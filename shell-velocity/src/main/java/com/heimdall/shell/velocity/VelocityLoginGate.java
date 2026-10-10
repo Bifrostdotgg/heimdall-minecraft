@@ -58,7 +58,7 @@ final class VelocityLoginGate implements AwaitingEventExecutor<LoginEvent> {
 
     private void decide(LoginGate gate, LoginEvent event) {
         try {
-            gate.decide(event);
+            gates.decide(gate, event);
         } catch (Throwable broken) {
             log.error("the core's login gate failed for " + event.getPlayer().getUsername()
                     + "; refusing the login", broken);

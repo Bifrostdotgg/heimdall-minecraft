@@ -233,7 +233,7 @@ public final class FakeShellContext implements ShellContext {
     }
 
     @Override
-    public StagedCore stageRelease(Path releaseJar) {
+    public StagedCore stageRelease(Path releaseJar, String expectedSha256) {
         return staging;
     }
 

@@ -23,6 +23,12 @@ public final class ShellContract {
     /** The contract this build implements. See the class note before changing it. */
     public static final int VERSION = 1;
 
+    /**
+     * How long a swap a core requests through {@link ShellContext#swapTo} is held back before the
+     * old core is stopped: time for the caller's reply to go out on the tunnel the swap closes.
+     */
+    public static final long SWAP_SETTLE_MS = 1_000L;
+
     /** {@link ShellContext#platform()} on Paper, Spigot and Folia. */
     public static final String PLATFORM_BUKKIT = "bukkit";
 

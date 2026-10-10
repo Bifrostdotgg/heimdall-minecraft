@@ -109,14 +109,15 @@ class RemoteUpdateHandlerTest {
         assertFalse(reply.string("message", "").isEmpty(), "and it says why");
     }
 
-    @Test
-    @DisplayName("a live swap starts only after the dashboard has been answered (D87)")
-    void swapStartsAfterTheReply() {
+    /**
+     * Drives one dashboard update against a shell that answers the swap request with
+     * {@code accept}, and returns the single reply.
+     */
+    private Payload updateWithShell(final boolean accept, final List<Integer> repliesAtRequest) {
         final RecordingReplier replier = new RecordingReplier();
-        final List<Integer> repliesWhenSwapStarted = new ArrayList<Integer>();
         HotSwap shell = new HotSwap() {
             @Override
-            public Staged stage(java.nio.file.Path releaseJar) {
+            public Staged stage(java.nio.file.Path releaseJar, String expectedSha256) {
                 return new Staged() {
                     @Override
                     public boolean swappable() {
@@ -135,9 +136,8 @@ class RemoteUpdateHandlerTest {
 
                     @Override
                     public boolean swap(Object audience) {
-                        // The swap stops this core and with it the tunnel the reply goes out on.
-                        repliesWhenSwapStarted.add(replier.replies.size());
-                        return true;
+                        repliesAtRequest.add(replier.replies.size());
+                        return accept;
                     }
                 };
             }
@@ -158,11 +158,36 @@ class RemoteUpdateHandlerTest {
 
         new UpdateWiring.RemoteUpdateHandler(logger, service, replier).onMessage(updateFrame());
 
-        assertEquals(1, replier.replies.size());
-        assertTrue(replier.replies.get(0).string("message", "").contains("swapping it in now"),
-                replier.replies.get(0).toString());
-        assertEquals(java.util.Collections.singletonList(1), repliesWhenSwapStarted,
-                "the swap must start after the reply, exactly once");
+        assertEquals(1, replier.replies.size(), "exactly one answer");
+        return replier.replies.get(0);
+    }
+
+    @Test
+    @DisplayName("a live swap is requested before the reply, which says it was accepted (D87)")
+    void acceptedSwapIsReported() {
+        List<Integer> repliesAtRequest = new ArrayList<Integer>();
+
+        Payload reply = updateWithShell(true, repliesAtRequest);
+
+        // Requested first so the reply can be truthful; the shell holds the swap back long enough
+        // for the reply to go out on the tunnel it closes (ShellContract.SWAP_SETTLE_MS).
+        assertEquals(java.util.Collections.singletonList(0), repliesAtRequest,
+                "the swap is requested once, before the reply");
+        assertTrue(reply.bool("success", false));
+        assertTrue(reply.string("message", "").contains("Swapping it in now"), reply.toString());
+    }
+
+    @Test
+    @DisplayName("a swap the shell will not start is reported as restart-only, and logged")
+    void refusedSwapIsReported() {
+        Payload reply = updateWithShell(false, new ArrayList<Integer>());
+
+        String message = reply.string("message", "");
+        assertTrue(reply.bool("success", false), "the install for the next restart still worked");
+        assertFalse(message.contains("Swapping it in now"), message);
+        assertTrue(message.contains("could not start"), message);
+        assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "live swap could not start"),
+                logger.records().toString());
     }
 
     @Test

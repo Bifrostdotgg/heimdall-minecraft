@@ -86,7 +86,7 @@ final class BungeeLoginGate implements Listener {
         } catch (RejectedExecutionException full) {
             log.warn("refusing " + connection.getName() + ": " + MAX_IN_FLIGHT
                     + " logins are already being decided");
-            deny(event, ShellMessages.LOGIN_UPDATING);
+            deny(event, ShellMessages.LOGIN_BUSY);
             complete(event, completed);
         }
     }
@@ -98,7 +98,7 @@ final class BungeeLoginGate implements Listener {
             return;
         }
         try {
-            decision.gate().decide(event);
+            gates.decide(decision.gate(), event);
         } catch (Throwable broken) {
             log.error("the core's login gate failed for " + connection.getName()
                     + "; refusing the login", broken);

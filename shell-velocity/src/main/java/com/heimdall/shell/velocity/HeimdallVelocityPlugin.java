@@ -8,6 +8,7 @@ import com.heimdall.shell.ShellBuildConstants;
 import com.heimdall.shell.contract.ShellContract;
 import com.heimdall.shell.hotswap.CommandPlatform;
 import com.heimdall.shell.hotswap.LoadedCore;
+import com.heimdall.shell.hotswap.LoginGateHolder;
 import com.heimdall.shell.hotswap.ShellAudience;
 import com.heimdall.shell.hotswap.ShellHost;
 import com.heimdall.shell.hotswap.ShellLog;
@@ -76,17 +77,32 @@ public final class HeimdallVelocityPlugin {
         this.log = new Slf4jShellLog(logger);
     }
 
-    /** Loads and starts the core once the proxy has finished initialising. */
+    /**
+     * Loads and starts the core once the proxy has finished initialising.
+     *
+     * <p>The login gate first, before anything else can fail, and everything after it inside
+     * {@link ShellHost#enable}, which sets the gate {@code DOWN} if any of it throws: a broken
+     * enable refuses logins instead of admitting everyone (departure D87).
+     */
     @Subscribe
     public void onProxyInitialize(ProxyInitializeEvent event) {
+        Platform platform;
+        LoginGateHolder gates;
         try {
-            host = new ShellHost(new Platform(), ShellBuildConstants.VERSION);
-            installAdminRelays(host);
-            registerLoginGate(host);
-            host.boot();
+            platform = new Platform();
+            gates = new LoginGateHolder(log);
+            registerLoginGate(gates);
         } catch (Throwable failed) {
-            slf4j.error("Heimdall's shell could not start; the proxy is unaffected", failed);
+            slf4j.error("Heimdall could not register its login gate; it is not running", failed);
+            return;
         }
+        host = ShellHost.enable(platform, ShellBuildConstants.VERSION, gates,
+                new ShellHost.Preparation() {
+                    @Override
+                    public void prepare(ShellHost target) {
+                        installAdminRelays(target);
+                    }
+                });
     }
 
     /** Stops the core while the proxy is still up enough to log about it. */
@@ -128,9 +144,9 @@ public final class HeimdallVelocityPlugin {
      * is used anyway, for the reason the core's {@code VelocityEvents} gives.
      */
     @SuppressWarnings("deprecation")
-    private void registerLoginGate(ShellHost target) {
+    private void registerLoginGate(LoginGateHolder gates) {
         proxy.getEventManager().register(this, LoginEvent.class, PostOrder.FIRST,
-                new VelocityLoginGate(target.loginGate(), log));
+                new VelocityLoginGate(gates, log));
     }
 
     /**

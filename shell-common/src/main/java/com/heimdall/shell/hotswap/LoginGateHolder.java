@@ -73,6 +73,9 @@ public final class LoginGateHolder {
 
     private LoginGate gate;
     private State state = State.STARTING;
+
+    /** Logins a core gate is deciding right now; guarded by {@link #lock}. */
+    private int inFlight;
     private boolean warnedNoGate;
 
     /** How long {@link #await()} waits. */
@@ -107,6 +110,62 @@ public final class LoginGateHolder {
                 }
             }
         });
+    }
+
+    /**
+     * Asks {@code gate} to decide {@code event}, counted as in flight while it does, so a swap can
+     * wait for logins the outgoing core is deciding before it stops that core ({@link #drain}).
+     * Platform listeners call this rather than {@code gate.decide} directly. Throws whatever the
+     * gate throws.
+     */
+    public void decide(LoginGate gate, Object event) {
+        synchronized (lock) {
+            inFlight++;
+        }
+        try {
+            gate.decide(event);
+        } finally {
+            synchronized (lock) {
+                inFlight--;
+                lock.notifyAll();
+            }
+        }
+    }
+
+    /**
+     * Takes the current gate away for a swap: logins arriving from now on wait for the next core
+     * (the state is {@link State#SWAPPING}) instead of reaching a core that is about to stop.
+     */
+    public void suspend() {
+        synchronized (lock) {
+            gate = null;
+            state = State.SWAPPING;
+            lock.notifyAll();
+        }
+    }
+
+    /**
+     * Waits up to {@code maxWaitMs} for every in-flight decision to finish.
+     *
+     * @return whether none is left
+     */
+    public boolean drain(long maxWaitMs) {
+        long deadline = System.nanoTime() + Math.max(0L, maxWaitMs) * 1_000_000L;
+        synchronized (lock) {
+            while (inFlight > 0) {
+                long remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0) {
+                    return false;
+                }
+                try {
+                    lock.wait(Math.max(1L, remainingNanos / 1_000_000L));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return inFlight == 0;
+                }
+            }
+            return true;
+        }
     }
 
     /** The current gate, without waiting; {@code null} when there is none. */

@@ -1,12 +1,15 @@
 package com.heimdall.shell.hotswap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.util.Registration;
 import com.heimdall.shell.contract.LoginGate;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -140,5 +143,97 @@ class LoginGateHolderTest {
         old.close();
 
         assertSame(next, gates.current());
+    }
+
+    /** A gate that blocks in {@code decide} until {@link #release} is counted down. */
+    private static final class BlockingGate implements LoginGate {
+
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        public void decide(Object event) {
+            entered.countDown();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("drain waits for a login a gate is still deciding, and returns once it is done")
+    void drainWaitsForInFlight() throws Exception {
+        final LoginGateHolder gates = new LoginGateHolder(log, 5_000L);
+        final BlockingGate gate = new BlockingGate();
+        Thread login = new Thread(() -> gates.decide(gate, "login"));
+        login.start();
+        assertTrue(gate.entered.await(2, TimeUnit.SECONDS));
+        Thread releaser = new Thread(() -> {
+            try {
+                Thread.sleep(150L);
+            } catch (InterruptedException ignored) {
+                return;
+            }
+            gate.release.countDown();
+        });
+        releaser.start();
+
+        long started = System.nanoTime();
+        assertTrue(gates.drain(5_000L));
+        long waited = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+        assertTrue(waited >= 100L, "drain returned while a login was in flight: " + waited + "ms");
+        login.join();
+        releaser.join();
+    }
+
+    @Test
+    @DisplayName("drain gives up after its bound and says so")
+    void drainIsBounded() throws Exception {
+        final LoginGateHolder gates = new LoginGateHolder(log, 5_000L);
+        final BlockingGate gate = new BlockingGate();
+        Thread login = new Thread(() -> gates.decide(gate, "login"));
+        login.start();
+        assertTrue(gate.entered.await(2, TimeUnit.SECONDS));
+
+        assertFalse(gates.drain(100L));
+
+        gate.release.countDown();
+        login.join();
+        assertTrue(gates.drain(0L), "nothing is in flight any more");
+    }
+
+    @Test
+    @DisplayName("a gate that throws still leaves the in-flight count, so a later drain is not stuck")
+    void throwingDecisionIsNotLeftInFlight() {
+        LoginGateHolder gates = new LoginGateHolder(log, 5_000L);
+        LoginGate broken = new LoginGate() {
+            @Override
+            public void decide(Object event) {
+                throw new IllegalStateException("boom");
+            }
+        };
+
+        assertThrows(IllegalStateException.class, () -> gates.decide(broken, "login"));
+        assertTrue(gates.drain(0L));
+    }
+
+    @Test
+    @DisplayName("suspend takes the gate away and holds new logins for the next one")
+    void suspendHolds() {
+        LoginGateHolder gates = new LoginGateHolder(log, 80L);
+        gates.bind(GATE);
+        gates.state(LoginGateHolder.State.RUNNING);
+
+        gates.suspend();
+
+        assertNull(gates.current());
+        assertSame(LoginGateHolder.State.SWAPPING, gates.state());
+        LoginGateHolder.Decision decision = gates.await();
+        assertNull(decision.gate());
+        assertEquals(ShellMessages.LOGIN_UPDATING, decision.refusal(), "held, then 'updating'");
+        assertTrue(log.errors().isEmpty(), "a suspended gate is not the running-without-a-gate bug");
     }
 }

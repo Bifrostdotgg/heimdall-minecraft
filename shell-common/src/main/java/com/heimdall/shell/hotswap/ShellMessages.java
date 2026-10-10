@@ -18,6 +18,10 @@ public final class ShellMessages {
     public static final String LOGIN_NO_CORE =
             "This server cannot check logins right now. Please try again later.";
 
+    /** A login refused because too many are already being decided at once. */
+    public static final String LOGIN_BUSY =
+            "This server is busy checking logins. Please try again in a moment.";
+
     /** A command arrived with no core running. */
     public static final String NOT_RUNNING =
             "§cHeimdall is not running right now. An admin can check §f/%s status§c.";

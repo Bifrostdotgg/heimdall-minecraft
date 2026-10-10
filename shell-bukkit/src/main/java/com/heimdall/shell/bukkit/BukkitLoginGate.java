@@ -43,7 +43,7 @@ final class BukkitLoginGate implements Listener {
             return;
         }
         try {
-            decision.gate().decide(event);
+            gates.decide(decision.gate(), event);
         } catch (Throwable broken) {
             // The core's own listener contains everything, so this is a gate that could not run at
             // all: a classloader closed under it, most likely. No core decided, so the login is

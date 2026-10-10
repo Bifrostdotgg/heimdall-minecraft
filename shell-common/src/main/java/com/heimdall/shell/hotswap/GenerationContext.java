@@ -148,8 +148,8 @@ class GenerationContext implements ShellContext {
     }
 
     @Override
-    public StagedCore stageRelease(Path releaseJar) {
-        return host.stageForSwap(releaseJar);
+    public StagedCore stageRelease(Path releaseJar, String expectedSha256) {
+        return host.stageForSwap(releaseJar, expectedSha256);
     }
 
     @Override

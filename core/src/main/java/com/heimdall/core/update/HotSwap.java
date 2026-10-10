@@ -14,16 +14,18 @@ public interface HotSwap {
     /** No shell: every update is installed for the next restart, as before hot-swap existed. */
     HotSwap NONE = new HotSwap() {
         @Override
-        public Staged stage(Path releaseJar) {
+        public Staged stage(Path releaseJar, String expectedSha256) {
             return Staged.refused("this build cannot swap its core live");
         }
     };
 
     /**
-     * Extracts and checks the core inside a downloaded, <strong>verified</strong> release jar.
-     * Blocking; never on a server thread. Never throws.
+     * Extracts and checks the core inside a downloaded release jar, after re-checking the jar
+     * against {@code expectedSha256}: the file on disk is hashed again here, so a jar replaced
+     * between the download and the swap is refused. Blocking; never on a server thread. Never
+     * throws.
      */
-    Staged stage(Path releaseJar);
+    Staged stage(Path releaseJar, String expectedSha256);
 
     /** A staged core, and whether it can go in live. */
     abstract class Staged {
@@ -38,11 +40,11 @@ public interface HotSwap {
         public abstract String version();
 
         /**
-         * Starts the live swap, which stops the core this is running in. Everything the caller
-         * still wants to say must be said first.
+         * Requests the live swap, which will stop the core this is running in. The shell holds it
+         * back briefly, so a reply the caller sends right after this still goes out.
          *
          * @param audience a platform command sender to report the outcome to, or {@code null}
-         * @return whether the swap was started
+         * @return whether the shell accepted the swap
          */
         public abstract boolean swap(Object audience);
 

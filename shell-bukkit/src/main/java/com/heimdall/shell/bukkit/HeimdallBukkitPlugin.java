@@ -8,6 +8,7 @@ import com.heimdall.shell.contract.ShellContract;
 import com.heimdall.shell.hotswap.CommandPlatform;
 import com.heimdall.shell.hotswap.JulShellLog;
 import com.heimdall.shell.hotswap.LoadedCore;
+import com.heimdall.shell.hotswap.LoginGateHolder;
 import com.heimdall.shell.hotswap.ShellAudience;
 import com.heimdall.shell.hotswap.ShellHost;
 import com.heimdall.shell.hotswap.ShellLog;
@@ -44,21 +45,33 @@ public final class HeimdallBukkitPlugin extends JavaPlugin {
 
     private ShellHost host;
 
+    /**
+     * The login gate first, before anything else can fail: a login must never find no listener, or
+     * it would be admitted with no decision at all (departure D87). Everything after it runs inside
+     * {@link ShellHost#enable}, which sets the gate {@code DOWN} if any of it throws, so a broken
+     * enable refuses logins instead of admitting everyone.
+     */
     @Override
     public void onEnable() {
+        Platform platform;
+        LoginGateHolder gates;
         try {
-            Platform platform = new Platform();
-            host = new ShellHost(platform, ShellBuildConstants.VERSION);
-            installDescriptorRelays(host);
-            // The login gate before the core, and for good: a login must never find no listener,
-            // or it would be admitted with no decision at all (departure D87).
+            platform = new Platform();
+            gates = new LoginGateHolder(platform.log());
             getServer().getPluginManager().registerEvents(
-                    new BukkitLoginGate(host.loginGate(), platform.log()), this);
-            host.boot();
+                    new BukkitLoginGate(gates, platform.log()), this);
         } catch (Throwable failed) {
-            getLogger().log(Level.SEVERE, "Heimdall's shell could not start; the server is "
-                    + "unaffected", failed);
+            getLogger().log(Level.SEVERE, "Heimdall could not register its login gate; it is not "
+                    + "running", failed);
+            return;
         }
+        host = ShellHost.enable(platform, ShellBuildConstants.VERSION, gates,
+                new ShellHost.Preparation() {
+                    @Override
+                    public void prepare(ShellHost target) {
+                        installDescriptorRelays(target);
+                    }
+                });
     }
 
     @Override

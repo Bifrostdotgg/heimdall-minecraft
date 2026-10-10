@@ -244,11 +244,46 @@ class UpdateServiceTest {
             assertTrue(outcome.installed());
             assertEquals(installer.outcome.target(), hotSwap.stagedFrom.get(0),
                     "the shell must stage the very jar the installer verified");
-            assertTrue(outcome.message().contains("swapping it in now"), outcome.message());
-            assertTrue(hotSwap.swaps.isEmpty(), "never started before the outcome is reported");
+            assertEquals(Arrays.asList("abababababababababababababababababababababababababababababababab"), hotSwap.expectedShas,
+                    "the shell re-checks the jar against the hash it was downloaded against");
+            assertFalse(outcome.message().toLowerCase().contains("swapping"),
+                    "nothing is swapping until a swap is requested: " + outcome.message());
+            assertTrue(hotSwap.swaps.isEmpty(), "never requested by the service itself");
 
-            assertTrue(outcome.startSwap("admin"));
+            InstallOutcome reported = outcome.startSwap("admin");
             assertEquals(Arrays.asList("admin"), hotSwap.swaps);
+            assertTrue(reported.message().contains("Swapping it in now"), reported.message());
+            assertFalse(reported.swapRefused());
+            assertNull(reported.pendingSwap(), "a swap is requested once");
+            assertSame(reported, reported.startSwap("again"));
+            assertEquals(Arrays.asList("admin"), hotSwap.swaps);
+        }
+
+        @Test
+        @DisplayName("a swap the shell refuses to start is reported as restart-only, never as swapping")
+        void refusedSwapIsReportedTruthfully() {
+            hotSwap.accept = false;
+            UpdateService service = serviceWithShell(hashed("3.1.0", "abababababababababababababababababababababababababababababababab"));
+
+            InstallOutcome reported = service.updateNow().startSwap("admin");
+
+            assertEquals(Arrays.asList("admin"), hotSwap.swaps, "it was asked");
+            assertTrue(reported.swapRefused());
+            assertTrue(reported.installed(), "the restart install still stands");
+            assertFalse(reported.message().contains("Swapping it in now"), reported.message());
+            assertTrue(reported.message().contains("could not start"), reported.message());
+            assertTrue(reported.message().contains("next restart"), reported.message());
+        }
+
+        @Test
+        @DisplayName("a shell that throws on the swap request is a refusal, not an escape")
+        void throwingSwapIsARefusal() {
+            hotSwap.explode = true;
+            UpdateService service = serviceWithShell(hashed("3.1.0", "abababababababababababababababababababababababababababababababab"));
+
+            InstallOutcome reported = service.updateNow().startSwap(null);
+
+            assertTrue(reported.swapRefused());
         }
 
         @Test
@@ -262,7 +297,9 @@ class UpdateServiceTest {
             assertNull(outcome.pendingSwap());
             assertTrue(hotSwap.stagedFrom.isEmpty(), "nothing unverified may even be staged");
             assertTrue(outcome.message().contains("No checksum was published"), outcome.message());
-            assertFalse(outcome.startSwap("admin"));
+            assertSame(outcome, outcome.startSwap("admin"), "with nothing pending, nothing changes");
+            assertFalse(outcome.swapRefused());
+            assertTrue(hotSwap.swaps.isEmpty());
         }
 
         @Test
@@ -609,12 +646,16 @@ class UpdateServiceTest {
     private static final class FakeHotSwap implements HotSwap {
 
         final List<java.nio.file.Path> stagedFrom = new ArrayList<java.nio.file.Path>();
+        final List<String> expectedShas = new ArrayList<String>();
         final List<Object> swaps = new ArrayList<Object>();
         Staged refusal;
+        boolean accept = true;
+        boolean explode;
 
         @Override
-        public Staged stage(java.nio.file.Path releaseJar) {
+        public Staged stage(java.nio.file.Path releaseJar, String expectedSha256) {
             stagedFrom.add(releaseJar);
+            expectedShas.add(expectedSha256);
             if (refusal != null) {
                 return refusal;
             }
@@ -637,7 +678,10 @@ class UpdateServiceTest {
                 @Override
                 public boolean swap(Object audience) {
                     swaps.add(audience);
-                    return true;
+                    if (explode) {
+                        throw new IllegalStateException("shell gone");
+                    }
+                    return accept;
                 }
             };
         }

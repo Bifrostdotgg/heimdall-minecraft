@@ -21,6 +21,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Owns the running core generation: loads it at server start, swaps it live, rolls a failed swap
@@ -74,6 +75,24 @@ public final class ShellHost {
     /** Where an operator stages a core (or a whole release) for {@code swap}. */
     public static final String STAGED_FILE = "staged.jar";
 
+    /**
+     * How long server shutdown waits for a swap in progress before stopping without it. Bounded so
+     * a core whose start or stop hangs can never hold the server's own shutdown hostage.
+     */
+    static final long SHUTDOWN_WAIT_MS = 20_000L;
+
+    /**
+     * How long a swap waits, with the gate already cleared, for logins the outgoing core is still
+     * deciding before it stops that core.
+     */
+    static final long GATE_DRAIN_MS = 5_000L;
+
+    /** The steps a platform shell runs between building the host and booting the first core. */
+    public interface Preparation {
+
+        void prepare(ShellHost host) throws Exception;
+    }
+
     private final ShellPlatform platform;
     private final ShellLog log;
     private final String shellVersion;
@@ -81,8 +100,11 @@ public final class ShellHost {
     private final RelayTable relays;
     private final LoginGateHolder gates;
 
-    /** Held for a whole transition (boot, swap, shutdown), so two can never interleave. */
-    private final Object transition = new Object();
+    /**
+     * Held for a whole transition (boot, swap, shutdown), so two can never interleave. A lock
+     * rather than a monitor so shutdown can wait for it with a bound.
+     */
+    private final ReentrantLock transition = new ReentrantLock();
 
     private volatile Generation current;
     private volatile boolean swapping;
@@ -98,7 +120,22 @@ public final class ShellHost {
     /** How long a retired loader stays open; a field so tests can shorten it. */
     volatile long loaderGraceMs = LOADER_GRACE_MS;
 
+    /** How long a core-requested swap is held back; a field so tests can shorten it. */
+    volatile long settleMs = ShellContract.SWAP_SETTLE_MS;
+
+    /** How long shutdown waits for a swap; a field so tests can shorten it. */
+    volatile long shutdownWaitMs = SHUTDOWN_WAIT_MS;
+
     public ShellHost(ShellPlatform platform, String shellVersion) {
+        this(platform, shellVersion, new LoginGateHolder(platform == null ? null : platform.log()));
+    }
+
+    /**
+     * With a login gate the platform shell built, and registered its listener for, before this
+     * host existed. That order is what keeps the gate fail-closed even if building the host throws:
+     * see {@link #enable}.
+     */
+    public ShellHost(ShellPlatform platform, String shellVersion, LoginGateHolder gates) {
         if (platform == null) {
             throw new IllegalArgumentException("a platform is required");
         }
@@ -106,7 +143,7 @@ public final class ShellHost {
         this.log = platform.log();
         this.shellVersion = shellVersion == null ? "unknown" : shellVersion;
         this.tunnel = new ShellTunnel(log, this.shellVersion);
-        this.gates = new LoginGateHolder(log);
+        this.gates = gates == null ? new LoginGateHolder(log) : gates;
         this.relays = new RelayTable(platform.commands(), platform.audience(), log,
                 new RelayTable.State() {
                     @Override
@@ -137,6 +174,39 @@ public final class ShellHost {
             this.loaded = loaded;
             this.context = context;
         }
+    }
+
+    /**
+     * Everything a platform shell's enable does after it has registered its login listener on
+     * {@code gates}: build the host, run {@code preparation} (install the permanent relays), boot.
+     *
+     * <p>Fail closed. If any of it throws, the gate is set {@code DOWN}, so the listener already
+     * registered refuses every login rather than the platform admitting everyone with no decision
+     * at all, and the failure is logged as an error. Registering the listener first is the caller's
+     * half of the same rule.
+     *
+     * @return the host, or {@code null} if it could not even be built
+     */
+    public static ShellHost enable(
+            ShellPlatform platform, String shellVersion, LoginGateHolder gates,
+            Preparation preparation) {
+        ShellHost host = null;
+        try {
+            host = new ShellHost(platform, shellVersion, gates);
+            if (preparation != null) {
+                preparation.prepare(host);
+            }
+            host.boot();
+        } catch (Throwable failed) {
+            gates.state(LoginGateHolder.State.DOWN);
+            try {
+                platform.log().error("Heimdall's shell could not start, so logins are refused "
+                        + "until it does; restart once the cause below is fixed", failed);
+            } catch (Throwable ignored) {
+                // Nothing left to report through.
+            }
+        }
+        return host;
     }
 
     // ── State ────────────────────────────────────────────────────────────────
@@ -211,7 +281,8 @@ public final class ShellHost {
      * @return whether a core is now running
      */
     public boolean boot() {
-        synchronized (transition) {
+        transition.lock();
+        try {
             try {
                 publishedTunnel = platform.publishTunnel(tunnel);
             } catch (Throwable failed) {
@@ -249,6 +320,8 @@ public final class ShellHost {
             log.info("core " + loaded.identity() + " running (shell " + shellVersion
                     + ", contract " + ShellContract.VERSION + ")");
             return true;
+        } finally {
+            transition.unlock();
         }
     }
 
@@ -263,11 +336,14 @@ public final class ShellHost {
     public void shutdown() {
         shutDown = true;
         gates.state(LoginGateHolder.State.DOWN);
-        synchronized (transition) {
-            Generation stopping = current;
-            current = null;
-            if (stopping != null) {
-                stop(stopping, false);
+        boolean locked = acquireForShutdown();
+        try {
+            if (locked) {
+                Generation stopping = current;
+                current = null;
+                if (stopping != null) {
+                    stop(stopping, false);
+                }
             }
             relays.shutdown();
             try {
@@ -276,6 +352,10 @@ public final class ShellHost {
                 log.debug("withdrawing the HeimdallTunnel service failed: " + failed);
             }
             publishedTunnel = Registration.NONE;
+        } finally {
+            if (locked) {
+                transition.unlock();
+            }
         }
         synchronized (executorsLock) {
             if (swapThread != null) {
@@ -285,6 +365,35 @@ public final class ShellHost {
                 // Pending loader closes are dropped on purpose: see the method note.
                 timer.shutdownNow();
             }
+        }
+    }
+
+    /**
+     * Waits, bounded, for a swap in progress to finish so shutdown can stop whatever core it left.
+     * Past the bound the swap thread is interrupted and given one more short chance; after that
+     * shutdown carries on without stopping the core, because the server's own shutdown must never
+     * hang on a core that does.
+     */
+    private boolean acquireForShutdown() {
+        try {
+            if (transition.tryLock(shutdownWaitMs, TimeUnit.MILLISECONDS)) {
+                return true;
+            }
+            log.warn("a core swap is still running after " + shutdownWaitMs + "ms; interrupting "
+                    + "it so the server can stop");
+            synchronized (executorsLock) {
+                if (swapThread != null) {
+                    swapThread.shutdownNow();
+                }
+            }
+            if (transition.tryLock(2_000L, TimeUnit.MILLISECONDS)) {
+                return true;
+            }
+            log.error("the core swap did not stop; shutting down without stopping the core", null);
+            return false;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -305,12 +414,23 @@ public final class ShellHost {
     }
 
     /**
-     * Stages a downloaded, verified release (or a bare core) for a live swap, and says whether it
-     * can be swapped in. See {@code ShellContext.stageRelease}. Never throws.
+     * Stages a downloaded release (or a bare core) for a live swap, after re-checking the file
+     * against {@code expectedSha256}, and says whether it can be swapped in. See
+     * {@code ShellContext.stageRelease}. Never throws.
      */
-    public StagedCore stageForSwap(Path file) {
+    public StagedCore stageForSwap(Path file, String expectedSha256) {
+        if (!Sha256.isWellFormed(expectedSha256)) {
+            return StagedCore.unusable("no verified checksum came with this release, so it cannot "
+                    + "be swapped in live");
+        }
         CoreArchive.CoreJar jar;
         try {
+            String actual = Sha256.of(file);
+            if (!actual.equals(expectedSha256)) {
+                return StagedCore.unusable("the downloaded release no longer matches its checksum "
+                        + "(expected " + expectedSha256.substring(0, 12) + ", found "
+                        + actual.substring(0, 12) + ")");
+            }
             jar = stage(file);
         } catch (CoreArchiveException unusable) {
             return StagedCore.unusable(unusable.getMessage());
@@ -351,7 +471,14 @@ public final class ShellHost {
             log.warn("the staged core changed between staging and swapping; refusing the swap");
             return false;
         }
-        return requestSwap(jar, new AudienceListener(platform.audience(), sender));
+        // Held back by settleMs, so the core that asked can still report before the swap stops it.
+        final CoreArchive.CoreJar verified = jar;
+        return requestSwap(new CoreSource() {
+            @Override
+            public CoreArchive.CoreJar get() {
+                return verified;
+            }
+        }, new AudienceListener(platform.audience(), sender), settleMs);
     }
 
     /** Produces the core a swap goes to; runs on the swap thread. */
@@ -371,7 +498,7 @@ public final class ShellHost {
             public CoreArchive.CoreJar get() {
                 return jar;
             }
-        }, listener);
+        }, listener, 0L);
     }
 
     /**
@@ -387,10 +514,11 @@ public final class ShellHost {
             public CoreArchive.CoreJar get() throws CoreArchiveException {
                 return stage(file);
             }
-        }, listener);
+        }, listener, 0L);
     }
 
-    private boolean requestSwap(final CoreSource source, final SwapListener listener) {
+    private boolean requestSwap(
+            final CoreSource source, final SwapListener listener, final long delayMs) {
         if (shutDown || !swapQueued.compareAndSet(false, true)) {
             return false;
         }
@@ -401,6 +529,9 @@ public final class ShellHost {
                 public void run() {
                     SwapOutcome outcome;
                     try {
+                        if (delayMs > 0) {
+                            Thread.sleep(delayMs);
+                        }
                         outcome = swapTo(source, told);
                     } catch (Throwable broken) {
                         log.error("the swap failed unexpectedly", broken);
@@ -441,7 +572,8 @@ public final class ShellHost {
      * {@link #requestSwap}.
      */
     SwapOutcome swap(CoreArchive.CoreJar jar, SwapListener listener) {
-        synchronized (transition) {
+        transition.lock();
+        try {
             if (shutDown) {
                 return refuse("the server is stopping", listener);
             }
@@ -458,16 +590,28 @@ public final class ShellHost {
 
             String from = outgoing == null ? "no core" : "core " + outgoing.loaded.identity();
             log.info("swapping " + from + " for core " + incoming.identity());
-            listener.progress("Swapping " + from + " for core " + incoming.identity() + "...");
 
+            // Logins hold from here, never refused: this matters most when there is no outgoing
+            // core, where the state was DOWN and would otherwise refuse logins through the start.
             swapping = true;
             gates.state(LoginGateHolder.State.SWAPPING);
             try {
+                tell(listener, "Swapping " + from + " for core " + incoming.identity() + "...");
                 Map<String, Object> handoff = Collections.emptyMap();
                 if (outgoing != null) {
+                    // New logins now wait for the next core; logins the outgoing core is already
+                    // deciding finish first, so none of them meets a runtime half torn down (where
+                    // the whitelist's API-fallback could admit it).
+                    gates.suspend();
+                    if (!gates.drain(GATE_DRAIN_MS)) {
+                        log.warn("a login was still being decided after " + GATE_DRAIN_MS
+                                + "ms; stopping the old core anyway");
+                    }
                     handoff = stop(outgoing, true);
                     current = null;
                     sweep(outgoing.loaded);
+                    tell(listener, "Stopped " + from + "; starting core " + incoming.identity()
+                            + "...");
                 }
 
                 Generation started = start(incoming, handoff);
@@ -503,6 +647,8 @@ public final class ShellHost {
                     log.debug("removed " + pruned + " command(s) the new core did not register");
                 }
             }
+        } finally {
+            transition.unlock();
         }
     }
 
@@ -513,7 +659,7 @@ public final class ShellHost {
             SwapListener listener) {
         log.warn("core " + failed.identity() + " failed to start; rolling back to core "
                 + outgoing.loaded.identity());
-        listener.progress("Core " + failed.identity() + " failed to start; rolling back...");
+        tell(listener, "Core " + failed.identity() + " failed to start; rolling back...");
         LoadedCore again;
         try {
             CoreArchive.CoreJar previous = CoreArchive.describe(outgoing.loaded.jar());
@@ -542,6 +688,18 @@ public final class ShellHost {
                 "The new core failed to start, so the previous core " + again.identity()
                         + " is running again. Check the server log for why.",
                 again.identity());
+    }
+
+    /**
+     * A progress line for {@code listener}. A listener that throws (a platform sender that has
+     * gone away) must not abort a swap halfway, with the gate suspended and no core started.
+     */
+    private void tell(SwapListener listener, String line) {
+        try {
+            listener.progress(line);
+        } catch (Throwable failed) {
+            log.debug("a swap progress line could not be delivered: " + failed);
+        }
     }
 
     private SwapOutcome refuse(String why, SwapListener listener) {

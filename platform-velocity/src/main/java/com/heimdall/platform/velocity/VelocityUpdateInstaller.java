@@ -2,6 +2,7 @@ package com.heimdall.platform.velocity;
 
 import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.log.HeimdallLogger;
+import com.heimdall.core.update.DownloadRefusedException;
 import com.heimdall.core.update.InstallOutcome;
 import com.heimdall.core.update.UpdateDownloader;
 import com.heimdall.core.update.UpdateInstaller;
@@ -61,6 +62,11 @@ final class VelocityUpdateInstaller implements UpdateInstaller {
                 return InstallOutcome.installed(ownJar.toPath(),
                         "Installed " + release.version() + " over the running jar — restart the "
                                 + "proxy to apply it.");
+            } catch (DownloadRefusedException refused) {
+                // A host, repository or checksum refusal is not a locked jar. Fetching the same
+                // refused bytes again into the data directory would only fail a second time, or
+                // worse, look like an install (departure D87).
+                throw refused;
             } catch (IOException lockedOrUnwritable) {
                 // The Windows case, and any read-only plugins directory. Not fatal, and worth a
                 // warning rather than silence: the fallback below leaves the operator with a manual

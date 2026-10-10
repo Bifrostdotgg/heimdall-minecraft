@@ -209,8 +209,8 @@ public final class UpdateService {
      * </ul>
      *
      * <p>The swap is returned as {@linkplain InstallOutcome#pendingSwap() pending}, never started
-     * here: it stops this core, so the caller reports the outcome first and then calls
-     * {@link InstallOutcome#startSwap(Object)}.
+     * here: the caller requests it with {@link InstallOutcome#startSwap(Object)}, which says
+     * whether it was accepted, and reports that.
      */
     public InstallOutcome updateNow() {
         // Always by hand (a command or a dashboard request), so past the bot's cache: installing
@@ -250,7 +250,7 @@ public final class UpdateService {
         }
         HotSwap.Staged staged;
         try {
-            staged = hotSwap.stage(outcome.target());
+            staged = hotSwap.stage(outcome.target(), release.sha256());
         } catch (RuntimeException broken) {
             staged = HotSwap.Staged.refused("staging failed: " + rootMessage(broken));
         }
@@ -261,8 +261,7 @@ public final class UpdateService {
                     + staged.problem() + ".");
         }
         return outcome.withPendingSwap(staged, "Downloaded and verified Heimdall " + version
-                + "; swapping it in now, which pauses logins for a few seconds. It is also "
-                + "installed for the next restart.");
+                + ", and installed it for the next restart.");
     }
 
     // ── Scheduling ───────────────────────────────────────────────────────────

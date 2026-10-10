@@ -21,8 +21,8 @@ public final class ShellHotSwap implements HotSwap {
     }
 
     @Override
-    public Staged stage(Path releaseJar) {
-        final StagedCore staged = shell.stageRelease(releaseJar);
+    public Staged stage(Path releaseJar, String expectedSha256) {
+        final StagedCore staged = shell.stageRelease(releaseJar, expectedSha256);
         if (!staged.swappable()) {
             return Staged.refused(staged.problem());
         }

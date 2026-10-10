@@ -83,6 +83,10 @@ public final class BootstrapConfig {
     private final boolean updatesCheckEnabled;
     private final boolean updatesNotifyAdmins;
     private final long updatesCheckIntervalHours;
+    private final String updatesReleaseRepo;
+
+    /** The repository official releases come from; mirrors {@code DownloadPolicy}'s constant. */
+    public static final String OFFICIAL_RELEASE_REPO = "Bifrostdotgg/heimdall-minecraft";
 
     /** Module ids an operator has switched off LOCALLY, space-separated. The offline escape hatch. */
     private final String disabledModules;
@@ -125,6 +129,9 @@ public final class BootstrapConfig {
         this.updatesCheckEnabled = builder.updatesCheckEnabled;
         this.updatesNotifyAdmins = builder.updatesNotifyAdmins;
         this.updatesCheckIntervalHours = builder.updatesCheckIntervalHours;
+        this.updatesReleaseRepo = builder.updatesReleaseRepo == null
+                || builder.updatesReleaseRepo.trim().isEmpty()
+                ? OFFICIAL_RELEASE_REPO : builder.updatesReleaseRepo.trim();
         this.disabledModules = Strings.trimToEmpty(builder.disabledModules);
         this.guildId = Strings.trimToEmpty(builder.guildId);
         this.instanceFingerprint = Strings.trimToEmpty(builder.instanceFingerprint);
@@ -156,6 +163,7 @@ public final class BootstrapConfig {
                 .updatesCheckEnabled(updatesCheckEnabled)
                 .updatesNotifyAdmins(updatesNotifyAdmins)
                 .updatesCheckIntervalHours(updatesCheckIntervalHours)
+                .updatesReleaseRepo(updatesReleaseRepo)
                 .disabledModules(disabledModules)
                 .instanceFingerprint(instanceFingerprint)
                 .guildId(guildId);
@@ -236,6 +244,21 @@ public final class BootstrapConfig {
     }
 
     /**
+     * The GitHub repository ({@code owner/name}) the self-updater may download releases from;
+     * {@link #OFFICIAL_RELEASE_REPO} unless an operator running a fork names their own. Every
+     * download is pinned to that repository's release path, because a live swap runs what it
+     * downloads (departure D87). A malformed value pins to nothing and refuses every download.
+     */
+    public String updatesReleaseRepo() {
+        return updatesReleaseRepo;
+    }
+
+    /** Whether {@link #updatesReleaseRepo()} is the official repository. */
+    public boolean usesOfficialReleaseRepo() {
+        return OFFICIAL_RELEASE_REPO.equalsIgnoreCase(updatesReleaseRepo);
+    }
+
+    /**
      * Module ids switched off locally, space-separated, or {@code ""}.
      *
      * <p>The offline escape hatch (departure D66): a module named here stays off whatever the
@@ -309,6 +332,7 @@ public final class BootstrapConfig {
                 && updatesCheckEnabled == that.updatesCheckEnabled
                 && updatesNotifyAdmins == that.updatesNotifyAdmins
                 && updatesCheckIntervalHours == that.updatesCheckIntervalHours
+                && updatesReleaseRepo.equals(that.updatesReleaseRepo)
                 && role == that.role
                 && identityCheck == that.identityCheck
                 && instanceFingerprint.equals(that.instanceFingerprint)
@@ -335,6 +359,7 @@ public final class BootstrapConfig {
         result = 31 * result + (updatesCheckEnabled ? 1 : 0);
         result = 31 * result + (updatesNotifyAdmins ? 1 : 0);
         result = 31 * result + (int) (updatesCheckIntervalHours ^ (updatesCheckIntervalHours >>> 32));
+        result = 31 * result + updatesReleaseRepo.hashCode();
         result = 31 * result + disabledModules.hashCode();
         result = 31 * result + guildId.hashCode();
         return result;
@@ -356,6 +381,7 @@ public final class BootstrapConfig {
                 + ", retries=" + retries
                 + ", retryDelayMs=" + retryDelayMs
                 + ", updatesCheckEnabled=" + updatesCheckEnabled
+                + ", updatesReleaseRepo=" + updatesReleaseRepo
                 + "}";
     }
 
@@ -383,6 +409,7 @@ public final class BootstrapConfig {
         private boolean updatesCheckEnabled = true;
         private boolean updatesNotifyAdmins = true;
         private long updatesCheckIntervalHours = DEFAULT_UPDATE_INTERVAL_HOURS;
+        private String updatesReleaseRepo = OFFICIAL_RELEASE_REPO;
         private String disabledModules = "";
         private String guildId = "";
         private String instanceFingerprint = "";
@@ -454,6 +481,12 @@ public final class BootstrapConfig {
 
         public Builder updatesCheckIntervalHours(long value) {
             this.updatesCheckIntervalHours = value;
+            return this;
+        }
+
+        /** See {@link BootstrapConfig#updatesReleaseRepo()}. Blank means the official one. */
+        public Builder updatesReleaseRepo(String value) {
+            this.updatesReleaseRepo = value;
             return this;
         }
 

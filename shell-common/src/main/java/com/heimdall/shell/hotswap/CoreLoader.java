@@ -20,6 +20,8 @@ import java.net.URLClassLoader;
  * <h2>Checks before anything runs</h2>
  *
  * <ul>
+ *   <li>The file's SHA-256 must still be the one it was described with, re-read just before the
+ *       loader opens it.
  *   <li>The manifest's contract must equal the shell's. This is the cheap check, made before a
  *       loader exists.
  *   <li>The entry class must be defined by the new loader itself. If it came from the parent, the
@@ -49,6 +51,21 @@ public final class CoreLoader {
             throw new CoreArchiveException("core " + jar.identity() + " was built for shell contract "
                     + jar.contract() + " and this shell implements " + expectedContract
                     + "; it can only be installed with a restart");
+        }
+        // Re-hashed here, immediately before the classloader opens the file, rather than trusted
+        // from when the jar was described: the file could have been replaced in between, and what
+        // runs must be the bytes that were checked. (The window that remains is the moment between
+        // this read and the loader's own, on a file in the plugin's own data folder.)
+        String onDisk;
+        try {
+            onDisk = Sha256.of(jar.path());
+        } catch (IOException unreadable) {
+            throw new CoreArchiveException("cannot read " + jar.path() + ": "
+                    + unreadable.getMessage(), unreadable);
+        }
+        if (!onDisk.equals(jar.identity().sha256())) {
+            throw new CoreArchiveException("core " + jar.identity() + " changed on disk after it was "
+                    + "checked; refusing to load it");
         }
         URLClassLoader loader;
         try {

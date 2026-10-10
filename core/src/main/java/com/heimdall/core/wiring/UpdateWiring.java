@@ -27,7 +27,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
@@ -100,7 +99,8 @@ public final class UpdateWiring {
                 currentVersion,
                 new GatewayReleaseSource(runtime.api()),
                 installer,
-                installer == null ? null : new UpdateDownloader(logger, DownloadPolicy.github()),
+                installer == null ? null : new UpdateDownloader(logger,
+                        DownloadPolicy.githubRelease(runtime.bootstrap().updatesReleaseRepo())),
                 runtime.executors().scheduler(),
                 hotSwap);
 
@@ -279,6 +279,14 @@ public final class UpdateWiring {
             try {
                 InstallOutcome ran = service.updateNow();
                 outcome = ran == null ? InstallOutcome.failed("the update reported nothing") : ran;
+                // Requested BEFORE the reply so the reply can say whether it was accepted. The
+                // shell holds an accepted swap back long enough for this reply to go out on the
+                // tunnel the swap is about to close (departure D87).
+                outcome = outcome.startSwap(null);
+                if (outcome.swapRefused()) {
+                    logger.warn("a dashboard-triggered update was installed for the next restart, "
+                            + "but its live swap could not start");
+                }
             } catch (Throwable broken) {
                 // updateNow is documented never to throw, so reaching here is a bug — but the frame
                 // must still be answered, so this catches Throwable and falls into the finally.
@@ -299,9 +307,6 @@ public final class UpdateWiring {
                     logger.debug(() -> "could not reply to a dashboard update frame: " + replyFailed);
                 }
             }
-            // After the reply, never before: the swap stops this core, and with it the tunnel the
-            // reply has to go out on. The dashboard sees the reconnect, and the outcome is logged.
-            outcome.startSwap(null);
         }
     }
 
@@ -346,8 +351,6 @@ public final class UpdateWiring {
 
         private final UpdateService service;
 
-        /** The live swap the last {@link #updateNow()} left waiting to be started. */
-        private final AtomicReference<InstallOutcome> pending = new AtomicReference<InstallOutcome>();
 
         ServiceAdmin(UpdateService service) {
             this.service = service;
@@ -370,16 +373,9 @@ public final class UpdateWiring {
         }
 
         @Override
-        public String updateNow() {
-            InstallOutcome outcome = service.updateNow();
-            pending.set(outcome.pendingSwap() == null ? null : outcome);
+        public String updateNow(Object audience) {
+            InstallOutcome outcome = service.updateNow().startSwap(audience);
             return outcome.message();
-        }
-
-        @Override
-        public boolean startPendingSwap(Object audience) {
-            InstallOutcome outcome = pending.getAndSet(null);
-            return outcome != null && outcome.startSwap(audience);
         }
 
         @Override

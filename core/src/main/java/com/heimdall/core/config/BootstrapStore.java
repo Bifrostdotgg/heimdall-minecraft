@@ -73,6 +73,7 @@ public final class BootstrapStore {
     private static final String KEY_UPDATES_CHECK = "updatesCheckEnabled";
     private static final String KEY_UPDATES_NOTIFY = "updatesNotifyAdmins";
     private static final String KEY_UPDATES_INTERVAL = "updatesCheckIntervalHours";
+    private static final String KEY_UPDATES_RELEASE_REPO = "updatesReleaseRepo";
     private static final String KEY_DISABLED_MODULES = "disabledModules";
 
     /**
@@ -194,6 +195,8 @@ public final class BootstrapStore {
             } else if (KEY_UPDATES_INTERVAL.equals(key)) {
                 builder.updatesCheckIntervalHours(
                         asLong(value, BootstrapConfig.DEFAULT_UPDATE_INTERVAL_HOURS));
+            } else if (KEY_UPDATES_RELEASE_REPO.equals(key)) {
+                builder.updatesReleaseRepo(asString(value));
             } else if (KEY_DISABLED_MODULES.equals(key)) {
                 builder.disabledModules(asString(value));
             } else if (KEY_INSTANCE_FINGERPRINT.equals(key)) {
@@ -247,6 +250,12 @@ public final class BootstrapStore {
         document.put(KEY_UPDATES_CHECK, Boolean.valueOf(config.updatesCheckEnabled()));
         document.put(KEY_UPDATES_NOTIFY, Boolean.valueOf(config.updatesNotifyAdmins()));
         document.put(KEY_UPDATES_INTERVAL, Long.valueOf(config.updatesCheckIntervalHours()));
+        // Only when an operator changed it, unlike the keys above: it is a fork's knob, and writing
+        // the official default into every bootstrap.yml would invite editing a security setting
+        // nobody needs to touch (departure D87).
+        if (!config.usesOfficialReleaseRepo()) {
+            document.put(KEY_UPDATES_RELEASE_REPO, config.updatesReleaseRepo());
+        }
         document.put(KEY_DISABLED_MODULES, config.disabledModules());
         // The last two known keys are the appendix the plugin maintains for itself: which instance
         // these credentials were bound to, and the guild the token last resolved to. They sit below

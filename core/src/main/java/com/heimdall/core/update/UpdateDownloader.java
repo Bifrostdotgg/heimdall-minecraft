@@ -160,8 +160,8 @@ public final class UpdateDownloader {
     public long download(String downloadUrl, File target, String expectedSha256)
             throws IOException {
         if (expectedSha256 != null && !isWellFormedSha256(expectedSha256)) {
-            throw new IOException("The release's published SHA-256 is malformed, so the download "
-                    + "cannot be verified; refusing it.");
+            throw new DownloadRefusedException("The release's published SHA-256 is malformed, so "
+                    + "the download cannot be verified; refusing it.");
         }
         if (downloadUrl == null || downloadUrl.trim().isEmpty()) {
             throw new IOException("No download URL available — run an update check first.");
@@ -170,7 +170,7 @@ public final class UpdateDownloader {
             throw new IOException("No download target was chosen.");
         }
 
-        checkAllowed(new URL(downloadUrl.trim()));
+        checkStart(new URL(downloadUrl.trim()));
 
         File parent = target.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
@@ -192,8 +192,9 @@ public final class UpdateDownloader {
                 if (expectedSha256 != null) {
                     String actual = hex(digest.digest());
                     if (!actual.equals(expectedSha256)) {
-                        throw new IOException("The download does not match the release's published "
-                                + "SHA-256 (expected " + expectedSha256.substring(0, 12) + ", got "
+                        throw new DownloadRefusedException("The download does not match the "
+                                + "release's published SHA-256 (expected "
+                                + expectedSha256.substring(0, 12) + ", got "
                                 + actual.substring(0, 12) + "); nothing was installed.");
                     }
                 }
@@ -224,7 +225,11 @@ public final class UpdateDownloader {
         String current = startUrl;
         for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
             URL url = new URL(current);
-            checkAllowed(url);
+            if (hop == 0) {
+                checkStart(url);
+            } else {
+                checkRedirect(url);
+            }
             HttpURLConnection connection = (HttpURLConnection) url.openConnection();
             connection.setInstanceFollowRedirects(false);
             connection.setRequestMethod("GET");
@@ -265,11 +270,35 @@ public final class UpdateDownloader {
     /** Enforces the host allowlist and the scheme rule, naming whatever was refused. */
     private void checkAllowed(URL url) throws IOException {
         if (!policy.allowsHost(url.getHost())) {
-            throw new IOException("Refusing to download update from untrusted host: " + url.getHost());
+            throw new DownloadRefusedException(
+                    "Refusing to download update from untrusted host: " + url.getHost());
         }
         if (!policy.allowsScheme(url.getProtocol())) {
-            throw new IOException(
+            throw new DownloadRefusedException(
                     "Refusing to download update over insecure protocol: " + url.getProtocol());
+        }
+    }
+
+    /**
+     * The first URL: allowlisted, and for a pinned policy a release download of the pinned
+     * repository. Checked before any connection is opened (departure D87).
+     */
+    private void checkStart(URL url) throws IOException {
+        checkAllowed(url);
+        if (!policy.allowsStart(url)) {
+            throw new DownloadRefusedException("Refusing to download an update that is not a "
+                    + "release of " + policy.releaseRepo() + " (" + url.getHost() + url.getPath()
+                    + ")");
+        }
+    }
+
+    /** A redirect hop: for a pinned policy, GitHub's release-asset host only. */
+    private void checkRedirect(URL url) throws IOException {
+        checkAllowed(url);
+        if (!policy.allowsRedirect(url)) {
+            throw new DownloadRefusedException("Refusing to follow an update redirect to "
+                    + url.getHost() + ": a release download may only redirect to GitHub's asset "
+                    + "host");
         }
     }
 
