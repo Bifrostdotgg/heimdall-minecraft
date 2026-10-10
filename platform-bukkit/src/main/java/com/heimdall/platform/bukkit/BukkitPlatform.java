@@ -44,6 +44,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     private final BukkitIntegrations integrations;
     private final ChatControlChannels chatControl;
     private final BukkitItemImages itemImages;
+    private final BukkitVanish vanish;
 
     /**
      * Builds every collaborator, and cleans up after itself if one of them throws.
@@ -90,8 +91,17 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
             // Builds nothing heavy: two idle executors and some paths. No asset is touched, and no
             // thread started, until the bridge asks for an image or prepares.
             this.itemImages = BukkitItemImages.create(logger, plugin);
+            // Resolves nothing yet: PremiumVanish is looked up on first use, and the bootstrap asks
+            // once it has wired the listeners. Its event hook is tracked against this generation.
+            this.vanish = BukkitVanish.create(
+                    logger, registrations, plugin, new Function<Player, PlayerHandle>() {
+                        @Override
+                        public PlayerHandle apply(Player player) {
+                            return directory.wrap(player);
+                        }
+                    });
             this.integrations = new BukkitIntegrations(
-                    logger, executors.io(), chatControl, itemImages);
+                    logger, executors.io(), chatControl, itemImages, vanish);
         } catch (Throwable halfBuilt) {
             closeQuietly(builtTap);
             closeQuietly(messenger);
@@ -158,6 +168,11 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
      */
     ChatControlChannels chatControl() {
         return chatControl;
+    }
+
+    /** The vanish integration, so the bootstrap can resolve it before anybody joins. */
+    BukkitVanish vanish() {
+        return vanish;
     }
 
     /** The online-player list, so the session listener can wrap a player it was handed. */
@@ -229,6 +244,9 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
         // The ChatControl channel hook is registered lazily, from whichever thread first asked, and
         // a plugin disable was the only thing that ever took it off again. A swap is not one.
         closeQuietly(chatControl);
+        // The PremiumVanish hook, for the same reason: a swap is not a plugin disable. It is also
+        // tracked against this generation, so this is the first of two ways it comes off.
+        closeQuietly(vanish);
         messenger.close();
         // Stops the asset and render threads and closes any open pack zips, so a /reload does not
         // leave file handles on a regenerated ItemsAdder pack.

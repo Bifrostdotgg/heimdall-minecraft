@@ -7,7 +7,19 @@ plugins {
     id("heimdall.java8")
 }
 
+// PremiumVanish's two BungeeCord events, as compile-time stand-ins under their real names.
+// BungeeCord's event bus only dispatches to a method whose declared parameter IS the event class, so
+// the vanish hook (BungeeVanishListener) cannot be registered reflectively the way the Bukkit and
+// Velocity ones are, and has to compile against these. compileOnly: nothing here reaches the jar,
+// and verifyCoreJar would refuse it if it did. At runtime the names resolve to PremiumVanish's own
+// classes. Departure D88.
+val vanishApi by sourceSets.creating
+
 dependencies {
+    "vanishApiCompileOnly"(libs.bungeecord.api)
+    compileOnly(vanishApi.output)
+    testImplementation(vanishApi.output)
+
     implementation(project(":core"))
     implementation(project(":api"))
     implementation(project(":platform-common"))

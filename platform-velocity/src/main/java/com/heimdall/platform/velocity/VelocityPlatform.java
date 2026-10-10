@@ -36,6 +36,7 @@ final class VelocityPlatform implements PlatformFacade, AutoCloseable {
     private final VelocityConsoleBridge console;
     private final VelocityCommandRegistrar commands;
     private final VelocityIntegrations integrations;
+    private final VelocityVanish vanish;
 
     VelocityPlatform(
             Object plugin,
@@ -53,7 +54,10 @@ final class VelocityPlatform implements PlatformFacade, AutoCloseable {
         this.consoleTap = new Log4jConsoleTap(logger, executors.io());
         this.console = new VelocityConsoleBridge(proxy, consoleTap);
         this.commands = new VelocityCommandRegistrar(registrations, logger, text);
-        this.integrations = new VelocityIntegrations(logger, executors.io());
+        // Resolves nothing yet; PremiumVanish is looked up on first use, and its event hook is
+        // tracked against this generation. Departure D88.
+        this.vanish = VelocityVanish.create(logger, registrations, plugin, proxy, text);
+        this.integrations = new VelocityIntegrations(logger, executors.io(), vanish);
     }
 
     /**
@@ -66,6 +70,11 @@ final class VelocityPlatform implements PlatformFacade, AutoCloseable {
      */
     boolean attachConsoleTap() {
         return consoleTap.attach();
+    }
+
+    /** The vanish integration, so the bootstrap can resolve it before anybody joins. */
+    VelocityVanish vanish() {
+        return vanish;
     }
 
     @Override
@@ -118,5 +127,8 @@ final class VelocityPlatform implements PlatformFacade, AutoCloseable {
         // The tap is the only thing here holding something the proxy itself owns; leaving a root
         // appender attached to a plugin that has been unloaded is how a reload leaks one per cycle.
         consoleTap.close();
+        // The PremiumVanish hook: a swap is not a plugin unload. Also tracked against this
+        // generation, so this is the first of two ways it comes off.
+        vanish.close();
     }
 }

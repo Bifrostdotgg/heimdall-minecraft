@@ -7,6 +7,7 @@ import net.md_5.bungee.api.event.PlayerDisconnectEvent;
 import net.md_5.bungee.api.event.PostLoginEvent;
 import net.md_5.bungee.api.plugin.Listener;
 import net.md_5.bungee.event.EventHandler;
+import net.md_5.bungee.event.EventPriority;
 
 /**
  * Turns the proxy's login and disconnect into core's session notifications.
@@ -35,6 +36,10 @@ import net.md_5.bungee.event.EventHandler;
  * <p>The timestamp is taken here, on the event thread, and carried across — the dispatch is
  * asynchronous, so by the time a listener runs "now" is some unknown distance later.
  *
+ * <p>Both at {@code HIGHEST}, BungeeCord's last priority, so a vanish plugin listening to the same
+ * events has marked the player before the join is reported (departure D88). Nothing here changes
+ * either event, so running last costs nothing.
+ *
  * <p>Both handlers are total. BungeeCord logs a plugin whose listener throws and carries on, which
  * would leave the whitelist mirror silently missing extensions with the cause a long way from the
  * symptom.
@@ -62,7 +67,7 @@ final class BungeeSessionListener implements Listener {
         this.text = text;
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onPostLogin(PostLoginEvent event) {
         long observedAt = System.currentTimeMillis();
         ProxiedPlayer player = event.getPlayer();
@@ -76,7 +81,7 @@ final class BungeeSessionListener implements Listener {
         }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onDisconnect(PlayerDisconnectEvent event) {
         long observedAt = System.currentTimeMillis();
         ProxiedPlayer player = event.getPlayer();

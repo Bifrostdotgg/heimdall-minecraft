@@ -296,13 +296,17 @@ final class VelocityBootstrap {
                 logger, runtime.loginPipeline(), platform.integrations().floodgate(), text)));
         // Join and quit, as core's session notifications. PostLoginEvent rather than LoginEvent and
         // DisconnectEvent rather than ServerDisconnectEvent: see VelocitySessionListener for why
-        // each of the obvious alternatives is wrong.
+        // each of the obvious alternatives is wrong. LAST, so a vanish plugin listening to the same
+        // events has marked the player before the join is reported (departure D88).
         final VelocitySessionListener sessions =
                 new VelocitySessionListener(logger, runtime.playerSessions(), text);
         registrations.track(VelocityEvents.listen(
-                events, plugin, PostLoginEvent.class, PostOrder.NORMAL, sessions::onPostLogin));
+                events, plugin, PostLoginEvent.class, PostOrder.LAST, sessions::onPostLogin));
         registrations.track(VelocityEvents.listen(
-                events, plugin, DisconnectEvent.class, PostOrder.NORMAL, sessions::onDisconnect));
+                events, plugin, DisconnectEvent.class, PostOrder.LAST, sessions::onDisconnect));
+        // PremiumVanish's hide/show hook, in place before the first join when it is already loaded.
+        // A miss (it loads after us) is retried on first use.
+        platform.vanish().prepare();
         // Chat, OBSERVED. A proxy still cannot cancel signed chat, so interception remains the
         // backends' — this listener reads and touches nothing, which is what makes a proxy-origin
         // Discord relay possible. It is inert unless the bridge module's relayChat setting is on,

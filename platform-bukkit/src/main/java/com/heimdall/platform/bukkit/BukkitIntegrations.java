@@ -7,6 +7,7 @@ import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.Integrations;
 import com.heimdall.core.platform.ItemImages;
 import com.heimdall.core.platform.LuckPermsBridge;
+import com.heimdall.core.platform.Vanish;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.LuckPermsSupport;
 import java.lang.reflect.Method;
@@ -37,14 +38,16 @@ final class BukkitIntegrations implements Integrations {
     private final BedrockIdentityProvider floodgate;
     private final ChatControlChannels chatControl;
     private final ItemImages itemImages;
+    private final Vanish vanish;
 
     BukkitIntegrations(
             HeimdallLogger logger, Executor ioExecutor, ChatControlChannels chatControl,
-            ItemImages itemImages) {
+            ItemImages itemImages, Vanish vanish) {
         this.logger = logger;
         this.ioExecutor = ioExecutor;
         this.chatControl = chatControl;
         this.itemImages = itemImages == null ? ItemImages.NONE : itemImages;
+        this.vanish = vanish == null ? Vanish.NONE : vanish;
         // Fixed at construction: this answers a classpath question, which cannot change while the
         // JVM is running. LuckPerms is the opposite case — a plugin that registers a service on its
         // own schedule — so it is resolved lazily and retried until it appears.
@@ -103,6 +106,15 @@ final class BukkitIntegrations implements Integrations {
     @Override
     public ItemImages itemImages() {
         return itemImages;
+    }
+
+    /**
+     * PremiumVanish or SuperVanish, plus the {@code vanished} metadata convention, so a vanished
+     * player's join, leave and death are kept out of Discord. Departure D88.
+     */
+    @Override
+    public Vanish vanish() {
+        return vanish;
     }
 
     @Override
