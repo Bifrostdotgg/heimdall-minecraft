@@ -1986,6 +1986,195 @@ channelled server. Drops are counted in the debug line, never described.
 - A reloaded ChatControl pauses relay until the server restarts, rather than re-hooking into the new
   class loader.
 
+### D86 - an item shown in chat relays as `[Name]` with a tooltip image, and nothing is stored
+
+**New in 3.1.**
+
+**Before:** a player using ChatControl's `[item]` relayed as the raw MiniMessage ChatControl wrote
+into the line, a `<hover:show_item:...>` tag carrying every item component as SNBT, so Discord
+showed a wall of markup instead of `[Spoon]`.
+**Now:** each well-formed item hover in a relayed line, with the text it decorates, becomes the plain
+`[Name]` the players saw, and on a Bukkit backend the line also carries a rendered tooltip card (the
+item's icon to the left of its tooltip box) as a PNG. The bot posts the images with the line.
+
+**This is the one sanctioned edit to a relayed line.** D82 still holds for everything else: a line
+with no item hover goes on the wire byte for byte, and only the hover tag and its decorated text are
+replaced. A tag that does not tokenise or does not describe an item is left exactly as it was, so
+the failure mode is today's behaviour, never a mangled line. The rewrite happens whether or not an
+image is produced, and on every platform: a proxy has no items but can still see a forwarded hover.
+
+**The input, as captured on Third Place (Paper 1.21.5+, ChatControl 12.2.18):**
+`show_item:<id>[:<count>][:<key>:<value>]*`, keys without `minecraft:`, values SNBT quoted with `'`
+or `"` (backslash escapes) or bare, the closing `</hover>` omitted when the hover runs to the end of
+the line, and possibly several hovers per line. The legacy single-holder form
+`show_item:<id>:<count>:"{nbt}"` (Paper 1.16.5 to 1.20.4, and below 1.16) and the bare forms are
+accepted too; pre-1.21.5 text components are JSON strings and are read as such. Plain Spigot 1.16+
+writes no hover, and nothing changes there. Both captures are test fixtures, verbatim.
+
+**Parsed here, not by Adventure.** The shaded Adventure is 4.13.1, which predates data components.
+Core gains `com.heimdall.core.items`: a MiniMessage-rules tokenizer for the tag (`HoverTags`), a
+Java 8 SNBT reader that also accepts JSON (`Snbt`), and a version-neutral `ChatItem` (name, item
+name, lore, enchantments including custom namespaced ones, damage and max damage, unbreakable,
+hidden components from `tooltip_display`, `show_in_tooltip:false` or `HideFlags`, custom model data
+in the 1.21.4 four-list shape, item model, rarity, glint override, dye and potion colours). It is
+platform-free and never logs a name or a lore line.
+
+**The rewrite runs inline on the chat thread, so it is bounded in work, not only in shape.** A
+translation whose format repeats its argument (`%1$s%1$s...`) nested a few levels deep multiplies at
+every level: a 543-character custom name built that way expanded without limit. Every intermediate
+string (each argument's text, each format's result) is capped at 1024 characters, and each component
+read has budgets of nodes visited and characters produced, after which the rest is dropped: one for
+the line and a separate one shared by every translation argument, so a wide fan-out of arguments
+cannot spend the line's share and leave an empty name. A tokenised hover that is not `show_item` is
+skipped whole, so an item quoted inside a `show_text` argument is not taken for a tag. Anything that
+still goes wrong in the rewrite or while attaching images, an `Error` included, is caught and the
+line relays (verbatim, or as `[Name]` text if the rewrite had finished). Nothing is rethrown:
+`ChatPipeline` catches only `RuntimeException` around an observer, so an `Error` let out would skip
+every observer after the bridge. One warning a minute names the throwable's class, never its
+message.
+
+**Drawn on the backend only, behind `Integrations.itemImages()`.** A default method answering
+`ItemImages.NONE`, like `chatChannels()` in D85, so both proxies need no change. The Bukkit family
+answers with `BukkitItemImages`:
+
+- **Vanilla assets are fetched, never shipped.** The client jar for the server's version (or the
+  nearest older release in Mojang's manifest; year versions like `26.1` included) is downloaded from
+  Mojang's piston servers, its version document checked against the manifest's SHA-1, the jar
+  against the version document's SHA-1 and size, and only fonts, item and block textures, models,
+  item definitions, the glint texture, the tooltip sprites and `en_us` are extracted into
+  `plugins/Heimdall/cache/assets/<version>/`. Extraction goes to a staging directory, a marker file
+  holding the jar's SHA-1 is written last, and the directory is renamed into place; a directory
+  without the marker is a crash mid-extraction and is deleted, never read. The jar is deleted. Every
+  read and the extraction are size-capped, and entry names cannot escape the cache. A manifest entry
+  without a SHA-1 fails closed. Temporary files carry a per-instance id, and only ones older than ten
+  minutes are swept, so two servers on one folder never delete each other's downloads. Once a
+  version's cache is in place, complete caches of other versions are deleted, except any used in the
+  last 24 hours: each prepare (every six hours) marks its own cache in use, so two servers on
+  different versions sharing one plugin folder keep each other's. A server idle for more than a day
+  can lose its cache to a sibling and fetches it again on its next prepare. Every transfer has
+  connect and read timeouts plus a wall-clock cap (two minutes for a document, five for a download),
+  and a redirect from https to http is refused. Log lines name the exception class and the host,
+  never a full URL (a pack URL can carry a token).
+- **Resource packs, in the order they win:** the operator's folder (`pack-folder`, default
+  `plugins/Heimdall/item-images/packs/`), the `server.properties` pack (downloaded and checked against
+  `resource-pack-sha1` when set), ItemsAdder's `output/generated.zip` (or `output_uncompressed/` when
+  the zip is protected), Nexo's and Oraxen's built packs, then vanilla. Zips are read through their
+  central directory; `pack.mcmeta` overlays apply for the running pack format (read from the client
+  jar's `version.json`). Discovery is re-run at most every ten seconds and the stack rebuilt only
+  when a file's size or modification time changed. A zip is never opened where it lies: ItemsAdder,
+  Nexo and Oraxen rewrite theirs, and an open handle (a lock, on Windows) would be in their way, so
+  each is copied into `cache/packs/open/` once per change, on the asset thread, and the copy is
+  opened. A pack whose copy is not ready yet, or failed (retried a minute later), is left out of the
+  stack and of its fingerprint, so the rescan after the copy rebuilds it; unused copies are deleted
+  on the next rebuild. The server pack is the cache's own file and is opened in place, so each
+  fetch lands under a new name (`server-<url key>-<content hash>.zip`) instead of replacing the file
+  a stack may hold open (Windows forbids that); the superseded file is deleted after the stack has
+  switched, and any file younger than ten minutes is left for the fetch that may have just written
+  it. A server pack with no `resource-pack-sha1` is re-fetched once its copy
+  is a day old; a failed fetch is retried after ten minutes, and the previous copy stays in use.
+- **Models resolve the way the client does:** `item_model`, then `items/<id>.json` evaluated against
+  custom model data (`range_dispatch`, `select`, `condition`, `composite`, tints), then the
+  pre-1.21.4 `overrides`; parent chains and texture variables are followed with caps. Flat sprites
+  are layered; element models are projected through their GUI display transform (blocks come out
+  isometric); `minecraft:special` and unresolvable models use the particle texture or a neutral
+  placeholder. Player skins are never fetched.
+- **The card:** bitmap glyphs from the client's own fonts (no system fonts; a built-in 5x7 ASCII set
+  when no assets are present), 1.21.2+ metrics and text shadow, the nine-sliced tooltip sprites where
+  the assets have them and the classic gradient otherwise, vanilla line order (name in rarity
+  colour, enchantments, lore, Unbreakable) plus a `Durability: x / y` line for any damageable item
+  that is not unbreakable. That last line is a product choice (Adam's): the registry id and component
+  count lines of advanced tooltips are not drawn. Defaults the hover does not carry (max durability,
+  rarity, the type's English name) come from the server's `Material`, a reflective
+  `ItemType#getItemRarity()` on 1.20.5+ (else a small table), and the language data.
+- **Off the chat thread, bounded:** one render thread with a queue of 16 (refused past that), a 3 s
+  budget per render checked between steps, and a redraw at half scale for a card that encodes over
+  256 KiB. Font files are indexed once per pack stack, outside any render's budget. A glyph keeps
+  only its sheet's path and its metrics: the sheet's pixels come from the texture cache when the
+  glyph is drawn, so a name drawing on many large GUI sheets stays inside that cache's budget instead
+  of pinning each sheet for the stack's life. A sheet that fails is remembered, and characters no
+  font has are not memoised. Textures are bounded before
+  decoding (file size, then the header's dimensions), the first animation frame is copied out of its
+  strip, model textures are shrunk to the icon's 32 pixels, and the texture cache is bounded at 32 MB
+  of decoded pixels. The probe for `java.awt` makes an image, a `Graphics2D` and a real PNG; a JVM
+  that fails it answers `available() == false` and the bridge relays text. Images are read and
+  written through in-memory ImageIO streams, never ImageIO's disk cache or its global setting.
+- **The render cache keeps pictures, not records.** It is keyed by the pack stack's fingerprint and a
+  SHA-256 of the item's normalised model (never the text), bounded at 128 cards or 16 MB, and an
+  entry lives at most ten minutes: a timer purges expired cards every minute, so they die on time on
+  an idle server too, not only when the next render looks.
+- **Configuration:** Local knobs, in an optional `plugins/Heimdall/item-images.yml`: `download-vanilla-assets`
+  (default `true`) and `pack-folder`.
+
+**The wire (`itemimages@1`, a build capability declared alongside `bridge@1`):**
+
+| Where | Shape |
+|---|---|
+| `bridge.chat` line | optional `items: [{name, png}]`, `png` standard base64 of a PNG, at most 4 per line, each at most 512 KiB before base64; oversized and extra images dropped and counted |
+| `bridge.chat` line | `msg` with every item hover replaced by `[Name]` |
+| `config.push` bridge settings | `itemImages`: boolean, default `true`; off still rewrites the text |
+
+**Gated on what the bot accepted.** A released bot closes its tunnel (WebSocket 1009) on any frame
+over its payload cap, 1 MiB at the time of writing. So `items` is attached only when the bot accepted
+`itemimages@1` in this connection's `identify_ack`; against any other bot nothing is drawn and the
+line carries the `[Name]` text alone. `TunnelBus.peerAccepts(capability)` is the new seam (default
+`false`, so an unknown bus fails closed), and it is checked twice: when the line is said, so nothing
+is drawn for a bot that cannot take it, and again when the frame is encoded, so a reconnect to an
+older bot in between strips the images instead of closing the socket.
+
+**A frame budget, as well as a count.** `bridge.chat` frames are packed to at most 3 MiB of estimated
+encoded size (under the new bot's 4 MiB cap, with room for the envelope): a line that would push a
+frame over waits, whole, at the front of the next frame, so a line is never split and order is kept.
+A single line that alone would exceed the budget loses its largest images, one at a time, until it
+fits; the count is logged, the text is never touched. `FrameBatcher` gains an optional sizer for
+this; the event batcher is unchanged.
+
+**Chat keeps its order, and waits only boundedly for it.** An item line waits for its images at most
+750 ms and then ships with whatever finished. Every relayed line passes through one FIFO staging
+deque in front of the chat batcher: with nothing pending a line goes straight through, adding no
+latency, and a line said after a pending item line waits behind it and ships after it, in the order
+both were said. A line therefore waits only while an item line ahead of it is drawing, and never
+longer than that line's budget, which began before it arrived. The budget timers run on the shared
+`heimdall-sched` thread, so the 750 ms is plus that thread's latency: a large frame being sent or a
+slow task ahead of the timer can delay it. Finishing a line is total: if attaching its images fails
+in any way, an `Error` included, the line ships as its `[Name]` text in its place, so a held line can
+never be left claimed but unfinished. As a belt, an item line that has waited more than twice the
+budget (a timer that never ran, a finish that never came) is released as text the next time the
+deque moves, with a warning counting how many. The deque holds at most 499 lines
+(past that its head ships with whatever finished), one under the chat batcher's drop-oldest cap so
+a forced release can never push out the very line it forces; at most eight item lines wait on renders at once,
+and past that a line ships text-only, still in order. Each pending line carries the enable cycle it
+was said in, and a render finishing after a disable is dropped rather than shipped into the next
+cycle; enable and disable empty the deque. Join, leave and death are a separate frame family
+(`bridge.event`), and their order relative to chat is not guaranteed. `prepare()` is called when the
+module is enabled or reconfigured with images on, so the vanilla download happens before the first
+item is shown, and never on a server that turned `itemImages` off.
+
+**Relay-only still holds.** Nothing is stored: the images travel with the line, a held line lives
+for at most the budget of the item line ahead of it, and the render cache holds pixels for ten
+minutes under a hash of what was drawn, not a record of who showed what. No log line carries a name, lore or the line; counts, sizes,
+versions and file names only.
+
+**Verified against fixtures, not yet against a server.** The parser is tested on the two captures
+verbatim; the asset cache against a fake Mojang (hash and size mismatches, partial caches, version
+fallback); model resolution against fixture packs (the Warded Jar resolves through an
+ItemsAdder-shaped `range_dispatch` on 10002); the renderer headless. No test boots a server or a
+client, so pixel fidelity against the real client, real ItemsAdder/Nexo/Oraxen output and the real
+Mojang endpoints are unverified until Third Place runs it.
+
+**Known limits, named.**
+
+- Unifont (in the asset index, not the client jar) is not fetched, and the `legacy_unicode`, `ttf`
+  and `unihex` font providers are not drawn: characters outside the bitmap fonts show the built-in
+  fallback or `?`.
+- 3D icons use per-direction shading, no face culling or ambient occlusion, and ignore face
+  `cullface`; animated textures show their first frame; the glint is a static tint.
+- Pre-1.13 servers get humanised default names (their language keys are not derived from item ids),
+  and a pack's own language files are only read for the `minecraft` namespace.
+- Item definition properties that depend on a live player or world (`using_item`, `compass`, `time`)
+  take their resting value.
+- Hidden-component handling covers enchantments, stored enchantments, lore, unbreakable and the whole
+  tooltip; attribute modifiers and other tooltip sections are never drawn at all.
+
 ---
 
 ## Structure

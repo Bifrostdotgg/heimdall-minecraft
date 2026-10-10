@@ -8,6 +8,7 @@ import com.heimdall.core.json.Payload;
 import com.heimdall.core.platform.ConsoleBridge;
 import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.Integrations;
+import com.heimdall.core.platform.ItemImages;
 import com.heimdall.core.platform.LogLine;
 import com.heimdall.core.platform.LuckPermsBridge;
 import com.heimdall.core.platform.PlatformFacade;
@@ -69,6 +70,7 @@ public final class FakePlatform implements PlatformFacade {
     private volatile Function<PlayerHandle, Payload> describer;
     private volatile CompletableFuture<Payload> traceProbe;
     private volatile ChatChannels chatChannels = ChatChannels.NONE;
+    private volatile ItemImages itemImages = ItemImages.NONE;
     private volatile boolean deferLater;
     private volatile boolean deferMainThread;
     private final List<Runnable> mainThreadQueue =
@@ -139,6 +141,15 @@ public final class FakePlatform implements PlatformFacade {
      */
     public FakePlatform withChatChannels(ChatChannels channels) {
         this.chatChannels = channels == null ? ChatChannels.NONE : channels;
+        return this;
+    }
+
+    /**
+     * Supplies an item-image renderer, as the Bukkit platform would. Defaults to
+     * {@link ItemImages#NONE}, which is what every platform that cannot draw answers.
+     */
+    public FakePlatform withItemImages(ItemImages images) {
+        this.itemImages = images == null ? ItemImages.NONE : images;
         return this;
     }
 
@@ -522,6 +533,11 @@ public final class FakePlatform implements PlatformFacade {
             @Override
             public ChatChannels chatChannels() {
                 return chatChannels;
+            }
+
+            @Override
+            public ItemImages itemImages() {
+                return itemImages;
             }
         };
     }

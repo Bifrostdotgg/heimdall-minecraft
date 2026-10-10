@@ -1,6 +1,8 @@
 package com.heimdall.module.bridge;
 
 import com.heimdall.core.config.ServerRole;
+import com.heimdall.core.items.ChatItem;
+import com.heimdall.core.items.HoverTags;
 import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.module.HeimdallModule;
@@ -8,6 +10,7 @@ import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.pipeline.ChatMessage;
 import com.heimdall.core.pipeline.ChatObserver;
 import com.heimdall.core.platform.ChatChannels;
+import com.heimdall.core.platform.ItemImages;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
@@ -20,20 +23,27 @@ import com.heimdall.core.tunnel.ProtocolModeListener;
 import com.heimdall.core.tunnel.TunnelBus;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 import net.kyori.adventure.text.Component;
 
 /**
@@ -162,6 +172,25 @@ import net.kyori.adventure.text.Component;
  * {@link #FRAME_CHANNELS} tells the bot what channels exist, so the dashboard has something to pick
  * from. Departure D85.
  *
+ * <h2>Items shown in chat: the one edit to a relayed line</h2>
+ *
+ * <p>ChatControl's {@code [item]} puts a MiniMessage {@code show_item} hover into the line. Each
+ * well-formed one, with the text it decorates, is replaced by the plain {@code [Name]} the players
+ * saw ({@link HoverTags}), and where the platform can draw ({@link ItemImages}, Bukkit backends
+ * only) and the {@code itemImages} setting allows, the line also carries a tooltip-card PNG per item
+ * in {@code items}. A line with no item hover is untouched, byte for byte. Departure D86.
+ *
+ * <p>An item line waits for its images for at most {@value #ITEM_IMAGE_BUDGET_MS} ms and then ships
+ * with whatever finished. Chat order is kept: every line passes through one FIFO staging deque in
+ * front of the chat batcher, so a line said after a pending item line waits behind it, for at most
+ * the remainder of that line's budget, and then both ship in the order they were said. With nothing
+ * pending a line goes straight to the batcher, adding no latency. The deque holds at most
+ * {@value #MAX_HELD_LINES} lines (past that the head ships with whatever finished), at most
+ * {@value #MAX_PENDING_ITEM_LINES} item lines wait on renders at once (past that a line ships as
+ * text, still in order), and nothing outlives the budget. Images travel with the line and are not
+ * kept here. Join, leave and death are a separate frame family and their order relative to chat is
+ * not guaranteed.
+ *
  * <h2>Threading</h2>
  *
  * <p>The chat observer runs on whatever thread the platform dispatched chat on — Bukkit's async chat
@@ -246,6 +275,44 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     static final String SETTING_CHAT_CHANNELS = "chatChannels";
 
     /**
+     * Whether this server attaches tooltip images to lines that show an item. Flat boolean,
+     * per-server, read live; default on. Off still rewrites each item hover to {@code [Name]}: that
+     * part is about the text being readable, not about images. Departure D86.
+     */
+    static final String SETTING_ITEM_IMAGES = "itemImages";
+
+    /** The default for {@link #SETTING_ITEM_IMAGES}. */
+    static final boolean DEFAULT_ITEM_IMAGES = true;
+
+    /** Images attached to one line at most; the rest are dropped and counted. The wire contract. */
+    static final int MAX_ITEMS_PER_LINE = 4;
+
+    /** Largest PNG attached, before base64. A bigger one is dropped and counted. The wire contract. */
+    static final int MAX_ITEM_PNG_BYTES = 512 * 1024;
+
+    /**
+     * How long an item line waits for its images before shipping with whatever finished. Long
+     * enough for a cached or warm render, short enough that the line still reads as live.
+     */
+    static final long ITEM_IMAGE_BUDGET_MS = 750L;
+
+    /**
+     * Item lines allowed to wait for images at once. Past this a line ships as text straight away:
+     * a burst of item spam must not turn into a growing set of held lines.
+     */
+    static final int MAX_PENDING_ITEM_LINES = 8;
+
+    /**
+     * The most a {@code bridge.chat} frame may carry, by estimated encoded size: 3 MiB, under the
+     * new bot's 4 MiB tunnel cap with room for the envelope. A line that would push a frame past it
+     * waits for the next frame; a line that alone would exceed it loses its largest images first.
+     */
+    static final long MAX_CHAT_FRAME_BYTES = 3L * 1024 * 1024;
+
+    /** What a frame's envelope and array punctuation are allowed, inside {@link #MAX_CHAT_FRAME_BYTES}. */
+    static final long FRAME_OVERHEAD_BYTES = 4L * 1024;
+
+    /**
      * How many one-second flushes pass between inventory polls. A ChatControl reload is an operator
      * action, so five seconds of lag before the dashboard sees a new channel is not worth a tighter
      * loop of reflective calls.
@@ -303,6 +370,44 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     /**
+     * Where item-image budget timeouts are scheduled. {@code null} means {@code heimdall-sched}.
+     * Tests substitute a manual one so "the budget ran out" happens when they say.
+     */
+    private volatile DrainScheduler budgetScheduler;
+
+    /**
+     * Lines {@link #held} may hold, the head included, before the head is forced out. One under
+     * the chat batcher's {@value #MAX_QUEUE_SIZE}: a forced release hands the whole deque to the
+     * batcher at once, and the batcher drops its oldest past its cap, which would be the very item
+     * line the force was meant to deliver.
+     */
+    static final int MAX_HELD_LINES = MAX_QUEUE_SIZE - 1;
+
+    /** Item lines currently waiting for images. Bounded by {@link #MAX_PENDING_ITEM_LINES}. */
+    private final AtomicInteger pendingItemLines = new AtomicInteger();
+
+    /**
+     * Guards {@link #held} and {@link #generation}, and is held across the hand-off to the chat
+     * batcher so two threads releasing lines can never interleave them. Never held while calling
+     * anything that can block: {@link #requestDrain()} runs after it is released.
+     */
+    private final Object orderLock = new Object();
+
+    /**
+     * Lines waiting, in the order they were said, because an item line ahead of them is still
+     * drawing. Empty whenever nothing is pending, which is the fast path. Guarded by
+     * {@link #orderLock}; bounded at {@value #MAX_HELD_LINES}.
+     */
+    private final ArrayDeque<Slot> held = new ArrayDeque<Slot>();
+
+    /**
+     * Bumped by every enable and disable. A pending line remembers the generation it was said in,
+     * and a render finishing after a disable (or a disable and a re-enable) carries a stale one and
+     * is dropped rather than shipped into the next cycle. Written under {@link #orderLock}.
+     */
+    private volatile long generation;
+
+    /**
      * Where immediate drains are scheduled. {@code null} means {@code heimdall-sched}, the single
      * thread {@link #flush} already runs on, so a drain and a tick can never overlap. Tests
      * substitute a manual scheduler so a queued line stays queued until they say otherwise.
@@ -334,9 +439,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             FRAME_CHAT, "lines", new FrameBatcher.Encoder<ChatLine>() {
                 @Override
                 public Payload encode(ChatLine line) {
-                    return line.toPayload();
+                    // Checked again at the wire, not only when the line was queued: a reconnect in
+                    // between can land on an older bot that would close the socket on an image.
+                    return line.toPayload(imagesAccepted(tunnel));
                 }
-            }, MAX_QUEUE_SIZE, MAX_BATCH);
+            }, MAX_QUEUE_SIZE, MAX_BATCH, new FrameBatcher.Sizer<ChatLine>() {
+                @Override
+                public long estimatedBytes(ChatLine line) {
+                    return line.estimatedBytes();
+                }
+            }, MAX_CHAT_FRAME_BYTES - FRAME_OVERHEAD_BYTES);
 
     private final FrameBatcher<SessionEvent> events = new FrameBatcher<SessionEvent>(
             FRAME_EVENT, "events", new FrameBatcher.Encoder<SessionEvent>() {
@@ -422,8 +534,10 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         // Both, always. CHAT_CHANNELS is a build capability like STATUS, not a module of its own: it
         // tells the bot this client understands the channel key, the allowlist and the inventory
         // frame, and it is true of this build whether or not ChatControl is installed.
-        return Collections.unmodifiableSet(new LinkedHashSet<String>(
-                Arrays.asList(Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS)));
+        // ITEM_IMAGES likewise: it says this client rewrites item hovers and may attach `items`. A
+        // proxy or an image-less backend declares it too and simply never attaches any.
+        return Collections.unmodifiableSet(new LinkedHashSet<String>(Arrays.asList(
+                Capabilities.BRIDGE, Capabilities.CHAT_CHANNELS, Capabilities.ITEM_IMAGES)));
     }
 
     @Override
@@ -441,6 +555,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         // fresh enable starts from empty queues rather than whatever a previous cycle left behind.
         chat.clear();
         events.clear();
+        resetStaging();
         // A drain refused or abandoned by a previous cycle must not leave the request latched.
         drainRequested.set(false);
         lastDrainAtMs = 0L;
@@ -449,13 +564,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         this.tunnel = context.tunnel();
 
         reconcileChatObserver();
+        prepareItemImages();
         context.onConfigChanged(new ModuleConfigListener() {
             @Override
             public void onModuleConfigChanged(
                     String moduleId, ModuleConfig previous, ModuleConfig current) {
                 // Fired on the socket's reading thread and fired only on a real change, so this is
-                // as cheap as it looks: a boolean read and, at most, one registration.
+                // as cheap as it looks: a boolean read and, at most, one registration. Preparing
+                // item images only submits work to the renderer's own thread.
                 reconcileChatObserver();
+                prepareItemImages();
             }
         });
 
@@ -542,9 +660,47 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             context = null;
         }
         tunnel = null;
+        resetStaging();
         chat.clear();
         events.clear();
         forgetInventory();
+    }
+
+    /** Forgets every held line and pending render, so nothing crosses an enable/disable cycle. */
+    private void resetStaging() {
+        synchronized (orderLock) {
+            generation++;
+            held.clear();
+            pendingItemLines.set(0);
+        }
+    }
+
+    /** At most one warning a minute for a line whose item handling failed. */
+    private final AtomicLong nextItemFailureWarnAt = new AtomicLong(Long.MIN_VALUE);
+
+    /**
+     * Notes, at most once a minute, that a line's item handling threw and the line relayed anyway.
+     * Names the throwable's class only: its message could carry the line.
+     *
+     * <p>Never rethrows. This runs inside the platform's chat dispatch, and {@code ChatPipeline}
+     * catches only {@link RuntimeException} around an observer: an {@link Error} let out of here
+     * would skip every observer after this one.
+     */
+    private void warnItemFailure(Throwable failure) {
+        long now = System.nanoTime();
+        long next = nextItemFailureWarnAt.get();
+        if (next != Long.MIN_VALUE && now - next < 0) {
+            return;
+        }
+        if (!nextItemFailureWarnAt.compareAndSet(next, now + TimeUnit.MINUTES.toNanos(1))) {
+            return;
+        }
+        ModuleContext ctx = context;
+        if (ctx != null) {
+            ctx.logger().warn("handling a chat line's items failed ("
+                    + failure.getClass().getName() + "); the line was relayed without them. "
+                    + "Repeats are reported at most once a minute.");
+        }
     }
 
     // ── Outbound ─────────────────────────────────────────────────────────────
@@ -572,16 +728,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                         if (channel != null && !channelAllowed(channel)) {
                             return;
                         }
-                        // Verbatim. Not trimmed, not normalised, not formatted - the bot renders,
-                        // and a relay that silently edited what a player typed is worse than one
-                        // that does not relay at all.
-                        chat.enqueue(new ChatLine(
-                                message.senderUuid(),
-                                message.senderName(),
-                                message.message(),
-                                channel,
-                                System.currentTimeMillis()));
-                        requestDrain();
+                        relayLine(message, channel);
                     }
                 });
             } else if (!wanted && chatObserver != Registration.NONE) {
@@ -592,6 +739,507 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 // not a policy violation. Turning relay off stops NEW messages being taken, which
                 // is what the setting means.
             }
+        }
+    }
+
+    /**
+     * Queues one observed line: verbatim when it shows no item, otherwise with each item hover
+     * replaced by {@code [Name]} and, where possible, tooltip images attached.
+     *
+     * <p>Runs on the chat thread, so it keeps the observer's rules: no blocking, no throwing, and
+     * nothing logged that carries text. The rewrite is string work bounded by {@link HoverTags}; the
+     * rendering happens on the platform's own executor and is only waited for off this thread.
+     */
+    private void relayLine(ChatMessage message, String channel) {
+        long timestampMs = System.currentTimeMillis();
+        String text = message.message();
+        if (!HoverTags.mightContainItem(text)) {
+            // Verbatim. Not trimmed, not normalised, not formatted - the bot renders, and a relay
+            // that silently edited what a player typed is worse than one that does not relay at all.
+            submit(Slot.ready(new ChatLine(message.senderUuid(), message.senderName(), text,
+                    channel, timestampMs, NO_ITEMS), generation));
+            return;
+        }
+        ModuleContext ctx = context;
+        ItemImages images = itemImages(ctx);
+        HoverTags.Rewrite rewrite;
+        try {
+            rewrite = HoverTags.rewrite(text, images);
+        } catch (Throwable unexpected) {
+            // HoverTags is bounded and never throws on any input; a translation source might, and
+            // this runs inside the platform's chat dispatch, where nothing may escape. Whatever went
+            // wrong, the line still relays, exactly as it was, and nothing is rethrown.
+            warnItemFailure(unexpected);
+            rewrite = null;
+        }
+        if (rewrite == null) {
+            submit(Slot.ready(new ChatLine(message.senderUuid(), message.senderName(), text,
+                    channel, timestampMs, NO_ITEMS), generation));
+            return;
+        }
+        ChatLine textOnly = new ChatLine(message.senderUuid(), message.senderName(),
+                rewrite.text(), channel, timestampMs, NO_ITEMS);
+        // Only to a bot that accepted itemimages@1 in this connection's handshake. A released bot
+        // closes its socket on a frame over its (1 MiB) payload cap, so it gets the [Name] text and
+        // nothing is drawn for it at all.
+        if (ctx == null || !itemImagesEnabled(ctx) || !imagesAccepted(tunnel)
+                || !available(images)) {
+            submit(Slot.ready(textOnly, generation));
+            return;
+        }
+        Attempt attempt = new Attempt();
+        try {
+            attachImages(ctx, images, textOnly, rewrite, attempt);
+        } catch (Throwable unexpected) {
+            // Same rule as the rewrite: the line relays, and nothing escapes into chat dispatch.
+            warnItemFailure(unexpected);
+            try {
+                if (attempt.slot != null && attempt.slot.placed) {
+                    // Already in the order: finish it there, never add a second copy.
+                    shipPending(attempt.slot);
+                } else {
+                    if (attempt.reserved) {
+                        releasePendingCount(attempt.generation);
+                    }
+                    submit(Slot.ready(textOnly, attempt.generation));
+                }
+            } catch (Throwable alsoFailed) {
+                // Nothing more can be done for this one line without risking the chat thread.
+            }
+        }
+    }
+
+    /** How far {@link #attachImages} got, so a failure part-way can be unwound exactly. */
+    private final class Attempt {
+        final long generation = HeimdallBridgeModule.this.generation;
+        boolean reserved;
+        Slot slot;
+    }
+
+    /**
+     * Hands a line to the chat batcher in the order it was said.
+     *
+     * <p>The fast path, a ready line with nothing held, goes straight through: plain chat with no
+     * item pending pays one uncontended lock and nothing else. Otherwise the line joins the back of
+     * {@link #held} and every ready line at the front is released. Lines from a previous
+     * enable/disable cycle are dropped.
+     */
+    private void submit(Slot slot) {
+        boolean released;
+        Slot forced = null;
+        synchronized (orderLock) {
+            if (slot.generation != generation) {
+                return;
+            }
+            if (held.isEmpty() && slot.line != null) {
+                chat.enqueue(slot.line);
+                slot.placed = true;
+                released = true;
+            } else {
+                held.addLast(slot);
+                slot.placed = true;
+                if (held.size() > MAX_HELD_LINES) {
+                    forced = claimHeadLocked();
+                }
+                released = releaseReadyLocked();
+            }
+        }
+        afterRelease(released);
+        if (forced != null) {
+            // Assembled (base64, logging) outside the lock; the head stays in place until then,
+            // so the order is unchanged, and the deque may sit a line or two over its bound.
+            finishSlot(forced);
+        }
+    }
+
+    /**
+     * Finishes a claimed slot, totally: whatever {@link #assemble} does, including throwing, the
+     * slot is marked ready with its images or, failing that, with its text-only line. A claimed
+     * slot left without a line would stop {@link #held} at its head forever, since nothing else
+     * may claim it again.
+     */
+    private void finishSlot(Slot slot) {
+        ChatLine done = slot.pending.line;
+        try {
+            assemble(slot);
+            if (slot.finished != null) {
+                done = slot.finished;
+            }
+        } catch (Throwable failed) {
+            warnItemFailure(failed);
+        } finally {
+            markReady(slot, done);
+        }
+    }
+
+    /** After a release: asks for a drain, and reports any line the watchdog had to let go. */
+    private void afterRelease(boolean released) {
+        Error injected = afterReleaseFailureForTests;
+        if (injected != null) {
+            afterReleaseFailureForTests = null;
+            throw injected;
+        }
+        if (released) {
+            requestDrain();
+        }
+        int overdue = watchdogReleases.getAndSet(0);
+        ModuleContext ctx = context;
+        if (overdue > 0 && ctx != null) {
+            ctx.logger().warn(overdue + " chat line(s) with items waited past twice the image "
+                    + "budget and were relayed as text");
+        }
+    }
+
+    /** Marks a pending slot ready with its finished line and releases whatever that unblocks. */
+    private void markReady(Slot slot, ChatLine line) {
+        boolean released;
+        synchronized (orderLock) {
+            if (slot.generation != generation || slot.line != null) {
+                return;
+            }
+            slot.line = line;
+            released = releaseReadyLocked();
+        }
+        afterRelease(released);
+    }
+
+    /**
+     * Moves every ready line at the head of {@link #held} to the batcher, in order.
+     *
+     * <p>Also the watchdog: a head item line that has waited more than twice the image budget is
+     * released as its text-only line, whoever (if anyone) still holds its claim. The budget timer
+     * and the render callbacks normally finish a line long before; this is the belt for a timer
+     * that never ran or a finish that never came, so the deque can never stall behind one line.
+     * A late finish then finds the slot ready and does nothing.
+     */
+    private boolean releaseReadyLocked() {
+        boolean any = false;
+        while (!held.isEmpty()) {
+            Slot head = held.peekFirst();
+            if (head.line == null && head.pending != null
+                    && nanoNow() - head.arrivedNanos > 2 * TimeUnit.MILLISECONDS.toNanos(
+                            ITEM_IMAGE_BUDGET_MS)) {
+                if (head.pending.markShipped() && pendingItemLines.get() > 0) {
+                    pendingItemLines.decrementAndGet();
+                }
+                head.line = head.pending.line;
+                watchdogReleases.incrementAndGet();
+            }
+            if (head.line == null) {
+                break;
+            }
+            chat.enqueue(held.pollFirst().line);
+            any = true;
+        }
+        return any;
+    }
+
+    /** Lines the watchdog released since the last report; see {@link #afterRelease}. */
+    private final AtomicInteger watchdogReleases = new AtomicInteger();
+
+    /** A monotonic clock for the watchdog; tests substitute one. {@code null} is the real one. */
+    private volatile java.util.function.LongSupplier nanoClock;
+
+    private long nanoNow() {
+        java.util.function.LongSupplier clock = nanoClock;
+        return clock != null ? clock.getAsLong() : System.nanoTime();
+    }
+
+    /**
+     * {@link #held} is over its bound: the head is an item line still drawing, so it is claimed to
+     * ship now with whatever finished. Only the claim happens under the lock; the caller assembles
+     * it and marks it ready afterwards.
+     *
+     * @return the claimed head, or {@code null} if it was not a pending line or is already claimed
+     */
+    private Slot claimHeadLocked() {
+        Slot head = held.peekFirst();
+        if (head == null || head.line != null || head.pending == null
+                || !head.pending.markShipped()) {
+            return null;
+        }
+        if (pendingItemLines.get() > 0) {
+            pendingItemLines.decrementAndGet();
+        }
+        return head;
+    }
+
+    /**
+     * Reserves one of the {@value #MAX_PENDING_ITEM_LINES} pending places for {@code cycle}.
+     * Under {@link #orderLock}, like the reset, so a disable landing between the check and the
+     * increment cannot leave a count from an old cycle in the new one.
+     */
+    boolean reservePending(long cycle) {
+        synchronized (orderLock) {
+            if (cycle != generation || pendingItemLines.get() >= MAX_PENDING_ITEM_LINES) {
+                return false;
+            }
+            pendingItemLines.incrementAndGet();
+            return true;
+        }
+    }
+
+    /** Returns a pending place, but only if {@code cycle} is still the current one. */
+    void releasePendingCount(long cycle) {
+        synchronized (orderLock) {
+            if (cycle == generation && pendingItemLines.get() > 0) {
+                pendingItemLines.decrementAndGet();
+            }
+        }
+    }
+
+    /**
+     * Starts one render per distinct item (at most {@value #MAX_ITEMS_PER_LINE}) and ships the line
+     * when they have all finished or {@value #ITEM_IMAGE_BUDGET_MS} ms have passed, whichever is
+     * first. Exactly one of those ships it.
+     */
+    private void attachImages(
+            final ModuleContext ctx, ItemImages images, final ChatLine textOnly,
+            HoverTags.Rewrite rewrite, Attempt attempt) {
+        // One image per distinct item: the same item shown twice is the same picture.
+        Map<String, Integer> seen = new HashMap<String, Integer>();
+        List<ChatItem> distinct = new ArrayList<ChatItem>();
+        List<String> names = new ArrayList<String>();
+        for (int i = 0; i < rewrite.items().size(); i++) {
+            ChatItem item = rewrite.items().get(i);
+            if (seen.put(item.cacheKey(), i) == null) {
+                distinct.add(item);
+                names.add(rewrite.names().get(i));
+            }
+        }
+        final int extra = Math.max(0, distinct.size() - MAX_ITEMS_PER_LINE);
+        if (extra > 0) {
+            distinct = distinct.subList(0, MAX_ITEMS_PER_LINE);
+            names = names.subList(0, MAX_ITEMS_PER_LINE);
+            ctx.logger().debug(() -> "a chat line showed more than " + MAX_ITEMS_PER_LINE
+                    + " items; dropped " + extra + " image(s)");
+        }
+
+        long cycle = attempt.generation;
+        if (!reservePending(cycle)) {
+            ctx.logger().debug("too many chat lines waiting on item images; sent one as text");
+            submit(Slot.ready(textOnly, cycle));
+            return;
+        }
+        attempt.reserved = true;
+        Error injected = attachFailureForTests;
+        if (injected != null) {
+            attachFailureForTests = null;
+            throw injected;
+        }
+
+        List<CompletableFuture<byte[]>> renders = new ArrayList<CompletableFuture<byte[]>>();
+        for (ChatItem item : distinct) {
+            renders.add(startRender(images, item));
+        }
+        final PendingItemLine pending = new PendingItemLine(textOnly, names, renders);
+        final Slot slot = Slot.pending(pending, cycle, nanoNow());
+        // Known to the unwind before it is placed: if submit throws, the unwind looks at
+        // slot.placed to decide between finishing it in the order and relaying it as text.
+        attempt.slot = slot;
+        // Into the order BEFORE any completion can fire: a render that is already done ships the
+        // line from inside whenComplete below, and it must find its place in the deque.
+        submit(slot);
+        for (CompletableFuture<byte[]> render : renders) {
+            // Plain whenComplete, never the executor-less *Async: this runs on whichever thread
+            // finished the render (or inline, if it was already done), and all it does is a check
+            // and, once, a short locked hand-off.
+            render.whenComplete(new BiConsumer<byte[], Throwable>() {
+                @Override
+                public void accept(byte[] png, Throwable failed) {
+                    if (pending.allDone()) {
+                        shipPending(slot);
+                    }
+                }
+            });
+        }
+        if (pending.isShipped()) {
+            return;
+        }
+        Runnable budget = new Runnable() {
+            @Override
+            public void run() {
+                shipPending(slot);
+            }
+        };
+        try {
+            DrainScheduler scheduler = budgetScheduler;
+            if (scheduler != null) {
+                scheduler.schedule(budget, ITEM_IMAGE_BUDGET_MS);
+            } else {
+                ctx.executors().scheduler()
+                        .schedule(budget, ITEM_IMAGE_BUDGET_MS, TimeUnit.MILLISECONDS);
+            }
+        } catch (RuntimeException refused) {
+            // Shutting down: there is nobody to wait for, so ship what there is now.
+            shipPending(slot);
+        }
+    }
+
+    /** {@link ItemImages#render}, with a throw or a {@code null} future turned into "no image". */
+    private static CompletableFuture<byte[]> startRender(ItemImages images, ChatItem item) {
+        try {
+            CompletableFuture<byte[]> render = images.render(item);
+            return render != null ? render : CompletableFuture.<byte[]>completedFuture(null);
+        } catch (Throwable failed) {
+            return CompletableFuture.completedFuture(null);
+        }
+    }
+
+    /**
+     * Ships a pending item line with whatever images finished, once. Called by the last render to
+     * complete and by the budget timeout; the loser of that race does nothing. A line from a cycle
+     * that has since been disabled is dropped: its count and its place were reset with it.
+     */
+    private void shipPending(Slot slot) {
+        PendingItemLine pending = slot.pending;
+        if (!pending.markShipped()) {
+            return;
+        }
+        synchronized (orderLock) {
+            // Checked and decremented together: a stale cycle's render must never decrement the
+            // count of the cycle that replaced it.
+            if (slot.generation != generation) {
+                return;
+            }
+            if (pendingItemLines.get() > 0) {
+                pendingItemLines.decrementAndGet();
+            }
+        }
+        finishSlot(slot);
+    }
+
+    /**
+     * Builds the finished line for a pending slot into {@code slot.finished}: the images that are
+     * ready, within the per-PNG cap and the frame budget, counts logged and nothing else. Written
+     * into the slot rather than returned, so no method here hands a chat line back out.
+     */
+    private void assemble(Slot slot) {
+        Runnable during = duringAssembleForTests;
+        if (during != null) {
+            duringAssembleForTests = null;
+            during.run();
+        }
+        Error injected = assembleFailureForTests;
+        if (injected != null) {
+            assembleFailureForTests = null;
+            throw injected;
+        }
+        PendingItemLine pending = slot.pending;
+        List<Payload> items = new ArrayList<Payload>();
+        int missing = 0;
+        int oversized = 0;
+        for (int i = 0; i < pending.renders.size(); i++) {
+            byte[] png = finishedPng(pending.renders.get(i));
+            if (png == null || png.length == 0) {
+                missing++;
+                continue;
+            }
+            if (png.length > MAX_ITEM_PNG_BYTES) {
+                oversized++;
+                continue;
+            }
+            items.add(Payload.builder()
+                    .put("name", pending.names.get(i))
+                    .put("png", Base64.getEncoder().encodeToString(png))
+                    .build());
+        }
+        ChatLine line = pending.line.withItems(items);
+        int trimmed = 0;
+        while (line.estimatedBytes() > MAX_CHAT_FRAME_BYTES - FRAME_OVERHEAD_BYTES
+                && !line.items.isEmpty()) {
+            line = line.withoutLargestItem();
+            trimmed++;
+        }
+        slot.finished = line;
+        ModuleContext ctx = context;
+        if (ctx == null) {
+            // Disabled while the images were drawing; the caller's generation check drops it.
+            return;
+        }
+        final int attached = line.items.size();
+        final int none = missing;
+        if (trimmed > 0) {
+            ctx.logger().warn("dropped " + trimmed + " item image(s) so a relayed chat line fits "
+                    + "the " + MAX_CHAT_FRAME_BYTES + "-byte frame budget");
+        }
+        if (oversized > 0) {
+            ctx.logger().warn("dropped " + oversized + " item image(s) larger than "
+                    + MAX_ITEM_PNG_BYTES + " bytes from a relayed chat line");
+        }
+        ctx.logger().debug(() -> "relayed a chat line with " + attached + " item image(s)"
+                + (none == 0 ? "" : "; " + none + " not ready or failed"));
+    }
+
+    /** A render's PNG if it has finished successfully, else {@code null}. Never waits. */
+    private static byte[] finishedPng(CompletableFuture<byte[]> render) {
+        if (!render.isDone() || render.isCompletedExceptionally() || render.isCancelled()) {
+            return null;
+        }
+        try {
+            return render.getNow(null);
+        } catch (RuntimeException failed) {
+            return null;
+        }
+    }
+
+    /** Whether the bot on {@code bus} accepted {@code itemimages@1}; false for no bus. */
+    private static boolean imagesAccepted(TunnelBus bus) {
+        if (bus == null) {
+            return false;
+        }
+        try {
+            return bus.peerAccepts(Capabilities.ITEM_IMAGES);
+        } catch (Throwable failed) {
+            return false;
+        }
+    }
+
+    /** Whether item images are wanted on this server, read live like {@link #relayChat()}. */
+    private static boolean itemImagesEnabled(ModuleContext ctx) {
+        return ctx.settings().bool(SETTING_ITEM_IMAGES, DEFAULT_ITEM_IMAGES);
+    }
+
+    /** The platform's renderer, never {@code null}. */
+    private static ItemImages itemImages(ModuleContext ctx) {
+        if (ctx == null) {
+            return ItemImages.NONE;
+        }
+        try {
+            ItemImages images = ctx.platform().integrations().itemImages();
+            return images == null ? ItemImages.NONE : images;
+        } catch (Throwable failed) {
+            return ItemImages.NONE;
+        }
+    }
+
+    private static boolean available(ItemImages images) {
+        try {
+            return images.available();
+        } catch (Throwable failed) {
+            return false;
+        }
+    }
+
+    /**
+     * Asks the renderer to get its assets ready, when images are wanted and relay is on. Called at
+     * enable and on every config change; {@link ItemImages#prepare} is idempotent and non-blocking,
+     * so a repeat costs nothing. With {@code itemImages} off nothing is prepared, which is what keeps
+     * a server that opted out from ever downloading the vanilla assets.
+     */
+    private void prepareItemImages() {
+        ModuleContext ctx = context;
+        if (ctx == null || !relayChat() || !itemImagesEnabled(ctx)) {
+            return;
+        }
+        ItemImages images = itemImages(ctx);
+        try {
+            if (images.available()) {
+                images.prepare();
+            }
+        } catch (RuntimeException failed) {
+            ctx.logger().debug(() -> "item image renderer could not start preparing: "
+                    + failed.getClass().getName());
         }
     }
 
@@ -1084,16 +1732,80 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         private final String message;
         private final String channel;
         private final long timestampMs;
+        private final List<Payload> items;
+        private final long estimatedBytes;
 
-        ChatLine(UUID uuid, String name, String message, String channel, long timestampMs) {
+        ChatLine(UUID uuid, String name, String message, String channel, long timestampMs,
+                List<Payload> items) {
             this.uuid = uuid;
             this.name = name;
             this.message = message;
             this.channel = channel;
             this.timestampMs = timestampMs;
+            this.items = items == null ? NO_ITEMS : items;
+            long estimate = 160L + jsonBytes(name) + jsonBytes(message) + jsonBytes(channel);
+            for (Payload item : this.items) {
+                estimate += 32L + jsonBytes(item.string("name", ""))
+                        + jsonBytes(item.string("png", ""));
+            }
+            this.estimatedBytes = estimate;
         }
 
-        Payload toPayload() {
+        /** An upper estimate of this line's encoded size, computed once. */
+        long estimatedBytes() {
+            return estimatedBytes;
+        }
+
+        /** This line without its largest image. */
+        ChatLine withoutLargestItem() {
+            if (items.isEmpty()) {
+                return this;
+            }
+            int largest = 0;
+            for (int i = 1; i < items.size(); i++) {
+                if (items.get(i).string("png", "").length()
+                        > items.get(largest).string("png", "").length()) {
+                    largest = i;
+                }
+            }
+            List<Payload> kept = new ArrayList<Payload>(items);
+            kept.remove(largest);
+            return withItems(kept);
+        }
+
+        /**
+         * Bytes a string can take in the frame's JSON, pessimistically: escapes, including the HTML
+         * characters a JSON writer may escape, count as six.
+         */
+        static long jsonBytes(String text) {
+            if (text == null) {
+                return 0L;
+            }
+            long bytes = 2L;
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                if (c < 0x20 || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&'
+                        || c == '=' || c == '\'') {
+                    bytes += 6;
+                } else if (c < 0x80) {
+                    bytes += 1;
+                } else if (c < 0x800) {
+                    bytes += 2;
+                } else {
+                    bytes += 3;
+                }
+            }
+            return bytes;
+        }
+
+        /** This line with {@code attached} as its item images. */
+        ChatLine withItems(List<Payload> attached) {
+            return new ChatLine(uuid, name, message, channel, timestampMs,
+                    attached == null || attached.isEmpty()
+                            ? NO_ITEMS : Collections.unmodifiableList(attached));
+        }
+
+        Payload toPayload(boolean withImages) {
             Payload.Builder builder = Payload.builder()
                     .put("uuid", uuid == null ? "" : uuid.toString())
                     .put("name", name == null ? "" : name)
@@ -1107,6 +1819,12 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 // with no name rather than no channel.
                 builder.put("channel", channel);
             }
+            if (withImages && !items.isEmpty()) {
+                // Omitted entirely for a line with no images, and for a bot that did not accept
+                // itemimages@1, so an ordinary line stays exactly
+                // the shape a bot without itemimages@1 already reads.
+                builder.putChildren("items", items);
+            }
             return builder.build();
         }
 
@@ -1119,7 +1837,82 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         public String toString() {
             return "ChatLine{sender='" + name + "', length="
                     + (message == null ? 0 : message.length())
-                    + (channel == null ? "" : ", channel='" + channel + "'") + "}";
+                    + (channel == null ? "" : ", channel='" + channel + "'")
+                    + (items.isEmpty() ? "" : ", items=" + items.size()) + "}";
+        }
+    }
+
+    /** The empty item list every ordinary line carries. */
+    private static final List<Payload> NO_ITEMS = Collections.emptyList();
+
+    /**
+     * An item line waiting for its images. Exists for at most {@value #ITEM_IMAGE_BUDGET_MS} ms: the
+     * budget timeout ships it if the renders have not. Holds the line and the futures, nothing else.
+     */
+    private static final class PendingItemLine {
+
+        final ChatLine line;
+        final List<String> names;
+        final List<CompletableFuture<byte[]>> renders;
+        private final AtomicBoolean shipped = new AtomicBoolean();
+
+        PendingItemLine(ChatLine line, List<String> names,
+                List<CompletableFuture<byte[]>> renders) {
+            this.line = line;
+            this.names = new ArrayList<String>(names);
+            this.renders = renders;
+        }
+
+        boolean allDone() {
+            for (CompletableFuture<byte[]> render : renders) {
+                if (!render.isDone()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** {@code true} for exactly one caller. */
+        boolean markShipped() {
+            return shipped.compareAndSet(false, true);
+        }
+
+        boolean isShipped() {
+            return shipped.get();
+        }
+    }
+
+    /**
+     * One place in the chat order: a line ready to go, or an item line still drawing. Exists while
+     * it waits in {@link #held}, which is at most the head item line's budget.
+     */
+    private static final class Slot {
+
+        final long generation;
+        final PendingItemLine pending;
+        /** When a pending slot was said, by the module's monotonic clock; for the watchdog. */
+        final long arrivedNanos;
+        /** Non-null once ready. Guarded by {@code orderLock}. */
+        ChatLine line;
+        /** Set once the slot is in the order (or straight through it). Written under the lock. */
+        volatile boolean placed;
+
+        /** The assembled line of a pending slot, set once by whichever thread shipped it. */
+        volatile ChatLine finished;
+
+        private Slot(long generation, PendingItemLine pending, ChatLine line, long arrivedNanos) {
+            this.generation = generation;
+            this.pending = pending;
+            this.line = line;
+            this.arrivedNanos = arrivedNanos;
+        }
+
+        static Slot ready(ChatLine line, long generation) {
+            return new Slot(generation, null, line, 0L);
+        }
+
+        static Slot pending(PendingItemLine pending, long generation, long arrivedNanos) {
+            return new Slot(generation, pending, null, arrivedNanos);
         }
     }
 
@@ -1179,6 +1972,45 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /** Routes immediate drains through {@code scheduler} instead of {@code heimdall-sched}. */
     void drainSchedulerForTests(DrainScheduler scheduler) {
         this.drainScheduler = scheduler;
+    }
+
+    /** Routes item-image budget timeouts through {@code scheduler} instead of {@code heimdall-sched}. */
+    void budgetSchedulerForTests(DrainScheduler scheduler) {
+        this.budgetScheduler = scheduler;
+    }
+
+    /** How many item lines are waiting on images. */
+    int pendingItemLineCount() {
+        return pendingItemLines.get();
+    }
+
+    /** Makes the next {@link #assemble} throw {@code failure}, once. */
+    volatile Error assembleFailureForTests;
+
+    /** Makes the next {@link #afterRelease} throw {@code failure}, once. */
+    volatile Error afterReleaseFailureForTests;
+
+    /** Runs at the start of the next {@link #assemble}, once, to interleave with a finish. */
+    volatile Runnable duringAssembleForTests;
+
+    /** Makes the next {@link #attachImages} throw {@code failure} after reserving, once. */
+    volatile Error attachFailureForTests;
+
+    /** Substitutes the watchdog's monotonic clock. */
+    void nanoClockForTests(java.util.function.LongSupplier clock) {
+        this.nanoClock = clock;
+    }
+
+    /** The current enable cycle. */
+    long generationForTests() {
+        return generation;
+    }
+
+    /** How many lines are held behind a pending item line. */
+    int heldLineCount() {
+        synchronized (orderLock) {
+            return held.size();
+        }
     }
 
     /** How many chat lines are currently queued. */
