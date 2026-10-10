@@ -2522,6 +2522,157 @@ every window would hand players a fresh allowance, as v2's reload did.
   either today (no `Material`, reflective NMS names are the same under both mappings); a change that
   starts to will need to be made safe for this first.
 
+### D88 - a vanished player's join, leave and death are not relayed, and vanish toggles are a setting
+
+**New in 3.1.**
+
+**Before:** the bridge relayed every join, leave and death it was told about (subject only to
+`relayEvents`, D83). Nothing anywhere in the plugin knew that vanish plugins exist, so a staff member
+joining or leaving vanished produced "X joined the server" in Discord while nobody in game saw a
+thing. Reported from Third Place: "#ingame-chat says when we join/leave in vanish now".
+**Now:** a vanished player's join, leave and death are never posted, from any instance; mid-session
+vanish and reappear post nothing unless the new per-server setting `announceVanishToggles` is on.
+
+#### Why every instance has to ask, not just the backend
+
+`relayEvents` defaults on for every role, so a proxy announces joins too, and it sees a join before
+any backend does. The bot keeps whichever copy of an event reaches it first (its best-effort ~1 s
+duplicate drop, D83), so a fix on the backends alone would still leak through the proxy. Each
+instance therefore asks its own vanish source: PremiumVanish on all three platforms, and on Bukkit
+backends also the `vanished` metadata convention.
+
+#### Where it lives
+
+- **Core** gains a small seam, `Vanish` and `VanishListener`, reached through
+  `Integrations.vanish()`. A default method answering `Vanish.NONE` ("nobody is hidden, nothing
+  toggles, nothing waits"), exactly like `chatChannels()` (D85) and `itemImages()` (D86). Core stays
+  platform-free.
+- **`:platform-common`** has `VanishSupport`, the platform-neutral half: lazy resolution retried on
+  every call while PremiumVanish is missing (no load-order guarantee, as for LuckPerms), following a
+  disable or reload, containment, the toggle listener list, and teardown. Written once so the three
+  platforms cannot drift.
+- **Each platform** supplies only the reflection: `BukkitVanish` (`VanishAPI.isInvisible(Player)`,
+  `isInvisibleOffline(UUID)` once the player has gone, the `PostPlayerHideEvent` /
+  `PostPlayerShowEvent` / `PlayerAutoVanishOnJoinEvent` events, falling back to the pre-change
+  `PlayerHideEvent` / `PlayerShowEvent` on an older PremiumVanish; SuperVanish ships the same API
+  and is found too), `VelocityVanish` (`VelocityVanishAPI.isInvisible`, `getAllInvisiblePlayers()`
+  once gone, `VelocityPlayerHideEvent` / `VelocityPlayerShowEvent` as functional handlers) and
+  `BungeeVanish` (the same on `BungeeVanishAPI`).
+- **The bridge** owns the rules, below. It asks the seam; it knows nothing about PremiumVanish.
+
+Everything is reflective through PremiumVanish's own class loader, as ChatControl's hook is (D85),
+and nothing of PremiumVanish's is shipped: its API jar must never be (its classes complain loudly
+when another plugin loads them). **One exception, forced by BungeeCord:** its event bus finds a
+handler by the declared parameter type of an `@EventHandler` method and dispatches on the event's
+exact class, so there is no way to register for an event class known only by name.
+`BungeeVanishListener` therefore compiles against two stand-ins under PremiumVanish's real names, in
+a `vanishApi` source set that is `compileOnly` and never shipped (`verifyCoreJar` would refuse a
+class outside `com/heimdall/` if it were), and it is only loaded once PremiumVanish has been found.
+It checks that the names it linked against are PremiumVanish's own classes, so a copy shaded by
+another plugin is reported rather than silently never firing. It is **public**, unlike the Bukkit
+listeners: BungeeCord invokes handlers with `Method.invoke` and no `setAccessible`, so a handler on a
+package-private class is refused, and `BungeeVanishTest` dispatches through the real `EventBus` to
+pin that.
+
+The hide/show hook is core code registered on the platform, so it is tracked through
+`CoreRegistrations` like everything else a generation registers (D87): a hot swap takes it off
+whether or not the platform's `close()` ran, and one registered after the generation was retired is
+closed on arrival. Nothing is in the shell.
+
+#### The rules, per session
+
+The bridge keeps a small record per player from join to quit, because the rules are about the
+session rather than the moment:
+
+- **Vanished at the join, or hidden by a toggle seen just before it** (PremiumVanish's auto-vanish
+  fires inside the join event, ahead of the session notification): the join is not posted, and the
+  session is *quiet*.
+- **A quiet session posts no leave and no death**, even if the player has reappeared by the time
+  they go. Discord never shows a leave without a join. A death of a quiet but visible player (joined
+  vanished, reappeared silently) is not posted either, for the same reason: Discord has not been told
+  they are here.
+- **Vanished at the leave or the death** (checked again then, with the offline lookups where the
+  online one is unreliable): not posted. A player who joined visibly and vanished without the
+  setting on therefore gets a join and no leave in Discord. That is the accepted cost of never
+  posting a vanished player's leave; the alternative publishes when a hidden staff member really
+  left.
+
+#### The deferred join
+
+PremiumVanish can mark a player a moment after the platform's join event: a backend marks an
+auto-vanished player inside the join, but a proxy learns a player's state from a backend or the
+shared database afterwards. So **when PremiumVanish is installed**, a join waits up to
+`VanishSupport.JOIN_SETTLE_MS` (1.5 s), re-checking every 250 ms, and is posted at the end with the
+join's own timestamp (so the bot's duplicate drop keys it like any other copy). Vanished at any
+check, or a hide event inside the window, decides it quiet at once. **Without PremiumVanish the
+window is zero and a join posts in the same call, exactly as before.** The metadata convention does
+not defer: it is set inside the join.
+
+Ordering stays sane: a quit or a death inside the window decides the join first, so both go out
+together and in order (a join and a leave for a visible player, who players in game saw come and go;
+nothing for a vanished one). Never a leave without its join, nor a join after its leave. The
+re-checks run on `heimdall-sched` directly, not through `ModuleContext.scheduleOnce`, which tracks
+every handle until the module is disabled and would grow by six per join.
+
+Both proxies' session listeners now run last (`PostOrder.LAST` on Velocity, `EventPriority.HIGHEST`
+on BungeeCord), so a vanish plugin listening to the same events has had its turn. Bukkit's were
+already at `MONITOR`.
+
+#### `announceVanishToggles`
+
+A new flat per-server boolean, read live from `ctx.settings()` like `relayEvents`, **default off**.
+
+- **Off:** vanishing or reappearing mid-session posts nothing.
+- **On:** mirrors what players in game see. PremiumVanish broadcasts a fake leave when somebody
+  vanishes and a fake join when they reappear, so the bridge posts a `leave` and a `join` with the
+  same kinds a real session uses. The bot needs no change. A toggle PremiumVanish was told to keep
+  silent (`-s`) is not announced, because players saw nothing; only Bukkit can tell that, so on a
+  proxy every toggle counts as announced.
+- **Either way** a toggle posts only when `relayEvents` is on for that instance: it goes through the
+  same `relayEvent` choke point. And the session remembers: after a mirrored reappearance the real
+  leave posts; after a mirrored vanish it does not; turning the setting on after a silent vanish does
+  not repeat a join Discord already has.
+
+Players already online when the module enables (a hot swap, or the module switched on
+mid-session) have no join to come, so they are seeded at enable, a hidden one as quiet.
+
+#### Fail-open, deliberately
+
+If PremiumVanish is installed but its API has moved, the integration logs one error naming the
+consequence and behaves as if PremiumVanish were absent. That is the opposite of ChatControl's
+fail-closed (D85), on purpose: failing closed here would mean relaying no join or leave for anyone,
+which punishes every player for a staff feature, and the calls used have not changed in years.
+PremiumVanish's own code throwing on one call answers "not vanished" for that call and warns at most
+once a minute.
+
+#### How it is tested
+
+`HeimdallBridgeVanishTest` drives the bridge through the real `ModuleManager` and
+`PlayerSessionEvents` with a fake `Vanish`: suppression of all three kinds, the quiet-leave rule, the
+early auto-vanish toggle, the deferred join (posted after the window with its own timestamp, a late
+mark caught by a re-check, a hide inside the window, quick join and leave both ways, a death inside
+the window, a disable inside the window), `announceVanishToggles` off and on, silent toggles, the
+`relayEvents` gate, live flips in both directions, seeding, and teardown on disable and re-enable.
+`Vanish.NONE` and a zero window are pinned as the old behaviour with no timer. `VanishSupportTest`
+covers resolution, retry, reload, a moved API, a transient failure, and the hook coming off through
+both `close()` and the generation teardown. `BukkitVanishTest`, `VelocityVanishTest` and
+`BungeeVanishTest` run the real reflective code against stand-ins for PremiumVanish's classes in the
+test source sets (the metadata source, the offline lookups, the event hooks, the pre-change
+fallback, teardown), and the BungeeCord one dispatches through BungeeCord's real event bus.
+
+#### Limits
+
+- **Not verified on a real server.** No test here has run PremiumVanish itself, and the smoke matrix
+  boots servers without joining them. The Velocity plugin id is taken to be `premiumvanish`, with a
+  case-insensitive id-or-name match as the fallback, because PremiumVanish does not document it.
+- **Mid-session toggles need PremiumVanish (or SuperVanish).** The metadata convention has no
+  events, so with only EssentialsX a vanish is seen at the next join, leave or death check and
+  `announceVanishToggles` has nothing to announce.
+- **A swap inside a join's window drops that join.** The new core seeds the player as visible, so
+  their leave still posts later.
+- **Chat is not touched.** A vanished player who talks in public chat is visible to everyone in game
+  anyway, and the chat half has its own settings.
+
 ---
 
 ## Structure

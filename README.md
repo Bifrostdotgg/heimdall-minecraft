@@ -248,6 +248,16 @@ Two notes worth having before you turn something on:
   - Deaths are the exception to any proxy-origin plan: no proxy has a death event, so those only
     ever come from backends.
   - Both take effect the moment you save — no restart, and no switching the module off and on.
+- **Vanished staff stay vanished in Discord.** With PremiumVanish (or SuperVanish) installed, on the
+  proxy or the backends, a vanished player's join, leave and death are never posted, and nor is the
+  leave of a session whose join was kept quiet. On a Bukkit backend the `vanished` flag that
+  EssentialsX, CMI and other vanish plugins set counts too. With PremiumVanish installed a join is
+  posted about a second and a half late, while the plugin makes sure the player is not being
+  vanished; without it nothing changes.
+  - `announceVanishToggles` (per server, **off** by default) decides what happens when somebody
+    vanishes or reappears mid-session. Off: nothing is posted. On: Discord sees what players in game
+    see, a leave when they vanish and a join when they reappear (not for a silent `-s` toggle, which
+    players do not see either). It only posts where `relayEvents` is on.
 
 ### WebSocket Tunnel
 
