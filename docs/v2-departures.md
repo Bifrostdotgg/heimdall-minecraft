@@ -2246,7 +2246,10 @@ be read, loaded or started is reported, and the shell runs on with no core.
 
 At server stop the shell stops the core but deliberately does not close its classloader: a callback
 still finishing on a library thread would otherwise become a `NoClassDefFoundError` trace in the
-shutdown log.
+shutdown log. Shutdown never waits unboundedly: if a swap is in progress it waits up to 20 seconds
+for it, then interrupts the swap thread and gives it 2 more, and after that stops without stopping
+the core, so a core whose start or stop hangs cannot hold the server's own shutdown. The swap and
+timer threads are daemons, and shutdown waits on no executor and closes no classloader.
 
 #### The swap
 
@@ -2258,8 +2261,11 @@ never a server thread, because stopping a core waits for its executors to drain.
 1. **Load the new core** into a fresh classloader while the old one keeps running. A jar that cannot
    be read, was built for another contract, or whose entry point will not construct is refused here,
    and nothing about the running server has changed.
-2. **Stop the old core**, with `ShellContext.isSwapping()` true so it hands state over. The shell
-   then closes anything the core left tracked, newest first, and sweeps the platform for anything
+2. **Take the login gate away, then stop the old core.** New logins from here wait for the next
+   core instead of reaching one that is about to stop, and logins the old core is already deciding
+   are waited for (up to 5 seconds) before it is stopped, so none of them meets a runtime half torn
+   down. Then the old core stops with `ShellContext.isSwapping()` true so it hands state over, the
+   shell closes anything the core left tracked, newest first, and sweeps the platform for anything
    still pointing into the old classloader.
 3. **Start the new core** with the old one's handoff.
 4. **If that throws, roll back**: unwind what the new core half-built, then start the old core
@@ -2271,7 +2277,9 @@ never a server thread, because stopping a core waits for its executors to drain.
    callback) can still be finishing.
 
 The swap is reported to whoever asked (console, player or dashboard) and always to the console. A
-failed swap says which core is running afterwards.
+failed swap says which core is running afterwards. Immediately before a core jar is loaded, its
+SHA-256 is computed again and compared with the one it was described with, so a file replaced on
+disk between the check and the load is refused rather than run.
 
 #### Updates go in live when they can, and only when they are verified
 
@@ -2287,14 +2295,37 @@ failed swap says which core is running afterwards.
    installs nothing; a malformed hash is refused before a byte is fetched.
 3. **It is swapped in live** only if the release had a hash and matched it, the jar's embedded core
    matches the hash the build recorded next to it, and that core was built for this shell's
-   contract. The swap starts only after the command has answered (or the dashboard frame has been
-   replied to), because it stops the core that is answering; the shell then reports the outcome to
-   the same sender, and always to the console.
+   contract. The installed jar is hashed **again** when the shell stages it, against the same
+   release hash, so a jar replaced after the download is refused. The swap is requested before the
+   command answers (or the dashboard frame is replied to), so the answer can say truthfully whether
+   it was accepted: *"Swapping it in now"* only when the shell accepted it, otherwise that the swap
+   could not start and the update applies on the next restart. The shell holds an accepted swap back
+   for `ShellContract.SWAP_SETTLE_MS` (one second) so that answer goes out before the swap stops the
+   core giving it, then reports the outcome to the same sender, and always to the console.
 
 **A release with no hash is never swapped in live.** A live swap runs the downloaded code at once,
 and nothing can vouch for a jar without one, so it is installed for the next restart only, and the
 message says why. **A release whose shell contract changed cannot be swapped in live either**: it is
 installed for the next restart, and the message names both contract numbers.
+
+**Downloads are pinned to one repository's releases.** Since a download can now be running within
+seconds, the host allowlist (`github.com`, `githubusercontent.com`) is no longer enough: GitHub
+serves every repository, and the hash arrives in the same bot response as the URL, so a compromised
+bot or a poisoned release cache could name any repository's asset with a matching hash. A download
+must now **start** at `https://github.com/Bifrostdotgg/heimdall-minecraft/releases/download/` (the
+path normalised first; `..`, percent-escapes, a query or a fragment are refused), and every
+**redirect** may only go to GitHub's asset host (`*.githubusercontent.com`). Anything else is refused
+before a connection is opened. An operator running a fork can pin their own repository instead with
+`updatesReleaseRepo: owner/name` in `bootstrap.yml`; the key is written out only when it differs from
+the official repository, a malformed value refuses every download, and it is read when a core
+starts (at boot, or after a swap). On the proxies, a refused download (host, repository, malformed
+or mismatched hash) is never retried into the data directory; only a jar that genuinely could not
+be replaced is.
+
+**The stronger follow-up is not in this change:** a signature over each release, checked against a
+public key built into the shell. Pinning narrows who can supply a jar to whoever can publish a
+release in the pinned repository; a signature would narrow it to whoever holds the signing key,
+independent of GitHub and of the bot.
 
 `/hd status` now shows the running core's version and the first twelve characters of its SHA-256,
 next to the shell's version: the core can change while the server runs, and two builds of one
@@ -2324,14 +2355,23 @@ login listener at enable, before any core runs, at exactly the priority the core
 **This is a deliberate change from the old failure mode.** Before, a Heimdall that failed to enable
 left a server with no login listener, which admitted everybody. Now a server whose Heimdall cannot
 run refuses logins instead. A whitelist that silently stops whitelisting is the worse failure, and
-the operator is told immediately either way.
+the operator is told immediately either way. The order at enable is what makes this hold: the
+login listener is registered **first**, before the shell host is built or any relay installed, and
+everything after it runs inside `ShellHost.enable`, which sets the gate to "no core" if any of it
+throws. Only a failure to register the listener itself leaves a server with no Heimdall at all, and
+that is logged as severe.
+
+A gate that throws while deciding (a classloader closed under it) refuses that login the same way:
+no core decided, so it is not admitted.
 
 On BungeeCord the shell also owns the event's *intent*. An intent can only be registered during
 dispatch, a login can arrive while no core exists, and nothing in BungeeCord ever times an intent
 out (D75), so the shell registers it, runs the decision on its own small pool of daemon threads
 that no swap touches, and completes it exactly once in a `finally`. Before the split the decision
 ran on the core's `heimdall-io`, which a swap shuts down: a decision queued behind that drain would
-have been dropped with its intent never completed.
+have been dropped with its intent never completed. A login that arrives while that pool's queue is
+full is refused with *"This server is busy checking logins"*, not the updating message, because no
+update is involved.
 
 #### Every registration is tracked, because a swap disables nothing
 
@@ -2403,17 +2443,29 @@ every window would hand players a fresh allowance, as v2's reload did.
   commands surviving a swap without the platform command ever being unregistered, the old loader
   closing after the grace period, rollback into a fresh loader, a failed rollback leaving no core
   (logins refused, admins alerted), a boot failure failing closed, the sweep removing what a leaky
-  core left on the platform, and contract and self-contradiction refusals.
+  core left on the platform, and contract and self-contradiction refusals. Also: staging re-hashes a
+  release and refuses a missing or wrong hash, a core changed on disk after its check is refused
+  before it loads, a core-requested swap waits out the settle delay, a swap waits for an in-flight
+  login and holds new ones for the next core, a swap from no core holds logins rather than refusing
+  them, an enable that throws leaves logins refused, and the shell's `swap` verb is refused without
+  `heimdall.admin`.
 - **The pieces**: `RelayTableTest`, `LoginGateHolderTest` (hold then deny, released early when no
-  core is coming, no-core deny), `RegistrationsTest` (order, never stopping early, idempotence),
-  `HandoffTest`, `CoreArchiveTest`, `ShellTunnelTest`, `CoreRegistrationsTest`, and
-  `BungeeLoginGateTest` against BungeeCord's real `AsyncEvent` intents. `BukkitSweepTest` runs the
+  core is coming, no-core deny, in-flight drain and its bound), `RegistrationsTest` (order, never
+  stopping early, idempotence), `HandoffTest`, `CoreArchiveTest`, `ShellTunnelTest`,
+  `CoreRegistrationsTest`, `BungeeLoginGateTest` against BungeeCord's real `AsyncEvent` intents, and
+  `BukkitLoginGateTest` and `VelocityLoginGateTest` against the real login events (a bound gate
+  decides, a throwing gate refuses, an already-refused login is skipped, no core refuses, mid-swap
+  holds for the next core). `BukkitSweepTest` runs the
   sweep on Bukkit's real `HandlerList`. `BukkitListenerShapeTest` fails the build on a public Bukkit
   listener class in the core.
 - **The updater**: `UpdateDownloaderTest` (hash match, mismatch leaving the old jar untouched,
-  malformed refused before any fetch, none), `UpdateServiceTest` (verified and swappable, no hash,
-  contract change, failed install), and `RemoteUpdateHandlerTest` (the swap starts only after the
-  dashboard has been answered).
+  malformed refused before any fetch, none, and the repository pin: other repositories, dot-dot and
+  encoded escapes, redirects off the asset host, a fork's opt-in, a malformed pin),
+  `UpdateServiceTest` (verified and swappable, no hash, contract change, failed install, a refused
+  swap reported as restart-only), `RemoteUpdateHandlerTest` (the reply says whether the swap was
+  accepted), `BootstrapStoreTest` (the pin round-trips and the official default is never written),
+  and `VelocityUpdateInstallerTest` and `BungeeUpdateInstallerTest` (a refused download is not
+  retried into the data directory; a jar that cannot be replaced still is).
 - **The artifact**: `ReleaseJarTest` extracts the core from the built release jar, checks its hash,
   and constructs its entry point in a child classloader; `verifyJarSplit` also checks that every
   shell-side class the core refers to (relocated Gson, the contract, the API types) is in the shell.
