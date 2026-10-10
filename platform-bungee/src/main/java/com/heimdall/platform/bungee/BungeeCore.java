@@ -30,7 +30,7 @@ public final class BungeeCore implements HeimdallCore {
         Plugin plugin = (Plugin) context.platformPlugin();
         bootstrap = new BungeeBootstrap(
                 plugin, plugin.getProxy(), new JulLogger(plugin.getLogger()),
-                context.dataDirectory());
+                context.dataDirectory(), context);
         bootstrap.enable();
     }
 

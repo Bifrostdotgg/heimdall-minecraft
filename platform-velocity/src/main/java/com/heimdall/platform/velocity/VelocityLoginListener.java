@@ -5,9 +5,7 @@ import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.pipeline.Verdict;
-import com.velocitypowered.api.event.PostOrder;
 import com.velocitypowered.api.event.ResultedEvent;
-import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.LoginEvent;
 import com.velocitypowered.api.proxy.Player;
 import java.net.InetSocketAddress;
@@ -63,7 +61,6 @@ final class VelocityLoginListener {
         this.text = text;
     }
 
-    @Subscribe(order = PostOrder.FIRST)
     public void onLogin(LoginEvent event) {
         Player player = event.getPlayer();
         if (player == null) {

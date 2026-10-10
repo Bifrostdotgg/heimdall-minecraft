@@ -191,6 +191,15 @@ public final class HeimdallRuntime implements AutoCloseable {
     private final List<Registration> registrations = new ArrayList<Registration>();
 
     /**
+     * What the previous core generation handed over in a hot swap (departure D87); empty at server
+     * start. Plain JDK values only, read once in {@link #start()}.
+     */
+    private final Map<String, Object> handoff;
+
+    /** The link command, held so its running cooldowns can be handed to the next generation. */
+    private volatile LinkDiscordCommand linkCommand;
+
+    /**
      * Serialises the three paths that re-point the client and the tunnel.
      *
      * <p>A dedicated object rather than {@code this}, so {@link #close()} can be written without it
@@ -207,6 +216,8 @@ public final class HeimdallRuntime implements AutoCloseable {
         this.bootstrapStore = builder.bootstrapStore;
         this.commandLabel = Strings.isBlank(builder.commandLabel)
                 ? "hd" : builder.commandLabel.trim();
+        this.handoff = builder.handoff == null
+                ? Collections.<String, Object>emptyMap() : builder.handoff;
         this.fingerprint = builder.instanceFingerprint == null
                 ? InstanceFingerprint.detect(System.getenv(), builder.platform.dataDirectory())
                 : builder.instanceFingerprint;
@@ -388,7 +399,10 @@ public final class HeimdallRuntime implements AutoCloseable {
         // not-configured return too, so a fresh server answers "not connected yet" rather than
         // "Unknown command". Unlike a module command it is never unregistered by a toggle; see
         // LinkDiscordCommand's javadoc.
-        registrations.add(platform.commands().register(new LinkDiscordCommand(logger, api).spec()));
+        LinkDiscordCommand link = new LinkDiscordCommand(logger, api);
+        link.restoreCooldowns(handoff.get(LinkDiscordCommand.HANDOFF_KEY));
+        linkCommand = link;
+        registrations.add(platform.commands().register(link.spec()));
         // Applies bootstrap.yml's local-disable set AND does the first reconcile against it, so a
         // module an operator switched off locally is never even started, whatever the cached or
         // pushed config says.
@@ -1000,6 +1014,23 @@ public final class HeimdallRuntime implements AutoCloseable {
     }
 
     /**
+     * The in-memory state worth carrying into the next core generation during a hot swap, as plain
+     * JDK values (departure D87). Everything else either lives on disk, where the next generation
+     * reads it back, or is rebuilt from the bot on reconnect.
+     *
+     * <p>Called by the platform bootstrap before {@link #close()}, and only when the shell says a
+     * swap is in progress.
+     */
+    public Map<String, Object> exportHandoff() {
+        Map<String, Object> out = new LinkedHashMap<String, Object>();
+        LinkDiscordCommand link = linkCommand;
+        if (link != null) {
+            out.put(LinkDiscordCommand.HANDOFF_KEY, link.exportCooldowns());
+        }
+        return out;
+    }
+
+    /**
      * Stops everything, in reverse.
      *
      * <p>Idempotent, and every step is contained: one failure on the way out must not skip the
@@ -1321,6 +1352,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         private String commandLabel = "hd";
         private HealthSnapshotSource healthSource;
         private BedrockIdentityProvider bedrockIdentityProvider;
+        private Map<String, Object> handoff;
 
         private Builder(HeimdallLogger logger, PlatformFacade platform) {
             if (logger == null || platform == null) {
@@ -1399,6 +1431,12 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         public Builder bedrockIdentityProvider(BedrockIdentityProvider value) {
             this.bedrockIdentityProvider = value;
+            return this;
+        }
+
+        /** What the previous core generation handed over; see {@link #exportHandoff()}. */
+        public Builder handoff(Map<String, Object> value) {
+            this.handoff = value;
             return this;
         }
 

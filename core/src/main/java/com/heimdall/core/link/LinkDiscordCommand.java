@@ -48,6 +48,11 @@ import java.util.function.BiConsumer;
  * the server is the right lifetime for a thirty-second window: the only thing lost on a restart is a
  * partial cooldown, and a restart is not something a player can trigger to farm codes.
  *
+ * <p>A hot swap is different (departure D87): an operator can apply one at any time, and a swap
+ * that reset every window would hand players a fresh allowance exactly as v2's reload did. So the
+ * windows still running are handed to the next core generation as plain uuid-to-millis pairs
+ * ({@link #exportCooldowns()}, {@link #restoreCooldowns(Object)}); a restart still forgets them.
+ *
  * <p>{@code heimdall.bypass} skips it. Unlike the login bypass — which cannot be a permission at all,
  * because permissions are not attached during pre-login (issue #796 / MC-2) — this one is checked
  * with the player very much online, so the node works exactly as an operator expects.
@@ -70,6 +75,9 @@ public final class LinkDiscordCommand {
 
     /** v2's window, to the millisecond. */
     public static final long COOLDOWN_MS = TimeUnit.SECONDS.toMillis(30);
+
+    /** The key the running windows travel under in a swap's handoff. */
+    public static final String HANDOFF_KEY = "link.cooldowns";
 
     public static final String PERMISSION = "heimdall.linkdiscord";
 
@@ -97,6 +105,45 @@ public final class LinkDiscordCommand {
     }
 
     /** The spec, with {@code /link} as an alias — both platforms register the pair. */
+    /**
+     * The windows still running, as uuid string to the millisecond they started.
+     *
+     * <p>Plain JDK types only, because the map crosses into another classloader. Windows that have
+     * already ended are left out: they would only be noise in the next generation's map.
+     */
+    public Map<String, Object> exportCooldowns() {
+        long now = System.currentTimeMillis();
+        Map<String, Object> out = new java.util.LinkedHashMap<String, Object>();
+        for (Map.Entry<UUID, Long> entry : lastUsed.entrySet()) {
+            long started = entry.getValue().longValue();
+            if (now - started >= 0 && now - started < COOLDOWN_MS) {
+                out.put(entry.getKey().toString(), Long.valueOf(started));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Takes over the windows a previous generation handed over. Anything malformed is skipped: a
+     * lost cooldown costs a player nothing, a failed start costs everyone a working server.
+     */
+    public void restoreCooldowns(Object handedOver) {
+        if (!(handedOver instanceof Map)) {
+            return;
+        }
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) handedOver).entrySet()) {
+            if (!(entry.getKey() instanceof String) || !(entry.getValue() instanceof Number)) {
+                continue;
+            }
+            try {
+                lastUsed.put(UUID.fromString((String) entry.getKey()),
+                        Long.valueOf(((Number) entry.getValue()).longValue()));
+            } catch (IllegalArgumentException malformed) {
+                logger.debug(() -> "skipping a malformed handed-over link cooldown");
+            }
+        }
+    }
+
     public CommandSpec spec() {
         return CommandSpec.named("linkdiscord")
                 .aliases(Arrays.asList("link"))

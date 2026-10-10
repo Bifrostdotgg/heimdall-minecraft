@@ -9,6 +9,7 @@ import com.heimdall.core.platform.Integrations;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.SchedulerBridge;
+import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.JulConsoleTap;
 import java.nio.file.Path;
 import java.util.concurrent.Executor;
@@ -48,16 +49,17 @@ final class BungeePlatform implements PlatformFacade, AutoCloseable {
             ServerRole role,
             Path dataDirectory,
             HeimdallExecutors executors,
-            BungeeText text) {
+            BungeeText text,
+            CoreRegistrations registrations) {
         this.role = role;
         this.dataDirectory = dataDirectory;
-        this.scheduler = new BungeeScheduler(plugin, proxy, logger);
+        this.scheduler = new BungeeScheduler(plugin, proxy, logger, registrations);
         this.players = new BungeePlayerDirectory(proxy, text);
         // proxy.getLogger(), never Logger.getLogger("") — BungeeCord's logger has no parent and does
         // not use parent handlers, so the JUL root sees nothing it writes. See JulConsoleTap.
         this.consoleTap = new JulConsoleTap(logger, executors.io(), proxy.getLogger());
         this.console = new BungeeConsoleBridge(proxy, consoleTap);
-        this.commands = new BungeeCommandRegistrar(plugin, proxy, logger, text);
+        this.commands = new BungeeCommandRegistrar(registrations, logger, text);
         this.integrations = new BungeeIntegrations(logger, executors.io());
     }
 

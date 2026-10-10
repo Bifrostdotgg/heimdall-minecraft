@@ -5,50 +5,45 @@ import com.heimdall.core.command.CommandSpec;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.text.Msg;
 import com.heimdall.core.util.Registration;
+import com.heimdall.platform.common.CoreRegistrations;
+import com.heimdall.shell.contract.CommandBinding;
+import com.heimdall.shell.contract.CommandTarget;
+import com.heimdall.shell.contract.ShellContext;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.Locale;
-import org.bukkit.command.Command;
-import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
-import org.bukkit.command.PluginCommand;
-import org.bukkit.command.TabCompleter;
-import org.bukkit.plugin.Plugin;
 
 /**
- * Binds a {@link CommandSpec} to a {@code plugin.yml} command, and unbinds it again.
+ * Binds a {@link CommandSpec} to the shell's relay for its name, and unbinds it again.
  *
- * <h2>Why the name has to be in plugin.yml</h2>
+ * <h2>The shell owns the Bukkit command now</h2>
  *
- * <p>Bukkit's command map can be reached reflectively and a command really can be registered at
- * runtime — v2 did not do it, and neither does this. The map's shape has changed across the decade
- * of servers this plugin supports, the reflective path is invisible to the conformance rules, and
- * the failure mode is a command that silently does not exist on one server generation. Declaring the
- * names in the descriptor costs one edit per new verb and works identically from 1.8.8 to current.
+ * <p>Before the hot-swap split this class set its own executor on the {@code plugin.yml} command
+ * and, for names that are not in the descriptor (the punishments root aliases), put a
+ * {@code PluginCommand} on the command map itself. Both are now the shell's job (departure D87):
+ * Bukkit never lets a descriptor command go, so whatever it holds as the executor must outlive every
+ * core, and a runtime {@code PluginCommand} left in the map across a swap must not be a core object
+ * either. The shell installs a relay on every descriptor command at enable and creates the runtime
+ * ones on first bind; this class supplies the code behind them, as a {@link CommandTarget}.
  *
- * <p>So a spec whose name the descriptor does not carry gets a warning and {@link Registration#NONE}
- * — never an exception. A module that fails to enable because a {@code plugin.yml} line was missed
- * would take its whole feature down over a typo in a resource file.
+ * <p>Everything a player experiences is unchanged: the same permission gate, the same containment
+ * of a handler that throws, the same "switched off" answer for a descriptor command whose module
+ * is off (now the shell's, because it has to be said with no core code behind the command), and a
+ * runtime name still leaves the map when its module does, so LiteBans can keep {@code /ban}.
  *
- * <h2>Unbinding</h2>
- *
- * <p>Closing the handle puts the command's executor back to the plugin itself, which is what Bukkit
- * uses when {@code setExecutor(null)} is called and produces the descriptor's own usage message.
- * The verb still exists — nothing can remove it — but it stops reaching a module that has been
- * switched off, which is the property departure D30 is about.
- *
- * <p>Thread-safe: Bukkit's {@code PluginCommand} setters are, and the rest is stateless.
+ * <p>Thread-safe: binding is the shell's, and the rest is stateless.
  */
 final class BukkitCommandRegistrar implements CommandRegistrar {
 
-    private final Plugin plugin;
+    private final CoreRegistrations registrations;
     private final HeimdallLogger logger;
     private final BukkitMessenger messenger;
 
-    BukkitCommandRegistrar(Plugin plugin, HeimdallLogger logger, BukkitMessenger messenger) {
-        this.plugin = plugin;
+    BukkitCommandRegistrar(
+            CoreRegistrations registrations, HeimdallLogger logger, BukkitMessenger messenger) {
+        this.registrations = registrations;
         this.logger = logger;
         this.messenger = messenger;
     }
@@ -58,157 +53,37 @@ final class BukkitCommandRegistrar implements CommandRegistrar {
         if (spec == null) {
             throw new IllegalArgumentException("spec is required");
         }
-        PluginCommand declared = plugin.getServer().getPluginCommand(spec.name());
-        if (declared != null && declared.getPlugin() == plugin) {
-            return bindDescriptor(spec, declared);
-        }
-        return bindDynamic(spec);
-    }
-
-    /**
-     * A name that lives in plugin.yml. Unbind is a Disabled stub, because Bukkit will not take the
-     * PluginCommand out of the map. Do not put optional aliases such as /ban in the descriptor:
-     * that stub would swallow the label when LiteBans should own it.
-     */
-    private Registration bindDescriptor(final CommandSpec spec, final PluginCommand command) {
-        warnAboutUndeclaredAliases(spec, command);
-        final Bridge bridge = new Bridge(spec);
-        command.setExecutor(bridge);
-        command.setTabCompleter(bridge);
-        if (command.getExecutor() != bridge) {
-            logger.warn("something else claimed /" + spec.name() + " immediately after Heimdall "
-                    + "registered it (now " + describe(command.getExecutor()) + ") — that command "
-                    + "will not reach Heimdall. A command-manager plugin is the usual cause.");
-        }
-        return Registration.once(new Runnable() {
-            @Override
-            public void run() {
-                if (command.getExecutor() == bridge) {
-                    Disabled disabled = new Disabled(spec.name());
-                    command.setExecutor(disabled);
-                    command.setTabCompleter(disabled);
-                }
-            }
-        });
-    }
-
-    /**
-     * A name that is not in plugin.yml: constructed and put on the command map, then taken off
-     * again so another plugin can reclaim it.
-     */
-    private Registration bindDynamic(final CommandSpec spec) {
-        final PluginCommand command = BukkitCommandMap.create(plugin, spec.name(), logger);
-        if (command == null) {
-            logger.warn("cannot register /" + spec.name() + " at runtime on this server");
+        ShellContext shell = registrations.context();
+        if (shell == null) {
+            logger.warn("no shell to bind /" + spec.name() + " through; it will not exist");
             return Registration.NONE;
         }
-        command.setDescription(spec.description() == null ? "" : spec.description());
-        command.setUsage(spec.usage() == null ? "/" + spec.name() : spec.usage());
-        command.setPermission(spec.permission());
-        command.setAliases(spec.aliases());
-        final Bridge bridge = new Bridge(spec);
-        command.setExecutor(bridge);
-        command.setTabCompleter(bridge);
-        final BukkitCommandMap.RegistrationHandle handle =
-                BukkitCommandMap.bind(plugin, command, spec.aliases(), logger);
-        if (handle == null) {
-            logger.warn("command map refused /" + spec.name()
-                    + " — the verb will not exist until the server exposes SimpleCommandMap");
-            return Registration.NONE;
-        }
-        return Registration.once(new Runnable() {
-            @Override
-            public void run() {
-                handle.unbind();
-            }
-        });
-    }
-
-    /**
-     * What a command answers while the module that owns it is switched off.
-     *
-     * <p>Bukkit cannot remove a {@code plugin.yml} command at runtime, so the verb exists whatever
-     * the dashboard says. The honest thing for it to do is say which of the three possible reasons
-     * applies — and "this feature is disabled" is the only one an operator can act on, because the
-     * other two (no permission, wrong arguments) are already answered elsewhere.
-     */
-    private final class Disabled implements CommandExecutor, TabCompleter {
-
-        private final String name;
-
-        Disabled(String name) {
-            this.name = name;
-        }
-
-        @Override
-        public boolean onCommand(
-                CommandSender sender, Command command, String label, String[] args) {
-            messenger.send(sender, Msg.legacy(
-                    "§cThat feature is switched off. Enable §f" + name
-                            + "§c on the Minecraft page of the Heimdall dashboard."));
-            return true;
-        }
-
-        @Override
-        public List<String> onTabComplete(
-                CommandSender sender, Command command, String alias, String[] args) {
-            // Empty, not null: null falls through to Bukkit's own player-name completion, and a
-            // switched-off command has no business advertising who is online.
-            return Collections.emptyList();
-        }
-    }
-
-    /** Names whatever currently owns a command, for the collision warning. */
-    private static String describe(Object executor) {
-        if (executor == null) {
-            return "unbound";
-        }
-        return executor.getClass().getName();
-    }
-
-    /**
-     * Says so when the spec and the descriptor disagree about aliases.
-     *
-     * <p>Not an error — the command still works under its primary name — but a silent difference
-     * between the two platforms is exactly the kind of thing that turns into "it works on my proxy".
-     */
-    private void warnAboutUndeclaredAliases(CommandSpec spec, PluginCommand command) {
-        if (spec.aliases().isEmpty()) {
-            return;
-        }
-        List<String> declared = new ArrayList<String>();
-        for (String alias : command.getAliases()) {
-            declared.add(alias.toLowerCase(Locale.ROOT));
-        }
-        List<String> missing = new ArrayList<String>();
-        for (String alias : spec.aliases()) {
-            String normalised = alias == null ? "" : alias.trim().toLowerCase(Locale.ROOT);
-            if (!normalised.isEmpty() && !declared.contains(normalised)) {
-                missing.add(normalised);
-            }
-        }
-        if (!missing.isEmpty()) {
-            logger.warn("plugin.yml does not declare alias(es) " + missing + " for /" + spec.name()
-                    + " — Bukkit fixes a command's aliases at load time, so they will not work "
-                    + "here even though they do on the proxy");
-        }
+        CommandBinding binding = CommandBinding.named(spec.name())
+                .aliases(spec.aliases())
+                .permission(spec.permission())
+                .description(spec.description())
+                .usage(spec.usage())
+                .target(new Target(spec))
+                .build();
+        return registrations.keep(shell.bindCommand(binding));
     }
 
     /** One command's executor and completer. Both halves gate on the same permission. */
-    private final class Bridge implements CommandExecutor, TabCompleter {
+    private final class Target implements CommandTarget {
 
         private final CommandSpec spec;
 
-        Bridge(CommandSpec spec) {
+        Target(CommandSpec spec) {
             this.spec = spec;
         }
 
         @Override
-        public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-            BukkitCommandSource source = new BukkitCommandSource(sender, messenger);
+        public void execute(Object sender, String label, String[] args) {
+            CommandSender bukkit = (CommandSender) sender;
+            BukkitCommandSource source = new BukkitCommandSource(bukkit, messenger);
             if (!source.hasPermission(spec.permission())) {
-                messenger.send(sender, Msg.legacy("§cYou do not have permission to use that."));
-                return true;
+                messenger.send(bukkit, Msg.legacy("§cYou do not have permission to use that."));
+                return;
             }
             try {
                 spec.handler().execute(source, Collections.unmodifiableList(Arrays.asList(args)));
@@ -217,21 +92,17 @@ final class BukkitCommandRegistrar implements CommandRegistrar {
                 // binding exists to be careful about are NoSuchMethodError and friends from an API
                 // that moved between server versions, and those are Errors. Left to Bukkit, any of
                 // them prints a stack trace at the player.
-                logger.error("/" + label + " failed for " + sender.getName(), broken);
-                messenger.send(sender, Msg.legacy("§cThat command failed. Check the server log."));
+                logger.error("/" + label + " failed for " + bukkit.getName(), broken);
+                messenger.send(bukkit, Msg.legacy("§cThat command failed. Check the server log."));
             }
-            // Always true: returning false makes Bukkit print the descriptor's usage line, which is
-            // never the right answer once the handler has already replied.
-            return true;
         }
 
         @Override
-        public List<String> onTabComplete(
-                CommandSender sender, Command command, String alias, String[] args) {
+        public List<String> complete(Object sender, String alias, String[] args) {
             if (spec.completer() == null) {
                 return null;
             }
-            BukkitCommandSource source = new BukkitCommandSource(sender, messenger);
+            BukkitCommandSource source = new BukkitCommandSource((CommandSender) sender, messenger);
             if (!source.hasPermission(spec.permission())) {
                 // Empty rather than null: null falls through to Bukkit's own online-player
                 // completion, so a player with no permission would still be told who is on.

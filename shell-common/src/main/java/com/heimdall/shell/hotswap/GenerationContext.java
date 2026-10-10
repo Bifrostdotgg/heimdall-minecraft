@@ -1,19 +1,26 @@
 package com.heimdall.shell.hotswap;
 
+import com.heimdall.core.json.Payload;
 import com.heimdall.core.util.Registration;
+import com.heimdall.shell.contract.CommandBinding;
 import com.heimdall.shell.contract.CoreIdentity;
+import com.heimdall.shell.contract.Handoff;
 import com.heimdall.shell.contract.Registrations;
 import com.heimdall.shell.contract.ShellContext;
 import com.heimdall.shell.contract.ShellContract;
+import com.heimdall.shell.contract.TunnelBackend;
 import java.io.File;
 import java.nio.file.Path;
+import java.util.Collections;
+import java.util.Map;
 
 /**
  * The {@link ShellContext} one core generation is handed.
  *
- * <p>Owns that generation's tracked registrations. {@link #retire(ShellLog)} closes whatever is still
- * tracked, newest first, and from then on every registration this context is offered is closed on
- * arrival: an old core's late work cannot attach itself to the server again after its generation
+ * <p>Owns that generation's tracked registrations, including every command binding and tunnel
+ * binding it makes. {@link #retire(ShellLog)} closes whatever is still tracked, newest first, and
+ * from then on every registration this context is offered is closed on arrival and every bind is
+ * refused: an old core's late work cannot attach itself to the server again after its generation
  * has gone.
  */
 class GenerationContext implements ShellContext {
@@ -21,12 +28,19 @@ class GenerationContext implements ShellContext {
     private final ShellHost host;
     private final ShellPlatform platform;
     private final CoreIdentity core;
+    private final Map<String, Object> handoffIn;
     private final Registrations tracked = new Registrations();
 
-    GenerationContext(ShellHost host, ShellPlatform platform, CoreIdentity core) {
+    private volatile boolean stoppingForSwap;
+    private volatile boolean stopping;
+    private volatile Map<String, Object> handoffOut = Collections.emptyMap();
+
+    GenerationContext(
+            ShellHost host, ShellPlatform platform, CoreIdentity core, Map<String, Object> handoff) {
         this.host = host;
         this.platform = platform;
         this.core = core;
+        this.handoffIn = handoff == null ? Collections.<String, Object>emptyMap() : handoff;
     }
 
     @Override
@@ -82,6 +96,56 @@ class GenerationContext implements ShellContext {
     @Override
     public Registration track(Registration registration) {
         return tracked.add(registration);
+    }
+
+    @Override
+    public Map<String, Object> handoff() {
+        return handoffIn;
+    }
+
+    @Override
+    public void handOff(Map<String, ?> state) {
+        // Validated whatever happens to it, so a core that breaks the plain-types rule finds out on
+        // every stop, not only on the stops that happen to be swaps.
+        Map<String, Object> copy = Handoff.copyOf(state);
+        if (stopping && stoppingForSwap) {
+            handoffOut = copy;
+        }
+    }
+
+    @Override
+    public Registration bindCommand(CommandBinding binding) {
+        if (binding == null || tracked.isClosed()) {
+            return Registration.NONE;
+        }
+        return tracked.add(host.bindCommand(binding));
+    }
+
+    @Override
+    public Registration bindTunnel(TunnelBackend backend) {
+        if (backend == null || tracked.isClosed()) {
+            return Registration.NONE;
+        }
+        return tracked.add(host.bindTunnel(backend));
+    }
+
+    @Override
+    public boolean deliverUnclaimed(String requestId, String type, Payload payload) {
+        if (tracked.isClosed()) {
+            return false;
+        }
+        return host.deliverUnclaimed(requestId, type, payload);
+    }
+
+    /** Marks the start of this generation's {@code stop()}. */
+    void beginStopping(boolean forSwap) {
+        this.stoppingForSwap = forSwap;
+        this.stopping = true;
+    }
+
+    /** What the core handed over during a stop for a swap. */
+    Map<String, Object> leftBehind() {
+        return handoffOut;
     }
 
     /** Whether this generation has been retired. */

@@ -1,8 +1,14 @@
 package com.heimdall.shell.velocity;
 
 import com.google.inject.Inject;
+import com.heimdall.api.HeimdallTunnel;
+import com.heimdall.api.HeimdallTunnelProvider;
+import com.heimdall.core.util.Registration;
 import com.heimdall.shell.ShellBuildConstants;
 import com.heimdall.shell.contract.ShellContract;
+import com.heimdall.shell.hotswap.CommandPlatform;
+import com.heimdall.shell.hotswap.LoadedCore;
+import com.heimdall.shell.hotswap.ShellAudience;
 import com.heimdall.shell.hotswap.ShellHost;
 import com.heimdall.shell.hotswap.ShellLog;
 import com.heimdall.shell.hotswap.ShellPlatform;
@@ -17,6 +23,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.CodeSource;
+import java.util.Collections;
 import org.slf4j.Logger;
 
 /**
@@ -72,6 +79,7 @@ public final class HeimdallVelocityPlugin {
     public void onProxyInitialize(ProxyInitializeEvent event) {
         try {
             host = new ShellHost(new Platform(), ShellBuildConstants.VERSION);
+            installAdminRelays(host);
             host.boot();
         } catch (Throwable failed) {
             slf4j.error("Heimdall's shell could not start; the proxy is unaffected", failed);
@@ -91,6 +99,21 @@ public final class HeimdallVelocityPlugin {
         } catch (Throwable failed) {
             slf4j.error("Heimdall did not shut down cleanly", failed);
         }
+    }
+
+    /**
+     * Registers the admin verbs before any core runs, so {@code /hdp swap} works with no core.
+     *
+     * <p>{@code /hdp} rather than {@code /hd} because a proxied network has both plugins installed
+     * and the proxy claims a name before the backend ever sees it (departure D47); {@code /hwl} is
+     * v2's name, kept on both platforms. Every other proxy command is registered when a core binds
+     * it.
+     */
+    private static void installAdminRelays(ShellHost target) {
+        target.relays().installPermanent("hdp", Collections.singletonList("heimdallproxy"),
+                "heimdall.admin", "Heimdall administration", "/hdp", true);
+        target.relays().installPermanent("hwl", Collections.singletonList("heimdallwhitelist"),
+                "heimdall.admin", "Deprecated alias for /hdp", "/hwl", true);
     }
 
     /**
@@ -115,6 +138,10 @@ public final class HeimdallVelocityPlugin {
 
     /** What {@link ShellHost} needs to know about this proxy. */
     private final class Platform implements ShellPlatform {
+
+        private final VelocityCommands commands =
+                new VelocityCommands(proxy.getCommandManager(), log);
+        private final VelocityAudience audience = new VelocityAudience(proxy);
 
         @Override
         public String name() {
@@ -159,6 +186,41 @@ public final class HeimdallVelocityPlugin {
         @Override
         public ClassLoader shellLoader() {
             return HeimdallVelocityPlugin.class.getClassLoader();
+        }
+
+        @Override
+        public CommandPlatform commands() {
+            return commands;
+        }
+
+        @Override
+        public ShellAudience audience() {
+            return audience;
+        }
+
+        @Override
+        public String adminLabel() {
+            return "hdp";
+        }
+
+        @Override
+        public Registration publishTunnel(final HeimdallTunnel tunnel) {
+            // Velocity has no services registry; the static holder is the portable route.
+            HeimdallTunnelProvider.install(tunnel);
+            return Registration.once(new Runnable() {
+                @Override
+                public void run() {
+                    HeimdallTunnelProvider.uninstall(tunnel);
+                }
+            });
+        }
+
+        @Override
+        public int sweep(LoadedCore retired) {
+            // Velocity offers no way to list a plugin's listeners, commands or tasks, so there is
+            // nothing to enumerate here. The core registers functional event handlers it can remove
+            // by identity, and every one of them is tracked, which is what keeps this at zero.
+            return 0;
         }
     }
 }

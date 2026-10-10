@@ -23,6 +23,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventPriority;
+import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.plugin.EventExecutor;
 import org.bukkit.plugin.Plugin;
@@ -99,7 +100,7 @@ import org.bukkit.plugin.Plugin;
  * and never throws: anything reflective is caught as {@link Throwable}, because the failure this
  * class exists to contain (a moved class, a changed signature) arrives as an {@link Error}.
  */
-final class ChatControlChannels implements ChatChannels {
+final class ChatControlChannels implements ChatChannels, AutoCloseable {
 
     /** The name ChatControl registers under. */
     static final String PLUGIN_NAME = "ChatControl";
@@ -130,6 +131,13 @@ final class ChatControlChannels implements ChatChannels {
 
         /** Registers {@code executor} for {@code type} at MONITOR, ignoring cancelled events. */
         void register(Class<? extends Event> type, Listener listener, EventExecutor executor);
+
+        /**
+         * Removes everything registered for {@code listener}. A default no-op so a test environment
+         * that never registers anything need not implement it.
+         */
+        default void unregister(Listener listener) {
+        }
     }
 
     /** What a legacy chat line should do once Heimdall knows ChatControl is installed. */
@@ -175,6 +183,15 @@ final class ChatControlChannels implements ChatChannels {
 
     /** Whether the post-event listener is registered. Written once, by the registration claimant. */
     private volatile boolean hooked;
+
+    /**
+     * The listener object the hook was registered with, so {@link #close()} can take it off again.
+     * Before the hot-swap split nothing did: a plugin disable unregistered it (departure D87).
+     */
+    private volatile Listener hookListener;
+
+    /** Set by {@link #close()}; no hook is registered after it. */
+    private volatile boolean closed;
 
     /** Claimed by the one thread that attempts the registration; never released. */
     private final AtomicBoolean registrationClaimed = new AtomicBoolean();
@@ -516,16 +533,19 @@ final class ChatControlChannels implements ChatChannels {
                 resolved = api;
             }
         }
-        if (!hooked && pipeline != null && registrationClaimed.compareAndSet(false, true)) {
+        if (!hooked && pipeline != null && !closed
+                && registrationClaimed.compareAndSet(false, true)) {
             // One attempt, ever, by whichever thread claims it: a second registration would relay
             // every channel line twice. Another thread arriving meanwhile waits on
             // registrationDone (see currentState) rather than answering for a hook that may
             // already be live; the latch is released however this ends.
             final Api bound = resolved;
             boolean registered = false;
+            Listener listener = new Listener() {
+            };
+            hookListener = listener;
             try {
-                environment.register(bound.postEvent, new Listener() {
-                }, new EventExecutor() {
+                environment.register(bound.postEvent, listener, new EventExecutor() {
                     @Override
                     public void execute(Listener listener, Event event) {
                         onChannelPost(bound, event);
@@ -544,6 +564,27 @@ final class ChatControlChannels implements ChatChannels {
             logger.info("ChatControl detected: Discord relay follows its chat channels");
         }
         return brokenBecause != null ? null : resolved;
+    }
+
+    /**
+     * Takes the channel hook off the server, and stops any later call from registering one.
+     *
+     * <p>Called when this core generation stops. The hook's executor is core code, so a hook left
+     * registered after a swap would pin the old classloader and relay every channel line through a
+     * stopped pipeline.
+     */
+    @Override
+    public void close() {
+        closed = true;
+        Listener listener = hookListener;
+        hookListener = null;
+        if (listener != null) {
+            try {
+                environment.unregister(listener);
+            } catch (Throwable failed) {
+                logger.debug(() -> "unregistering the ChatControl hook failed: " + failed);
+            }
+        }
     }
 
     /** Waits for the one registration attempt to end; {@code false} on timeout or interrupt. */
@@ -764,6 +805,11 @@ final class ChatControlChannels implements ChatChannels {
         public void register(Class<? extends Event> type, Listener listener, EventExecutor executor) {
             Bukkit.getPluginManager()
                     .registerEvent(type, listener, EventPriority.MONITOR, executor, heimdall, true);
+        }
+
+        @Override
+        public void unregister(Listener listener) {
+            HandlerList.unregisterAll(listener);
         }
     }
 }

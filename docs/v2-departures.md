@@ -2248,6 +2248,93 @@ At server stop the shell stops the core but deliberately does not close its clas
 still finishing on a library thread would otherwise become a `NoClassDefFoundError` trace in the
 shutdown log.
 
+#### The swap
+
+`/hd swap` (`/hdp swap` on a proxy) applies a core staged at `plugins/Heimdall/core/staged.jar`
+(Velocity: `plugins/heimdall/core/staged.jar`), which may be a bare core jar or a whole release jar.
+The updater uses the same machinery. Every swap runs on the shell's own `heimdall-swap` thread,
+never a server thread, because stopping a core waits for its executors to drain. In order:
+
+1. **Load the new core** into a fresh classloader while the old one keeps running. A jar that cannot
+   be read, was built for another contract, or whose entry point will not construct is refused here,
+   and nothing about the running server has changed.
+2. **Stop the old core**, with `ShellContext.isSwapping()` true so it hands state over. The shell
+   then closes anything the core left tracked, newest first, and sweeps the platform for anything
+   still pointing into the old classloader.
+3. **Start the new core** with the old one's handoff.
+4. **If that throws, roll back**: unwind what the new core half-built, then start the old core
+   again from its jar in a *fresh* classloader (never by restarting the old instance, whose statics
+   have already been torn down). If the rollback fails too, no core is running; see the login gate
+   below for what that means.
+5. **Close the old classloader after 30 seconds**, not at once. Closing it makes every class it has
+   not loaded yet unloadable, and old-core work already in flight (a scheduled task, a socket
+   callback) can still be finishing.
+
+The swap is reported to whoever asked (console, player or dashboard) and always to the console. A
+failed swap says which core is running afterwards.
+
+#### Every registration is tracked, because a swap disables nothing
+
+Before the split, "the plugin is disabled" cleaned up whatever the plugin had registered. A swap
+disables no plugin, and calling `unregisterAll(plugin)`, `cancelTasks(plugin)` or
+`unregisterListeners(plugin)` would take the shell's own registrations with it. So:
+
+- **Each core generation tracks everything it registers** (`CoreRegistrations` in
+  `:platform-common`): listeners, delayed tasks (until they run), command bindings, the tunnel
+  binding. Its own `disable()` closes them newest first, before the runtime behind them stops, and
+  the shell closes anything still tracked after `stop()` returns, so a forgotten registration cannot
+  outlive its generation. Teardown never stops early, is idempotent, and a context that has been
+  retired closes anything offered to it on arrival.
+- **Commands are shell-owned relays.** The platform only ever holds a shell object for a Heimdall
+  command, and a core supplies the code behind it (`CommandBinding`). Every `plugin.yml` command
+  gets a permanent relay at enable (Bukkit can never unregister those, so a core executor there
+  would pin its classloader forever); the admin verbs are permanent on the proxies too, so
+  `/hd swap` works with no core; anything else is registered on first bind. Outside a swap, unbinding
+  a runtime command still removes it, so a module that is switched off gives its verb back and
+  LiteBans keeps `/ban`. During a swap a command never disappears: a relay with nothing bound says
+  "Heimdall is updating, try again in a moment", and the ones the new core does not bind again are
+  removed when the swap ends. `BukkitCommandMap` moved into the shell for this reason.
+- **Velocity listeners are functional handlers**, registered with
+  `register(plugin, Class, PostOrder, EventHandler)` and removed by identity. Annotated listener
+  objects go through a Velocity method-handle cache keyed strongly by `Method`, which would pin an
+  old core until some later registration happened to evict it.
+- **The ChatControl channel hook** is unregistered when its generation stops; before, only a plugin
+  disable removed it.
+- **Bukkit listeners stay package-private and final**: Paper 1.16 caches a generated executor in a
+  static map only for a public listener with a public handler, and that entry would pin a core.
+
+**The post-swap sweep** is the backstop. On Bukkit it walks the plugin's registered listeners,
+services and pending tasks; on BungeeCord it reads the plugin manager's per-plugin listener and
+command maps reflectively; on both it unregisters anything whose class came from the old core's
+classloader. This is not hypothetical: adventure-platform-bukkit's `BukkitAudiences.close()` never
+unregisters the join and quit listener it registers (verified in the 4.3.4 bytecode), so without
+the sweep every swap would leave one firing into a stopped core. Velocity offers no way to
+enumerate a plugin's registrations, so there the tracked teardown is the whole mechanism.
+
+#### The public tunnel survives a swap
+
+`HeimdallTunnel`, as found through `HeimdallTunnelProvider` or Bukkit's `ServicesManager`, is now
+the shell's (`ShellTunnel`), published once and never replaced. It forwards to whichever core is
+running (`TunnelBackend`), and third-party `on(...)` subscriptions live in the shell, so a plugin
+that cached the tunnel or subscribed to a message type needs to do nothing across a swap.
+
+**The tunnel itself reconnects.** The old core closes its socket and the new one opens a fresh
+connection, which takes a few seconds. In that window the public tunnel reports itself disconnected,
+drops publishes and fails requests fast, exactly as during an ordinary reconnect, and **chat
+bridged to or from Discord in that window is not relayed**. Nothing is queued to replay it, for the
+same reason nothing is queued during a reconnect: the bot is the source of truth and clients
+re-sync when they come back.
+
+#### State that crosses a swap
+
+Almost all of Heimdall's state is either on disk (the whitelist mirror, the punishment store, the
+cached config), which the new core reads back exactly as at a restart, or comes from the bot on
+reconnect. The rest is handed over as plain JDK values only (strings, booleans, `Integer`, `Long`,
+`Double`, and lists and string-keyed maps of those), validated by `Handoff` when the old core hands
+it over, so nothing in the handoff can keep the old classloader alive. Today that is the
+`/linkdiscord` cooldowns: a swap is something an operator can do at any time, and one that reset
+every window would hand players a fresh allowance, as v2's reload did.
+
 ---
 
 ## Structure

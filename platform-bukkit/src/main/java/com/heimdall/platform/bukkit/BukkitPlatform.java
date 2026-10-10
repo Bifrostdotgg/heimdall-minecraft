@@ -11,6 +11,7 @@ import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.platform.SchedulerBridge;
 import com.heimdall.platform.bukkit.itemimage.BukkitItemImages;
+import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.Log4jConsoleTap;
 import java.nio.file.Path;
 import java.util.concurrent.Executor;
@@ -62,11 +63,12 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
             HeimdallLogger logger,
             ServerRole role,
             boolean forwardsPlayerIps,
-            HeimdallExecutors executors) {
+            HeimdallExecutors executors,
+            CoreRegistrations registrations) {
         this.role = role;
         this.forwardsPlayerIps = forwardsPlayerIps;
         this.dataDirectory = plugin.getDataFolder().toPath();
-        this.mainThread = createServerThread(plugin, logger);
+        this.mainThread = new TrackingServerThread(createServerThread(plugin, logger), registrations);
         this.messenger = new BukkitMessenger(plugin, logger);
         BukkitPlayerDirectory builtPlayers = null;
         Log4jConsoleTap builtTap = null;
@@ -76,7 +78,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
             this.players = builtPlayers;
             this.consoleTap = builtTap;
             this.console = new BukkitConsoleBridge(logger, mainThread, consoleTap);
-            this.commands = new BukkitCommandRegistrar(plugin, logger, messenger);
+            this.commands = new BukkitCommandRegistrar(registrations, logger, messenger);
             final BukkitPlayerDirectory directory = builtPlayers;
             this.chatControl = ChatControlChannels.create(
                     logger, plugin, new Function<Player, PlayerHandle>() {
@@ -224,6 +226,9 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
         // reference the server itself owns, and leaving a root appender attached to a plugin that
         // has been disabled is how a reload leaks one per cycle.
         consoleTap.close();
+        // The ChatControl channel hook is registered lazily, from whichever thread first asked, and
+        // a plugin disable was the only thing that ever took it off again. A swap is not one.
+        closeQuietly(chatControl);
         messenger.close();
         // Stops the asset and render threads and closes any open pack zips, so a /reload does not
         // leave file handles on a regenerated ItemsAdder pack.

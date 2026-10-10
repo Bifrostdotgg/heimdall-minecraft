@@ -30,7 +30,7 @@ public final class BukkitCore implements HeimdallCore {
     @Override
     public void start(ShellContext context) throws Exception {
         JavaPlugin plugin = (JavaPlugin) context.platformPlugin();
-        bootstrap = new BukkitBootstrap(plugin, context.shellJar());
+        bootstrap = new BukkitBootstrap(plugin, context.shellJar(), context);
         bootstrap.enable();
     }
 

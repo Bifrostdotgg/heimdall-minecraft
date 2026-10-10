@@ -1,8 +1,10 @@
 package com.heimdall.shell.contract;
 
+import com.heimdall.core.json.Payload;
 import com.heimdall.core.util.Registration;
 import java.io.File;
 import java.nio.file.Path;
+import java.util.Map;
 
 /**
  * One core generation's view of the shell that loaded it.
@@ -79,4 +81,44 @@ public interface ShellContext {
      * {@code registration} immediately and returns {@link Registration#NONE}.
      */
     Registration track(Registration registration);
+
+    /**
+     * What the previous generation handed over when it stopped for this swap; empty at server start
+     * and after a generation that left nothing. Unmodifiable, plain JDK values only (see
+     * {@link Handoff}).
+     */
+    Map<String, Object> handoff();
+
+    /**
+     * Leaves state for the next generation. Only honoured while this generation is stopping for a
+     * swap; at server stop it is discarded, because there is no next generation.
+     *
+     * @throws IllegalArgumentException if a value is not a plain JDK type, naming where
+     */
+    void handOff(Map<String, ?> state);
+
+    /**
+     * Points the shell's relay for {@code binding.name()} at this generation's code, creating the
+     * relay if it does not exist yet. Tracked like {@link #track}.
+     *
+     * <p>Closing the handle unbinds it. Outside a swap that also takes the command away from
+     * players, except where the platform cannot (Bukkit's {@code plugin.yml} commands, which then
+     * answer "that feature is switched off"). During a swap the relay stays registered until the
+     * swap ends, so the incoming generation can take it over without the command disappearing.
+     */
+    Registration bindCommand(CommandBinding binding);
+
+    /**
+     * Makes {@code backend} what the shell's permanent {@code HeimdallTunnel} forwards to. Tracked
+     * like {@link #track}; closing it leaves the tunnel disconnected until another core binds.
+     */
+    Registration bindTunnel(TunnelBackend backend);
+
+    /**
+     * Offers an inbound tunnel message no core module claimed to the third-party plugins subscribed
+     * through the public SPI.
+     *
+     * @return whether a subscriber took it
+     */
+    boolean deliverUnclaimed(String requestId, String type, Payload payload);
 }

@@ -33,7 +33,8 @@ public final class VelocityCore implements HeimdallCore {
                 context.platformPlugin(),
                 (ProxyServer) context.platformServer(),
                 new Slf4jLogger((Logger) context.platformLogger()),
-                context.dataDirectory());
+                context.dataDirectory(),
+                context);
         bootstrap.enable();
     }
 

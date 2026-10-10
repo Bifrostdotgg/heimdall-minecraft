@@ -9,6 +9,7 @@ import com.heimdall.core.platform.Integrations;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.SchedulerBridge;
+import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.Log4jConsoleTap;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.nio.file.Path;
@@ -43,14 +44,15 @@ final class VelocityPlatform implements PlatformFacade, AutoCloseable {
             ServerRole role,
             Path dataDirectory,
             HeimdallExecutors executors,
-            VelocityText text) {
+            VelocityText text,
+            CoreRegistrations registrations) {
         this.role = role;
         this.dataDirectory = dataDirectory;
-        this.scheduler = new VelocityScheduler(plugin, proxy, logger);
+        this.scheduler = new VelocityScheduler(plugin, proxy, logger, registrations);
         this.players = new VelocityPlayerDirectory(proxy, text);
         this.consoleTap = new Log4jConsoleTap(logger, executors.io());
         this.console = new VelocityConsoleBridge(proxy, consoleTap);
-        this.commands = new VelocityCommandRegistrar(proxy.getCommandManager(), logger, text);
+        this.commands = new VelocityCommandRegistrar(registrations, logger, text);
         this.integrations = new VelocityIntegrations(logger, executors.io());
     }
 

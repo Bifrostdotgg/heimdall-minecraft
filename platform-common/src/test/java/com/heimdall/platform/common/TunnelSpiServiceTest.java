@@ -7,201 +7,125 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.heimdall.api.HeimdallTunnel;
-import com.heimdall.api.HeimdallTunnelProvider;
+import com.heimdall.core.BuildConstants;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.log.LogLevel;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.platform.PlatformFacade;
-import com.heimdall.core.tunnel.TunnelMessageHandler;
+import com.heimdall.core.testing.FakeShellContext;
 import com.heimdall.core.util.Registration;
 import com.heimdall.core.wiring.HeimdallRuntime;
+import com.heimdall.shell.contract.TunnelBackend;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * The public SPI's dispatch and reply rules.
+ * The core half of the public SPI: what this generation hands the shell, and what it sends on.
  *
- * <p>Everything here runs against an unconfigured runtime — no bootstrap.yml, therefore no tunnel —
- * which is not a limitation but the case worth pinning: the SPI is installed on every server
- * whether or not it has been set up, and a consumer must see one consistent set of behaviours
- * rather than a second code path for "Heimdall exists but is not connected".
+ * <p>The consumer half (subscriptions, replacement, the correlated reply) lives in the shell since
+ * departure D87 and is tested there, in {@code ShellTunnelTest}. What is pinned here is the seam:
+ * install binds a backend, closing the handle unbinds it, unclaimed frames are offered to the
+ * shell and nothing else, and an unconfigured runtime gives a consumer the same answers a reconnect
+ * does.
  */
 class TunnelSpiServiceTest {
 
     private final RecordingLogger logger = new RecordingLogger();
 
     private HeimdallRuntime runtime;
-    private TunnelSpiService service;
+    private Registration installed = Registration.NONE;
 
-    private TunnelSpiService install(Path dataDir) {
+    private HeimdallRuntime runtime(Path dataDir) {
         PlatformFacade platform = new StubPlatform(dataDir);
         runtime = HeimdallRuntime.builder(logger, platform)
                 .bootstrapStore(new BootstrapStore(logger, dataDir.resolve("bootstrap.yml")))
                 .build();
-        service = TunnelSpiService.install(logger, runtime);
-        return service;
+        return runtime;
     }
 
     @AfterEach
     void tearDown() {
-        TunnelSpiService.uninstall(service);
+        installed.close();
         if (runtime != null) {
             runtime.close();
         }
     }
 
     @Test
-    @DisplayName("install publishes the service so any plugin can find it")
-    void installPublishes(@TempDir Path dataDir) {
-        TunnelSpiService installed = install(dataDir);
-        assertSame(installed, HeimdallTunnelProvider.get());
+    @DisplayName("install binds this generation as the shell's tunnel backend, and close unbinds it")
+    void installBindsAndCloseUnbinds(@TempDir Path dataDir) {
+        FakeShellContext shell = new FakeShellContext("bukkit", dataDir);
+        installed = TunnelSpiService.install(logger, runtime(dataDir), shell);
 
-        TunnelSpiService.uninstall(installed);
-        assertNull(HeimdallTunnelProvider.get(), "disable must not leave a dead tunnel published");
+        TunnelBackend backend = shell.backend();
+        assertNotNull(backend, "the shell's HeimdallTunnel must have something to forward to");
+        assertEquals(BuildConstants.VERSION, backend.version());
+
+        installed.close();
+        assertNull(shell.backend(), "a stopped generation must not stay the tunnel's backend");
     }
 
     @Test
-    @DisplayName("uninstalling a service that is not the installed one leaves the holder alone")
-    void uninstallIsCompareAndClear(@TempDir Path dataDir) {
-        TunnelSpiService installed = install(dataDir);
-        HeimdallTunnel other = new HeimdallTunnel() {
-            @Override
-            public String version() {
-                return "other";
-            }
+    @DisplayName("an unclaimed frame is offered to the shell, id and type intact")
+    void unclaimedFramesGoToTheShell(@TempDir Path dataDir) {
+        FakeShellContext shell = new FakeShellContext("bukkit", dataDir).deliverAccepts(true);
+        TunnelSpiService service = new TunnelSpiService(logger, runtime(dataDir).tunnel());
 
-            @Override
-            public boolean isConnected() {
-                return false;
-            }
+        service.inbound(shell).onMessage(Envelope.of("req-1", "trace.probe",
+                Payload.builder().put("uuid", "abc").build()));
 
-            @Override
-            public void publish(String type, Payload payload) {
-            }
-
-            @Override
-            public CompletableFuture<Payload> request(String type, Payload payload, long timeoutMs) {
-                return new CompletableFuture<Payload>();
-            }
-
-            @Override
-            public Registration on(String type, InboundHandler handler) {
-                return Registration.NONE;
-            }
-        };
-        HeimdallTunnelProvider.install(other);
-
-        TunnelSpiService.uninstall(installed);
-        assertSame(other, HeimdallTunnelProvider.get(),
-                "an old instance's teardown must not wipe a newer registration");
-        HeimdallTunnelProvider.uninstall(other);
+        assertEquals(1, shell.delivered().size());
+        assertEquals("req-1/trace.probe", shell.delivered().get(0));
     }
 
     @Test
-    @DisplayName("a handler is given the payload and answers on <type>.result")
-    void dispatchAndReply(@TempDir Path dataDir) {
-        TunnelSpiService spi = install(dataDir);
-        final List<Payload> seen = new ArrayList<Payload>();
-
-        spi.on("trace.probe", new HeimdallTunnel.InboundHandler() {
-            @Override
-            public void handle(Payload payload, HeimdallTunnel.Responder responder) {
-                seen.add(payload);
-                responder.respond(Payload.builder().put("ok", true).build());
-            }
-        });
-
-        Envelope request = Envelope.of("req-1", "trace.probe",
-                Payload.builder().put("uuid", "abc").build());
-        spi.inbound().onMessage(request);
-
-        assertEquals(1, seen.size());
-        assertEquals("abc", seen.get(0).string("uuid", ""));
-        // There is no bus on an unconfigured server, so the reply is dropped rather than thrown —
-        // the assertion that matters is that responding did not blow up the dispatch.
-    }
-
-    @Test
-    @DisplayName("an unclaimed type is a debug line, not an error")
+    @DisplayName("a frame nobody subscribed to is a debug line, not an error")
     void unclaimedTypeIsQuiet(@TempDir Path dataDir) {
-        TunnelSpiService spi = install(dataDir);
-        spi.inbound().onMessage(Envelope.of("id", "nobody.wants.this", Payload.empty()));
-        assertTrue(logger.records().isEmpty() || logger.at(com.heimdall.core.log.LogLevel.SEVERE)
-                .isEmpty(), "an unhandled type is not a failure: " + logger.records());
+        FakeShellContext shell = new FakeShellContext("bukkit", dataDir).deliverAccepts(false);
+        TunnelSpiService service = new TunnelSpiService(logger, runtime(dataDir).tunnel());
+
+        service.inbound(shell).onMessage(Envelope.of("id", "nobody.wants.this", Payload.empty()));
+
+        assertTrue(logger.at(LogLevel.SEVERE).isEmpty(),
+                "an unhandled type is not a failure: " + logger.records());
     }
 
     @Test
-    @DisplayName("a handler that throws is contained")
-    void throwingHandlerIsContained(@TempDir Path dataDir) {
-        TunnelSpiService spi = install(dataDir);
-        spi.on("boom", new HeimdallTunnel.InboundHandler() {
-            @Override
-            public void handle(Payload payload, HeimdallTunnel.Responder responder) {
-                throw new IllegalStateException("consumer is broken");
-            }
-        });
-        TunnelMessageHandler inbound = spi.inbound();
-        inbound.onMessage(Envelope.of("id", "boom", Payload.empty()));
-
-        assertTrue(logger.logged(com.heimdall.core.log.LogLevel.SEVERE, "boom"),
-                "the failure must be attributed to the type: " + logger.records());
-        // And the dispatcher still works afterwards.
-        inbound.onMessage(Envelope.of("id2", "boom", Payload.empty()));
-    }
-
-    @Test
-    @DisplayName("closing a registration unsubscribes, but only if it is still ours")
-    void unsubscribeIsIdentityChecked(@TempDir Path dataDir) {
-        TunnelSpiService spi = install(dataDir);
-        final List<String> calls = new ArrayList<String>();
-
-        Registration first = spi.on("shared", new HeimdallTunnel.InboundHandler() {
-            @Override
-            public void handle(Payload payload, HeimdallTunnel.Responder responder) {
-                calls.add("first");
-            }
-        });
-        spi.on("shared", new HeimdallTunnel.InboundHandler() {
-            @Override
-            public void handle(Payload payload, HeimdallTunnel.Responder responder) {
-                calls.add("second");
-            }
-        });
-
-        // The first plugin unregisters after the second has taken the type over.
-        first.close();
-        spi.inbound().onMessage(Envelope.of("id", "shared", Payload.empty()));
-        assertEquals(1, calls.size());
-        assertEquals("second", calls.get(0), "the later subscriber must survive the earlier's close");
-    }
-
-    @Test
-    @DisplayName("without a tunnel the SPI is inert rather than broken")
+    @DisplayName("without a connected tunnel the backend is inert rather than broken")
     void inertWithoutATunnel(@TempDir Path dataDir) {
-        TunnelSpiService spi = install(dataDir);
+        FakeShellContext shell = new FakeShellContext("bukkit", dataDir);
+        installed = TunnelSpiService.install(logger, runtime(dataDir), shell);
+        TunnelBackend backend = shell.backend();
 
-        assertNotNull(spi.version());
-        assertFalse(spi.isConnected());
-        spi.publish("anything", null);
+        assertFalse(backend.isConnected());
+        backend.publish("anything", null);
+        backend.reply("id", "anything.result", null);
 
-        CompletableFuture<Payload> pending = spi.request("anything", null, 100L);
+        CompletableFuture<Payload> pending = backend.request("anything", null, 100L);
         assertTrue(pending.isCompletedExceptionally(), "a request with no socket must fail fast");
-        try {
-            pending.get();
-        } catch (InterruptedException | ExecutionException expected) {
-            assertTrue(expected.getCause() instanceof IllegalStateException
-                    || expected instanceof InterruptedException);
-        }
+    }
+
+    @Test
+    @DisplayName("closing twice is harmless and leaves another generation's backend alone")
+    void closeIsIdempotentAndIdentityChecked(@TempDir Path dataDir) {
+        FakeShellContext shell = new FakeShellContext("bukkit", dataDir);
+        Registration first = TunnelSpiService.install(logger, runtime(dataDir), shell);
+        TunnelBackend firstBackend = shell.backend();
+        installed = TunnelSpiService.install(logger, runtime, shell);
+        TunnelBackend secondBackend = shell.backend();
+
+        first.close();
+        first.close();
+        assertSame(secondBackend, shell.backend(),
+                "an old generation's teardown must not unbind its successor");
+        assertTrue(firstBackend != secondBackend);
     }
 
     /** The smallest platform that satisfies the runtime: a data directory and nothing else. */
