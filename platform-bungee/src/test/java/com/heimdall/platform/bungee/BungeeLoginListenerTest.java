@@ -19,8 +19,6 @@ import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import net.md_5.bungee.api.Callback;
@@ -28,30 +26,21 @@ import net.md_5.bungee.api.chat.BaseComponent;
 import net.md_5.bungee.api.chat.TextComponent;
 import net.md_5.bungee.api.connection.PendingConnection;
 import net.md_5.bungee.api.event.LoginEvent;
-import net.md_5.bungee.api.plugin.Plugin;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
- * The login gate, against BungeeCord's real {@code AsyncEvent} intent machinery.
+ * The core's Bungee login decision, against BungeeCord's real {@code LoginEvent}.
  *
- * <h2>Why the real event and not a stand-in</h2>
+ * <p>The intent machinery (register during dispatch, complete exactly once, never hang a connection)
+ * belongs to the shell since the hot-swap split and is tested there, in
+ * {@code com.heimdall.shell.bungee.BungeeLoginGateTest}, against the same real event. What is left
+ * here is the decision itself: who is refused, with what reason, what is left alone, and that a
+ * glue failure admits rather than locking the network (departure D87).
  *
- * <p>Everything this class asserts is about a promise BungeeCord makes and does not enforce: an
- * intent that is registered and never completed leaves that player's connection waiting at the login
- * screen <em>forever</em>. {@code AsyncEvent} holds a latch and a callback and no clock; nothing in
- * the proxy notices, nothing logs, and the symptom reaches support as "some players just hang".
- *
- * <p>A hand-rolled fake event would only ever agree with this test's own idea of how intents work.
- * So {@link LoginEvent} is constructed for real, with a real {@link Callback}, and
- * {@link LoginEvent#postCall()} is invoked exactly where BungeeCord's {@code EventBus} invokes it —
- * after the handler returns. The callback firing is therefore not an assertion this test makes up:
- * it is BungeeCord's own latch reaching zero, which is the same thing that lets the connection
- * proceed on a real proxy.
- *
- * <p>Every test here is a revert check. Delete the {@code finally} in the worker, or the
- * {@code complete()} on the rejection path, or the {@code compareAndSet}, and exactly one of these
- * goes red.
+ * <p>The event is real and {@link LoginEvent#postCall()} is invoked where BungeeCord's
+ * {@code EventBus} invokes it, so a decision that registered an intent of its own (which it must
+ * not; the shell owns that) would leave the gate unreleased and fail these tests.
  */
 class BungeeLoginListenerTest {
 
@@ -59,32 +48,6 @@ class BungeeLoginListenerTest {
 
     private final RecordingLogger logger = new RecordingLogger(true);
     private final LoginPipeline pipeline = new LoginPipeline(logger);
-
-    /**
-     * A plugin instance, used only as the key BungeeCord files intents under.
-     *
-     * <p>Through {@code Plugin}'s <em>protected</em> constructor, which exists for exactly this and
-     * says so by asserting that the classloader is <strong>not</strong> a {@code PluginClassloader}
-     * — the no-arg one asserts the opposite, because at runtime a plugin is only ever constructed by
-     * the loader. Every accessor on the result is null, which is fine:
-     * {@code registerIntent}/{@code completeIntent} put it in a {@code ConcurrentHashMap} and never
-     * touch it otherwise.
-     */
-    private static final class TestPlugin extends Plugin {
-        TestPlugin() {
-            super(null, null);
-        }
-    }
-
-    private final Plugin plugin = new TestPlugin();
-
-    /** Runs the deferred decision on the calling thread, so assertions are ordinary. */
-    private static final Executor INLINE = new Executor() {
-        @Override
-        public void execute(Runnable command) {
-            command.run();
-        }
-    };
 
     /** Floodgate absent, which is the ordinary case and not what any of this is about. */
     private static final BedrockIdentityProvider NO_FLOODGATE = new BedrockIdentityProvider() {
@@ -145,9 +108,8 @@ class BungeeLoginListenerTest {
                 });
     }
 
-    private BungeeLoginListener listenerOn(Executor executor) {
-        return new BungeeLoginListener(
-                plugin, logger, pipeline, NO_FLOODGATE, new BungeeText(), executor);
+    private BungeeLoginListener listener() {
+        return new BungeeLoginListener(logger, pipeline, NO_FLOODGATE, new BungeeText());
     }
 
     /** Registers an interceptor and returns the attempts it saw. */
@@ -166,7 +128,7 @@ class BungeeLoginListenerTest {
     /** Drives one login exactly as BungeeCord's EventBus does: handler, then postCall(). */
     private LoginEvent drive(BungeeLoginListener listener, Gate gate, PendingConnection connection) {
         LoginEvent event = new LoginEvent(connection, gate);
-        listener.onLogin(event);
+        listener.decide(event);
         event.postCall();
         return event;
     }
@@ -177,7 +139,7 @@ class BungeeLoginListenerTest {
         record(Verdict.allow());
         Gate gate = new Gate();
 
-        LoginEvent event = drive(listenerOn(INLINE), gate, connection(PLAYER, "AllowedSteve"));
+        LoginEvent event = drive(listener(), gate, connection(PLAYER, "AllowedSteve"));
 
         assertFalse(event.isCancelled());
         assertTrue(gate.released(),
@@ -192,7 +154,7 @@ class BungeeLoginListenerTest {
         record(Verdict.deny(Msg.legacy("§cYou are not whitelisted.")));
         Gate gate = new Gate();
 
-        LoginEvent event = drive(listenerOn(INLINE), gate, connection(PLAYER, "DeniedSteve"));
+        LoginEvent event = drive(listener(), gate, connection(PLAYER, "DeniedSteve"));
 
         assertTrue(gate.released(),
                 "a refusal that never releases the gate is not a refusal — the player sees a hang "
@@ -216,7 +178,7 @@ class BungeeLoginListenerTest {
         record(Verdict.deny(Msg.legacy("§cno")));
         Gate gate = new Gate();
 
-        LoginEvent event = drive(listenerOn(INLINE), gate, connection(PLAYER, "DeniedSteve"));
+        LoginEvent event = drive(listener(), gate, connection(PLAYER, "DeniedSteve"));
 
         assertTrue(event.isCancelled());
     }
@@ -236,7 +198,7 @@ class BungeeLoginListenerTest {
         }, 0, "broken");
         Gate gate = new Gate();
 
-        LoginEvent event = drive(listenerOn(INLINE), gate, connection(PLAYER, "Steve"));
+        LoginEvent event = drive(listener(), gate, connection(PLAYER, "Steve"));
 
         assertTrue(gate.released(),
                 "a bug in the glue must not leave a connection hostage");
@@ -244,57 +206,6 @@ class BungeeLoginListenerTest {
                 "and it must not lock the network either — the pipeline's default for login is admit");
         assertTrue(logger.logged(LogLevel.SEVERE, "admitting them"),
                 "the operator has to be told the gate did not run: " + logger.records());
-    }
-
-    @Test
-    @DisplayName("an executor that refuses the work completes the intent rather than hanging")
-    void rejectedExecutionCompletesTheIntent() {
-        // The plugin is being disabled while somebody is mid-login: heimdall-io has stopped
-        // accepting tasks. The intent is already registered by then, so the only correct thing left
-        // is to release it — the alternative is a player who never gets in and never gets kicked.
-        record(Verdict.deny(Msg.legacy("§cno")));
-        Gate gate = new Gate();
-        Executor shuttingDown = new Executor() {
-            @Override
-            public void execute(Runnable command) {
-                throw new RejectedExecutionException("heimdall-io is shutting down");
-            }
-        };
-
-        LoginEvent event = drive(listenerOn(shuttingDown), gate, connection(PLAYER, "Steve"));
-
-        assertTrue(gate.released(), "the gate has to be released even when the check never ran");
-        assertFalse(event.isCancelled(),
-                "and the player is admitted: refusing on the strength of a check that did not "
-                        + "happen would lock a network out during every restart");
-        assertTrue(logger.logged(LogLevel.WARN, "never come"), logger.records().toString());
-    }
-
-    @Test
-    @DisplayName("an executor that runs the task and then reports it rejected releases the gate once")
-    void theGateIsReleasedAtMostOnce() {
-        // The at-most-once half of the contract, which the AtomicBoolean is the whole of.
-        // completeIntent checkStates that an intent is outstanding, so a second call throws — on the
-        // netty event loop, inside BungeeCord's own dispatch, for a connection already let through.
-        // An executor that runs the task and THEN throws is that shape, and it is not something a
-        // caller can rule out about somebody else's pool.
-        record(Verdict.allow());
-        Gate gate = new Gate();
-        Executor ranItAnyway = new Executor() {
-            @Override
-            public void execute(Runnable command) {
-                command.run();
-                throw new RejectedExecutionException("reported after running it");
-            }
-        };
-
-        LoginEvent event = drive(listenerOn(ranItAnyway), gate, connection(PLAYER, "Steve"));
-
-        assertFalse(event.isCancelled());
-        assertEquals(1, gate.releases(), "the gate must be released exactly once");
-        assertFalse(logger.logged(LogLevel.SEVERE, "could not release the login gate"),
-                "a second completeIntent throws inside BungeeCord's event dispatch: "
-                        + logger.records());
     }
 
     @Test
@@ -309,7 +220,7 @@ class BungeeLoginListenerTest {
         event.setCancelled(true);
         event.setCancelReason(TextComponent.fromLegacyText("§cBanned until 2027 — appeal at ..."));
 
-        listenerOn(INLINE).onLogin(event);
+        listener().decide(event);
         event.postCall();
 
         assertTrue(seen.isEmpty(), "the pipeline was consulted about a decision already made");
@@ -328,7 +239,7 @@ class BungeeLoginListenerTest {
         List<LoginAttempt> seen = record(Verdict.deny(Msg.legacy("§cno")));
         Gate gate = new Gate();
 
-        LoginEvent event = drive(listenerOn(INLINE), gate, connection(null, "Nameless"));
+        LoginEvent event = drive(listener(), gate, connection(null, "Nameless"));
 
         assertTrue(seen.isEmpty());
         assertFalse(event.isCancelled());
@@ -341,7 +252,7 @@ class BungeeLoginListenerTest {
         List<LoginAttempt> seen = record(Verdict.allow());
         Gate gate = new Gate();
 
-        drive(listenerOn(INLINE), gate, connection(PLAYER, "AllowedSteve"));
+        drive(listener(), gate, connection(PLAYER, "AllowedSteve"));
 
         assertEquals(1, seen.size());
         LoginAttempt attempt = seen.get(0);

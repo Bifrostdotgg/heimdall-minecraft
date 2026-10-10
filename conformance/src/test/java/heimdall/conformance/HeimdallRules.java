@@ -52,9 +52,20 @@ final class HeimdallRules {
         "net.kyori.adventure.platform..",
     };
 
-    /** Package prefixes that must stay platform-free. */
+    /**
+     * Package prefixes that must stay platform-free.
+     *
+     * <p>The two shell packages are here since the hot-swap split (departure D87): the contract is
+     * what every core generation and every platform shell agree on, so a platform type in it would
+     * tie all three platforms to one, and the hotswap package is the loader, swapper and gate logic
+     * that is written once precisely so it can be tested without a server.
+     */
     static final String[] PLATFORM_FREE_PACKAGES = {
-        "com.heimdall.core..", "com.heimdall.api..", "com.heimdall.module..",
+        "com.heimdall.core..",
+        "com.heimdall.api..",
+        "com.heimdall.module..",
+        "com.heimdall.shell.contract..",
+        "com.heimdall.shell.hotswap..",
     };
 
     private static final String EXECUTOR = "java.util.concurrent.Executor";

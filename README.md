@@ -118,6 +118,17 @@ and every few hours. When a newer version is available:
     cannot be replaced at all — it is downloaded into the plugin's data folder instead and the
     console says to move it into `plugins/` yourself.
 
+**Most updates also apply live, with no restart.** The plugin is a small permanent shell around a
+swappable core, and when a release is verified against the SHA-256 the bot publishes for it, its
+core is swapped in while the server runs: the bot link reconnects within a few seconds, logins
+wait briefly, and bridged chat in that window is not relayed. The JAR is still installed for the
+next restart too, so the update survives one. A release with no published checksum, or one that
+changes the shell itself, applies on restart only, and `/hd update` says which. The first release
+with the shell needs one ordinary restart to install it. `/hd status` shows the running core's
+version and checksum, and `/hd swap` swaps in a core placed by hand at
+`plugins/Heimdall/core/staged.jar` (`plugins/heimdall/core/` on Velocity). See departure D87 in
+`docs/v2-departures.md` for the details and the limits.
+
 `/hwl version` / `/hwl update` still work as the deprecated alias, forwarding to the same commands.
 
 Unlike most plugin behaviour, the update check has no dashboard equivalent — it has to keep working

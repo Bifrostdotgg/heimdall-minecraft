@@ -91,6 +91,108 @@ class UpdateDownloaderTest {
             assertFalse(policy.allowsHost(null));
         }
 
+        private static final String OFFICIAL =
+                "https://github.com/Bifrostdotgg/heimdall-minecraft/releases/download/v3.1.0/heimdall.jar";
+
+        private java.net.URL url(String value) throws java.net.MalformedURLException {
+            return new java.net.URL(value);
+        }
+
+        @Test
+        @DisplayName("a download may only start at the official repository's release assets (D87)")
+        void startIsPinnedToTheOfficialReleases() throws Exception {
+            DownloadPolicy policy = DownloadPolicy.github();
+
+            assertEquals(DownloadPolicy.OFFICIAL_RELEASE_REPO, policy.releaseRepo());
+            assertTrue(policy.allowsStart(url(OFFICIAL)));
+            assertTrue(policy.allowsStart(url(OFFICIAL.replace("Bifrostdotgg", "bifrostdotgg"))),
+                    "GitHub owner and repository names are case-insensitive");
+            assertFalse(policy.allowsStart(url(
+                    "https://github.com/attacker/heimdall-minecraft/releases/download/v3.1.0/h.jar")));
+            assertFalse(policy.allowsStart(url(
+                    "https://github.com/Bifrostdotgg/heimdall-minecraft-evil/releases/download/v1/h.jar")));
+            assertFalse(policy.allowsStart(url(
+                    "https://github.com/Bifrostdotgg/heimdall-minecraft/raw/main/h.jar")),
+                    "only release downloads, not anything else in the repository");
+            assertFalse(policy.allowsStart(url(
+                    "https://github.com/Bifrostdotgg/heimdall-minecraft/releases/download/")));
+            assertFalse(policy.allowsStart(url("https://github.com/Bifrostdotgg/heimdall-minecraft"
+                    + "/releases/download/../../../../attacker/repo/releases/download/v1/h.jar")),
+                    "a dot-dot path must not climb out of the pinned repository");
+            assertFalse(policy.allowsStart(url("https://github.com/Bifrostdotgg/heimdall-minecraft"
+                    + "/releases/download/%2e%2e/%2e%2e/%2e%2e/%2e%2e/attacker/r/releases/download/v/h.jar")),
+                    "nor an encoded one");
+            assertFalse(policy.allowsStart(url(OFFICIAL + "?x=1")));
+            assertFalse(policy.allowsStart(url(
+                    "https://objects.githubusercontent.com/Bifrostdotgg/heimdall-minecraft/releases/download/v/h.jar")),
+                    "the asset host is a redirect target, never a starting point");
+            assertFalse(policy.allowsStart(url(OFFICIAL.replace("https:", "http:"))));
+        }
+
+        @Test
+        @DisplayName("a pinned download may only be redirected to GitHub's asset host")
+        void redirectsOnlyToTheAssetHost() throws Exception {
+            DownloadPolicy policy = DownloadPolicy.github();
+
+            assertTrue(policy.allowsRedirect(url("https://objects.githubusercontent.com/a/b")));
+            assertTrue(policy.allowsRedirect(url("https://release-assets.githubusercontent.com/a")));
+            assertFalse(policy.allowsRedirect(url(
+                    "https://github.com/attacker/repo/releases/download/v1/h.jar")),
+                    "a redirect back to github.com could name any repository");
+            assertFalse(policy.allowsRedirect(url("http://objects.githubusercontent.com/a/b")));
+            assertFalse(policy.allowsRedirect(url("https://evilgithubusercontent.com/a")));
+        }
+
+        @Test
+        @DisplayName("a fork's operator can pin their own repository instead, and only that one")
+        void aForkCanOptIn() throws Exception {
+            DownloadPolicy fork = DownloadPolicy.githubRelease("Someone/heimdall-fork");
+            assertEquals("Someone/heimdall-fork", fork.releaseRepo());
+            assertTrue(fork.allowsStart(url(
+                    "https://github.com/Someone/heimdall-fork/releases/download/v1/h.jar")));
+            assertFalse(fork.allowsStart(url(OFFICIAL)), "a pin is one repository, not a list");
+
+            assertTrue(DownloadPolicy.githubRelease(null) == DownloadPolicy.github());
+            assertTrue(DownloadPolicy.githubRelease("  ") == DownloadPolicy.github());
+            assertTrue(DownloadPolicy.githubRelease("bifrostdotgg/HEIMDALL-minecraft")
+                    == DownloadPolicy.github());
+        }
+
+        @Test
+        @DisplayName("a malformed repository pins to nothing, so every download is refused")
+        void malformedRepoRefusesEverything() throws Exception {
+            for (String bad : new String[] {"no-slash", "a/b/c", "owner/..", "o w/r"}) {
+                DownloadPolicy policy = DownloadPolicy.githubRelease(bad);
+                assertFalse(policy.allowsStart(url(OFFICIAL)), bad);
+                assertFalse(policy.allowsStart(url(
+                        "https://github.com/" + bad.replace(" ", "") + "/releases/download/v/h.jar")),
+                        bad);
+            }
+        }
+
+        @Test
+        @DisplayName("the downloader refuses another repository's release before opening a connection")
+        void downloaderRefusesAnotherRepository(@TempDir Path dir) {
+            File target = dir.resolve("plugin.jar").toFile();
+
+            DownloadRefusedException refused = assertThrows(DownloadRefusedException.class,
+                    () -> downloader.download(
+                            "https://github.com/attacker/repo/releases/download/v1/evil.jar", target));
+
+            assertTrue(refused.getMessage().contains("not a release of "
+                    + DownloadPolicy.OFFICIAL_RELEASE_REPO), refused.getMessage());
+            assertFalse(target.exists());
+        }
+
+        @Test
+        @DisplayName("a host refusal is a DownloadRefusedException, which installers must not retry")
+        void hostRefusalIsTyped(@TempDir Path dir) {
+            File target = dir.resolve("plugin.jar").toFile();
+
+            assertThrows(DownloadRefusedException.class,
+                    () -> downloader.download("https://example.com/heimdall.jar", target));
+        }
+
         @Test
         @DisplayName("keeps v2's ceiling and timeouts")
         void keepsV2Numbers() {
@@ -127,6 +229,62 @@ class UpdateDownloaderTest {
         @AfterEach
         void stop() {
             server.close();
+        }
+
+        @Test
+        @DisplayName("a body matching the published SHA-256 is installed")
+        void publishedHashMatches(@TempDir Path dir) throws Exception {
+            server.serve(200, JAR_BYTES);
+            File target = dir.resolve("plugin.jar").toFile();
+
+            long written = downloader.download(server.url("/heimdall.jar"), target, sha256(JAR_BYTES));
+
+            assertEquals(JAR_BYTES.length, written);
+            assertArrayEquals(JAR_BYTES, Files.readAllBytes(target.toPath()));
+            assertNoPartFile(target);
+        }
+
+        @Test
+        @DisplayName("a body that does not match is refused, and the old jar is left exactly as it was")
+        void publishedHashMismatches(@TempDir Path dir) throws Exception {
+            server.serve(200, JAR_BYTES);
+            File target = dir.resolve("plugin.jar").toFile();
+            byte[] old = "the old jar".getBytes(StandardCharsets.UTF_8);
+            Files.write(target.toPath(), old);
+
+            IOException refused = assertThrows(IOException.class, () -> downloader.download(
+                    server.url("/heimdall.jar"), target, sha256("something else".getBytes(
+                            StandardCharsets.UTF_8))));
+
+            assertTrue(refused.getMessage().contains("does not match"), refused.getMessage());
+            assertArrayEquals(old, Files.readAllBytes(target.toPath()),
+                    "a jar that failed verification must never land where the platform loads it");
+            assertNoPartFile(target);
+        }
+
+        @Test
+        @DisplayName("a malformed published hash is refused before anything is fetched")
+        void malformedHashIsRefusedUpFront(@TempDir Path dir) throws Exception {
+            server.serve(200, JAR_BYTES);
+            File target = dir.resolve("plugin.jar").toFile();
+
+            IOException refused = assertThrows(IOException.class, () -> downloader.download(
+                    server.url("/heimdall.jar"), target, "sha256:" + sha256(JAR_BYTES)));
+
+            assertTrue(refused.getMessage().contains("malformed"), refused.getMessage());
+            assertFalse(server.awaitRequest(200L), "nothing may be fetched for an unverifiable hash");
+            assertFalse(target.exists());
+        }
+
+        @Test
+        @DisplayName("with no published hash the download is unverified but still works, as v2's did")
+        void noHashIsUnverified(@TempDir Path dir) throws Exception {
+            server.serve(200, JAR_BYTES);
+            File target = dir.resolve("plugin.jar").toFile();
+
+            long written = downloader.download(server.url("/heimdall.jar"), target, null);
+
+            assertEquals(JAR_BYTES.length, written);
         }
 
         @Test
@@ -302,6 +460,15 @@ class UpdateDownloaderTest {
             first.join(10_000);
             assertEquals(null, firstError.get(), "the first download should have completed cleanly");
         }
+    }
+
+    private static String sha256(byte[] bytes) throws Exception {
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes);
+        StringBuilder out = new StringBuilder();
+        for (byte b : digest) {
+            out.append(String.format("%02x", b & 0xFF));
+        }
+        return out.toString();
     }
 
     private static void assertNoPartFile(File target) {

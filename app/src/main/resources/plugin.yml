@@ -1,5 +1,5 @@
 name: Heimdall
-main: com.heimdall.platform.bukkit.HeimdallBukkitPlugin
+main: com.heimdall.shell.bukkit.HeimdallBukkitPlugin
 version: @version@
 author: Bifrost
 website: https://bifrost.gg

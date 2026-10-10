@@ -4,7 +4,6 @@ import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.pipeline.ChatMessage;
 import com.heimdall.core.pipeline.ChatPipeline;
 import com.velocitypowered.api.event.PostOrder;
-import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.player.PlayerChatEvent;
 import com.velocitypowered.api.proxy.Player;
 
@@ -74,7 +73,6 @@ public final class VelocityChatListener {
         this.pipeline = pipeline;
     }
 
-    @Subscribe(order = PostOrder.LAST)
     public void onChat(PlayerChatEvent event) {
         // Captured as the handler goes, so the catch below can name the player when one is known
         // and stay quiet about it when one is not. Reading it again down there would re-enter the

@@ -1,6 +1,5 @@
 package com.heimdall.platform.bukkit;
 
-import com.heimdall.api.HeimdallTunnel;
 import com.heimdall.core.BuildConstants;
 import com.heimdall.core.admin.AdminCommand;
 import com.heimdall.core.admin.AdminContext;
@@ -18,17 +17,21 @@ import com.heimdall.core.wiring.MigrationBoot;
 import com.heimdall.core.wiring.UpdateWiring;
 import com.heimdall.platform.bukkit.adapter.BukkitAdapters;
 import com.heimdall.platform.bukkit.adapter.TickSource;
+import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.HeimdallModules;
+import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
+import com.heimdall.shell.contract.ShellContext;
 import java.io.File;
 import java.util.Collections;
 import java.util.function.IntSupplier;
 import org.bukkit.Bukkit;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventPriority;
+import org.bukkit.event.HandlerList;
+import org.bukkit.event.Listener;
 import org.bukkit.plugin.EventExecutor;
-import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 
 /**
@@ -57,6 +60,16 @@ import org.bukkit.plugin.java.JavaPlugin;
  *       thing that handles it exists.
  * </ol>
  *
+ * <h2>Every registration is undone here, not by the server</h2>
+ *
+ * <p>Since the hot-swap split (departure D87) this class runs in a core generation that can be
+ * stopped while the server, and the shell's plugin, keep running. Bukkit only cleans up after a
+ * plugin it disables, and a swap disables nothing, so every listener, task and command this class
+ * registers goes through {@link CoreRegistrations} and is undone in {@link #disable()}, newest
+ * first. Nothing here may call {@code HandlerList.unregisterAll(plugin)},
+ * {@code cancelTasks(plugin)} or {@code ServicesManager.unregisterAll(plugin)}: the plugin is the
+ * shell's, and those calls would take the shell's own login gate, relays and tunnel with them.
+ *
  * <p>Teardown is the reverse of whatever actually got built, and every step is contained. Not "the
  * exact reverse": {@code onEnable} catches everything, so a throw half-way through this leaves a
  * server running with some of it constructed, and {@link #disable()} is the only thing that will
@@ -67,6 +80,12 @@ final class BukkitBootstrap {
 
     private final JavaPlugin plugin;
     private final HeimdallLogger logger;
+
+    /** The shell this generation runs under. */
+    private final ShellContext shell;
+
+    /** This generation's listeners, timers and bindings, undone newest first on disable. */
+    private final CoreRegistrations registrations;
     private final long startedAtMs = System.currentTimeMillis();
 
     /**
@@ -92,7 +111,9 @@ final class BukkitBootstrap {
 
     private BukkitPlatform platform;
     private HeimdallRuntime runtime;
-    private TunnelSpiService spi;
+
+    /** The tunnel backend handed to the shell's permanent {@code HeimdallTunnel}. */
+    private Registration spi = Registration.NONE;
 
     /** The {@code /hd} and {@code /hwl} registrations, unbound on disable. */
     private Registration adminCommands = Registration.NONE;
@@ -103,19 +124,21 @@ final class BukkitBootstrap {
     /** The updater's periodic check, its {@code update} subscription and its join notice. */
     private Registration updates = Registration.NONE;
 
-    BukkitBootstrap(JavaPlugin plugin, File ownJar) {
+    BukkitBootstrap(JavaPlugin plugin, File ownJar, ShellContext shell) {
         this.plugin = plugin;
         this.ownJar = ownJar;
+        this.shell = shell;
+        this.registrations = new CoreRegistrations(shell);
         this.logger = new JulLogger(plugin.getLogger());
     }
 
     /**
      * Builds and starts everything.
      *
-     * <p>Never throws. A {@code JavaPlugin} whose {@code onEnable} throws is disabled by the server
-     * with a stack trace, and every reason this could fail — no config, no LuckPerms, an
-     * unattachable logging backend — is a reason to run in a reduced state and say so, not a reason
-     * to leave the operator with no Heimdall and no instruction either.
+     * <p>Every expected reason this could fail (no config, no LuckPerms, an unattachable logging
+     * backend) is a reason to run in a reduced state and say so, and none of them throws. What does
+     * throw is a genuine bug, and since departure D87 it reaches the shell through
+     * {@link BukkitCore#start}, which unwinds the half-built generation and reports it.
      */
     void enable() {
         File dataFolder = plugin.getDataFolder();
@@ -142,7 +165,8 @@ final class BukkitBootstrap {
         ServerRole role = InstanceRoleDetector.resolve(bootstrap.role(), detector, logger);
 
         executors = new HeimdallExecutors(logger);
-        platform = new BukkitPlatform(plugin, logger, role, detector.isBehindProxy(), executors);
+        platform = new BukkitPlatform(
+                plugin, logger, role, detector.isBehindProxy(), executors, registrations);
 
         TickSource ticks = BukkitAdapters.tickSource(logger);
         runtime = HeimdallRuntime.builder(logger, platform)
@@ -152,18 +176,21 @@ final class BukkitBootstrap {
                 .commandLabel("hd")
                 .healthSource(new BukkitHealthSource(ticks))
                 .bedrockIdentityProvider(FloodgateIdentityProvider.create())
+                .handoff(shell.handoff())
                 .build();
 
         // Between build() and start(), which is the gap the runtime leaves open for exactly this:
         // modules must be registered before the first reconcile, and start() is what runs it.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
-                .pluginVersion(BuildConstants.VERSION);
+                .pluginVersion(BuildConstants.VERSION)
+                .core(shell.core().toString(), shell.shellVersion());
         HeimdallModules.registerAll(runtime, admin);
 
         BukkitUpdateInstaller installer = new BukkitUpdateInstaller(logger, ownJar, dataFolder);
         UpdateWiring.Installed update = UpdateWiring.install(
-                logger, BuildConstants.VERSION, runtime, installer.isUsable() ? installer : null);
+                logger, BuildConstants.VERSION, runtime, installer.isUsable() ? installer : null,
+                new ShellHotSwap(shell));
         updates = update.periodicChecks();
         admin.updates(update.admin());
 
@@ -205,8 +232,17 @@ final class BukkitBootstrap {
         guarded("releasing chat relay state", new Runnable() {
             @Override
             public void run() {
-                if (chatListener != null) {
-                    chatListener.close();
+                final BukkitChatListener chat = chatListener;
+                if (chat != null && platform != null) {
+                    // The state lives in a ThreadLocal on the main thread. A swap stops this core on
+                    // the shell's swap thread, where remove() would clear nothing, so it hops; at
+                    // server stop this already is the main thread and it runs inline.
+                    platform.mainThread().execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            chat.close();
+                        }
+                    });
                 }
             }
         });
@@ -220,20 +256,29 @@ final class BukkitBootstrap {
         });
         adminCommands = Registration.NONE;
 
-        guarded("uninstalling the tunnel SPI", new Runnable() {
+        guarded("unbinding the tunnel SPI", new Runnable() {
             @Override
             public void run() {
-                TunnelSpiService.uninstall(spi);
+                spi.close();
             }
         });
-        spi = null;
+        spi = Registration.NONE;
 
-        guarded("unregistering Bukkit services", new Runnable() {
+        guarded("unregistering listeners and timers", new Runnable() {
             @Override
             public void run() {
-                // Bukkit unregisters a disabling plugin's services itself; this is belt and braces
-                // for the /reload path, where it does not always get that far.
-                Bukkit.getServicesManager().unregisterAll(plugin);
+                // Before the runtime stops, so no event or timer reaches a runtime that is going
+                // away. Never unregisterAll(plugin): the plugin is the shell's (see the class note).
+                registrations.closeAll(logger);
+            }
+        });
+
+        guarded("handing state to the next core", new Runnable() {
+            @Override
+            public void run() {
+                if (runtime != null && shell.isSwapping()) {
+                    shell.handOff(runtime.exportHandoff());
+                }
             }
         });
 
@@ -265,7 +310,11 @@ final class BukkitBootstrap {
         });
         platform = null;
 
-        logger.info("Heimdall v" + BuildConstants.VERSION + " shutting down");
+        if (shell.isSwapping()) {
+            logger.info("Heimdall core v" + BuildConstants.VERSION + " stopped for a swap");
+        } else {
+            logger.info("Heimdall v" + BuildConstants.VERSION + " shutting down");
+        }
     }
 
     /**
@@ -292,11 +341,30 @@ final class BukkitBootstrap {
 
     // ── Wiring ───────────────────────────────────────────────────────────────
 
+    /**
+     * Registers {@code listener}'s annotated handlers and tracks a handle that unregisters them.
+     *
+     * <p>Every listener class here is package-private and final. That is load-bearing: Paper 1.16's
+     * {@code EventExecutor.create} caches a generated executor class in a static map only for a
+     * public listener with a public handler, and such a cache entry would pin this core's
+     * classloader for the life of the server. {@code BukkitListenerShapeTest} holds the line.
+     */
+    private void listen(final Listener listener) {
+        Bukkit.getPluginManager().registerEvents(listener, plugin);
+        registrations.track(Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                HandlerList.unregisterAll(listener);
+            }
+        }));
+    }
+
     private void registerListeners() {
-        Bukkit.getPluginManager().registerEvents(
-                new BukkitLoginListener(
-                        logger, runtime.loginPipeline(), platform.integrations().floodgate()),
-                plugin);
+        // The login decision, bound to the shell's permanent pre-login listener rather than
+        // registered as a listener of its own: a swap must never leave a window with no login
+        // listener at all, in which everybody would be admitted (departure D87).
+        registrations.keep(shell.bindLoginGate(new BukkitLoginListener(
+                logger, runtime.loginPipeline(), platform.integrations().floodgate())));
         // Before the chat listener, so the first line typed already knows whether ChatControl is
         // deciding channels. attach() also registers ChatControl's channel hook when it is there.
         platform.chatControl().attach(runtime.chatPipeline());
@@ -324,25 +392,21 @@ final class BukkitBootstrap {
                         type, chat, EventPriority.MONITOR, executor, plugin, false);
             }
         });
-        Bukkit.getPluginManager().registerEvents(chat, plugin);
+        // listen() unregisters by listener object, which covers the modern MONITOR registration
+        // above as well: it was made with the same listener.
+        listen(chat);
         chatListener = chat;
         logger.debug(() -> "chat relay: Paper chat hook " + chat.modernState());
-        Bukkit.getPluginManager().registerEvents(
-                new BukkitCommandListener(logger, runtime.commandPipeline(), platform.messenger()),
-                plugin);
-        Bukkit.getPluginManager().registerEvents(new BukkitPunishmentGuard(logger), plugin);
+        listen(new BukkitCommandListener(logger, runtime.commandPipeline(), platform.messenger()));
+        listen(new BukkitPunishmentGuard(logger));
         // Phase 1c deliberately shipped no join/quit listeners rather than dead ones; the whitelist
         // mirror's extension windows are the first real consumer and arrive in 1d. See seam S1.
-        Bukkit.getPluginManager().registerEvents(
-                new BukkitSessionListener(
-                        logger, runtime.playerSessions(), platform.playerDirectory()),
-                plugin);
+        listen(new BukkitSessionListener(
+                logger, runtime.playerSessions(), platform.playerDirectory()));
         // Deaths, on the Bukkit family only: neither proxy has a death event, so a backend is the
         // only place the server's own death message exists at all. Departure D80.
-        Bukkit.getPluginManager().registerEvents(
-                new BukkitDeathListener(
-                        logger, runtime.playerSessions(), platform.playerDirectory()),
-                plugin);
+        listen(new BukkitDeathListener(
+                logger, runtime.playerSessions(), platform.playerDirectory()));
     }
 
     /**
@@ -361,11 +425,12 @@ final class BukkitBootstrap {
                 platform.commands(), admin, "hd", Collections.singletonList("heimdall"));
     }
 
+    /**
+     * Hands this generation's tunnel to the shell. The {@code HeimdallTunnel} other plugins find in
+     * the {@code ServicesManager} and {@code HeimdallTunnelProvider} is the shell's, published once
+     * and never replaced, so a plugin that cached it keeps working across a swap (departure D87).
+     */
     private void registerSpi() {
-        spi = TunnelSpiService.install(logger, runtime);
-        // The ServicesManager is Bukkit's own idiom and where a Bukkit plugin author looks first;
-        // HeimdallTunnelProvider, installed above, is the portable route that also works on Velocity.
-        Bukkit.getServicesManager()
-                .register(HeimdallTunnel.class, spi, plugin, ServicePriority.Normal);
+        spi = TunnelSpiService.install(logger, runtime, shell);
     }
 }

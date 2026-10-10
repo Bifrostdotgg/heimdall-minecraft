@@ -36,6 +36,8 @@ public final class AdminContext {
     private final OffenseAdmin offenses;
     private final PunishmentAdmin punishments;
     private final UpdateAdmin updates;
+    private final String core;
+    private final String shellVersion;
 
     private AdminContext(Builder builder) {
         if (builder.runtime == null) {
@@ -50,6 +52,22 @@ public final class AdminContext {
         this.offenses = builder.offenses == null ? OffenseAdmin.NONE : builder.offenses;
         this.punishments = builder.punishments == null ? PunishmentAdmin.NONE : builder.punishments;
         this.updates = builder.updates == null ? UpdateAdmin.NONE : builder.updates;
+        this.core = builder.core == null ? "" : builder.core;
+        this.shellVersion = builder.shellVersion == null ? "" : builder.shellVersion;
+    }
+
+    /**
+     * The running core, as {@code <version> (sha256 <first twelve>)}, or empty with no shell.
+     * {@code /hd status} shows it: since the hot-swap split (departure D87) the core can change
+     * while the server runs, and the hash is the only way to tell two builds of one version apart.
+     */
+    public String core() {
+        return core;
+    }
+
+    /** The shell's version, which only changes with a restart; empty with no shell. */
+    public String shellVersion() {
+        return shellVersion;
     }
 
     public static Builder builder(HeimdallRuntime runtime) {
@@ -129,6 +147,8 @@ public final class AdminContext {
         private OffenseAdmin offenses;
         private PunishmentAdmin punishments;
         private UpdateAdmin updates;
+        private String core;
+        private String shellVersion;
 
         private Builder() {
         }
@@ -173,6 +193,13 @@ public final class AdminContext {
         /** The punishments module's surface. Left unset, {@link PunishmentAdmin#NONE}. */
         public Builder punishments(PunishmentAdmin value) {
             this.punishments = value;
+            return this;
+        }
+
+        /** The running core and the shell it runs under; see {@link AdminContext#core()}. */
+        public Builder core(String coreValue, String shellVersionValue) {
+            this.core = coreValue;
+            this.shellVersion = shellVersionValue;
             return this;
         }
 

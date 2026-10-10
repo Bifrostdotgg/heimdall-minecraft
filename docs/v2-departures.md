@@ -2175,6 +2175,353 @@ Mojang endpoints are unverified until Third Place runs it.
 - Hidden-component handling covers enchantments, stored enchantments, lore, unbreakable and the whole
   tooltip; attribute modifiers and other tooltip sections are never drawn at all.
 
+
+### D87 - the plugin is a permanent shell that loads a swappable core
+
+**New in 3.1.**
+
+**Before:** one jar, merged into one classloader by the platform. Any update, however small, needed
+a server or proxy restart, and proxies are the thing operators restart least.
+**Now:** the jar the platform loads is a **shell**, and everything else is a **core** that the shell
+loads into a child `URLClassLoader` and can replace while the server runs. The release is still the
+single `heimdall-whitelist-<version>.jar` asset (the v2 self-updater and the bot's download card
+pick exactly that file); the core travels inside it, stored at `META-INF/heimdall/heimdall-core.jar`
+with its version, SHA-256 and contract recorded next to it in `META-INF/heimdall/core.properties`.
+
+**The first hot-swap build still needs one ordinary restart** to install the shell. Every later
+update whose shell contract is unchanged can then be applied live.
+
+#### What lives where, and why
+
+The shell holds only what has to keep its identity for the life of the process:
+
+- the three platform entry points (`com.heimdall.shell.bukkit|velocity|bungee`), which `plugin.yml`,
+  `bungee.yml` and the generated `velocity-plugin.json` now name;
+- the hot-swap loader itself (`:shell-common`, package `com.heimdall.shell.hotswap`);
+- the contract both halves compile against (`:shell-api`, package `com.heimdall.shell.contract`);
+- the public `com.heimdall.api` SPI and the types it exposes: `Payload`, `Envelope`, `Registration`
+  and `OnceRegistration`, which keep their `com.heimdall.core.*` names so the published SPI does not
+  change, plus Gson under `Payload`. A third-party plugin links against these through the shell's
+  loader, so a copy in a swappable core would be a different class from the one it linked against.
+  `Envelope` moves too because it calls `Payload`'s package-private Gson bridge, and package-private
+  access does not work across two classloaders.
+
+The core is everything else: `:core`, the feature modules, and the three platform bindings, which
+now enter through `BukkitCore`, `VelocityCore` and `BungeeCore` instead of plugin main classes.
+
+#### How the two jars are built and checked
+
+`:app` builds each half as its own shadow jar from its own classpath. One jar-wide relocation would
+have rewritten the Velocity shell's native Adventure calls along with the core's shaded copy. The
+shell relocates and bundles Gson only; the core relocates its Gson references to the same
+`com.heimdall.libs.gson` names without bundling Gson, so they resolve to the shell's copy, and
+bundles and relocates nv-websocket, SnakeYAML and Adventure as before.
+
+Three checks run on every build:
+
+- `verifyShadowJar`: the release jar's bytecode levels, relocations and descriptors, as before. The
+  Java 17 exemption moves to `com/heimdall/shell/velocity/`.
+- `verifyCoreJar`: the same bytecode, relocation and logging-facade checks on the core, whose Java 17
+  exemption stays at `com/heimdall/platform/velocity/`.
+- `verifyJarSplit`: the shell carries only shell classes, the core carries none of them, no class
+  is in both, and the nested core is byte-identical to the core this build produced. Parent-first
+  loading makes a class present in both always resolve from the shell, so without this check a
+  duplicated class would silently never be upgraded by any swap.
+
+#### The contract version
+
+`ShellContract.VERSION` is a compile-time integer. A core returns it from `contractVersion()`, and
+javac inlines it, so the value is the one the core was built against. The core manifest and
+`core.properties` carry it too, so the updater can decide without loading a class. **Bump it** when
+anything in `:shell-api` or `:api` changes in a way an older shell could not serve.
+
+One change was made without a bump: `ShellContext.stageRelease` gained its `expectedSha256`
+parameter while the shell was still unreleased. No released tag contains the shell, so no installed
+shell can meet a core built against the old signature, and contract 1 is defined as the signature
+that ships. Once a shell has shipped, a change like that needs a bump.
+
+#### At server start
+
+The shell reads the core out of the jar the platform loaded (through a fresh `JarFile`, never the
+shell's own classloader), checks it against the recorded hash, writes it to
+`plugins/Heimdall/core/heimdall-core-<version>-<sha12>.jar` (Velocity: `plugins/heimdall/core/`),
+deletes older cores from that folder, and loads it. Core files are content-addressed so a write never
+touches a jar a live classloader has open, which on Windows would fail outright. A core that cannot
+be read, loaded or started is reported, and the shell runs on with no core.
+
+At server stop the shell stops the core but deliberately does not close its classloader: a callback
+still finishing on a library thread would otherwise become a `NoClassDefFoundError` trace in the
+shutdown log. Shutdown never waits unboundedly: if a swap is in progress it waits up to 20 seconds
+for it, then interrupts the swap thread and gives it 2 more, and after that stops without stopping
+the core, so a core whose start or stop hangs cannot hold the server's own shutdown. The swap and
+timer threads are daemons, and shutdown waits on no executor and closes no classloader.
+
+#### The swap
+
+`/hd swap` (`/hdp swap` on a proxy) applies a core staged at `plugins/Heimdall/core/staged.jar`
+(Velocity: `plugins/heimdall/core/staged.jar`), which may be a bare core jar or a whole release jar.
+The updater uses the same machinery. Every swap runs on the shell's own `heimdall-swap` thread,
+never a server thread, because stopping a core waits for its executors to drain. In order:
+
+1. **Load the new core** into a fresh classloader while the old one keeps running. A jar that cannot
+   be read, was built for another contract, or whose entry point will not construct is refused here,
+   and nothing about the running server has changed.
+2. **Take the login gate away, then stop the old core.** New logins from here wait for the next
+   core instead of reaching one that is about to stop. A login that was already handed the old
+   core's gate holds a *lease*, counted from the moment it got the gate rather than when it starts
+   deciding, and the swap waits up to 5 seconds for every lease to come back. That is shorter than
+   a login's bot-call budget, so it is a bound, not a promise that every decision finishes: a lease
+   still out when the wait ends is **voided**, and whatever the old core then decides for that
+   login, the shell refuses it with *"Server is updating, try again in a moment"*. The guarantee is
+   therefore that no login is admitted by a core that has been stopped (not that no decision ever
+   runs against a half torn down core): a slow bot call that ends in the API-fallback "allow" after
+   the drain gave up is refused, not admitted. Stopping a core outside a swap (one that failed while
+   starting, or at shutdown) voids its leases the same way. Then the old core stops with
+   `ShellContext.isSwapping()` true so it hands state over, the shell closes anything the core left
+   tracked, newest first, and sweeps the platform for anything still pointing into the old
+   classloader.
+3. **Start the new core** with the old one's handoff.
+4. **If that throws, roll back**: unwind what the new core half-built, then start the old core
+   again from its jar in a *fresh* classloader (never by restarting the old instance, whose statics
+   have already been torn down). If the rollback fails too, no core is running; see the login gate
+   below for what that means.
+5. **Close the old classloader after 30 seconds**, not at once. Closing it makes every class it has
+   not loaded yet unloadable, and old-core work already in flight (a scheduled task, a socket
+   callback) can still be finishing.
+
+The swap is reported to whoever asked (console, player or dashboard) and always to the console. A
+failed swap says which core is running afterwards. Immediately before a core jar is loaded, its
+SHA-256 is computed again and compared with the one it was described with, so a file replaced on
+disk between the check and the load is refused rather than run.
+
+#### Updates go in live when they can, and only when they are verified
+
+`/hd update` (`/hdp update`) and a dashboard-triggered update work as before, and then do more:
+
+1. **The release is always installed for the next restart**, exactly as before: into
+   `plugins/update/` on the Bukkit family, over the running jar (or into the data directory on
+   Windows) on the proxies. A core swapped in live is a property of the running process only, so
+   this is what makes the update survive a restart.
+2. **The download is checked against the SHA-256 the bot reports** from GitHub's asset digest
+   (`sha256` on `GET plugin/latest`, 64 lowercase hex characters). The hash is computed as the body
+   streams in and compared before the `.part` file is moved anywhere. A mismatch is a refusal that
+   installs nothing; a malformed hash is refused before a byte is fetched.
+3. **It is swapped in live** only if the release had a hash and matched it, the jar's embedded core
+   matches the hash the build recorded next to it, and that core was built for this shell's
+   contract. The installed jar is hashed **again** when the shell stages it, against the same
+   release hash, so a jar replaced after the download is refused. The swap is requested before the
+   command answers (or the dashboard frame is replied to), so the answer can say truthfully whether
+   it was accepted: *"Swapping it in now"* only when the shell accepted it, otherwise that the swap
+   could not start and the update applies on the next restart. The shell holds an accepted swap back
+   for `ShellContract.SWAP_SETTLE_MS` (one second) so that answer goes out before the swap stops the
+   core giving it, then reports the outcome to the same sender, and always to the console.
+
+**A release with no hash is never swapped in live.** A live swap runs the downloaded code at once,
+and nothing can vouch for a jar without one, so it is installed for the next restart only, and the
+message says why. **A release whose shell contract changed cannot be swapped in live either**: it is
+installed for the next restart, and the message names both contract numbers.
+
+**Downloads are pinned to one repository's releases.** Since a download can now be running within
+seconds, the host allowlist (`github.com`, `githubusercontent.com`) is no longer enough: GitHub
+serves every repository, and the hash arrives in the same bot response as the URL, so a compromised
+bot or a poisoned release cache could name any repository's asset with a matching hash. A download
+must now **start** at `https://github.com/Bifrostdotgg/heimdall-minecraft/releases/download/` (the
+path normalised first; `..`, percent-escapes, a query or a fragment are refused), and every
+**redirect** may only go to GitHub's asset host (`*.githubusercontent.com`). Anything else is refused
+before a connection is opened. An operator running a fork can pin their own repository instead with
+`updatesReleaseRepo: owner/name` in `bootstrap.yml`; the key is written out only when it differs from
+the official repository, a malformed value refuses every download, and it is read when a core
+starts (at boot, or after a swap). On the proxies, a refused download (host, repository, malformed
+or mismatched hash) is never retried into the data directory; only a jar that genuinely could not
+be replaced is.
+
+**The stronger follow-up is not in this change:** a signature over each release, checked against a
+public key built into the shell. Pinning narrows who can supply a jar to whoever can publish a
+release in the pinned repository; a signature would narrow it to whoever holds the signing key,
+independent of GitHub and of the bot.
+
+`/hd status` now shows the running core's version and the first twelve characters of its SHA-256,
+next to the shell's version: the core can change while the server runs, and two builds of one
+version are only told apart by their hash. `/hd swap` is listed in `/hd` help and tab completion,
+but the shell answers it before any core sees it, because it has to work with no core at all.
+
+#### The login gate belongs to the shell, and fails closed
+
+The login listener is the one registration that may never have a gap: a window with no listener at
+all is a window in which everyone is admitted. So each platform shell registers its own permanent
+login listener at enable, before any core runs, at exactly the priority the core's used to have
+(`AsyncPlayerPreLoginEvent` at `LOW`, Velocity's `LoginEvent` at `PostOrder.FIRST`, BungeeCord's
+`LoginEvent` at `LOW`), and a core binds its decision to it as a `LoginGate`. Then:
+
+- **A core is running:** its gate decides, as before. Its own policy is unchanged: a bug in the
+  pipeline glue still admits rather than locking the server, because that is a decision a core
+  makes.
+- **A core is starting or a swap is running:** the login waits up to five seconds for the next
+  core's gate, then is refused with *"Server is updating, try again in a moment"*. Every platform's
+  own login timeout is far longer, so the wait never costs a connection by itself.
+- **No core is running** (the core could not start at all, or a swap and its rollback both failed):
+  every login is refused at once with *"This server cannot check logins right now. Please try again
+  later."*, until a core runs again. Entering this state is an error on the console and a message
+  to every online player holding `heimdall.admin`, because from here somebody has to act: stage a
+  good core and run `/hd swap`, or restart.
+
+**This is a deliberate change from the old failure mode.** Before, a Heimdall that failed to enable
+left a server with no login listener, which admitted everybody. Now a server whose Heimdall cannot
+run refuses logins instead. A whitelist that silently stops whitelisting is the worse failure, and
+the operator is told immediately either way. The order at enable is what makes this hold: the
+login listener is registered **first**, before the shell host is built or any relay installed, and
+everything after it runs inside `ShellHost.enable`, which sets the gate to "no core" if any of it
+throws. Only a failure to register the listener itself leaves a server with no Heimdall at all, and
+that is logged as severe.
+
+A gate that throws while deciding (a classloader closed under it) refuses that login the same way:
+no core decided, so it is not admitted.
+
+On BungeeCord the shell also owns the event's *intent*. An intent can only be registered during
+dispatch, a login can arrive while no core exists, and nothing in BungeeCord ever times an intent
+out (D75), so the shell registers it, runs the decision on its own small pool of daemon threads
+that no swap touches, and completes it exactly once in a `finally`. Before the split the decision
+ran on the core's `heimdall-io`, which a swap shuts down: a decision queued behind that drain would
+have been dropped with its intent never completed. A login that arrives while that pool's queue is
+full is refused with *"This server is busy checking logins"*, not the updating message, because no
+update is involved.
+
+#### Every registration is tracked, because a swap disables nothing
+
+Before the split, "the plugin is disabled" cleaned up whatever the plugin had registered. A swap
+disables no plugin, and calling `unregisterAll(plugin)`, `cancelTasks(plugin)` or
+`unregisterListeners(plugin)` would take the shell's own registrations with it. So:
+
+- **Each core generation tracks everything it registers** (`CoreRegistrations` in
+  `:platform-common`): listeners, delayed tasks (until they run), command bindings, the tunnel
+  binding. Its own `disable()` closes them newest first, before the runtime behind them stops, and
+  the shell closes anything still tracked after `stop()` returns, so a forgotten registration cannot
+  outlive its generation. Teardown never stops early, is idempotent, and a context that has been
+  retired closes anything offered to it on arrival.
+- **Commands are shell-owned relays.** The platform only ever holds a shell object for a Heimdall
+  command, and a core supplies the code behind it (`CommandBinding`). Every `plugin.yml` command
+  gets a permanent relay at enable (Bukkit can never unregister those, so a core executor there
+  would pin its classloader forever); the admin verbs are permanent on the proxies too, so
+  `/hd swap` works with no core; anything else is registered on first bind. Outside a swap, unbinding
+  a runtime command still removes it, so a module that is switched off gives its verb back and
+  LiteBans keeps `/ban`. During a swap a command never disappears: a relay with nothing bound says
+  "Heimdall is updating, try again in a moment", and the ones the new core does not bind again are
+  removed when the swap ends. `BukkitCommandMap` moved into the shell for this reason.
+- **Velocity listeners are functional handlers**, registered with
+  `register(plugin, Class, PostOrder, EventHandler)` and removed by identity. Annotated listener
+  objects go through a Velocity method-handle cache keyed strongly by `Method`, which would pin an
+  old core until some later registration happened to evict it.
+- **The ChatControl channel hook** is unregistered when its generation stops; before, only a plugin
+  disable removed it.
+- **Bukkit listeners stay package-private and final**: Paper 1.16 caches a generated executor in a
+  static map only for a public listener with a public handler, and that entry would pin a core.
+
+**The post-swap sweep** is the backstop. On Bukkit it walks the plugin's registered listeners,
+services and pending tasks; on BungeeCord it reads the plugin manager's per-plugin listener and
+command maps reflectively; on both it unregisters anything whose class came from the old core's
+classloader. This is not hypothetical: adventure-platform-bukkit's `BukkitAudiences.close()` never
+unregisters the join and quit listener it registers (verified in the 4.3.4 bytecode), so without
+the sweep every swap would leave one firing into a stopped core. Velocity offers no way to
+enumerate a plugin's registrations, so there the tracked teardown is the whole mechanism.
+
+#### The public tunnel survives a swap
+
+`HeimdallTunnel`, as found through `HeimdallTunnelProvider` or Bukkit's `ServicesManager`, is now
+the shell's (`ShellTunnel`), published once and never replaced. It forwards to whichever core is
+running (`TunnelBackend`), and third-party `on(...)` subscriptions live in the shell, so a plugin
+that cached the tunnel or subscribed to a message type needs to do nothing across a swap.
+
+**The tunnel itself reconnects.** The old core closes its socket and the new one opens a fresh
+connection, which takes a few seconds. In that window the public tunnel reports itself disconnected,
+drops publishes and fails requests fast, exactly as during an ordinary reconnect, and **chat
+bridged to or from Discord in that window is not relayed**. Nothing is queued to replay it, for the
+same reason nothing is queued during a reconnect: the bot is the source of truth and clients
+re-sync when they come back.
+
+#### State that crosses a swap
+
+Almost all of Heimdall's state is either on disk (the whitelist mirror, the punishment store, the
+cached config), which the new core reads back exactly as at a restart, or comes from the bot on
+reconnect. The rest is handed over as plain JDK values only (strings, booleans, `Integer`, `Long`,
+`Double`, and lists and string-keyed maps of those), validated by `Handoff` when the old core hands
+it over, so nothing in the handoff can keep the old classloader alive. Today that is the
+`/linkdiscord` cooldowns: a swap is something an operator can do at any time, and one that reset
+every window would hand players a fresh allowance, as v2's reload did.
+
+#### How it is tested
+
+- **Real classloaders, real jars.** `:shell-common` builds a set of fixture core jars from their own
+  source set, kept off the test classpath, and `ShellHostTest` drives the shell against them through
+  `CoreLoader` exactly as production does: boot from a release-shaped jar, swap with handoff,
+  commands surviving a swap without the platform command ever being unregistered, the old loader
+  closing after the grace period, rollback into a fresh loader, a failed rollback leaving no core
+  (logins refused, admins alerted), a boot failure failing closed, the sweep removing what a leaky
+  core left on the platform, and contract and self-contradiction refusals. Also: staging re-hashes a
+  release and refuses a missing or wrong hash, a core changed on disk after its check is refused
+  before it loads, a core-requested swap waits out the settle delay, a swap waits for an in-flight
+  login and holds new ones for the next core, a swap from no core holds logins rather than refusing
+  them, an enable that throws leaves logins refused, and the shell's `swap` verb is refused without
+  `heimdall.admin`.
+- **The pieces**: `RelayTableTest`, `LoginGateHolderTest` (hold then deny, released early when no
+  core is coming, no-core deny; leases counted from the hand-out, including a swap that drains
+  between the hand-out and the decision, a decision outliving the drain voided, a retired
+  generation's leases voided), `RegistrationsTest` (order, never
+  stopping early, idempotence), `HandoffTest`, `CoreArchiveTest`, `ShellTunnelTest`,
+  `CoreRegistrationsTest`, `BungeeLoginGateTest` against BungeeCord's real `AsyncEvent` intents, and
+  `BukkitLoginGateTest` and `VelocityLoginGateTest` against the real login events (a bound gate
+  decides, a throwing gate refuses, an already-refused login is skipped, no core refuses, mid-swap
+  holds for the next core, and an "allow" that outlives a swap's drain is refused). `ShellHostTest`
+  also covers a login still out when a swap's drain gives up, shutdown voiding a held lease,
+  shutdown's bounded wait on a hung swap, a throwing progress listener, and a swap cancelled during
+  its settle delay being logged as a cancellation rather than a failure. `BukkitSweepTest` runs the
+  sweep on Bukkit's real `HandlerList`. `BukkitListenerShapeTest` fails the build on a public Bukkit
+  listener class in the core.
+- **The updater**: `UpdateDownloaderTest` (hash match, mismatch leaving the old jar untouched,
+  malformed refused before any fetch, none, and the repository pin: other repositories, dot-dot and
+  encoded escapes, redirects off the asset host, a fork's opt-in, a malformed pin),
+  `UpdateServiceTest` (verified and swappable, no hash, contract change, failed install, a refused
+  swap reported as restart-only), `RemoteUpdateHandlerTest` (the reply says whether the swap was
+  accepted), `BootstrapStoreTest` (the pin round-trips and the official default is never written),
+  `UpdateWiringTest` (the wired downloader uses the configured repository),
+  and `VelocityUpdateInstallerTest` and `BungeeUpdateInstallerTest` (a refused download is not
+  retried into the data directory; a jar that cannot be replaced still is).
+- **The artifact**: `ReleaseJarTest` extracts the core from the built release jar, checks its hash,
+  and constructs its entry point in a child classloader; `verifyJarSplit` also checks that every
+  shell-side class the core refers to (relocated Gson, the contract, the API types) is in the shell.
+- **On real servers**: the connected smoke's `paper-swap`, `velocity-swap` and `bungee-swap` rows
+  swap to a second core build over the tunnel and assert the reconnect and a command answered by the
+  new core (see `smoke/README.md`).
+
+#### Limits, and what an operator sees
+
+- **One restart to install.** The first release with the shell needs an ordinary restart; so does
+  any release that bumps `ShellContract.VERSION`, which the updater says when it installs one.
+- **A swap pauses the bot link for a few seconds.** Bridge chat in that window is not relayed in
+  either direction, the public tunnel reports itself disconnected, and logins wait (up to five
+  seconds) for the new core.
+- **A live swap does not persist on its own.** A restart loads the core inside the installed jar.
+  The updater keeps the two in step by always installing the jar for the restart as well; a core an
+  operator stages by hand and swaps in with `/hd swap` is replaced by the installed jar's on the next
+  restart.
+- **Old core files** stay in `plugins/Heimdall/core/` until the next start prunes them, because a
+  classloader can hold its jar open (on Windows, undeletably) until it is closed.
+- **Residual leaks the design accepts.** A retired core's classloader can be kept alive past its
+  grace period by something outside Heimdall's control: a third-party plugin holding an object from
+  it, Velocity's own method-handle cache if a future change ever registers an annotated listener, a
+  `ThreadLocal` value parked on a Paper chat thread by a line that was mid-flight during the swap
+  (released at that thread's next chat line), or a `java.util.logging` or log4j reference in a
+  library. Each costs memory, not correctness, and is bounded by the number of swaps between
+  restarts.
+- **Thread placement.** A swap stops and starts cores on the shell's swap thread, so a new core
+  registers its listeners and runtime commands off the main thread. Heimdall already did the latter
+  whenever a config push enabled a module; on Folia, whose command map is a plain map read by region
+  threads, a swap that adds or removes a runtime command name is a small new exposure. Swaps that
+  keep the same commands do not touch the map at all.
+- **The core skips the server's bytecode rewriting.** A core loaded by the shell is not seen by
+  CraftBukkit's legacy-plugin rewriting or Paper's plugin remapping. Nothing in the core needs
+  either today (no `Material`, reflective NMS names are the same under both mappings); a change that
+  starts to will need to be made safe for this first.
+
 ---
 
 ## Structure

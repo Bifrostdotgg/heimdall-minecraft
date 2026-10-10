@@ -14,6 +14,7 @@ import com.heimdall.core.text.Msg;
 import com.heimdall.core.tunnel.TunnelClient;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.update.DownloadPolicy;
+import com.heimdall.core.update.HotSwap;
 import com.heimdall.core.update.InstallOutcome;
 import com.heimdall.core.update.ReleaseSource;
 import com.heimdall.core.update.UpdateDownloader;
@@ -76,6 +77,20 @@ public final class UpdateWiring {
             String currentVersion,
             final HeimdallRuntime runtime,
             UpdateInstaller installer) {
+        return install(logger, currentVersion, runtime, installer, HotSwap.NONE);
+    }
+
+    /**
+     * {@link #install(HeimdallLogger, String, HeimdallRuntime, UpdateInstaller)}, with the hot-swap
+     * shell behind it, so a verified release whose core fits this shell is also swapped in live
+     * (departure D87).
+     */
+    public static Installed install(
+            HeimdallLogger logger,
+            String currentVersion,
+            final HeimdallRuntime runtime,
+            UpdateInstaller installer,
+            HotSwap hotSwap) {
         // Built with whatever installer there is, including null. checkNow(), the periodic tick and
         // the join notice all work with no installer; only updateNow() needs one, and it answers
         // gracefully when there is none.
@@ -84,8 +99,10 @@ public final class UpdateWiring {
                 currentVersion,
                 new GatewayReleaseSource(runtime.api()),
                 installer,
-                installer == null ? null : new UpdateDownloader(logger, DownloadPolicy.github()),
-                runtime.executors().scheduler());
+                installer == null ? null : new UpdateDownloader(logger,
+                        DownloadPolicy.githubRelease(runtime.bootstrap().updatesReleaseRepo())),
+                runtime.executors().scheduler(),
+                hotSwap);
 
         List<Registration> handles = new ArrayList<Registration>();
         handles.add(service.startPeriodicChecks(new Supplier<UpdateSettings>() {
@@ -201,6 +218,11 @@ public final class UpdateWiring {
             this.service = service;
         }
 
+        /** The service behind {@link #admin()}; for tests in this package. */
+        UpdateService service() {
+            return service;
+        }
+
         /** What {@code /hd version} and {@code /hd update} talk to. Never {@code null}. */
         public UpdateAdmin admin() {
             return admin;
@@ -262,6 +284,14 @@ public final class UpdateWiring {
             try {
                 InstallOutcome ran = service.updateNow();
                 outcome = ran == null ? InstallOutcome.failed("the update reported nothing") : ran;
+                // Requested BEFORE the reply so the reply can say whether it was accepted. The
+                // shell holds an accepted swap back long enough for this reply to go out on the
+                // tunnel the swap is about to close (departure D87).
+                outcome = outcome.startSwap(null);
+                if (outcome.swapRefused()) {
+                    logger.warn("a dashboard-triggered update was installed for the next restart, "
+                            + "but its live swap could not start");
+                }
             } catch (Throwable broken) {
                 // updateNow is documented never to throw, so reaching here is a bug — but the frame
                 // must still be answered, so this catches Throwable and falls into the finally.
@@ -326,6 +356,7 @@ public final class UpdateWiring {
 
         private final UpdateService service;
 
+
         ServiceAdmin(UpdateService service) {
             this.service = service;
         }
@@ -347,8 +378,8 @@ public final class UpdateWiring {
         }
 
         @Override
-        public String updateNow() {
-            InstallOutcome outcome = service.updateNow();
+        public String updateNow(Object audience) {
+            InstallOutcome outcome = service.updateNow().startSwap(audience);
             return outcome.message();
         }
 

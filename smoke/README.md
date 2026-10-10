@@ -371,6 +371,31 @@ The row needs no console (it waits on log lines, then reads the host file system
 never a harness limitation — it simply did not exist. Each row greps for its own platform's directory
 and file name, so neither can go green on the other's log line.
 
+### The hot-swap rows
+
+`paper-swap`, `velocity-swap` and `bungee-swap` prove a live core swap on a real server
+(departure D87). Each is a configured row with one addition: before boot, a second build of the
+core (`heimdall-core-swaptest.jar`, which `./gradlew build` writes to `app/build/smoke/` and CI
+hands over as its own artifact) is staged at `<data directory>/core/staged.jar`. Then:
+
+| Step | How it is driven | Asserted on |
+|---|---|---|
+| The first core boots and connects | as for a configured row | both ends |
+| `/hd swap` (`/hdp swap` on a proxy) | `STUB_BOT_COMMANDS_ON_ACK`: the stub sends it as `run_command` on the first config ack | the plugin: `swapping core ... for core ...+swaptest`, then `core ...+swaptest ... is running` |
+| The tunnel reconnects from the new core | the new core dials on its own | the stub: a second v3 `identified` line |
+| Commands still work | the stub sends `status` on the second ack | the stub: `run_command[2]` answered; the plugin: `core: ...+swaptest` in the status output |
+
+The swap is driven over the tunnel rather than a console so all three platforms can run it: the
+proxy images have no console, and every platform answers `run_command`. Nothing is added to the
+production jar for it; `/hd swap` is a real admin verb.
+
+**What these rows do not prove** is anything about a player mid-swap. The login gate's
+hold-then-refuse is covered by `LoginGateHolderTest` and by `BungeeLoginGateTest` against
+BungeeCord's real intent machinery; there is no headless client here to log in during the gap.
+
+`pull_image` in `lib.sh` retries an image pull a few times before every row, because Docker Hub's
+anonymous pull limit and its occasional 5xx have failed rows before the server ever started.
+
 ### Why the Bukkit row mounts `/data/plugins` when `run.sh` does not
 
 `run.sh` only has to get a jar in, so it uses the image's read-only `/plugins` staging path — which

@@ -4,6 +4,7 @@ import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.platform.SchedulerBridge;
 import com.heimdall.core.util.Registration;
+import com.heimdall.platform.common.CoreRegistrations;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import net.md_5.bungee.api.ProxyServer;
@@ -26,18 +27,26 @@ import net.md_5.bungee.api.scheduler.ScheduledTask;
  *
  * <p>{@link #runLater} is the one method that genuinely needs the proxy's scheduler, because the task
  * has to be cancellable when the plugin unloads — and BungeeCord cancels a plugin's scheduled tasks
- * for it on disable, which a bare timer would not give us.
+ * for it on disable, which a bare timer would not give us. A hot swap disables no plugin (departure
+ * D87), so each delayed task is also tracked against this core generation until it runs, and the
+ * generation's teardown cancels whatever is still pending.
  */
 final class BungeeScheduler implements Executor, SchedulerBridge {
 
     private final Plugin plugin;
     private final ProxyServer proxy;
     private final HeimdallLogger logger;
+    private final CoreRegistrations registrations;
 
-    BungeeScheduler(Plugin plugin, ProxyServer proxy, HeimdallLogger logger) {
+    BungeeScheduler(
+            Plugin plugin,
+            ProxyServer proxy,
+            HeimdallLogger logger,
+            CoreRegistrations registrations) {
         this.plugin = plugin;
         this.proxy = proxy;
         this.logger = logger;
+        this.registrations = registrations;
     }
 
     @Override
@@ -61,22 +70,28 @@ final class BungeeScheduler implements Executor, SchedulerBridge {
     }
 
     @Override
-    public Registration runLater(Runnable task, long delayMs) {
+    public Registration runLater(Runnable task, final long delayMs) {
         if (task == null) {
             return Registration.NONE;
         }
-        try {
-            final ScheduledTask handle = proxy.getScheduler()
-                    .schedule(plugin, task, Math.max(0L, delayMs), TimeUnit.MILLISECONDS);
-            return Registration.once(new Runnable() {
-                @Override
-                public void run() {
-                    handle.cancel();
+        return registrations.oneShot(new java.util.function.Function<Runnable, Registration>() {
+            @Override
+            public Registration apply(Runnable wrapped) {
+                try {
+                    final ScheduledTask handle = proxy.getScheduler()
+                            .schedule(plugin, wrapped, Math.max(0L, delayMs), TimeUnit.MILLISECONDS);
+                    return Registration.once(new Runnable() {
+                        @Override
+                        public void run() {
+                            handle.cancel();
+                        }
+                    });
+                } catch (RuntimeException rejected) {
+                    logger.debug(() -> "not scheduling delayed work; the proxy is shutting down: "
+                            + rejected);
+                    return Registration.NONE;
                 }
-            });
-        } catch (RuntimeException rejected) {
-            logger.debug(() -> "not scheduling delayed work; the proxy is shutting down: " + rejected);
-            return Registration.NONE;
-        }
+            }
+        }, task);
     }
 }

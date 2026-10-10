@@ -75,7 +75,7 @@ final class BukkitUpdateInstaller implements UpdateInstaller {
         }
         File updateFolder = new File(pluginsDirectory, UPDATE_FOLDER);
         File target = new File(updateFolder, runningJar.getName());
-        long bytes = downloader.download(release.downloadUrl(), target);
+        long bytes = downloader.download(release.downloadUrl(), target, release.sha256());
         logger.info("staged " + bytes + " bytes at " + target
                 + "; the server will apply it on its next start");
         return InstallOutcome.installed(target.toPath(),

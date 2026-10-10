@@ -112,6 +112,7 @@ public final class AdminCommand {
                 PunishmentSubcommands.verb("iphistory", "<player>", "local address history", "iphistory"),
                 new UpdateSubcommands.Version(),
                 new UpdateSubcommands.Update(),
+                new UpdateSubcommands.Swap(),
                 new RuntimeSubcommands.Debug());
     }
 

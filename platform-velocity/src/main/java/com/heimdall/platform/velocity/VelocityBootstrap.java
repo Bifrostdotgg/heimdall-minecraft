@@ -13,9 +13,17 @@ import com.heimdall.core.util.Registration;
 import com.heimdall.core.wiring.HeimdallRuntime;
 import com.heimdall.core.wiring.MigrationBoot;
 import com.heimdall.core.wiring.UpdateWiring;
+import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.HeimdallModules;
+import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
+import com.heimdall.shell.contract.ShellContext;
+import com.velocitypowered.api.event.EventManager;
+import com.velocitypowered.api.event.PostOrder;
+import com.velocitypowered.api.event.connection.DisconnectEvent;
+import com.velocitypowered.api.event.connection.PostLoginEvent;
+import com.velocitypowered.api.event.player.PlayerChatEvent;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -34,6 +42,12 @@ import java.util.Collections;
  * {@link ServerRole#GATEKEEPER} unless configured otherwise, the chat listener observes and never
  * cancels (a proxy cannot cancel signed chat), and text has to cross a shading boundary — see
  * {@link VelocityText}.
+ *
+ * <p>Since the hot-swap split (departure D87) this runs in a core generation that can be stopped
+ * while the proxy and the shell's plugin keep running, so every listener, task and command it
+ * registers is tracked through {@link CoreRegistrations} and undone in {@link #disable()}. Listeners
+ * are functional handlers registered through {@link VelocityEvents}, never annotated listener
+ * objects; see that class for why.
  */
 final class VelocityBootstrap {
 
@@ -42,6 +56,12 @@ final class VelocityBootstrap {
     private final HeimdallLogger logger;
     private final Path dataDirectory;
     private final long startedAtMs = System.currentTimeMillis();
+
+    /** The shell this generation runs under. */
+    private final ShellContext shell;
+
+    /** This generation's listeners, timers and bindings, undone newest first on disable. */
+    private final CoreRegistrations registrations;
 
     /**
      * Held rather than kept in a local: a throw part-way through {@link #enable()} would otherwise
@@ -54,7 +74,9 @@ final class VelocityBootstrap {
     private VelocityText text;
     private VelocityPlatform platform;
     private HeimdallRuntime runtime;
-    private TunnelSpiService spi;
+
+    /** The tunnel backend handed to the shell's permanent {@code HeimdallTunnel}. */
+    private Registration spi = Registration.NONE;
 
     /** The {@code /hdp} and {@code /hwl} registrations, unregistered on disable. */
     private Registration adminCommands = Registration.NONE;
@@ -62,19 +84,26 @@ final class VelocityBootstrap {
     /** The updater's periodic check, its {@code update} subscription and its join notice. */
     private Registration updates = Registration.NONE;
 
-    VelocityBootstrap(Object plugin, ProxyServer proxy, HeimdallLogger logger, Path dataDirectory) {
+    VelocityBootstrap(
+            Object plugin,
+            ProxyServer proxy,
+            HeimdallLogger logger,
+            Path dataDirectory,
+            ShellContext shell) {
         this.plugin = plugin;
         this.proxy = proxy;
         this.logger = logger;
         this.dataDirectory = dataDirectory;
+        this.shell = shell;
+        this.registrations = new CoreRegistrations(shell);
     }
 
     /**
      * Builds and starts everything.
      *
-     * <p>Never throws. Velocity logs a plugin whose initialise handler throws and carries on with
-     * the plugin half-started, which is strictly worse than a plugin that started in a reduced state
-     * and said which one.
+     * <p>Expected failures leave a reduced state and say which one. A throw is a genuine bug, and
+     * reaches the shell through {@link VelocityCore#start}, which unwinds the half-built generation
+     * (departure D87).
      */
     void enable() {
         try {
@@ -105,7 +134,7 @@ final class VelocityBootstrap {
 
         executors = new HeimdallExecutors(logger);
         platform = new VelocityPlatform(
-                plugin, proxy, logger, role, dataDirectory, executors, text);
+                plugin, proxy, logger, role, dataDirectory, executors, text, registrations);
 
         runtime = HeimdallRuntime.builder(logger, platform)
                 .executors(executors)
@@ -114,6 +143,7 @@ final class VelocityBootstrap {
                 .commandLabel("hdp")
                 .healthSource(new VelocityHealthSource(proxy))
                 .bedrockIdentityProvider(FloodgateIdentityProvider.create())
+                .handoff(shell.handoff())
                 .build();
 
         // Between build() and start(), like the Bukkit side and for the same reason: the first
@@ -121,20 +151,24 @@ final class VelocityBootstrap {
         // next config push.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
-                .pluginVersion(BuildConstants.VERSION);
+                .pluginVersion(BuildConstants.VERSION)
+                .core(shell.core().toString(), shell.shellVersion());
         HeimdallModules.registerAll(runtime, admin);
 
         UpdateWiring.Installed update = UpdateWiring.install(
                 logger,
                 BuildConstants.VERSION,
                 runtime,
-                new VelocityUpdateInstaller(logger, proxy, plugin, dataDirectory));
+                new VelocityUpdateInstaller(logger, proxy, plugin, dataDirectory),
+                new ShellHotSwap(shell));
         updates = update.periodicChecks();
         admin.updates(update.admin());
 
         registerListeners();
         registerCommands(admin.build());
-        spi = TunnelSpiService.install(logger, runtime);
+        // The HeimdallTunnel other plugins hold is the shell's, published once and never replaced;
+        // this hands it this generation's tunnel to forward to (departure D87).
+        spi = TunnelSpiService.install(logger, runtime, shell);
 
         boolean tapped = platform.attachConsoleTap();
         runtime.start();
@@ -172,13 +206,32 @@ final class VelocityBootstrap {
         });
         adminCommands = Registration.NONE;
 
-        guarded("uninstalling the tunnel SPI", new Runnable() {
+        guarded("unbinding the tunnel SPI", new Runnable() {
             @Override
             public void run() {
-                TunnelSpiService.uninstall(spi);
+                spi.close();
             }
         });
-        spi = null;
+        spi = Registration.NONE;
+
+        guarded("unregistering listeners and timers", new Runnable() {
+            @Override
+            public void run() {
+                // Before the runtime stops, so no event reaches a runtime that is going away. Never
+                // unregisterListeners(plugin): the plugin is the shell's, and that would take the
+                // shell's own login gate with it.
+                registrations.closeAll(logger);
+            }
+        });
+
+        guarded("handing state to the next core", new Runnable() {
+            @Override
+            public void run() {
+                if (runtime != null && shell.isSwapping()) {
+                    shell.handOff(runtime.exportHandoff());
+                }
+            }
+        });
 
         guarded("stopping the runtime", new Runnable() {
             @Override
@@ -208,7 +261,11 @@ final class VelocityBootstrap {
         });
         platform = null;
 
-        logger.info("Heimdall v" + BuildConstants.VERSION + " shutting down");
+        if (shell.isSwapping()) {
+            logger.info("Heimdall core v" + BuildConstants.VERSION + " stopped for a swap");
+        } else {
+            logger.info("Heimdall v" + BuildConstants.VERSION + " shutting down");
+        }
     }
 
     /**
@@ -231,21 +288,28 @@ final class VelocityBootstrap {
     }
 
     private void registerListeners() {
-        proxy.getEventManager().register(
-                plugin,
-                new VelocityLoginListener(
-                        logger, runtime.loginPipeline(), platform.integrations().floodgate(), text));
+        EventManager events = proxy.getEventManager();
+        // The login decision, bound to the shell's permanent LoginEvent handler rather than
+        // registered as a handler of its own: a swap must never leave a window with no login handler
+        // at all, in which everybody would be admitted (departure D87).
+        registrations.keep(shell.bindLoginGate(new VelocityLoginListener(
+                logger, runtime.loginPipeline(), platform.integrations().floodgate(), text)));
         // Join and quit, as core's session notifications. PostLoginEvent rather than LoginEvent and
-        // DisconnectEvent rather than ServerDisconnectEvent — see VelocitySessionListener for why
+        // DisconnectEvent rather than ServerDisconnectEvent: see VelocitySessionListener for why
         // each of the obvious alternatives is wrong.
-        proxy.getEventManager().register(
-                plugin, new VelocitySessionListener(logger, runtime.playerSessions(), text));
+        final VelocitySessionListener sessions =
+                new VelocitySessionListener(logger, runtime.playerSessions(), text);
+        registrations.track(VelocityEvents.listen(
+                events, plugin, PostLoginEvent.class, PostOrder.NORMAL, sessions::onPostLogin));
+        registrations.track(VelocityEvents.listen(
+                events, plugin, DisconnectEvent.class, PostOrder.NORMAL, sessions::onDisconnect));
         // Chat, OBSERVED. A proxy still cannot cancel signed chat, so interception remains the
         // backends' — this listener reads and touches nothing, which is what makes a proxy-origin
         // Discord relay possible. It is inert unless the bridge module's relayChat setting is on,
         // and that defaults to false on a gatekeeper. See VelocityChatListener, departure D81.
-        proxy.getEventManager().register(
-                plugin, new VelocityChatListener(logger, runtime.chatPipeline()));
+        final VelocityChatListener chat = new VelocityChatListener(logger, runtime.chatPipeline());
+        registrations.track(VelocityEvents.listen(
+                events, plugin, PlayerChatEvent.class, PostOrder.LAST, chat::onChat));
     }
 
     /**

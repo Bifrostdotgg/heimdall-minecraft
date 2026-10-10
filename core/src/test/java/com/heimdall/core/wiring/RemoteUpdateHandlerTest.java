@@ -8,6 +8,7 @@ import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.RecordingLogger;
+import com.heimdall.core.update.HotSwap;
 import com.heimdall.core.update.InstallOutcome;
 import com.heimdall.core.update.ReleaseSource;
 import com.heimdall.core.update.UpdateDownloader;
@@ -50,12 +51,18 @@ class RemoteUpdateHandlerTest {
 
     /** A release source that answers immediately with the given version. */
     private static ReleaseSource sourceFor(final String version) {
+        return sourceFor(version, null);
+    }
+
+    /** As {@link #sourceFor(String)}, with a published SHA-256. */
+    private static ReleaseSource sourceFor(final String version, final String sha256) {
         return new ReleaseSource() {
             @Override
             public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
                 return CompletableFuture.completedFuture(PluginRelease.builder()
                         .version(version)
                         .downloadUrl("https://github.com/x/y/releases/download/" + version + "/p.jar")
+                        .sha256(sha256)
                         .build());
             }
 
@@ -100,6 +107,87 @@ class RemoteUpdateHandlerTest {
         Payload reply = replier.replies.get(0);
         assertFalse(reply.bool("success", true), "it could not install, so success is false");
         assertFalse(reply.string("message", "").isEmpty(), "and it says why");
+    }
+
+    /**
+     * Drives one dashboard update against a shell that answers the swap request with
+     * {@code accept}, and returns the single reply.
+     */
+    private Payload updateWithShell(final boolean accept, final List<Integer> repliesAtRequest) {
+        final RecordingReplier replier = new RecordingReplier();
+        HotSwap shell = new HotSwap() {
+            @Override
+            public Staged stage(java.nio.file.Path releaseJar, String expectedSha256) {
+                return new Staged() {
+                    @Override
+                    public boolean swappable() {
+                        return true;
+                    }
+
+                    @Override
+                    public String problem() {
+                        return "";
+                    }
+
+                    @Override
+                    public String version() {
+                        return "3.4.0";
+                    }
+
+                    @Override
+                    public boolean swap(Object audience) {
+                        repliesAtRequest.add(replier.replies.size());
+                        return accept;
+                    }
+                };
+            }
+        };
+        UpdateInstaller installer = new UpdateInstaller() {
+            @Override
+            public InstallOutcome install(PluginRelease release, UpdateDownloader downloader) {
+                return InstallOutcome.installed(java.nio.file.Paths.get("plugins", "update", "h.jar"),
+                        "installed 3.4.0 for the next restart");
+            }
+        };
+        scheduler = Executors.newSingleThreadScheduledExecutor();
+        UpdateService service = new UpdateService(logger, "3.0.0",
+                sourceFor("3.4.0", "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+                installer,
+                new UpdateDownloader(logger, com.heimdall.core.update.DownloadPolicy.github()),
+                scheduler, shell);
+
+        new UpdateWiring.RemoteUpdateHandler(logger, service, replier).onMessage(updateFrame());
+
+        assertEquals(1, replier.replies.size(), "exactly one answer");
+        return replier.replies.get(0);
+    }
+
+    @Test
+    @DisplayName("a live swap is requested before the reply, which says it was accepted (D87)")
+    void acceptedSwapIsReported() {
+        List<Integer> repliesAtRequest = new ArrayList<Integer>();
+
+        Payload reply = updateWithShell(true, repliesAtRequest);
+
+        // Requested first so the reply can be truthful; the shell holds the swap back long enough
+        // for the reply to go out on the tunnel it closes (ShellContract.SWAP_SETTLE_MS).
+        assertEquals(java.util.Collections.singletonList(0), repliesAtRequest,
+                "the swap is requested once, before the reply");
+        assertTrue(reply.bool("success", false));
+        assertTrue(reply.string("message", "").contains("Swapping it in now"), reply.toString());
+    }
+
+    @Test
+    @DisplayName("a swap the shell will not start is reported as restart-only, and logged")
+    void refusedSwapIsReported() {
+        Payload reply = updateWithShell(false, new ArrayList<Integer>());
+
+        String message = reply.string("message", "");
+        assertTrue(reply.bool("success", false), "the install for the next restart still worked");
+        assertFalse(message.contains("Swapping it in now"), message);
+        assertTrue(message.contains("could not start"), message);
+        assertTrue(logger.logged(com.heimdall.core.log.LogLevel.WARN, "live swap could not start"),
+                logger.records().toString());
     }
 
     @Test

@@ -65,6 +65,7 @@ public final class UpdateService {
     private final UpdateInstaller installer;
     private final UpdateDownloader downloader;
     private final ScheduledExecutorService scheduler;
+    private final HotSwap hotSwap;
 
     private volatile Published published = Published.NOTHING;
     private volatile Registration periodic = Registration.NONE;
@@ -77,6 +78,21 @@ public final class UpdateService {
             UpdateInstaller installer,
             UpdateDownloader downloader,
             ScheduledExecutorService scheduler) {
+        this(logger, currentVersion, releases, installer, downloader, scheduler, HotSwap.NONE);
+    }
+
+    /**
+     * With a hot-swap shell behind it: an installed release whose download was verified, and whose
+     * core is built for this shell, is also swapped in live (see {@link #updateNow()}).
+     */
+    public UpdateService(
+            HeimdallLogger logger,
+            String currentVersion,
+            ReleaseSource releases,
+            UpdateInstaller installer,
+            UpdateDownloader downloader,
+            ScheduledExecutorService scheduler,
+            HotSwap hotSwap) {
         if (logger == null || releases == null || scheduler == null) {
             throw new IllegalArgumentException("logger, release source and scheduler are required");
         }
@@ -86,6 +102,15 @@ public final class UpdateService {
         this.installer = installer;
         this.downloader = downloader;
         this.scheduler = scheduler;
+        this.hotSwap = hotSwap == null ? HotSwap.NONE : hotSwap;
+    }
+
+    /**
+     * The downloader {@link #updateNow()} installs with, or {@code null} with no installer. Exposed
+     * so a test can check which release repository it is pinned to (departure D87).
+     */
+    public UpdateDownloader downloader() {
+        return downloader;
     }
 
     // ── Reads ────────────────────────────────────────────────────────────────
@@ -175,6 +200,25 @@ public final class UpdateService {
      * <p><strong>Blocking</strong> — the check plus a multi-megabyte download. Never throws; a
      * failure comes back as {@link InstallOutcome#failed(String)}, because every caller is a command
      * handler or a tunnel reply that has to print something either way.
+     *
+     * <h2>Live, or on restart</h2>
+     *
+     * <p>The release is always installed for the next restart, exactly as before hot-swap: the
+     * running jar is what a restart loads, and a core swapped in live is a property of this process
+     * only. On top of that, it is swapped in live (departure D87) when all of these hold:
+     *
+     * <ul>
+     *   <li>the release came with a SHA-256 and the download matched it. A live swap runs the
+     *       downloaded code at once, so a jar nothing can vouch for is installed for a restart and
+     *       never swapped in; a jar that does not match is not installed at all;
+     *   <li>the jar's embedded core matches the hash the build recorded next to it;
+     *   <li>that core was built for this shell's contract. A release that changed the shell can only
+     *       go in with a restart, and says so.
+     * </ul>
+     *
+     * <p>The swap is returned as {@linkplain InstallOutcome#pendingSwap() pending}, never started
+     * here: the caller requests it with {@link InstallOutcome#startSwap(Object)}, which says
+     * whether it was accepted, and reports that.
      */
     public InstallOutcome updateNow() {
         // Always by hand (a command or a dashboard request), so past the bot's cache: installing
@@ -193,11 +237,39 @@ public final class UpdateService {
             if (outcome == null) {
                 return InstallOutcome.failed("The installer reported nothing for " + version + ".");
             }
-            return outcome;
+            return offerLiveSwap(current.release, version, outcome);
         } catch (Exception failed) {
             logger.warn("could not install " + version + ": " + rootMessage(failed));
             return InstallOutcome.failed("Update failed: " + rootMessage(failed));
         }
+    }
+
+    /** Turns a restart install into a live swap too, when {@link #updateNow()}'s rules allow. */
+    private InstallOutcome offerLiveSwap(
+            PluginRelease release, String version, InstallOutcome outcome) {
+        if (!outcome.installed() || outcome.target() == null || hotSwap == HotSwap.NONE) {
+            return outcome;
+        }
+        if (release.sha256() == null) {
+            logger.warn("Heimdall " + version + " was published without a SHA-256, so it was "
+                    + "installed for the next restart and not swapped in live");
+            return outcome.withMessage(outcome.message() + " No checksum was published for this "
+                    + "release, so it cannot be verified and will not be swapped in live.");
+        }
+        HotSwap.Staged staged;
+        try {
+            staged = hotSwap.stage(outcome.target(), release.sha256());
+        } catch (RuntimeException broken) {
+            staged = HotSwap.Staged.refused("staging failed: " + rootMessage(broken));
+        }
+        if (!staged.swappable()) {
+            logger.info("Heimdall " + version + " is installed for the next restart; it cannot be "
+                    + "swapped in live: " + staged.problem());
+            return outcome.withMessage(outcome.message() + " It cannot be swapped in live: "
+                    + staged.problem() + ".");
+        }
+        return outcome.withPendingSwap(staged, "Downloaded and verified Heimdall " + version
+                + ", and installed it for the next restart.");
     }
 
     // ── Scheduling ───────────────────────────────────────────────────────────
@@ -335,7 +407,7 @@ public final class UpdateService {
         logger.warn("================================================");
         logger.warn("  A new Heimdall version is available!");
         logger.warn("  Installed: " + currentVersion + "   Latest: " + Versions.normalize(release.version()));
-        logger.warn("  Run '/hd update' to download it (applied on restart).");
+        logger.warn("  Run '/hd update' to install it (live when it can be, otherwise on restart).");
         if (Strings.isNotBlank(release.htmlUrl())) {
             logger.warn("  Release notes: " + release.htmlUrl());
         }

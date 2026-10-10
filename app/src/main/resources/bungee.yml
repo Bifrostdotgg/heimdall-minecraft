@@ -4,7 +4,7 @@
 # PluginManager.detectPlugins looks for `bungee.yml` and falls back to
 # `plugin.yml` only if it is absent — so without this file a proxy would read
 # the Bukkit descriptor next to it, try to load
-# com.heimdall.platform.bukkit.HeimdallBukkitPlugin, and fail on a
+# com.heimdall.shell.bukkit.HeimdallBukkitPlugin, and fail on a
 # NoClassDefFoundError for org.bukkit.plugin.java.JavaPlugin. With it, the proxy
 # never sees the Bukkit descriptor and a Bukkit server never looks for this one.
 #
@@ -14,7 +14,7 @@
 # the same directory name the Bukkit family uses, and deliberately NOT Velocity's
 # lower-case plugins/heimdall/, which comes from that platform's plugin *id*.
 name: Heimdall
-main: com.heimdall.platform.bungee.HeimdallBungeePlugin
+main: com.heimdall.shell.bungee.HeimdallBungeePlugin
 version: @version@
 author: Bifrost
 description: Discord-to-Minecraft whitelist, role sync, punishments and console relay

@@ -32,8 +32,15 @@
 #               bootstrap.yml from it, connect on the legacy guild key, keep the original as
 #               *.v2-backup, and hand the translated settings to the dashboard. Run on BOTH
 #               platforms, because this is the one mode whose inputs are not shared between them.
+#   swap        configured, plus a second build of the core staged at <data>/core/staged.jar. The
+#               stub sends `/hd swap` (`/hdp swap`) as run_command on the first config ack; the
+#               row asserts the swap in the plugin's log, the tunnel reconnecting from the new core
+#               in the stub's, and a second command answered by the new core. One per platform,
+#               driven over the tunnel, so no console is needed. Departure D87.
 #
 # Environment:
+#   SMOKE_SWAP_CORE       the second core for the swap rows (default: app/build/smoke/ or dist/
+#                         heimdall-core-swaptest.jar, which ./gradlew build produces)
 #   SMOKE_JAR             path to the shaded jar (default: newest app/build/libs/heimdall-whitelist-*.jar)
 #   SMOKE_STUB_DIST       stub-bot installDist directory (default: stub-bot/build/install/stub-bot)
 #   SMOKE_BOOT_TIMEOUT    seconds to wait for the enable banner (default 240)
@@ -191,6 +198,21 @@ STUB_IMPORT_PATTERN="config import for ${MIGRATE_SERVER_ID} \\(imported=true\\)"
 STUB_LEGACY_IDENTIFY_PATTERN="identify: guild=${STUB_GUILD} \\(legacy: no token id\\)"
 
 # The plugin's own banners, shared with run.sh. Kept in step by the self-test below.
+# The hot-swap rows (departure D87). The core is swapped live to a second build of itself, staged
+# at <data>/core/staged.jar before boot, by a `/hd swap` (`/hdp swap` on a proxy) the stub sends as
+# run_command on the first config ack: a proxy image has no console to type it into, and every
+# platform answers run_command. The swapped-in core reconnects, acks its config again, and the
+# stub sends the second command, `status`, which only a working core can answer with its identity.
+#
+# The patterns are written from the shell's own format strings (ShellHost, CoreIdentity) rather
+# than copied from a green run, because no swap row had run when they were written. The self-test
+# still pins each one against its nearest miss.
+SWAP_CORE_NAME='heimdall-core-swaptest.jar'
+SWAP_STARTED_PATTERN='swapping core .* for core [^ ]+\+swaptest \(sha256 [0-9a-f]{12}\)'
+SWAP_DONE_PATTERN='core [^ ]+\+swaptest \(sha256 [0-9a-f]{12}\) is running \(was '
+SWAP_STATUS_PATTERN='core: .*\+swaptest \(sha256 [0-9a-f]{12}\)'
+STUB_SWAP_COMMAND_PATTERN="on-ack run_command\\[2\\] '(hd|hdp) status' -> ${STUB_SERVER_ID}: output=dispatched: (hd|hdp) status"
+
 ENABLE_PATTERN='Heimdall v[0-9][^ ]* enabled'
 DISABLE_PATTERN='Heimdall v[0-9][^ ]* shutting down'
 READY_PATTERN='Done \([0-9.]+s\)'
@@ -231,6 +253,11 @@ ROWS=(
     "paper-setup|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|setup"
     "paper-migrate|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|migrate"
     "velocity-migrate|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G|migrate"
+    # Hot swap, one per platform (D87). Proxies are where it matters most, being what operators
+    # restart least, and the swap is driven through run_command, so no console is needed anywhere.
+    "paper-swap|itzg/minecraft-server:2026.7.2-java21|PAPER|1.21.8|bukkit|2G|swap"
+    "velocity-swap|itzg/mc-proxy:2026.7.1-java21|VELOCITY|3.5.1|velocity|1G|swap"
+    "bungee-swap|itzg/mc-proxy:2026.7.1-java21|BUNGEECORD|2085|bungee|1G|swap"
 )
 
 CURRENT_CONTAINERS=""
@@ -450,6 +477,41 @@ selftest() {
         "[stub-bot 22:41:09.001] DEBUG POST /api/guilds/${STUB_GUILD}/minecraft/connection-attempt" \
         yes "probe: the stub saw the connection attempt" || failures=$((failures + 1))
 
+    # ── Hot swap (D87) ───────────────────────────────────────────────────────
+    check_match "${SWAP_STARTED_PATTERN}" \
+        "[18:02:11 INFO]: [Heimdall] swapping core 3.0.0-SNAPSHOT (sha256 12ec55bda7da) for core 3.0.0-SNAPSHOT+swaptest (sha256 71d507301cb3)" \
+        yes "swap: the shell started a swap to the staged build" || failures=$((failures + 1))
+    # The near-miss: a swap to some other core (a rollback reload, a hand-staged jar) would print the
+    # same shape, and must not satisfy a row that is asserting this particular build went in.
+    check_match "${SWAP_STARTED_PATTERN}" \
+        "[18:02:11 INFO]: [Heimdall] swapping core 3.0.0-SNAPSHOT (sha256 12ec55bda7da) for core 3.0.1 (sha256 71d507301cb3)" \
+        no "swap: the staged build vs any other core" || failures=$((failures + 1))
+    check_match "${SWAP_DONE_PATTERN}" \
+        "[18:02:14 INFO]: [Heimdall] core 3.0.0-SNAPSHOT+swaptest (sha256 71d507301cb3) is running (was 3.0.0-SNAPSHOT (sha256 12ec55bda7da))" \
+        yes "swap: the new core is running" || failures=$((failures + 1))
+    # A swap that failed and rolled back names the staged core too. It must not read as a success.
+    check_match "${SWAP_DONE_PATTERN}" \
+        "[18:02:14 WARN]: [Heimdall] rolled back: core 3.0.0-SNAPSHOT+swaptest (sha256 71d507301cb3) failed to start; still running core 3.0.0-SNAPSHOT (sha256 12ec55bda7da)" \
+        no "swap: running vs rolled back" || failures=$((failures + 1))
+    check_match "${SWAP_STATUS_PATTERN}" \
+        "[18:02:20 INFO]: core: 3.0.0-SNAPSHOT+swaptest (sha256 71d507301cb3)   shell: 3.0.0-SNAPSHOT" \
+        yes "swap: /hd status names the swapped-in core" || failures=$((failures + 1))
+    check_match "${SWAP_STATUS_PATTERN}" \
+        "[18:02:20 INFO]: core: 3.0.0-SNAPSHOT (sha256 12ec55bda7da)   shell: 3.0.0-SNAPSHOT" \
+        no "swap: the new core's status vs the old core's" || failures=$((failures + 1))
+    check_match "${STUB_SWAP_COMMAND_PATTERN}" \
+        "[stub-bot 18:02:20.101] on-ack run_command[2] 'hdp status' -> ${STUB_SERVER_ID}: output=dispatched: hdp status" \
+        yes "swap: a command reached the reconnected core" || failures=$((failures + 1))
+    # The verb not existing after the swap is the failure this row is for.
+    check_match "${STUB_SWAP_COMMAND_PATTERN}" \
+        "[stub-bot 18:02:20.101] on-ack run_command[2] 'hdp status' -> ${STUB_SERVER_ID}: output=no such command: hdp status" \
+        no "swap: an answered command vs an unknown one" || failures=$((failures + 1))
+    # And the FIRST command answered must not stand in for the second: that reply came from the
+    # core being swapped out, before anything was proven about the new one.
+    check_match "${STUB_SWAP_COMMAND_PATTERN}" \
+        "[stub-bot 18:02:10.101] on-ack run_command[1] 'hd status' -> ${STUB_SERVER_ID}: output=dispatched: hd status" \
+        no "swap: the second command vs the first" || failures=$((failures + 1))
+
     # ── Setup ────────────────────────────────────────────────────────────────
     check_match "${STUB_CLAIMED_PATTERN}" \
         "[stub-bot] claimed setup code ${SETUP_CODE} -> server ${SETUP_SERVER_ID}" \
@@ -533,7 +595,8 @@ selftest() {
             # velocity-migrate row exists to have corrected, made in the opposite direction.
             fail "row ${name} is mode 'migrate' on bungee, which v2 never shipped a build for (D78)"
             failures=$((failures + 1))
-        elif [ "${mode}" != "configured" ] && [ "${mode}" != "setup" ] && [ "${mode}" != "migrate" ]; then
+        elif [ "${mode}" != "configured" ] && [ "${mode}" != "setup" ] && [ "${mode}" != "migrate" ] \
+                && [ "${mode}" != "swap" ]; then
             # Same trap, one field along: an unknown mode would take the `configured` branch, write
             # a bootstrap.yml, and quietly prove the thing the row was not written for.
             fail "row ${name} has unknown mode '${mode}'"
@@ -572,6 +635,38 @@ find_jar() {
         return 1
     fi
     printf '%s' "${found}"
+}
+
+# The second core build the swap rows stage. Built by `./gradlew build` (:app:swapTestCore); CI
+# downloads it next to the release jar.
+find_swap_core() {
+    if [ -n "${SMOKE_SWAP_CORE:-}" ]; then
+        [ -f "${SMOKE_SWAP_CORE}" ] || { fail "SMOKE_SWAP_CORE=${SMOKE_SWAP_CORE} does not exist"; return 1; }
+        printf '%s' "${SMOKE_SWAP_CORE}"
+        return 0
+    fi
+    local candidate
+    for candidate in "${REPO_ROOT}/app/build/smoke/${SWAP_CORE_NAME}" "${REPO_ROOT}/dist/${SWAP_CORE_NAME}"; do
+        if [ -f "${candidate}" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    fail "no ${SWAP_CORE_NAME} found: run ./gradlew build, or set SMOKE_SWAP_CORE"
+    return 1
+}
+
+# Puts the second core where `/hd swap` looks for it: <data directory>/core/staged.jar. Before boot
+# is fine, because the shell only ever reads it when told to swap; at start it loads the core nested
+# in the plugin jar, and never prunes staged.jar.
+stage_swap_core() {
+    local data_dir="$1" core
+    core="$(find_swap_core)" || return 1
+    if ! mkdir -p "${data_dir}/core" || ! cp "${core}" "${data_dir}/core/staged.jar"; then
+        fail "HARNESS: could not stage ${core} into ${data_dir}/core"
+        return 1
+    fi
+    return 0
 }
 
 find_stub() {
@@ -872,7 +967,14 @@ row_body() {
     local -a stub_env=()
     if [ "${mode}" = "setup" ]; then
         stub_env=(-e "STUB_BOT_CLAIM_CODES=${SETUP_CODE}:Smoke:${SETUP_SERVER_ID}")
+    elif [ "${mode}" = "swap" ]; then
+        local admin="hd"
+        [ "${platform}" != "bukkit" ] && admin="hdp"
+        stub_env=(-e "STUB_BOT_COMMANDS_ON_ACK=${admin} swap|${admin} status")
     fi
+
+    pull_image eclipse-temurin:21-jre
+    pull_image "${image}"
 
     if ! docker run -d --name "${stub_container}" --network "${network}" \
             --network-alias stub-bot \
@@ -920,8 +1022,12 @@ row_body() {
         # Three modes, three starting states. `setup` writes nothing at all, which is what a
         # freshly dropped-in jar looks like and what makes the /hd setup assertions mean anything.
         case "${mode}" in
-            configured)
+            configured|swap)
                 if ! write_bootstrap "${work}/data-plugins/Heimdall/bootstrap.yml"; then
+                    kill "${stub_tail}" 2>/dev/null || true
+                    return 1
+                fi
+                if [ "${mode}" = "swap" ] && ! stage_swap_core "${work}/data-plugins/Heimdall"; then
                     kill "${stub_tail}" 2>/dev/null || true
                     return 1
                 fi
@@ -966,8 +1072,13 @@ row_body() {
         local proxy_data_dir="heimdall"
         [ "${platform}" = "bungee" ] && proxy_data_dir="Heimdall"
         case "${mode}" in
-            configured)
+            configured|swap)
                 if ! write_bootstrap "${work}/plugins/${proxy_data_dir}/bootstrap.yml"; then
+                    kill "${stub_tail}" 2>/dev/null || true
+                    return 1
+                fi
+                if [ "${mode}" = "swap" ] \
+                        && ! stage_swap_core "${work}/plugins/${proxy_data_dir}"; then
                     kill "${stub_tail}" 2>/dev/null || true
                     return 1
                 fi
@@ -1015,7 +1126,7 @@ row_body() {
     #
     # Only for the configured rows. The migration row's whole point is that v2's api.guildId becomes
     # the cache (departure D54), and the setup row has no bootstrap.yml to check.
-    if [ "${mode}" = "configured" ] && grep -q "guildIdCache" \
+    if { [ "${mode}" = "configured" ] || [ "${mode}" = "swap" ]; } && grep -q "guildIdCache" \
             "${work}"/*/Heimdall/bootstrap.yml "${work}"/*/heimdall/bootstrap.yml 2>/dev/null; then
         fail "HARNESS: the bootstrap.yml carries a cached guild, so the discovery assertion would"
         fail "pass without the identify endpoint ever being called"
@@ -1036,6 +1147,7 @@ row_body() {
         configured) assert_row || rc=$? ;;
         setup) assert_setup_row || rc=$? ;;
         migrate) assert_migrate_row || rc=$? ;;
+        swap) assert_swap_row || rc=$? ;;
     esac
 
     # Stop the server first, so its disable banner and the stub's disconnect line both land.
@@ -1176,6 +1288,92 @@ assert_row() {
         wait_for_pattern "${server_log}" "${READY_PATTERN}" "${BOOT_TIMEOUT}" "the server to finish starting" \
             || return 1
         assert_login_probe || return 1
+    fi
+    return 0
+}
+
+# Counts matches of a regex in a growing file until there are at least `want`. Returns 1 on timeout.
+wait_for_count() {
+    local file="$1" pattern="$2" want="$3" timeout="$4" label="$5"
+    local deadline=$(( $(date +%s) + timeout )) have=0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if [ -f "${file}" ]; then
+            have="$(grep -Ec "${pattern}" "${file}" || true)"
+            if [ "${have:-0}" -ge "${want}" ]; then
+                return 0
+            fi
+        fi
+        sleep 2
+    done
+    fail "timed out after ${timeout}s waiting for ${label} (saw ${have:-0} of ${want})"
+    return 1
+}
+
+# A live core swap, from both ends (departure D87).
+#
+# What it proves, in order: the first core comes up and connects as usual; the shell swaps it for
+# the staged second build (the plugin's own log says which core went in, by version and hash); the
+# NEW core reconnects the tunnel and identifies itself again (the stub's second v3 identify); and a
+# command still reaches a core afterwards and is answered by the new one (`status` naming the
+# swapped-in build). The disable banner and the error scan at shutdown run as for every row.
+#
+# What it does not prove: anything about a player mid-swap. The login gate's hold-then-refuse is
+# covered by the shell's unit tests against BungeeCord's real intent machinery and by the gate
+# holder's own tests; there is no headless client here to log in during the gap.
+# shellcheck disable=SC2317
+assert_swap_row() {
+    if ! wait_for_pattern "${server_log}" "${ENABLE_PATTERN}" "${BOOT_TIMEOUT}" \
+            "the plugin's enable banner"; then
+        return 1
+    fi
+    pass "plugin enabled"
+
+    if ! wait_for_pattern "${stub_log}" "${STUB_IDENTIFIED_PATTERN}" 120 \
+            "the first core to identify"; then
+        return 1
+    fi
+    if ! wait_for_pattern "${stub_log}" "${STUB_CONFIG_ACKED_PATTERN}" 60 \
+            "the first core to ack its config"; then
+        return 1
+    fi
+    pass "the first core connected and acked its config"
+
+    if ! wait_for_pattern "${server_log}" "${SWAP_STARTED_PATTERN}" 90 \
+            "the shell to start swapping to the staged core"; then
+        fail "the stub sent the swap command on the first ack; nothing in the plugin took it"
+        return 1
+    fi
+    if ! wait_for_pattern "${server_log}" "${SWAP_DONE_PATTERN}" 120 \
+            "the swapped-in core to start"; then
+        return 1
+    fi
+    pass "core swapped live to the staged build"
+
+    if ! wait_for_count "${stub_log}" "${STUB_IDENTIFIED_PATTERN}" 2 120 \
+            "the swapped-in core to reconnect the tunnel"; then
+        return 1
+    fi
+    pass "the tunnel reconnected from the new core"
+
+    if ! wait_for_pattern "${stub_log}" "${STUB_SWAP_COMMAND_PATTERN}" 90 \
+            "a command to reach the swapped-in core"; then
+        fail "the admin verb did not answer after the swap: a relay lost its binding, or the"
+        fail "new core never bound it"
+        return 1
+    fi
+    if ! wait_for_pattern "${server_log}" "${SWAP_STATUS_PATTERN}" 60 \
+            "status to name the swapped-in core"; then
+        return 1
+    fi
+    pass "commands still work after the swap, answered by the new core"
+
+    if ! assert_no_heimdall_errors "${server_log}" "the swap"; then
+        return 1
+    fi
+
+    if [ "${platform}" = "bukkit" ]; then
+        wait_for_pattern "${server_log}" "${READY_PATTERN}" "${BOOT_TIMEOUT}" \
+            "the server to finish starting" || return 1
     fi
     return 0
 }

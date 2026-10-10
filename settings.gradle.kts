@@ -3,6 +3,14 @@ rootProject.name = "heimdall-plugin"
 include(
     "core",
     "api",
+    // The hot-swap shell. :shell-api is the contract both halves compile against; the three
+    // platform shells and :shell-common are what the platform loads and never swaps. See
+    // docs/v2-departures.md D87 and app/build.gradle.kts for how the two halves are packaged.
+    "shell-api",
+    "shell-common",
+    "shell-bukkit",
+    "shell-velocity",
+    "shell-bungee",
     "platform-common",
     "platform-bukkit",
     "platform-bukkit-paper",

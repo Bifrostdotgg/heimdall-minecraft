@@ -140,6 +140,35 @@ class BootstrapStoreTest {
     }
 
     @Test
+    @DisplayName("a fork's release repository round-trips, and the official one is never written")
+    void releaseRepoIsWrittenOnlyWhenChanged(@TempDir Path dir) throws IOException {
+        BootstrapStore store = storeIn(dir);
+        BootstrapConfig official = BootstrapConfig.builder().serverId("survival").build();
+        store.save(official);
+
+        assertFalse(read(dir).contains("updatesReleaseRepo"),
+                "the default must not be written out as an invitation to edit it:\n" + read(dir));
+        assertEquals(BootstrapConfig.OFFICIAL_RELEASE_REPO, store.load().updatesReleaseRepo());
+        assertTrue(store.load().usesOfficialReleaseRepo());
+
+        BootstrapConfig fork = official.toBuilder().updatesReleaseRepo("Someone/heimdall-fork").build();
+        store.save(fork);
+
+        BootstrapConfig loaded = storeIn(dir).load();
+        assertEquals("Someone/heimdall-fork", loaded.updatesReleaseRepo());
+        assertFalse(loaded.usesOfficialReleaseRepo());
+        assertEquals(fork, loaded);
+    }
+
+    @Test
+    @DisplayName("a blank release repository means the official one")
+    void blankReleaseRepoIsOfficial(@TempDir Path dir) throws IOException {
+        write(dir, "serverId: survival\nupdatesReleaseRepo: \"  \"\n");
+
+        assertEquals(BootstrapConfig.OFFICIAL_RELEASE_REPO, storeIn(dir).load().updatesReleaseRepo());
+    }
+
+    @Test
     @DisplayName("a key this version does not know survives a load/save cycle")
     void unknownKeysArePreserved(@TempDir Path dir) throws IOException {
         write(dir, "endpoint: https://bot.example\n"

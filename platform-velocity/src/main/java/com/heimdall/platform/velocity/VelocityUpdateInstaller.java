@@ -2,6 +2,7 @@ package com.heimdall.platform.velocity;
 
 import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.log.HeimdallLogger;
+import com.heimdall.core.update.DownloadRefusedException;
 import com.heimdall.core.update.InstallOutcome;
 import com.heimdall.core.update.UpdateDownloader;
 import com.heimdall.core.update.UpdateInstaller;
@@ -55,12 +56,17 @@ final class VelocityUpdateInstaller implements UpdateInstaller {
         File ownJar = resolveOwnJar();
         if (ownJar != null) {
             try {
-                long bytes = downloader.download(release.downloadUrl(), ownJar);
+                long bytes = downloader.download(release.downloadUrl(), ownJar, release.sha256());
                 logger.info("replaced " + ownJar + " with " + bytes
                         + " bytes; the proxy will load it on its next start");
                 return InstallOutcome.installed(ownJar.toPath(),
                         "Installed " + release.version() + " over the running jar — restart the "
                                 + "proxy to apply it.");
+            } catch (DownloadRefusedException refused) {
+                // A host, repository or checksum refusal is not a locked jar. Fetching the same
+                // refused bytes again into the data directory would only fail a second time, or
+                // worse, look like an install (departure D87).
+                throw refused;
             } catch (IOException lockedOrUnwritable) {
                 // The Windows case, and any read-only plugins directory. Not fatal, and worth a
                 // warning rather than silence: the fallback below leaves the operator with a manual
@@ -71,7 +77,7 @@ final class VelocityUpdateInstaller implements UpdateInstaller {
         }
 
         File fallback = dataDirectory.resolve("heimdall-" + release.version() + ".jar").toFile();
-        downloader.download(release.downloadUrl(), fallback);
+        downloader.download(release.downloadUrl(), fallback, release.sha256());
         return InstallOutcome.installed(fallback.toPath(),
                 "Downloaded " + release.version() + " to " + fallback.getAbsolutePath()
                         + " — the running jar could not be replaced automatically, so move it into "

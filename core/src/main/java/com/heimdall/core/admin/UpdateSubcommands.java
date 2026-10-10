@@ -65,8 +65,8 @@ final class UpdateSubcommands {
                 public void run() {
                     if (updates.checkNow()) {
                         source.sendMessage(Msg.legacy("§aVersion §f" + updates.latestVersion()
-                                + "§a is available. Run §f/hd update§a to download it; it applies "
-                                + "on the next restart."));
+                                + "§a is available. Run §f/hd update§a to install it: live when it "
+                                + "can be, otherwise on the next restart."));
                     } else {
                         source.sendMessage(Msg.legacy("§aNothing newer is published, or the bot "
                                 + "could not be asked. §7/hd status§a says which."));
@@ -76,7 +76,45 @@ final class UpdateSubcommands {
         }
     }
 
-    /** {@code /hd update} — download the newest release and stage it for the next restart. */
+    /**
+     * {@code swap}: applies a core an operator staged by hand. Listed here so help and completion
+     * show it, but the shell answers it before any core sees it, because it has to work with no
+     * core running at all (departure D87). Reaching this means no shell took the command.
+     */
+    static final class Swap implements AdminSubcommand {
+
+        @Override
+        public String name() {
+            return "swap";
+        }
+
+        @Override
+        public String usage() {
+            return "";
+        }
+
+        @Override
+        public String description() {
+            return "swap in the core staged at core/staged.jar, live";
+        }
+
+        @Override
+        public void run(CommandSource source, List<String> args, AdminContext context) {
+            // The same gate the shell applies, as a belt: the admin tree is already behind
+            // heimdall.admin, and this costs one call.
+            if (!source.hasPermission(AdminCommand.PERMISSION)) {
+                source.sendMessage(Msg.legacy("§cYou do not have permission to use that."));
+                return;
+            }
+            source.sendMessage(Msg.legacy("§eSwapping is done by Heimdall's shell, and this "
+                    + "server's shell did not answer. Install the current release and restart."));
+        }
+    }
+
+    /**
+     * {@code /hd update}: download the newest release, install it for the next restart, and swap
+     * its core in live when it is verified and fits this shell (departure D87).
+     */
     static final class Update implements AdminSubcommand {
 
         @Override
@@ -91,7 +129,7 @@ final class UpdateSubcommands {
 
         @Override
         public String description() {
-            return "download the newest release, applied on the next restart";
+            return "install the newest release, live when it can be, otherwise on restart";
         }
 
         @Override
@@ -113,7 +151,12 @@ final class UpdateSubcommands {
             context.async(new Runnable() {
                 @Override
                 public void run() {
-                    source.sendMessage(Msg.legacy("§a" + updates.updateNow()));
+                    // A live swap, if there is one, is requested inside updateNow and the message
+                    // says whether it was accepted. The shell holds a requested swap back long
+                    // enough for this reply to go out first, then reports the outcome to the same
+                    // sender (departure D87).
+                    String said = updates.updateNow(source.nativeSender());
+                    source.sendMessage(Msg.legacy("§a" + said));
                 }
             });
         }

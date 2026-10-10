@@ -112,6 +112,23 @@ abstract class VerifyShadowJar : DefaultTask() {
     @get:Input
     abstract val expectedBungeeMain: Property<String>
 
+    /**
+     * Whether this jar is the one the platforms load, and so carries the three descriptors.
+     *
+     * <p>True for the release jar. False for the hot-swap core (departure D87), which no platform
+     * ever reads a descriptor from: it is loaded by the shell, through a services entry, and every
+     * other check here applies to it unchanged.
+     */
+    @get:Input
+    abstract val checkDescriptors: Property<Boolean>
+
+    init {
+        checkDescriptors.convention(true)
+        expectedVersion.convention("")
+        expectedVelocityPluginId.convention("")
+        expectedBungeeMain.convention("")
+    }
+
     @TaskAction
     fun verify() {
         val jar = jarFile.get().asFile
@@ -134,9 +151,11 @@ abstract class VerifyShadowJar : DefaultTask() {
             checkShadedLibrariesAreSelfContained(zip, classes, problems)
             checkBytecodeLevels(zip, classes, problems)
             checkExemptModuleStillDiffers(zip, problems)
-            checkPluginYml(zip, problems)
-            checkVelocityPluginJson(zip, problems)
-            checkBungeeYml(zip, problems)
+            if (checkDescriptors.get()) {
+                checkPluginYml(zip, problems)
+                checkVelocityPluginJson(zip, problems)
+                checkBungeeYml(zip, problems)
+            }
 
             logger.lifecycle(
                 "verifyShadowJar: ${entries.size} entries, ${classes.size} classes in ${jar.name}",

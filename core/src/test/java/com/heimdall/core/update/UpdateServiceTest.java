@@ -215,6 +215,137 @@ class UpdateServiceTest {
     }
 
     @Nested
+    @DisplayName("updateNow with a hot-swap shell (D87)")
+    class LiveSwap {
+
+        private final FakeHotSwap hotSwap = new FakeHotSwap();
+
+        private UpdateService serviceWithShell(PluginRelease release) {
+            return new UpdateService(logger, CURRENT, new FakeSource(release), installer,
+                    new UpdateDownloader(logger, DownloadPolicy.github()), scheduler, hotSwap);
+        }
+
+        private PluginRelease hashed(String version, String sha) {
+            return PluginRelease.builder()
+                    .version(version)
+                    .downloadUrl("https://github.com/Bifrostdotgg/heimdall-minecraft/releases/x.jar")
+                    .sha256(sha)
+                    .build();
+        }
+
+        @Test
+        @DisplayName("a verified release that fits this shell is installed AND offered as a live swap")
+        void verifiedReleaseIsSwappable() {
+            UpdateService service = serviceWithShell(hashed("3.1.0", "abababababababababababababababababababababababababababababababab"));
+
+            InstallOutcome outcome = service.updateNow();
+
+            assertEquals(1, installer.calls.get(), "always installed for the next restart too");
+            assertTrue(outcome.installed());
+            assertEquals(installer.outcome.target(), hotSwap.stagedFrom.get(0),
+                    "the shell must stage the very jar the installer verified");
+            assertEquals(Arrays.asList("abababababababababababababababababababababababababababababababab"), hotSwap.expectedShas,
+                    "the shell re-checks the jar against the hash it was downloaded against");
+            assertFalse(outcome.message().toLowerCase().contains("swapping"),
+                    "nothing is swapping until a swap is requested: " + outcome.message());
+            assertTrue(hotSwap.swaps.isEmpty(), "never requested by the service itself");
+
+            InstallOutcome reported = outcome.startSwap("admin");
+            assertEquals(Arrays.asList("admin"), hotSwap.swaps);
+            assertTrue(reported.message().contains("Swapping it in now"), reported.message());
+            assertFalse(reported.swapRefused());
+            assertNull(reported.pendingSwap(), "a swap is requested once");
+            assertSame(reported, reported.startSwap("again"));
+            assertEquals(Arrays.asList("admin"), hotSwap.swaps);
+        }
+
+        @Test
+        @DisplayName("a swap the shell refuses to start is reported as restart-only, never as swapping")
+        void refusedSwapIsReportedTruthfully() {
+            hotSwap.accept = false;
+            UpdateService service = serviceWithShell(hashed("3.1.0", "abababababababababababababababababababababababababababababababab"));
+
+            InstallOutcome reported = service.updateNow().startSwap("admin");
+
+            assertEquals(Arrays.asList("admin"), hotSwap.swaps, "it was asked");
+            assertTrue(reported.swapRefused());
+            assertTrue(reported.installed(), "the restart install still stands");
+            assertFalse(reported.message().contains("Swapping it in now"), reported.message());
+            assertTrue(reported.message().contains("could not start"), reported.message());
+            assertTrue(reported.message().contains("next restart"), reported.message());
+        }
+
+        @Test
+        @DisplayName("a shell that throws on the swap request is a refusal, not an escape")
+        void throwingSwapIsARefusal() {
+            hotSwap.explode = true;
+            UpdateService service = serviceWithShell(hashed("3.1.0", "abababababababababababababababababababababababababababababababab"));
+
+            InstallOutcome reported = service.updateNow().startSwap(null);
+
+            assertTrue(reported.swapRefused());
+        }
+
+        @Test
+        @DisplayName("a release with no published hash is installed for restart only, never swapped live")
+        void unverifiedReleaseIsNeverSwapped() {
+            UpdateService service = serviceWithShell(hashed("3.1.0", null));
+
+            InstallOutcome outcome = service.updateNow();
+
+            assertTrue(outcome.installed());
+            assertNull(outcome.pendingSwap());
+            assertTrue(hotSwap.stagedFrom.isEmpty(), "nothing unverified may even be staged");
+            assertTrue(outcome.message().contains("No checksum was published"), outcome.message());
+            assertSame(outcome, outcome.startSwap("admin"), "with nothing pending, nothing changes");
+            assertFalse(outcome.swapRefused());
+            assertTrue(hotSwap.swaps.isEmpty());
+        }
+
+        @Test
+        @DisplayName("a release whose core needs another shell contract is installed for restart, and says why")
+        void contractChangeNeedsARestart() {
+            hotSwap.refusal = HotSwap.Staged.refused(
+                    "core 3.1.0 was built for shell contract 2 and this shell implements 1, so it "
+                            + "needs a restart");
+            UpdateService service = serviceWithShell(hashed("3.1.0", "abababababababababababababababababababababababababababababababab"));
+
+            InstallOutcome outcome = service.updateNow();
+
+            assertTrue(outcome.installed());
+            assertNull(outcome.pendingSwap());
+            assertTrue(outcome.message().contains("needs a restart"), outcome.message());
+            assertTrue(outcome.message().startsWith(installer.outcome.message()),
+                    "the restart instructions must still be there: " + outcome.message());
+        }
+
+        @Test
+        @DisplayName("a failed install is never staged")
+        void failedInstallIsNotStaged() {
+            installer.failWith(new IOException("The download does not match the release's "
+                    + "published SHA-256"));
+            UpdateService service = serviceWithShell(hashed("3.1.0", "abababababababababababababababababababababababababababababababab"));
+
+            InstallOutcome outcome = service.updateNow();
+
+            assertFalse(outcome.installed());
+            assertTrue(outcome.message().contains("does not match"), outcome.message());
+            assertTrue(hotSwap.stagedFrom.isEmpty());
+        }
+
+        @Test
+        @DisplayName("without a shell the installer's outcome is returned untouched")
+        void noShellNoSwap() {
+            UpdateService service = serviceFor(new FakeSource(hashed("3.1.0", "abababababababababababababababababababababababababababababababab")));
+
+            InstallOutcome outcome = service.updateNow();
+
+            assertSame(installer.outcome, outcome);
+            assertNull(outcome.pendingSwap());
+        }
+    }
+
+    @Nested
     @DisplayName("joinNotice")
     class JoinNotice {
 
@@ -505,6 +636,54 @@ class UpdateServiceTest {
         @Override
         public long joinTimeoutMs() {
             return 1000L;
+        }
+    }
+
+    /**
+     * A hot-swap shell that records what it was asked to stage and swap. It answers "swappable"
+     * unless a test sets {@link #refusal}.
+     */
+    private static final class FakeHotSwap implements HotSwap {
+
+        final List<java.nio.file.Path> stagedFrom = new ArrayList<java.nio.file.Path>();
+        final List<String> expectedShas = new ArrayList<String>();
+        final List<Object> swaps = new ArrayList<Object>();
+        Staged refusal;
+        boolean accept = true;
+        boolean explode;
+
+        @Override
+        public Staged stage(java.nio.file.Path releaseJar, String expectedSha256) {
+            stagedFrom.add(releaseJar);
+            expectedShas.add(expectedSha256);
+            if (refusal != null) {
+                return refusal;
+            }
+            return new Staged() {
+                @Override
+                public boolean swappable() {
+                    return true;
+                }
+
+                @Override
+                public String problem() {
+                    return "";
+                }
+
+                @Override
+                public String version() {
+                    return "3.1.0";
+                }
+
+                @Override
+                public boolean swap(Object audience) {
+                    swaps.add(audience);
+                    if (explode) {
+                        throw new IllegalStateException("shell gone");
+                    }
+                    return accept;
+                }
+            };
         }
     }
 

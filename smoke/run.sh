@@ -566,6 +566,7 @@ row_body() {
         fi
     fi
 
+    pull_image "${image}"
     if ! docker "${docker_args[@]}" "${image}" >/dev/null; then
         fail "HARNESS: docker run failed for ${name}"
         return 1

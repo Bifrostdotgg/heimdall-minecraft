@@ -4,6 +4,7 @@ import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.platform.SchedulerBridge;
 import com.heimdall.core.util.Registration;
+import com.heimdall.platform.common.CoreRegistrations;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.scheduler.ScheduledTask;
 import java.util.concurrent.Executor;
@@ -24,17 +25,25 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>{@link #runLater} is the one method that genuinely needs the proxy's scheduler, because the
  * task has to be cancellable when the plugin unloads and Velocity cancels a plugin's tasks for it.
+ * A hot swap unloads no plugin (departure D87), so each delayed task is also tracked against this
+ * core generation until it runs, and the generation's teardown cancels whatever is still pending.
  */
 final class VelocityScheduler implements Executor, SchedulerBridge {
 
     private final Object plugin;
     private final ProxyServer proxy;
     private final HeimdallLogger logger;
+    private final CoreRegistrations registrations;
 
-    VelocityScheduler(Object plugin, ProxyServer proxy, HeimdallLogger logger) {
+    VelocityScheduler(
+            Object plugin,
+            ProxyServer proxy,
+            HeimdallLogger logger,
+            CoreRegistrations registrations) {
         this.plugin = plugin;
         this.proxy = proxy;
         this.logger = logger;
+        this.registrations = registrations;
     }
 
     @Override
@@ -57,19 +66,22 @@ final class VelocityScheduler implements Executor, SchedulerBridge {
     }
 
     @Override
-    public Registration runLater(Runnable task, long delayMs) {
+    public Registration runLater(Runnable task, final long delayMs) {
         if (task == null) {
             return Registration.NONE;
         }
-        try {
-            ScheduledTask handle = proxy.getScheduler()
-                    .buildTask(plugin, task)
-                    .delay(Math.max(0L, delayMs), TimeUnit.MILLISECONDS)
-                    .schedule();
-            return Registration.once(handle::cancel);
-        } catch (RuntimeException rejected) {
-            logger.debug(() -> "not scheduling delayed work; the proxy is shutting down: " + rejected);
-            return Registration.NONE;
-        }
+        return registrations.oneShot(wrapped -> {
+            try {
+                ScheduledTask handle = proxy.getScheduler()
+                        .buildTask(plugin, wrapped)
+                        .delay(Math.max(0L, delayMs), TimeUnit.MILLISECONDS)
+                        .schedule();
+                return Registration.once(handle::cancel);
+            } catch (RuntimeException rejected) {
+                logger.debug(() -> "not scheduling delayed work; the proxy is shutting down: "
+                        + rejected);
+                return Registration.NONE;
+            }
+        }, task);
     }
 }

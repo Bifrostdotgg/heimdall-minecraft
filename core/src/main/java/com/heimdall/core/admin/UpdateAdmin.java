@@ -15,8 +15,8 @@ package com.heimdall.core.admin;
  *
  * <h2>Threading</h2>
  *
- * <p>{@link #checkNow()} and {@link #updateNow()} <strong>block</strong> — one on an HTTP round trip,
- * the other on that plus a jar download of up to 50 MB. Both belong on {@code heimdall-io}, never on
+ * <p>{@link #checkNow()} and {@link #updateNow(Object)} <strong>block</strong>: one on an HTTP
+ * round trip, the other on that plus a jar download of up to 50 MB. Both belong on {@code heimdall-io}, never on
  * a server thread. Everything else is a volatile read.
  */
 public interface UpdateAdmin {
@@ -40,7 +40,7 @@ public interface UpdateAdmin {
         }
 
         @Override
-        public String updateNow() {
+        public String updateNow(Object audience) {
             return "this build has no self-updater";
         }
 
@@ -69,11 +69,17 @@ public interface UpdateAdmin {
     boolean checkNow();
 
     /**
-     * Checks and, if there is something newer, downloads and installs it. Blocking; never throws.
+     * Checks and, if there is something newer, downloads and installs it, and requests the live
+     * swap when the release qualifies for one (departure D87). Blocking; never throws.
+     *
+     * <p>Everything is per call: the sentence describes this call's install and whether this call's
+     * swap was accepted, so it never claims a swap that is not happening.
+     *
+     * @param audience the platform sender a live swap's outcome is reported to, or {@code null}
      *
      * @return one operator-facing sentence saying what happened, including the restart it needs
      */
-    String updateNow();
+    String updateNow(Object audience);
 
     /** Whether the last successful check found something newer. */
     boolean isUpdateAvailable();

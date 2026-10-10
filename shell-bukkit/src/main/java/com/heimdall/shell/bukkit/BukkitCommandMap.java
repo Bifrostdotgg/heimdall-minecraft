@@ -1,6 +1,6 @@
-package com.heimdall.platform.bukkit;
+package com.heimdall.shell.bukkit;
 
-import com.heimdall.core.log.HeimdallLogger;
+import com.heimdall.shell.hotswap.ShellLog;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -16,9 +16,13 @@ import org.bukkit.plugin.Plugin;
  * Runtime command-map bind and unbind for names that are not in plugin.yml.
  *
  * <p>Descriptor commands cannot yield the label: Bukkit leaves a PluginCommand in the map for the
- * life of the plugin, and our unbind is a Disabled stub that would swallow {@code /ban} on a
- * LiteBans hook install. Names that must be able to disappear therefore never live in plugin.yml
- * and are put on the map here, then taken off again.
+ * life of the plugin, and a relay with nothing bound would still swallow {@code /ban} on a LiteBans
+ * hook install. Names that must be able to disappear therefore never live in plugin.yml and are put
+ * on the map here, then taken off again.
+ *
+ * <p>Moved from the core into the shell with the hot-swap split (departure D87): the
+ * {@code PluginCommand} objects it creates stay in the command map across a swap, so they must be
+ * shell objects. A core-owned one would pin its classloader for as long as the command existed.
  */
 final class BukkitCommandMap {
 
@@ -27,7 +31,7 @@ final class BukkitCommandMap {
     private BukkitCommandMap() {
     }
 
-    static PluginCommand create(Plugin plugin, String name, HeimdallLogger logger) {
+    static PluginCommand create(Plugin plugin, String name, ShellLog logger) {
         try {
             Constructor<PluginCommand> ctor =
                     PluginCommand.class.getDeclaredConstructor(String.class, Plugin.class);
@@ -41,7 +45,7 @@ final class BukkitCommandMap {
         }
     }
 
-    static CommandMap mapOf(Plugin plugin, HeimdallLogger logger) {
+    static CommandMap mapOf(Plugin plugin, ShellLog logger) {
         Object server = plugin.getServer();
         try {
             Method method = server.getClass().getMethod("getCommandMap");
@@ -74,7 +78,7 @@ final class BukkitCommandMap {
             Plugin plugin,
             PluginCommand command,
             List<String> aliases,
-            HeimdallLogger logger) {
+            ShellLog logger) {
         CommandMap map = mapOf(plugin, logger);
         if (map == null) {
             return null;
@@ -161,7 +165,7 @@ final class BukkitCommandMap {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, Command> knownCommands(CommandMap map, HeimdallLogger logger) {
+    private static Map<String, Command> knownCommands(CommandMap map, ShellLog logger) {
         try {
             Method method = map.getClass().getMethod("getKnownCommands");
             Object value = method.invoke(map);

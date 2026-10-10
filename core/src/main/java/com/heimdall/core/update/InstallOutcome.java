@@ -28,6 +28,15 @@ import java.util.Objects;
  * <p><strong>Neither strategy applies until a restart.</strong> No outcome here means the new
  * version is running; every success message says so, and a caller must not imply otherwise.
  *
+ * <h2>A pending live swap</h2>
+ *
+ * <p>Since the hot-swap split (departure D87) an install can also carry a {@linkplain #pendingSwap()
+ * staged core} that can go in without a restart. The caller requests it with
+ * {@link #startSwap(Object)}, which answers with the outcome to report: the shell holds an
+ * accepted swap back long enough for that report to go out before it stops this core, so the
+ * message can say truthfully whether a swap is happening. Equality ignores the pending swap,
+ * because it is an action rather than part of what happened.
+ *
  * <p>Named factories rather than a constructor, per departure D21: {@code boolean} + {@code String}
  * + nullable {@code Path} is exactly the signature a positional call gets wrong and still compiles.
  *
@@ -39,11 +48,77 @@ public final class InstallOutcome {
     private final boolean installed;
     private final String message;
     private final Path target;
+    private final HotSwap.Staged pendingSwap;
+    private final boolean swapRefused;
 
     private InstallOutcome(boolean installed, String message, Path target) {
+        this(installed, message, target, null);
+    }
+
+    private InstallOutcome(
+            boolean installed, String message, Path target, HotSwap.Staged pendingSwap) {
+        this(installed, message, target, pendingSwap, false);
+    }
+
+    private InstallOutcome(
+            boolean installed,
+            String message,
+            Path target,
+            HotSwap.Staged pendingSwap,
+            boolean swapRefused) {
         this.installed = installed;
         this.message = message == null ? "" : message;
         this.target = target;
+        this.pendingSwap = pendingSwap;
+        this.swapRefused = swapRefused;
+    }
+
+    /** This outcome with a different message, keeping everything else. */
+    public InstallOutcome withMessage(String replacement) {
+        return new InstallOutcome(installed, replacement, target, pendingSwap);
+    }
+
+    /** This outcome carrying a live swap to start once it has been reported. */
+    public InstallOutcome withPendingSwap(HotSwap.Staged staged, String replacement) {
+        return new InstallOutcome(installed, replacement, target, staged);
+    }
+
+    /** The live swap waiting to start, or {@code null} when this install applies on restart. */
+    public HotSwap.Staged pendingSwap() {
+        return pendingSwap;
+    }
+
+    /**
+     * Requests the pending live swap, if there is one, and answers with the outcome to report.
+     *
+     * <p>With no pending swap this is the same outcome. Otherwise the message is completed with
+     * whether the shell accepted the swap, so nothing ever says "swapping it in" when no swap is
+     * coming. The pending swap is consumed either way: a second call requests nothing.
+     *
+     * @param audience a platform command sender the shell tells how the swap went, or {@code null}
+     */
+    public InstallOutcome startSwap(Object audience) {
+        if (pendingSwap == null) {
+            return this;
+        }
+        boolean accepted;
+        try {
+            accepted = pendingSwap.swap(audience);
+        } catch (RuntimeException broken) {
+            accepted = false;
+        }
+        if (accepted) {
+            return new InstallOutcome(installed, message + " Swapping it in now; logins pause for "
+                    + "a few seconds.", target, null, false);
+        }
+        return new InstallOutcome(installed, message + " The live swap could not start (another "
+                + "swap is running, or the server is stopping), so it applies on the next restart.",
+                target, null, true);
+    }
+
+    /** Whether a live swap was requested and refused, so the update applies on restart only. */
+    public boolean swapRefused() {
+        return swapRefused;
     }
 
     /**

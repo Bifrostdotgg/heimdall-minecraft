@@ -2,7 +2,6 @@ package com.heimdall.platform.velocity;
 
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.session.PlayerSessionEvents;
-import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 
@@ -39,7 +38,6 @@ public final class VelocitySessionListener {
         this.text = text;
     }
 
-    @Subscribe
     public void onPostLogin(PostLoginEvent event) {
         long observedAt = System.currentTimeMillis();
         try {
@@ -49,7 +47,6 @@ public final class VelocitySessionListener {
         }
     }
 
-    @Subscribe
     public void onDisconnect(DisconnectEvent event) {
         long observedAt = System.currentTimeMillis();
         try {
