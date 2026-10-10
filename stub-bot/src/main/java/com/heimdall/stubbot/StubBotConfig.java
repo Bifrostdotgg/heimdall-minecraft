@@ -112,6 +112,18 @@ public final class StubBotConfig {
      */
     private final List<String> discordOnAck = new ArrayList<>();
 
+    /**
+     * Console commands to send as {@code run_command}, one per config ack from the same server: the
+     * first on its first ack, the second on its second, and so on.
+     *
+     * <p>Empty by default. It exists for the hot-swap rows of the connected smoke (departure D87): a
+     * proxy image has no console to type {@code /hdp swap} into, but every platform answers
+     * {@code run_command}, and a swapped-in core reconnects and acks its config again, so the
+     * second command is how a row proves that commands still work after the swap. Separated by
+     * {@code |}, like {@link #discordOnAck}, because a command line may contain a comma.
+     */
+    private final List<String> commandsOnAck = new ArrayList<>();
+
     private long pingIntervalMs = 30_000L;
     private long livenessTimeoutMs = 90_000L;
 
@@ -191,6 +203,7 @@ public final class StubBotConfig {
                 // is escaped; unescaped it is alternation between two empty branches and every
                 // character comes back as its own entry.
                 case "discord_on_ack" -> config.discordOnAck(List.of(value.split("\\|")));
+                case "commands_on_ack" -> config.commandsOnAck(List.of(value.split("\\|")));
                 case "foreign_servers" -> {
                     config.foreignServers.clear();
                     for (String id : value.split(",")) {
@@ -517,6 +530,24 @@ public final class StubBotConfig {
             for (String type : types) {
                 if (type != null && !type.trim().isEmpty()) {
                     requestOnAck.add(type.trim());
+                }
+            }
+        }
+        return this;
+    }
+
+    /** Commands to send as {@code run_command}, the Nth on a server's Nth ack. See the field. */
+    public List<String> commandsOnAck() {
+        return Collections.unmodifiableList(commandsOnAck);
+    }
+
+    /** Sets the on-ack commands. Entries are trimmed and blank ones dropped. */
+    public StubBotConfig commandsOnAck(List<String> commands) {
+        commandsOnAck.clear();
+        if (commands != null) {
+            for (String command : commands) {
+                if (command != null && !command.trim().isEmpty()) {
+                    commandsOnAck.add(command.trim());
                 }
             }
         }

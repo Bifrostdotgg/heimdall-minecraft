@@ -2395,6 +2395,62 @@ it over, so nothing in the handoff can keep the old classloader alive. Today tha
 `/linkdiscord` cooldowns: a swap is something an operator can do at any time, and one that reset
 every window would hand players a fresh allowance, as v2's reload did.
 
+#### How it is tested
+
+- **Real classloaders, real jars.** `:shell-common` builds a set of fixture core jars from their own
+  source set, kept off the test classpath, and `ShellHostTest` drives the shell against them through
+  `CoreLoader` exactly as production does: boot from a release-shaped jar, swap with handoff,
+  commands surviving a swap without the platform command ever being unregistered, the old loader
+  closing after the grace period, rollback into a fresh loader, a failed rollback leaving no core
+  (logins refused, admins alerted), a boot failure failing closed, the sweep removing what a leaky
+  core left on the platform, and contract and self-contradiction refusals.
+- **The pieces**: `RelayTableTest`, `LoginGateHolderTest` (hold then deny, released early when no
+  core is coming, no-core deny), `RegistrationsTest` (order, never stopping early, idempotence),
+  `HandoffTest`, `CoreArchiveTest`, `ShellTunnelTest`, `CoreRegistrationsTest`, and
+  `BungeeLoginGateTest` against BungeeCord's real `AsyncEvent` intents. `BukkitSweepTest` runs the
+  sweep on Bukkit's real `HandlerList`. `BukkitListenerShapeTest` fails the build on a public Bukkit
+  listener class in the core.
+- **The updater**: `UpdateDownloaderTest` (hash match, mismatch leaving the old jar untouched,
+  malformed refused before any fetch, none), `UpdateServiceTest` (verified and swappable, no hash,
+  contract change, failed install), and `RemoteUpdateHandlerTest` (the swap starts only after the
+  dashboard has been answered).
+- **The artifact**: `ReleaseJarTest` extracts the core from the built release jar, checks its hash,
+  and constructs its entry point in a child classloader; `verifyJarSplit` also checks that every
+  shell-side class the core refers to (relocated Gson, the contract, the API types) is in the shell.
+- **On real servers**: the connected smoke's `paper-swap`, `velocity-swap` and `bungee-swap` rows
+  swap to a second core build over the tunnel and assert the reconnect and a command answered by the
+  new core (see `smoke/README.md`).
+
+#### Limits, and what an operator sees
+
+- **One restart to install.** The first release with the shell needs an ordinary restart; so does
+  any release that bumps `ShellContract.VERSION`, which the updater says when it installs one.
+- **A swap pauses the bot link for a few seconds.** Bridge chat in that window is not relayed in
+  either direction, the public tunnel reports itself disconnected, and logins wait (up to five
+  seconds) for the new core.
+- **A live swap does not persist on its own.** A restart loads the core inside the installed jar.
+  The updater keeps the two in step by always installing the jar for the restart as well; a core an
+  operator stages by hand and swaps in with `/hd swap` is replaced by the installed jar's on the next
+  restart.
+- **Old core files** stay in `plugins/Heimdall/core/` until the next start prunes them, because a
+  classloader can hold its jar open (on Windows, undeletably) until it is closed.
+- **Residual leaks the design accepts.** A retired core's classloader can be kept alive past its
+  grace period by something outside Heimdall's control: a third-party plugin holding an object from
+  it, Velocity's own method-handle cache if a future change ever registers an annotated listener, a
+  `ThreadLocal` value parked on a Paper chat thread by a line that was mid-flight during the swap
+  (released at that thread's next chat line), or a `java.util.logging` or log4j reference in a
+  library. Each costs memory, not correctness, and is bounded by the number of swaps between
+  restarts.
+- **Thread placement.** A swap stops and starts cores on the shell's swap thread, so a new core
+  registers its listeners and runtime commands off the main thread. Heimdall already did the latter
+  whenever a config push enabled a module; on Folia, whose command map is a plain map read by region
+  threads, a swap that adds or removes a runtime command name is a small new exposure. Swaps that
+  keep the same commands do not touch the map at all.
+- **The core skips the server's bytecode rewriting.** A core loaded by the shell is not seen by
+  CraftBukkit's legacy-plugin rewriting or Paper's plugin remapping. Nothing in the core needs
+  either today (no `Material`, reflective NMS names are the same under both mappings); a change that
+  starts to will need to be made safe for this first.
+
 ---
 
 ## Structure

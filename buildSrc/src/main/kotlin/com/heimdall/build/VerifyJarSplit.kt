@@ -18,11 +18,13 @@ import org.gradle.api.tasks.TaskAction
 /**
  * Asserts the hot-swap split on the artifacts that ship (departure D87).
  *
- * <p>Three things, each of which would otherwise surface only at runtime on a customer's server:
+ * <p>Four things, each of which would otherwise surface only at runtime on a customer's server:
  *
  * <ol>
  *   <li><strong>The split itself</strong>, per [JarSplit]: the shell carries only shell classes and
  *       the core carries none of them.
+ *   <li><strong>Every shell-side class the core refers to is in the shell</strong>, per
+ *       [JarSplit.danglingReferences]: relocated Gson, the contract, the API types.
  *   <li><strong>The nested core is this core.</strong> The release jar's embedded core must be
  *       byte-identical to the core jar this build produced, and the hash recorded next to it must be
  *       that core's hash. The shell refuses a mismatch at boot, which on a real server means a
@@ -73,6 +75,7 @@ abstract class VerifyJarSplit : DefaultTask() {
         val coreBytes = coreJar.get().asFile.readBytes()
         val coreSha = sha256(coreBytes)
         val coreClasses = mutableListOf<String>()
+        val coreClassBytes = mutableMapOf<String, ByteArray>()
         var coreHasService = false
         var coreContract: String? = null
         var coreVersion: String? = null
@@ -84,6 +87,7 @@ abstract class VerifyJarSplit : DefaultTask() {
                 val entry = jar.nextJarEntry ?: break
                 if (entry.name.endsWith(".class")) {
                     coreClasses += entry.name
+                    coreClassBytes[entry.name] = jar.readBytes()
                 }
                 if (entry.name == serviceEntry.get()) {
                     coreHasService = true
@@ -141,6 +145,8 @@ abstract class VerifyJarSplit : DefaultTask() {
         }
 
         problems += JarSplit.problems(shellClasses, coreClasses, shellOnlyPrefixes.get())
+        problems += JarSplit.danglingReferences(
+            coreClassBytes, shellClasses.toSet(), shellOnlyPrefixes.get())
 
         logger.lifecycle(
             "verifyJarSplit: ${shellClasses.size} shell classes, ${coreClasses.size} core " +

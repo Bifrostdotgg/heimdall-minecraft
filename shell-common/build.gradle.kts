@@ -50,3 +50,53 @@ sourceSets {
         java.srcDir(generateShellConstants)
     }
 }
+
+// ── Fixture cores for the tests ────────────────────────────────────────────
+//
+// Real jars, loaded by the tests through a real child URLClassLoader, exactly as a production core
+// is. Their classes are compiled in their own source set and deliberately kept OFF the test
+// classpath: parent-first delegation would otherwise resolve them from the test loader, and the
+// loader's "the entry point must come from the core jar" check would (rightly) refuse every one.
+//
+// One class, several jars; heimdall-fixture.properties in each picks the behaviour. See
+// FixtureCore for what each variant does.
+val fixtureCore: SourceSet = sourceSets.create("fixtureCore")
+
+dependencies {
+    "fixtureCoreCompileOnly"(project(":shell-api"))
+}
+
+val fixtureCoreContracts = mapOf(
+    "alpha" to "1",
+    "beta" to "1",
+    "failing" to "1",
+    "contradicts" to "1",
+    "leaky" to "1",
+    "fragile" to "1",
+    "contract2" to "2",
+)
+
+val fixtureCoreJars = fixtureCoreContracts.map { (variant, contract) ->
+    tasks.register<Jar>("fixtureCore" + variant.replaceFirstChar { it.uppercase() }) {
+        archiveFileName.set("fixture-core-$variant.jar")
+        destinationDirectory.set(layout.buildDirectory.dir("fixture-cores"))
+        from(fixtureCore.output)
+        from("src/fixtureCore/services")
+        from("src/fixtureCore/variants/$variant")
+        manifest {
+            attributes(
+                "Heimdall-Shell-Contract" to contract,
+                "Heimdall-Core-Version" to "1.0.0-$variant",
+            )
+        }
+    }
+}
+
+tasks.test {
+    dependsOn(fixtureCoreJars)
+    inputs.files(fixtureCoreJars)
+    systemProperty(
+        "heimdall.fixtureCores",
+        layout.buildDirectory.dir("fixture-cores").get().asFile.absolutePath,
+    )
+}

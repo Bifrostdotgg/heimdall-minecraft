@@ -45,6 +45,49 @@ object JarSplit {
         return problems
     }
 
+    private val REFERENCE = Regex("com/heimdall/[A-Za-z0-9_$/]+")
+
+    /**
+     * Every shell-side class a core class refers to must be in the shell jar.
+     *
+     * <p>The core is built against the shell's types but carries none of them, so each such
+     * reference resolves through the parent classloader at runtime, and one the shell jar lacks is a
+     * `NoClassDefFoundError` on a customer's server the first time that code path runs. Relocated
+     * Gson is the likeliest victim: the core relocates its Gson references without bundling Gson, so
+     * the two relocations must agree class by class. The names are read straight out of the
+     * constant pool, as in `VerifyShadowJar`'s logging-facade scan, which sees descriptors and
+     * signatures as well as class references.
+     */
+    fun danglingReferences(
+        coreClassBytes: Map<String, ByteArray>,
+        shellClasses: Set<String>,
+        shellOnlyPrefixes: List<String>,
+    ): List<String> {
+        val stems = shellOnlyPrefixes.map { it.removeSuffix(".class").removeSuffix("$") }
+        val missing = sortedSetOf<String>()
+        for ((owner, bytes) in coreClassBytes) {
+            val text = bytes.toString(Charsets.ISO_8859_1)
+            for (match in REFERENCE.findAll(text)) {
+                val name = match.value
+                if (name.endsWith("/") || stems.none { name.startsWith(it) }) {
+                    continue
+                }
+                if ("$name.class" !in shellClasses) {
+                    missing += "$name (from $owner)"
+                }
+            }
+        }
+        return if (missing.isEmpty()) {
+            emptyList()
+        } else {
+            listOf(
+                "${missing.size} shell-side class(es) the core refers to are not in the shell " +
+                    "jar, so each is a NoClassDefFoundError waiting to happen: " +
+                    missing.take(5).joinToString(", "),
+            )
+        }
+    }
+
     /** Runs [problems] on fixtures with known answers and reports any it got wrong. */
     fun selfCheckProblems(): List<String> {
         val prefixes = listOf("com/heimdall/shell/", "com/heimdall/api/")
@@ -61,6 +104,15 @@ object JarSplit {
                 prefixes).isEmpty()
         ) {
             wrong += "a shell class in the core jar was not reported"
+        }
+        val present = setOf("com/heimdall/libs/gson/JsonObject.class")
+        val clean = mapOf("Core.class" to "Lcom/heimdall/libs/gson/JsonObject;".toByteArray())
+        if (danglingReferences(clean, present, prefixes + "com/heimdall/libs/gson/").isNotEmpty()) {
+            wrong += "a reference the shell satisfies was reported as dangling"
+        }
+        val dangling = mapOf("Core.class" to "Lcom/heimdall/libs/gson/Missing;".toByteArray())
+        if (danglingReferences(dangling, present, prefixes + "com/heimdall/libs/gson/").isEmpty()) {
+            wrong += "a reference the shell cannot satisfy was not reported"
         }
         return wrong
     }

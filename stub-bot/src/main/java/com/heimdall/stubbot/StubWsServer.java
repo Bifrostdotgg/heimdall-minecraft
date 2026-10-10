@@ -91,6 +91,9 @@ public final class StubWsServer extends WebSocketServer {
      */
     private final Set<String> onAckDiscordSent = ConcurrentHashMap.newKeySet();
 
+    /** Config acks seen per server, for {@code STUB_BOT_COMMANDS_ON_ACK}'s "Nth command on Nth ack". */
+    private final Map<String, AtomicInteger> acksSeen = new ConcurrentHashMap<>();
+
     private volatile WsMessageListener messageListener;
     private final AtomicInteger configVersion;
 
@@ -342,6 +345,7 @@ public final class StubWsServer extends WebSocketServer {
                 }
                 fireOnAckRequests(server);
                 fireOnAckDiscord(server);
+                fireOnAckCommands(server);
                 return;
             }
             default -> {
@@ -554,6 +558,40 @@ public final class StubWsServer extends WebSocketServer {
         int delivered = sendBridgeDiscord(server.guildId(), server.serverId(), texts);
         StubLog.info("on-ack bridge.discord -> " + server.serverId() + ": " + texts.size()
                 + " message(s), delivered=" + delivered);
+    }
+
+    /**
+     * Sends the Nth {@code STUB_BOT_COMMANDS_ON_ACK} command as {@code run_command} on a server's
+     * Nth config ack, and logs the reply.
+     *
+     * <p>For the hot-swap rows (departure D87): the first command is the swap, which reconnects the
+     * tunnel from a new core; the reconnected core acks its config again, and the second command
+     * proves a command still reaches a core afterwards. The reply to the first may well be lost, as
+     * the swap closes the socket it would travel on, so rows assert on the plugin's own log for
+     * that one and on this line for the second.
+     */
+    private void fireOnAckCommands(ConnectedServer server) {
+        List<String> commands = config.commandsOnAck();
+        if (commands.isEmpty()) {
+            return;
+        }
+        final int nth = acksSeen.computeIfAbsent(
+                server.guildId() + "/" + server.serverId(), key -> new AtomicInteger())
+                .incrementAndGet();
+        if (nth > commands.size()) {
+            return;
+        }
+        final String command = commands.get(nth - 1);
+        runCommand(server.guildId(), server.serverId(), command, ON_ACK_TIMEOUT_MS)
+                .whenCompleteAsync((reply, failure) -> {
+                    String label = "on-ack run_command[" + nth + "] '" + command + "' -> "
+                            + server.serverId();
+                    if (failure != null) {
+                        StubLog.warn(label + " FAILED: " + rootMessage(failure));
+                        return;
+                    }
+                    StubLog.info(label + ": " + summarise(reply));
+                }, scheduler);
     }
 
     /**

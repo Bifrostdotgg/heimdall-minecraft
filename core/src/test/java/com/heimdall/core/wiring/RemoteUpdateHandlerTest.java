@@ -8,6 +8,7 @@ import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.RecordingLogger;
+import com.heimdall.core.update.HotSwap;
 import com.heimdall.core.update.InstallOutcome;
 import com.heimdall.core.update.ReleaseSource;
 import com.heimdall.core.update.UpdateDownloader;
@@ -50,12 +51,18 @@ class RemoteUpdateHandlerTest {
 
     /** A release source that answers immediately with the given version. */
     private static ReleaseSource sourceFor(final String version) {
+        return sourceFor(version, null);
+    }
+
+    /** As {@link #sourceFor(String)}, with a published SHA-256. */
+    private static ReleaseSource sourceFor(final String version, final String sha256) {
         return new ReleaseSource() {
             @Override
             public CompletableFuture<PluginRelease> latestRelease(boolean fresh) {
                 return CompletableFuture.completedFuture(PluginRelease.builder()
                         .version(version)
                         .downloadUrl("https://github.com/x/y/releases/download/" + version + "/p.jar")
+                        .sha256(sha256)
                         .build());
             }
 
@@ -100,6 +107,62 @@ class RemoteUpdateHandlerTest {
         Payload reply = replier.replies.get(0);
         assertFalse(reply.bool("success", true), "it could not install, so success is false");
         assertFalse(reply.string("message", "").isEmpty(), "and it says why");
+    }
+
+    @Test
+    @DisplayName("a live swap starts only after the dashboard has been answered (D87)")
+    void swapStartsAfterTheReply() {
+        final RecordingReplier replier = new RecordingReplier();
+        final List<Integer> repliesWhenSwapStarted = new ArrayList<Integer>();
+        HotSwap shell = new HotSwap() {
+            @Override
+            public Staged stage(java.nio.file.Path releaseJar) {
+                return new Staged() {
+                    @Override
+                    public boolean swappable() {
+                        return true;
+                    }
+
+                    @Override
+                    public String problem() {
+                        return "";
+                    }
+
+                    @Override
+                    public String version() {
+                        return "3.4.0";
+                    }
+
+                    @Override
+                    public boolean swap(Object audience) {
+                        // The swap stops this core and with it the tunnel the reply goes out on.
+                        repliesWhenSwapStarted.add(replier.replies.size());
+                        return true;
+                    }
+                };
+            }
+        };
+        UpdateInstaller installer = new UpdateInstaller() {
+            @Override
+            public InstallOutcome install(PluginRelease release, UpdateDownloader downloader) {
+                return InstallOutcome.installed(java.nio.file.Paths.get("plugins", "update", "h.jar"),
+                        "installed 3.4.0 for the next restart");
+            }
+        };
+        scheduler = Executors.newSingleThreadScheduledExecutor();
+        UpdateService service = new UpdateService(logger, "3.0.0",
+                sourceFor("3.4.0", "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"),
+                installer,
+                new UpdateDownloader(logger, com.heimdall.core.update.DownloadPolicy.github()),
+                scheduler, shell);
+
+        new UpdateWiring.RemoteUpdateHandler(logger, service, replier).onMessage(updateFrame());
+
+        assertEquals(1, replier.replies.size());
+        assertTrue(replier.replies.get(0).string("message", "").contains("swapping it in now"),
+                replier.replies.get(0).toString());
+        assertEquals(java.util.Collections.singletonList(1), repliesWhenSwapStarted,
+                "the swap must start after the reply, exactly once");
     }
 
     @Test

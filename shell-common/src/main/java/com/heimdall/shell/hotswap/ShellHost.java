@@ -157,6 +157,11 @@ public final class ShellHost {
         return running == null ? null : running.loaded.identity();
     }
 
+    /** The running generation, for the tests. */
+    Generation currentGeneration() {
+        return current;
+    }
+
     /** Why the last start, swap or rollback failed; empty when nothing has. */
     public String lastProblem() {
         return lastProblem;

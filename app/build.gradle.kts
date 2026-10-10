@@ -322,7 +322,50 @@ tasks.check {
     dependsOn(verifyShadowJar, verifyCoreJar, verifyJarSplit)
 }
 
-// `build` should produce the shipping artifact, not just the thin jar.
+/**
+ * A second build of the core for the connected smoke's swap rows (departure D87): the same classes
+ * under a `+swaptest` version, so a different hash and a different identity, which is what a live
+ * swap has to tell apart. Never shipped: it lands in build/smoke, which nothing publishes, and the
+ * release workflow uploads only the one named release jar.
+ */
+val swapTestCore by tasks.registering(Jar::class) {
+    description = "Builds a second core build, for the connected smoke's swap rows."
+    group = "build"
+    archiveFileName.set("heimdall-core-swaptest.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("smoke"))
+    from(zipTree(coreJar.flatMap { it.archiveFile })) {
+        exclude("META-INF/MANIFEST.MF")
+    }
+    manifest {
+        attributes(
+            "Heimdall-Shell-Contract" to shellContract.toString(),
+            "Heimdall-Core-Version" to "${project.version}+swaptest",
+        )
+    }
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+// `build` should produce the shipping artifact, not just the thin jar, and the smoke's second core.
 tasks.build {
+    dependsOn(releaseJar, swapTestCore)
+}
+
+// ReleaseJarTest reads the built release jar the way the shell does at boot: extract the nested
+// core, check it against core.properties, load its entry point in a child classloader. The shell
+// classes come from :shell-common on the test classpath; the core's, only from the nested jar.
+dependencies {
+    testImplementation(project(":shell-common"))
+}
+
+tasks.test {
     dependsOn(releaseJar)
+    inputs.file(releaseJar.flatMap { it.archiveFile })
+    systemProperty(
+        "heimdall.releaseJar",
+        layout.buildDirectory.file("libs/heimdall-whitelist-${project.version}.jar")
+            .get().asFile.absolutePath,
+    )
+    systemProperty("heimdall.expectedVersion", project.version.toString())
 }

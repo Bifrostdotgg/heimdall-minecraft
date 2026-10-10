@@ -130,6 +130,62 @@ class UpdateDownloaderTest {
         }
 
         @Test
+        @DisplayName("a body matching the published SHA-256 is installed")
+        void publishedHashMatches(@TempDir Path dir) throws Exception {
+            server.serve(200, JAR_BYTES);
+            File target = dir.resolve("plugin.jar").toFile();
+
+            long written = downloader.download(server.url("/heimdall.jar"), target, sha256(JAR_BYTES));
+
+            assertEquals(JAR_BYTES.length, written);
+            assertArrayEquals(JAR_BYTES, Files.readAllBytes(target.toPath()));
+            assertNoPartFile(target);
+        }
+
+        @Test
+        @DisplayName("a body that does not match is refused, and the old jar is left exactly as it was")
+        void publishedHashMismatches(@TempDir Path dir) throws Exception {
+            server.serve(200, JAR_BYTES);
+            File target = dir.resolve("plugin.jar").toFile();
+            byte[] old = "the old jar".getBytes(StandardCharsets.UTF_8);
+            Files.write(target.toPath(), old);
+
+            IOException refused = assertThrows(IOException.class, () -> downloader.download(
+                    server.url("/heimdall.jar"), target, sha256("something else".getBytes(
+                            StandardCharsets.UTF_8))));
+
+            assertTrue(refused.getMessage().contains("does not match"), refused.getMessage());
+            assertArrayEquals(old, Files.readAllBytes(target.toPath()),
+                    "a jar that failed verification must never land where the platform loads it");
+            assertNoPartFile(target);
+        }
+
+        @Test
+        @DisplayName("a malformed published hash is refused before anything is fetched")
+        void malformedHashIsRefusedUpFront(@TempDir Path dir) throws Exception {
+            server.serve(200, JAR_BYTES);
+            File target = dir.resolve("plugin.jar").toFile();
+
+            IOException refused = assertThrows(IOException.class, () -> downloader.download(
+                    server.url("/heimdall.jar"), target, "sha256:" + sha256(JAR_BYTES)));
+
+            assertTrue(refused.getMessage().contains("malformed"), refused.getMessage());
+            assertFalse(server.awaitRequest(200L), "nothing may be fetched for an unverifiable hash");
+            assertFalse(target.exists());
+        }
+
+        @Test
+        @DisplayName("with no published hash the download is unverified but still works, as v2's did")
+        void noHashIsUnverified(@TempDir Path dir) throws Exception {
+            server.serve(200, JAR_BYTES);
+            File target = dir.resolve("plugin.jar").toFile();
+
+            long written = downloader.download(server.url("/heimdall.jar"), target, null);
+
+            assertEquals(JAR_BYTES.length, written);
+        }
+
+        @Test
         @DisplayName("writes the bytes, returns the count, and leaves no .part behind")
         void happyPath(@TempDir Path dir) throws IOException {
             server.serve(200, JAR_BYTES);
@@ -302,6 +358,15 @@ class UpdateDownloaderTest {
             first.join(10_000);
             assertEquals(null, firstError.get(), "the first download should have completed cleanly");
         }
+    }
+
+    private static String sha256(byte[] bytes) throws Exception {
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes);
+        StringBuilder out = new StringBuilder();
+        for (byte b : digest) {
+            out.append(String.format("%02x", b & 0xFF));
+        }
+        return out.toString();
     }
 
     private static void assertNoPartFile(File target) {

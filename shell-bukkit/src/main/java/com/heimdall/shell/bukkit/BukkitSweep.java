@@ -7,6 +7,7 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
+import java.util.function.Predicate;
 import org.bukkit.Bukkit;
 import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
@@ -44,17 +45,26 @@ final class BukkitSweep {
     private BukkitSweep() {
     }
 
-    static int sweep(Plugin plugin, LoadedCore retired, ShellLog log) {
-        return listeners(plugin, retired, log) + services(plugin, retired, log)
-                + tasks(plugin, retired, log);
+    static int sweep(Plugin plugin, final LoadedCore retired, ShellLog log) {
+        Predicate<Class<?>> owned = new Predicate<Class<?>>() {
+            @Override
+            public boolean test(Class<?> type) {
+                return retired.owns(type);
+            }
+        };
+        return listeners(plugin, owned, log) + services(plugin, owned, log)
+                + tasks(plugin, owned, log);
     }
 
-    private static int listeners(Plugin plugin, LoadedCore retired, ShellLog log) {
+    /** The listener half, against any notion of "belongs to the retired core". */
+    static int listeners(Plugin plugin, Predicate<Class<?>> retired, ShellLog log) {
         Set<Listener> stale = Collections.newSetFromMap(new IdentityHashMap<Listener, Boolean>());
         try {
             for (RegisteredListener registered : HandlerList.getRegisteredListeners(plugin)) {
                 Listener listener = registered.getListener();
-                if (retired.owns(listener.getClass()) || retired.owns(executorClass(registered))) {
+                Class<?> executor = executorClass(registered);
+                if (retired.test(listener.getClass())
+                        || (executor != null && retired.test(executor))) {
                     stale.add(listener);
                 }
             }
@@ -73,13 +83,13 @@ final class BukkitSweep {
         return stale.size();
     }
 
-    private static int services(Plugin plugin, LoadedCore retired, ShellLog log) {
+    private static int services(Plugin plugin, Predicate<Class<?>> retired, ShellLog log) {
         int removed = 0;
         try {
             for (RegisteredServiceProvider<?> service
                     : Bukkit.getServicesManager().getRegistrations(plugin)) {
                 Object provider = service.getProvider();
-                if (provider != null && retired.owns(provider.getClass())) {
+                if (provider != null && retired.test(provider.getClass())) {
                     Bukkit.getServicesManager().unregister(provider);
                     removed++;
                 }
@@ -90,11 +100,12 @@ final class BukkitSweep {
         return removed;
     }
 
-    private static int tasks(Plugin plugin, LoadedCore retired, ShellLog log) {
+    private static int tasks(Plugin plugin, Predicate<Class<?>> retired, ShellLog log) {
         int cancelled = 0;
         try {
             for (BukkitTask task : Bukkit.getScheduler().getPendingTasks()) {
-                if (task.getOwner() == plugin && retired.owns(taskClass(task))) {
+                Class<?> type = taskClass(task);
+                if (task.getOwner() == plugin && type != null && retired.test(type)) {
                     task.cancel();
                     cancelled++;
                 }

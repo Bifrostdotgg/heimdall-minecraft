@@ -39,6 +39,29 @@ wait_for_pattern() {
     return 1
 }
 
+# Pulls an image before a row uses it, retrying with a pause between attempts.
+#
+# Docker Hub's anonymous pull limit, and its occasional 5xx, have failed CI rows before the server
+# under test ever started, which reads as a red plugin row for a reason that has nothing to do with
+# the plugin. Best effort and deliberately quiet about success: an image already present is not
+# pulled again, and if every attempt fails the caller's own `docker run` still tries once more and
+# fails with Docker's own message, which is the one worth reading.
+pull_image() {
+    local image="$1" attempt
+    if docker image inspect "${image}" >/dev/null 2>&1; then
+        return 0
+    fi
+    for attempt in 1 2 3; do
+        if docker pull -q "${image}" >/dev/null 2>&1; then
+            return 0
+        fi
+        warn "docker pull ${image} failed (attempt ${attempt}/3); retrying in $((attempt * 20))s"
+        sleep $((attempt * 20))
+    done
+    warn "could not pull ${image}; docker run will try once more"
+    return 0
+}
+
 # Every `docker exec` in this harness, with a wall-clock bound.
 #
 # An exec that hangs hangs the whole row until CI's job timeout kills it, and the report is then a
