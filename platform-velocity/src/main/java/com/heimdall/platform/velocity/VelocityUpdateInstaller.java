@@ -55,7 +55,7 @@ final class VelocityUpdateInstaller implements UpdateInstaller {
         File ownJar = resolveOwnJar();
         if (ownJar != null) {
             try {
-                long bytes = downloader.download(release.downloadUrl(), ownJar);
+                long bytes = downloader.download(release.downloadUrl(), ownJar, release.sha256());
                 logger.info("replaced " + ownJar + " with " + bytes
                         + " bytes; the proxy will load it on its next start");
                 return InstallOutcome.installed(ownJar.toPath(),
@@ -71,7 +71,7 @@ final class VelocityUpdateInstaller implements UpdateInstaller {
         }
 
         File fallback = dataDirectory.resolve("heimdall-" + release.version() + ".jar").toFile();
-        downloader.download(release.downloadUrl(), fallback);
+        downloader.download(release.downloadUrl(), fallback, release.sha256());
         return InstallOutcome.installed(fallback.toPath(),
                 "Downloaded " + release.version() + " to " + fallback.getAbsolutePath()
                         + " — the running jar could not be replaced automatically, so move it into "

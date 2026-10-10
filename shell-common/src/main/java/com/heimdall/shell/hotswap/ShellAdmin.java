@@ -72,7 +72,7 @@ final class ShellAdmin implements RelayTable.AdminVerbs {
             audience.send(sender, "§eCore " + jar.identity() + " is already running.");
             return;
         }
-        if (!host.requestSwap(jar, new SenderListener(sender))) {
+        if (!host.requestSwap(jar, new AudienceListener(audience, sender))) {
             audience.send(sender, "§cA swap is already in progress.");
             return;
         }
@@ -93,27 +93,5 @@ final class ShellAdmin implements RelayTable.AdminVerbs {
         }
         audience.send(sender, "§7Logins are refused until a core is running. Stage a core at §f"
                 + host.stagedPath() + "§7 and run §f/" + label + " swap§7, or restart.");
-    }
-
-    /** Reports a swap's progress and result back to whoever asked for it. */
-    private final class SenderListener implements SwapListener {
-
-        private final Object sender;
-
-        SenderListener(Object sender) {
-            this.sender = sender;
-        }
-
-        @Override
-        public void progress(String line) {
-            audience.send(sender, "§7" + line);
-        }
-
-        @Override
-        public void finished(SwapOutcome outcome) {
-            String colour = outcome.succeeded() ? "§a"
-                    : outcome.kind() == SwapOutcome.Kind.NO_CORE ? "§4" : "§c";
-            audience.send(sender, colour + outcome.message());
-        }
     }
 }

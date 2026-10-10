@@ -65,8 +65,8 @@ final class UpdateSubcommands {
                 public void run() {
                     if (updates.checkNow()) {
                         source.sendMessage(Msg.legacy("§aVersion §f" + updates.latestVersion()
-                                + "§a is available. Run §f/hd update§a to download it; it applies "
-                                + "on the next restart."));
+                                + "§a is available. Run §f/hd update§a to install it: live when it "
+                                + "can be, otherwise on the next restart."));
                     } else {
                         source.sendMessage(Msg.legacy("§aNothing newer is published, or the bot "
                                 + "could not be asked. §7/hd status§a says which."));
@@ -77,6 +77,35 @@ final class UpdateSubcommands {
     }
 
     /** {@code /hd update} — download the newest release and stage it for the next restart. */
+    /**
+     * {@code swap}: applies a core an operator staged by hand. Listed here so help and completion
+     * show it, but the shell answers it before any core sees it, because it has to work with no
+     * core running at all (departure D87). Reaching this means no shell took the command.
+     */
+    static final class Swap implements AdminSubcommand {
+
+        @Override
+        public String name() {
+            return "swap";
+        }
+
+        @Override
+        public String usage() {
+            return "";
+        }
+
+        @Override
+        public String description() {
+            return "swap in the core staged at core/staged.jar, live";
+        }
+
+        @Override
+        public void run(CommandSource source, List<String> args, AdminContext context) {
+            source.sendMessage(Msg.legacy("§eSwapping is done by Heimdall's shell, and this "
+                    + "server's shell did not answer. Install the current release and restart."));
+        }
+    }
+
     static final class Update implements AdminSubcommand {
 
         @Override
@@ -91,7 +120,7 @@ final class UpdateSubcommands {
 
         @Override
         public String description() {
-            return "download the newest release, applied on the next restart";
+            return "install the newest release, live when it can be, otherwise on restart";
         }
 
         @Override
@@ -114,6 +143,9 @@ final class UpdateSubcommands {
                 @Override
                 public void run() {
                     source.sendMessage(Msg.legacy("§a" + updates.updateNow()));
+                    // After the reply: the swap stops this core. The shell reports the outcome to the
+                    // same sender (departure D87).
+                    updates.startPendingSwap(source.nativeSender());
                 }
             });
         }

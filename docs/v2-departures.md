@@ -2273,6 +2273,34 @@ never a server thread, because stopping a core waits for its executors to drain.
 The swap is reported to whoever asked (console, player or dashboard) and always to the console. A
 failed swap says which core is running afterwards.
 
+#### Updates go in live when they can, and only when they are verified
+
+`/hd update` (`/hdp update`) and a dashboard-triggered update work as before, and then do more:
+
+1. **The release is always installed for the next restart**, exactly as before: into
+   `plugins/update/` on the Bukkit family, over the running jar (or into the data directory on
+   Windows) on the proxies. A core swapped in live is a property of the running process only, so
+   this is what makes the update survive a restart.
+2. **The download is checked against the SHA-256 the bot reports** from GitHub's asset digest
+   (`sha256` on `GET plugin/latest`, 64 lowercase hex characters). The hash is computed as the body
+   streams in and compared before the `.part` file is moved anywhere. A mismatch is a refusal that
+   installs nothing; a malformed hash is refused before a byte is fetched.
+3. **It is swapped in live** only if the release had a hash and matched it, the jar's embedded core
+   matches the hash the build recorded next to it, and that core was built for this shell's
+   contract. The swap starts only after the command has answered (or the dashboard frame has been
+   replied to), because it stops the core that is answering; the shell then reports the outcome to
+   the same sender, and always to the console.
+
+**A release with no hash is never swapped in live.** A live swap runs the downloaded code at once,
+and nothing can vouch for a jar without one, so it is installed for the next restart only, and the
+message says why. **A release whose shell contract changed cannot be swapped in live either**: it is
+installed for the next restart, and the message names both contract numbers.
+
+`/hd status` now shows the running core's version and the first twelve characters of its SHA-256,
+next to the shell's version: the core can change while the server runs, and two builds of one
+version are only told apart by their hash. `/hd swap` is listed in `/hd` help and tab completion,
+but the shell answers it before any core sees it, because it has to work with no core at all.
+
 #### The login gate belongs to the shell, and fails closed
 
 The login listener is the one registration that may never have a gap: a window with no listener at

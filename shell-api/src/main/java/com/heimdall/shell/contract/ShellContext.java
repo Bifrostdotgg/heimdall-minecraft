@@ -127,4 +127,26 @@ public interface ShellContext {
      * @return whether a subscriber took it
      */
     boolean deliverUnclaimed(String requestId, String type, Payload payload);
+
+    /**
+     * Extracts the core from a release jar the updater has downloaded <strong>and verified</strong>,
+     * checks it against the hash the build recorded next to it, and says whether it can be swapped
+     * in live: built for this shell's contract, and not the core already running.
+     *
+     * <p>Blocking (it reads and writes a few megabytes); never call it on a server thread. Never
+     * throws: an unusable jar comes back as {@link StagedCore#unusable}.
+     */
+    StagedCore stageRelease(Path releaseJar);
+
+    /**
+     * Starts a live swap to {@code staged} on the shell's swap thread and returns at once. The
+     * calling core is stopped by it, so anything the caller still wants to say (a command reply, a
+     * dashboard answer) must be said <em>before</em> this is called.
+     *
+     * @param audience a platform command sender to report the outcome to, or {@code null} for the
+     *     console only; the outcome is always logged
+     * @return {@code false} if a swap is already running, the shell is stopping, or
+     *     {@code staged} is not {@link StagedCore#swappable()}
+     */
+    boolean swapTo(StagedCore staged, Object audience);
 }

@@ -14,6 +14,7 @@ import com.heimdall.core.text.Msg;
 import com.heimdall.core.tunnel.TunnelClient;
 import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.update.DownloadPolicy;
+import com.heimdall.core.update.HotSwap;
 import com.heimdall.core.update.InstallOutcome;
 import com.heimdall.core.update.ReleaseSource;
 import com.heimdall.core.update.UpdateDownloader;
@@ -26,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
@@ -76,6 +78,20 @@ public final class UpdateWiring {
             String currentVersion,
             final HeimdallRuntime runtime,
             UpdateInstaller installer) {
+        return install(logger, currentVersion, runtime, installer, HotSwap.NONE);
+    }
+
+    /**
+     * {@link #install(HeimdallLogger, String, HeimdallRuntime, UpdateInstaller)}, with the hot-swap
+     * shell behind it, so a verified release whose core fits this shell is also swapped in live
+     * (departure D87).
+     */
+    public static Installed install(
+            HeimdallLogger logger,
+            String currentVersion,
+            final HeimdallRuntime runtime,
+            UpdateInstaller installer,
+            HotSwap hotSwap) {
         // Built with whatever installer there is, including null. checkNow(), the periodic tick and
         // the join notice all work with no installer; only updateNow() needs one, and it answers
         // gracefully when there is none.
@@ -85,7 +101,8 @@ public final class UpdateWiring {
                 new GatewayReleaseSource(runtime.api()),
                 installer,
                 installer == null ? null : new UpdateDownloader(logger, DownloadPolicy.github()),
-                runtime.executors().scheduler());
+                runtime.executors().scheduler(),
+                hotSwap);
 
         List<Registration> handles = new ArrayList<Registration>();
         handles.add(service.startPeriodicChecks(new Supplier<UpdateSettings>() {
@@ -282,6 +299,9 @@ public final class UpdateWiring {
                     logger.debug(() -> "could not reply to a dashboard update frame: " + replyFailed);
                 }
             }
+            // After the reply, never before: the swap stops this core, and with it the tunnel the
+            // reply has to go out on. The dashboard sees the reconnect, and the outcome is logged.
+            outcome.startSwap(null);
         }
     }
 
@@ -326,6 +346,9 @@ public final class UpdateWiring {
 
         private final UpdateService service;
 
+        /** The live swap the last {@link #updateNow()} left waiting to be started. */
+        private final AtomicReference<InstallOutcome> pending = new AtomicReference<InstallOutcome>();
+
         ServiceAdmin(UpdateService service) {
             this.service = service;
         }
@@ -349,7 +372,14 @@ public final class UpdateWiring {
         @Override
         public String updateNow() {
             InstallOutcome outcome = service.updateNow();
+            pending.set(outcome.pendingSwap() == null ? null : outcome);
             return outcome.message();
+        }
+
+        @Override
+        public boolean startPendingSwap(Object audience) {
+            InstallOutcome outcome = pending.getAndSet(null);
+            return outcome != null && outcome.startSwap(audience);
         }
 
         @Override

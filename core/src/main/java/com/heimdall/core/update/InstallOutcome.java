@@ -28,6 +28,14 @@ import java.util.Objects;
  * <p><strong>Neither strategy applies until a restart.</strong> No outcome here means the new
  * version is running; every success message says so, and a caller must not imply otherwise.
  *
+ * <h2>A pending live swap</h2>
+ *
+ * <p>Since the hot-swap split (departure D87) an install can also carry a {@linkplain #pendingSwap()
+ * staged core} that can go in without a restart. Starting it stops the core this object lives in,
+ * so it is never started here: the caller reports the outcome first (a command reply, the dashboard
+ * frame) and then calls {@link #startSwap(Object)}. Equality ignores it, because it is an action
+ * rather than part of what happened.
+ *
  * <p>Named factories rather than a constructor, per departure D21: {@code boolean} + {@code String}
  * + nullable {@code Path} is exactly the signature a positional call gets wrong and still compiles.
  *
@@ -39,11 +47,44 @@ public final class InstallOutcome {
     private final boolean installed;
     private final String message;
     private final Path target;
+    private final HotSwap.Staged pendingSwap;
 
     private InstallOutcome(boolean installed, String message, Path target) {
+        this(installed, message, target, null);
+    }
+
+    private InstallOutcome(
+            boolean installed, String message, Path target, HotSwap.Staged pendingSwap) {
         this.installed = installed;
         this.message = message == null ? "" : message;
         this.target = target;
+        this.pendingSwap = pendingSwap;
+    }
+
+    /** This outcome with a different message, keeping everything else. */
+    public InstallOutcome withMessage(String replacement) {
+        return new InstallOutcome(installed, replacement, target, pendingSwap);
+    }
+
+    /** This outcome carrying a live swap to start once it has been reported. */
+    public InstallOutcome withPendingSwap(HotSwap.Staged staged, String replacement) {
+        return new InstallOutcome(installed, replacement, target, staged);
+    }
+
+    /** The live swap waiting to start, or {@code null} when this install applies on restart. */
+    public HotSwap.Staged pendingSwap() {
+        return pendingSwap;
+    }
+
+    /**
+     * Starts the pending live swap, if there is one. Call it only after the outcome has been
+     * reported: the swap stops the core that is reporting.
+     *
+     * @param audience a platform command sender to tell how the swap went, or {@code null}
+     * @return whether a swap was started
+     */
+    public boolean startSwap(Object audience) {
+        return pendingSwap != null && pendingSwap.swap(audience);
     }
 
     /**

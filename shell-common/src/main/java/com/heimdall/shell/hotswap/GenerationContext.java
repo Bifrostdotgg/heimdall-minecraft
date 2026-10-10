@@ -9,6 +9,7 @@ import com.heimdall.shell.contract.LoginGate;
 import com.heimdall.shell.contract.Registrations;
 import com.heimdall.shell.contract.ShellContext;
 import com.heimdall.shell.contract.ShellContract;
+import com.heimdall.shell.contract.StagedCore;
 import com.heimdall.shell.contract.TunnelBackend;
 import java.io.File;
 import java.nio.file.Path;
@@ -144,6 +145,21 @@ class GenerationContext implements ShellContext {
             return false;
         }
         return host.deliverUnclaimed(requestId, type, payload);
+    }
+
+    @Override
+    public StagedCore stageRelease(Path releaseJar) {
+        return host.stageForSwap(releaseJar);
+    }
+
+    @Override
+    public boolean swapTo(StagedCore staged, Object audience) {
+        // A generation already stopping or stopped cannot ask for a swap: the swap would stop a core
+        // that is not the one asking.
+        if (stopping || tracked.isClosed()) {
+            return false;
+        }
+        return host.swapTo(staged, audience);
     }
 
     /** Marks the start of this generation's {@code stop()}. */

@@ -4,6 +4,7 @@ import com.heimdall.core.json.Payload;
 import com.heimdall.core.util.Registration;
 import com.heimdall.shell.contract.CoreIdentity;
 import com.heimdall.shell.contract.ShellContract;
+import com.heimdall.shell.contract.StagedCore;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -296,6 +297,56 @@ public final class ShellHost {
         CoreArchive.CoreJar described = CoreArchive.describe(file);
         Path adopted = CoreArchive.adopt(file, described.identity(), coreDirectory());
         return CoreArchive.describe(adopted);
+    }
+
+    /**
+     * Stages a downloaded, verified release (or a bare core) for a live swap, and says whether it
+     * can be swapped in. See {@code ShellContext.stageRelease}. Never throws.
+     */
+    public StagedCore stageForSwap(Path file) {
+        CoreArchive.CoreJar jar;
+        try {
+            jar = stage(file);
+        } catch (CoreArchiveException unusable) {
+            return StagedCore.unusable(unusable.getMessage());
+        } catch (Throwable broken) {
+            return StagedCore.unusable("staging failed unexpectedly: " + broken);
+        }
+        if (jar.contract() != ShellContract.VERSION) {
+            return new StagedCore(jar.path(), jar.identity(), jar.contract(),
+                    "core " + jar.identity() + " was built for shell contract " + jar.contract()
+                            + " and this shell implements " + ShellContract.VERSION
+                            + ", so it needs a restart");
+        }
+        if (jar.identity().equals(runningCore())) {
+            return new StagedCore(jar.path(), jar.identity(), jar.contract(),
+                    "core " + jar.identity() + " is already running");
+        }
+        return new StagedCore(jar.path(), jar.identity(), jar.contract(), "");
+    }
+
+    /**
+     * Starts a live swap to a core {@link #stageForSwap} accepted; see
+     * {@code ShellContext.swapTo}.
+     */
+    public boolean swapTo(StagedCore staged, Object sender) {
+        if (staged == null || !staged.swappable()) {
+            return false;
+        }
+        CoreArchive.CoreJar jar;
+        try {
+            jar = CoreArchive.describe(staged.path());
+        } catch (CoreArchiveException gone) {
+            log.warn("the staged core is no longer usable: " + gone.getMessage());
+            return false;
+        }
+        if (!jar.identity().equals(staged.identity())) {
+            // Content-addressed files cannot change under the same name, so this is a file an
+            // operator replaced by hand between staging and swapping. Refuse rather than guess.
+            log.warn("the staged core changed between staging and swapping; refusing the swap");
+            return false;
+        }
+        return requestSwap(jar, new AudienceListener(platform.audience(), sender));
     }
 
     /**

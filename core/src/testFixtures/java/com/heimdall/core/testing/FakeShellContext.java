@@ -9,6 +9,7 @@ import com.heimdall.shell.contract.LoginGate;
 import com.heimdall.shell.contract.Registrations;
 import com.heimdall.shell.contract.ShellContext;
 import com.heimdall.shell.contract.ShellContract;
+import com.heimdall.shell.contract.StagedCore;
 import com.heimdall.shell.contract.TunnelBackend;
 import java.io.File;
 import java.nio.file.Path;
@@ -41,6 +42,8 @@ public final class FakeShellContext implements ShellContext {
     private volatile Map<String, Object> handoffIn = Collections.emptyMap();
     private volatile Map<String, Object> handoffOut = Collections.emptyMap();
     private volatile boolean deliverAccepts;
+    private volatile StagedCore staging = StagedCore.unusable("no staging set up in this test");
+    private final List<String> swapsRequested = Collections.synchronizedList(new ArrayList<String>());
 
     public FakeShellContext(String platform, Path dataDirectory) {
         this.platform = platform;
@@ -63,6 +66,19 @@ public final class FakeShellContext implements ShellContext {
     public FakeShellContext deliverAccepts(boolean value) {
         this.deliverAccepts = value;
         return this;
+    }
+
+    /** What {@link #stageRelease} answers. */
+    public FakeShellContext staging(StagedCore value) {
+        this.staging = value;
+        return this;
+    }
+
+    /** {@code "<version>/<audience>"} for each swap a core started. */
+    public List<String> swapsRequested() {
+        synchronized (swapsRequested) {
+            return new ArrayList<String>(swapsRequested);
+        }
     }
 
     /** What the core handed over, if anything. */
@@ -214,6 +230,20 @@ public final class FakeShellContext implements ShellContext {
                 }
             }
         }));
+    }
+
+    @Override
+    public StagedCore stageRelease(Path releaseJar) {
+        return staging;
+    }
+
+    @Override
+    public boolean swapTo(StagedCore staged, Object audience) {
+        if (staged == null || !staged.swappable()) {
+            return false;
+        }
+        swapsRequested.add(staged.identity().version() + "/" + audience);
+        return true;
     }
 
     @Override

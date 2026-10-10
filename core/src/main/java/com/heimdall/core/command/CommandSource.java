@@ -39,4 +39,15 @@ public interface CommandSource {
 
     /** Sends the sender a message. A no-op if they have since disconnected. */
     void sendMessage(Component message);
+
+    /**
+     * The platform's own sender object (a Bukkit or BungeeCord {@code CommandSender}, a Velocity
+     * {@code CommandSource}), or {@code null} when there is none.
+     *
+     * <p>For the one thing that outlives the core a command runs in: a hot swap the command
+     * started, whose outcome the shell reports to this sender after the core is gone (D87).
+     */
+    default Object nativeSender() {
+        return null;
+    }
 }

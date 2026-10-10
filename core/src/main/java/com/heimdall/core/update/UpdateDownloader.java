@@ -14,6 +14,8 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -51,6 +53,18 @@ import java.util.concurrent.ConcurrentHashMap;
  *       start, and the server then does not come back up. Staging turns a failed download into a
  *       no-op.
  * </ul>
+ *
+ * <h2>The published SHA-256, when there is one</h2>
+ *
+ * <p>Since the hot-swap split a download can be running code within seconds (departure D87), so
+ * {@link #download(String, File, String)} also checks the bytes against the SHA-256 the bot
+ * reported from GitHub's asset digest. The hash is computed as the body streams in, compared before
+ * the {@code .part} file is moved anywhere, and a mismatch is a refusal that leaves the target
+ * untouched, exactly like a truncated transfer. A malformed hash (anything but 64 lowercase hex
+ * characters) is refused before a byte is fetched: something between GitHub and here changed shape,
+ * and the place to learn that is a refusal, not a comparison that quietly normalised it. With no
+ * hash at all the download proceeds unverified, as v2's always did, and it is the
+ * {@link UpdateService}'s job to make sure such a jar is only ever installed for a restart.
  *
  * <p>One deliberate departure from v2: v2's {@code finally} called
  * {@code Files.deleteIfExists(tmp)} directly, so an {@code IOException} from the cleanup would
@@ -133,6 +147,22 @@ public final class UpdateDownloader {
      *     transfer failed. In every one of those cases the target is left exactly as it was.
      */
     public long download(String downloadUrl, File target) throws IOException {
+        return download(downloadUrl, target, null);
+    }
+
+    /**
+     * {@link #download(String, File)}, refusing a body whose SHA-256 is not {@code expectedSha256}.
+     *
+     * @param expectedSha256 64 lowercase hex characters, or {@code null} to skip the check
+     * @throws IOException additionally when the hash is malformed or the body does not match it; in
+     *     both cases the target is left exactly as it was
+     */
+    public long download(String downloadUrl, File target, String expectedSha256)
+            throws IOException {
+        if (expectedSha256 != null && !isWellFormedSha256(expectedSha256)) {
+            throw new IOException("The release's published SHA-256 is malformed, so the download "
+                    + "cannot be verified; refusing it.");
+        }
         if (downloadUrl == null || downloadUrl.trim().isEmpty()) {
             throw new IOException("No download URL available — run an update check first.");
         }
@@ -157,7 +187,16 @@ public final class UpdateDownloader {
         try {
             HttpURLConnection connection = open(downloadUrl.trim());
             try {
-                long total = transfer(connection, tmp);
+                MessageDigest digest = sha256();
+                long total = transfer(connection, tmp, digest);
+                if (expectedSha256 != null) {
+                    String actual = hex(digest.digest());
+                    if (!actual.equals(expectedSha256)) {
+                        throw new IOException("The download does not match the release's published "
+                                + "SHA-256 (expected " + expectedSha256.substring(0, 12) + ", got "
+                                + actual.substring(0, 12) + "); nothing was installed.");
+                    }
+                }
                 swap(tmp, target);
                 logger.info("downloaded " + total + " bytes to " + target);
                 return total;
@@ -234,8 +273,9 @@ public final class UpdateDownloader {
         }
     }
 
-    /** Streams the body into {@code tmp}, aborting past the ceiling. */
-    private long transfer(HttpURLConnection connection, File tmp) throws IOException {
+    /** Streams the body into {@code tmp}, hashing it as it goes, aborting past the ceiling. */
+    private long transfer(HttpURLConnection connection, File tmp, MessageDigest digest)
+            throws IOException {
         long total = 0;
         InputStream in = new BufferedInputStream(connection.getInputStream());
         try {
@@ -250,6 +290,7 @@ public final class UpdateDownloader {
                                 + policy.maxBytes() + " bytes).");
                     }
                     out.write(buffer, 0, read);
+                    digest.update(buffer, 0, read);
                 }
             } finally {
                 out.close();
@@ -301,6 +342,38 @@ public final class UpdateDownloader {
         } finally {
             Files.deleteIfExists(staged);
         }
+    }
+
+    /** Whether {@code value} is exactly 64 lowercase hex characters. */
+    static boolean isWellFormedSha256(String value) {
+        if (value == null || value.length() != 64) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static MessageDigest sha256() throws IOException {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException impossible) {
+            // Every Java SE runtime is required to provide SHA-256.
+            throw new IOException("this JVM has no SHA-256", impossible);
+        }
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder out = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            out.append(Character.forDigit((b >> 4) & 0xF, 16));
+            out.append(Character.forDigit(b & 0xF, 16));
+        }
+        return out.toString();
     }
 
     /**

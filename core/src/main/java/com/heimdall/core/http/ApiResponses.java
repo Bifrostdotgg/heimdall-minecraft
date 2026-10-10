@@ -236,6 +236,9 @@ final class ApiResponses {
                 .releaseNotes(string(data, "releaseNotes"))
                 .htmlUrl(string(data, "htmlUrl"))
                 .publishedAt(string(data, "publishedAt"))
+                // GitHub's asset digest, as the bot passes it on: 64 lowercase hex, or absent when
+                // the bot could not say. Absent means "never swap this in live" (D87).
+                .sha256(string(data, "sha256"))
                 .build();
     }
 

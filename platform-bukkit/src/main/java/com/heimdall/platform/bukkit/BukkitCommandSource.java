@@ -64,4 +64,10 @@ final class BukkitCommandSource implements CommandSource {
     public String toString() {
         return "BukkitCommandSource{" + sender.getName() + "}";
     }
+
+    /** The platform's sender, so a hot swap this command starts can report back to it (D87). */
+    @Override
+    public Object nativeSender() {
+        return sender;
+    }
 }

@@ -20,6 +20,7 @@ import com.heimdall.platform.bukkit.adapter.TickSource;
 import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.HeimdallModules;
+import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
 import com.heimdall.shell.contract.ShellContext;
 import java.io.File;
@@ -182,12 +183,14 @@ final class BukkitBootstrap {
         // modules must be registered before the first reconcile, and start() is what runs it.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
-                .pluginVersion(BuildConstants.VERSION);
+                .pluginVersion(BuildConstants.VERSION)
+                .core(shell.core().toString(), shell.shellVersion());
         HeimdallModules.registerAll(runtime, admin);
 
         BukkitUpdateInstaller installer = new BukkitUpdateInstaller(logger, ownJar, dataFolder);
         UpdateWiring.Installed update = UpdateWiring.install(
-                logger, BuildConstants.VERSION, runtime, installer.isUsable() ? installer : null);
+                logger, BuildConstants.VERSION, runtime, installer.isUsable() ? installer : null,
+                new ShellHotSwap(shell));
         updates = update.periodicChecks();
         admin.updates(update.admin());
 

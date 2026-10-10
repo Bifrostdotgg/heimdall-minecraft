@@ -75,6 +75,18 @@ public interface UpdateAdmin {
      */
     String updateNow();
 
+    /**
+     * Starts the live swap the last {@link #updateNow()} prepared, if it prepared one (departure
+     * D87). Called by the command only after it has printed {@code updateNow()}'s sentence, because
+     * the swap stops the core that is printing.
+     *
+     * @param audience the platform sender to report the swap to, or {@code null}
+     * @return whether a swap was started
+     */
+    default boolean startPendingSwap(Object audience) {
+        return false;
+    }
+
     /** Whether the last successful check found something newer. */
     boolean isUpdateAvailable();
 

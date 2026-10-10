@@ -64,6 +64,10 @@ final class StatusSubcommand implements AdminSubcommand {
 
         source.sendMessage(Msg.legacy("§6Heimdall §fv" + context.pluginVersion()
                 + " §8— §7" + describeServer(runtime)));
+        if (!context.core().isEmpty()) {
+            source.sendMessage(Msg.legacy("§7core: §f" + context.core()
+                    + "   §7shell: §f" + context.shellVersion()));
+        }
         source.sendMessage(Msg.legacy("§7role: §f" + context.role().wireName()
                 + "   §7serverId: §f" + orNone(bootstrap.serverId())));
         // The endpoint is the whitelabel field: a customer claiming against their own instance has a

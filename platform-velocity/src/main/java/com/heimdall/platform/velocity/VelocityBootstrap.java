@@ -16,6 +16,7 @@ import com.heimdall.core.wiring.UpdateWiring;
 import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.HeimdallModules;
+import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
 import com.heimdall.shell.contract.ShellContext;
 import com.velocitypowered.api.event.EventManager;
@@ -150,14 +151,16 @@ final class VelocityBootstrap {
         // next config push.
         AdminContext.Builder admin = AdminContext.builder(runtime)
                 .role(role)
-                .pluginVersion(BuildConstants.VERSION);
+                .pluginVersion(BuildConstants.VERSION)
+                .core(shell.core().toString(), shell.shellVersion());
         HeimdallModules.registerAll(runtime, admin);
 
         UpdateWiring.Installed update = UpdateWiring.install(
                 logger,
                 BuildConstants.VERSION,
                 runtime,
-                new VelocityUpdateInstaller(logger, proxy, plugin, dataDirectory));
+                new VelocityUpdateInstaller(logger, proxy, plugin, dataDirectory),
+                new ShellHotSwap(shell));
         updates = update.periodicChecks();
         admin.updates(update.admin());
 
