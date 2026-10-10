@@ -2235,6 +2235,11 @@ javac inlines it, so the value is the one the core was built against. The core m
 `core.properties` carry it too, so the updater can decide without loading a class. **Bump it** when
 anything in `:shell-api` or `:api` changes in a way an older shell could not serve.
 
+One change was made without a bump: `ShellContext.stageRelease` gained its `expectedSha256`
+parameter while the shell was still unreleased. No released tag contains the shell, so no installed
+shell can meet a core built against the old signature, and contract 1 is defined as the signature
+that ships. Once a shell has shipped, a change like that needs a bump.
+
 #### At server start
 
 The shell reads the core out of the jar the platform loaded (through a fresh `JarFile`, never the
@@ -2262,11 +2267,19 @@ never a server thread, because stopping a core waits for its executors to drain.
    be read, was built for another contract, or whose entry point will not construct is refused here,
    and nothing about the running server has changed.
 2. **Take the login gate away, then stop the old core.** New logins from here wait for the next
-   core instead of reaching one that is about to stop, and logins the old core is already deciding
-   are waited for (up to 5 seconds) before it is stopped, so none of them meets a runtime half torn
-   down. Then the old core stops with `ShellContext.isSwapping()` true so it hands state over, the
-   shell closes anything the core left tracked, newest first, and sweeps the platform for anything
-   still pointing into the old classloader.
+   core instead of reaching one that is about to stop. A login that was already handed the old
+   core's gate holds a *lease*, counted from the moment it got the gate rather than when it starts
+   deciding, and the swap waits up to 5 seconds for every lease to come back. That is shorter than
+   a login's bot-call budget, so it is a bound, not a promise that every decision finishes: a lease
+   still out when the wait ends is **voided**, and whatever the old core then decides for that
+   login, the shell refuses it with *"Server is updating, try again in a moment"*. The guarantee is
+   therefore that no login is admitted by a core that has been stopped (not that no decision ever
+   runs against a half torn down core): a slow bot call that ends in the API-fallback "allow" after
+   the drain gave up is refused, not admitted. Stopping a core outside a swap (one that failed while
+   starting, or at shutdown) voids its leases the same way. Then the old core stops with
+   `ShellContext.isSwapping()` true so it hands state over, the shell closes anything the core left
+   tracked, newest first, and sweeps the platform for anything still pointing into the old
+   classloader.
 3. **Start the new core** with the old one's handoff.
 4. **If that throws, roll back**: unwind what the new core half-built, then start the old core
    again from its jar in a *fresh* classloader (never by restarting the old instance, whose statics
@@ -2450,12 +2463,17 @@ every window would hand players a fresh allowance, as v2's reload did.
   them, an enable that throws leaves logins refused, and the shell's `swap` verb is refused without
   `heimdall.admin`.
 - **The pieces**: `RelayTableTest`, `LoginGateHolderTest` (hold then deny, released early when no
-  core is coming, no-core deny, in-flight drain and its bound), `RegistrationsTest` (order, never
+  core is coming, no-core deny; leases counted from the hand-out, including a swap that drains
+  between the hand-out and the decision, a decision outliving the drain voided, a retired
+  generation's leases voided), `RegistrationsTest` (order, never
   stopping early, idempotence), `HandoffTest`, `CoreArchiveTest`, `ShellTunnelTest`,
   `CoreRegistrationsTest`, `BungeeLoginGateTest` against BungeeCord's real `AsyncEvent` intents, and
   `BukkitLoginGateTest` and `VelocityLoginGateTest` against the real login events (a bound gate
   decides, a throwing gate refuses, an already-refused login is skipped, no core refuses, mid-swap
-  holds for the next core). `BukkitSweepTest` runs the
+  holds for the next core, and an "allow" that outlives a swap's drain is refused). `ShellHostTest`
+  also covers a login still out when a swap's drain gives up, shutdown voiding a held lease,
+  shutdown's bounded wait on a hung swap, a throwing progress listener, and a swap cancelled during
+  its settle delay being logged as a cancellation rather than a failure. `BukkitSweepTest` runs the
   sweep on Bukkit's real `HandlerList`. `BukkitListenerShapeTest` fails the build on a public Bukkit
   listener class in the core.
 - **The updater**: `UpdateDownloaderTest` (hash match, mismatch leaving the old jar untouched,
@@ -2464,6 +2482,7 @@ every window would hand players a fresh allowance, as v2's reload did.
   `UpdateServiceTest` (verified and swappable, no hash, contract change, failed install, a refused
   swap reported as restart-only), `RemoteUpdateHandlerTest` (the reply says whether the swap was
   accepted), `BootstrapStoreTest` (the pin round-trips and the official default is never written),
+  `UpdateWiringTest` (the wired downloader uses the configured repository),
   and `VelocityUpdateInstallerTest` and `BungeeUpdateInstallerTest` (a refused download is not
   retried into the data directory; a jar that cannot be replaced still is).
 - **The artifact**: `ReleaseJarTest` extracts the core from the built release jar, checks its hash,

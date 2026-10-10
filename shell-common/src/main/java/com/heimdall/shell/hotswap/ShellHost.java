@@ -83,7 +83,9 @@ public final class ShellHost {
 
     /**
      * How long a swap waits, with the gate already cleared, for logins the outgoing core is still
-     * deciding before it stops that core.
+     * deciding before it stops that core. Deliberately shorter than a login's bot-call budget: a
+     * decision still out when this runs out is voided, so it is refused rather than admitted (see
+     * {@link LoginGateHolder}).
      */
     static final long GATE_DRAIN_MS = 5_000L;
 
@@ -125,6 +127,9 @@ public final class ShellHost {
 
     /** How long shutdown waits for a swap; a field so tests can shorten it. */
     volatile long shutdownWaitMs = SHUTDOWN_WAIT_MS;
+
+    /** How long a swap drains logins; a field so tests can shorten it. */
+    volatile long gateDrainMs = GATE_DRAIN_MS;
 
     public ShellHost(ShellPlatform platform, String shellVersion) {
         this(platform, shellVersion, new LoginGateHolder(platform == null ? null : platform.log()));
@@ -533,8 +538,20 @@ public final class ShellHost {
                             Thread.sleep(delayMs);
                         }
                         outcome = swapTo(source, told);
+                    } catch (InterruptedException stopping) {
+                        // Shutdown interrupts the swap thread, most often during the settle delay.
+                        // Nothing failed: the swap was cancelled, and saying so at ERROR would
+                        // read as a fault in every shutdown log.
+                        Thread.currentThread().interrupt();
+                        log.info("a pending core swap was cancelled because the server is stopping");
+                        outcome = new SwapOutcome(SwapOutcome.Kind.REFUSED,
+                                "the swap was cancelled: the server is stopping", runningCore());
                     } catch (Throwable broken) {
-                        log.error("the swap failed unexpectedly", broken);
+                        if (shutDown) {
+                            log.info("a core swap was cut short by server shutdown: " + broken);
+                        } else {
+                            log.error("the swap failed unexpectedly", broken);
+                        }
                         outcome = new SwapOutcome(SwapOutcome.Kind.REFUSED,
                                 "the swap failed unexpectedly: " + broken, runningCore());
                     } finally {
@@ -599,13 +616,14 @@ public final class ShellHost {
                 tell(listener, "Swapping " + from + " for core " + incoming.identity() + "...");
                 Map<String, Object> handoff = Collections.emptyMap();
                 if (outgoing != null) {
-                    // New logins now wait for the next core; logins the outgoing core is already
-                    // deciding finish first, so none of them meets a runtime half torn down (where
-                    // the whitelist's API-fallback could admit it).
+                    // New logins now wait for the next core. Logins the outgoing core already holds a
+                    // lease for get a bounded time to finish; any still out after it are voided, so
+                    // whatever the stopped core decides for them, they are refused, never admitted.
                     gates.suspend();
-                    if (!gates.drain(GATE_DRAIN_MS)) {
-                        log.warn("a login was still being decided after " + GATE_DRAIN_MS
-                                + "ms; stopping the old core anyway");
+                    long drainMs = gateDrainMs;
+                    if (!gates.drain(drainMs)) {
+                        log.warn("a login was still being decided after " + drainMs
+                                + "ms; it will be refused, and the old core is stopping");
                     }
                     handoff = stop(outgoing, true);
                     current = null;
@@ -762,6 +780,14 @@ public final class ShellHost {
      * @return what the core handed over (empty unless {@code forSwap})
      */
     Map<String, Object> stop(Generation generation, boolean forSwap) {
+        // Its gate goes before it stops, and any login still holding a lease on it is voided: a
+        // decision finished by a stopping core is refused, never admitted. A swap has already
+        // drained by now; this is for a core that failed during its start, and for shutdown.
+        int voided = gates.retire();
+        if (voided > 0) {
+            log.warn(voided + " login(s) were still being decided by core "
+                    + generation.loaded.identity() + " as it stopped; they will be refused");
+        }
         generation.context.beginStopping(forSwap);
         try {
             generation.loaded.core().stop();

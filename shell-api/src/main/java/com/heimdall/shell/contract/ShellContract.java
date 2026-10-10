@@ -20,7 +20,15 @@ package com.heimdall.shell.contract;
  */
 public final class ShellContract {
 
-    /** The contract this build implements. See the class note before changing it. */
+    /**
+     * The contract this build implements. See the class note before changing it.
+     *
+     * <p>Bump it on any change to a type in this package that a core and a shell from different
+     * builds would disagree about. One exception so far: {@code ShellContext.stageRelease} gained
+     * its {@code expectedSha256} parameter without a bump, because no released tag contained the
+     * shell yet, so no installed shell could meet a core built against the old signature
+     * (departure D87). Once a shell has shipped, that exception is gone.
+     */
     public static final int VERSION = 1;
 
     /**

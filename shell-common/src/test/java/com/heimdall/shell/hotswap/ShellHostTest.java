@@ -367,47 +367,161 @@ class ShellHostTest {
     }
 
     @Test
-    @DisplayName("a swap clears the gate and waits for logins the old core is still deciding")
+    @DisplayName("a swap clears the gate and waits for a login holding the old core's gate")
     void swapDrainsLoginsInFlight() throws Exception {
         bootWith("alpha");
         final LoginGateHolder gates = host.loginGate();
-        final CountDownLatch entered = new CountDownLatch(1);
-        final CountDownLatch release = new CountDownLatch(1);
-        Thread login = new Thread(() -> gates.decide(new LoginGate() {
-            @Override
-            public void decide(Object event) {
-                entered.countDown();
-                try {
-                    release.await(5, TimeUnit.SECONDS);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }, "login"));
-        login.start();
-        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        // Handed the old core's gate, not yet deciding: the window the lease exists to close.
+        LoginGateHolder.Decision held = gates.lease();
+        assertNotNull(held);
         StateProbe probe = new StateProbe(gates);
 
         assertTrue(host.requestSwap(jar("beta"), probe));
         Thread.sleep(200L);
 
         assertFalse(platform.journal().contains("stop 1.0.0-alpha swapping=true"),
-                "the old core stopped under a login it was still deciding");
+                "the old core stopped under a login that held its gate");
         assertNull(gates.current(), "new logins must not reach the outgoing core");
         assertSame(LoginGateHolder.State.SWAPPING, gates.state());
-        final AtomicReference<LoginGateHolder.Decision> held =
+        final AtomicReference<LoginGateHolder.Decision> next =
                 new AtomicReference<LoginGateHolder.Decision>();
-        Thread next = new Thread(() -> held.set(gates.await(5_000L)));
-        next.start();
+        Thread arriving = new Thread(() -> next.set(gates.await(5_000L)));
+        arriving.start();
 
-        release.countDown();
-        login.join(2_000L);
+        assertTrue(gates.decide(held, "steve"), "decided while the old core still ran: it stands");
 
         assertTrue(Fixtures.eventually(() -> probe.done.get() != null));
         assertTrue(probe.done.get().succeeded(), probe.done.get().toString());
-        next.join(2_000L);
-        assertNotNull(held.get().gate(), "a login arriving mid-swap is held for the next core");
-        assertSame(gates.current(), held.get().gate());
+        List<String> journal = platform.journal();
+        assertTrue(journal.contains("gate 1.0.0-alpha steve"), journal.toString());
+        assertTrue(journal.indexOf("gate 1.0.0-alpha steve")
+                        < journal.indexOf("stop 1.0.0-alpha swapping=true"),
+                "the old core must decide before it stops: " + journal);
+        arriving.join(2_000L);
+        assertNotNull(next.get().gate(), "a login arriving mid-swap is held for the next core");
+        assertSame(gates.current(), next.get().gate());
+    }
+
+    @Test
+    @DisplayName("a login still out when the drain gives up is refused, and never reaches the old core")
+    void loginOutlivingTheDrainIsRefused() throws Exception {
+        bootWith("alpha");
+        host.gateDrainMs = 100L;
+        LoginGateHolder.Decision held = host.loginGate().lease();
+
+        SwapOutcome outcome = host.swap(jar("beta"), SwapListener.NONE);
+
+        assertTrue(outcome.succeeded(), outcome.toString());
+        assertTrue(platform.log.contains("it will be refused"), platform.log.lines().toString());
+        assertFalse(host.loginGate().decide(held, "steve"),
+                "a decision through a stopped core must not stand");
+        assertFalse(platform.journal().contains("gate 1.0.0-alpha steve"),
+                "the stopped core was asked: " + platform.journal());
+    }
+
+    @Test
+    @DisplayName("shutdown voids a login still holding the running core's gate")
+    void shutdownVoidsLeases() throws Exception {
+        ShellHost booted = bootWith("alpha");
+        ShellHost.Generation last = booted.currentGeneration();
+        LoginGateHolder.Decision held = booted.loginGate().lease();
+
+        booted.shutdown();
+        host = null;
+        last.loaded.closeLoader(platform.log);
+
+        assertFalse(booted.loginGate().decide(held, "steve"));
+        assertFalse(platform.journal().contains("gate 1.0.0-alpha steve"), platform.journal().toString());
+    }
+
+    @Test
+    @DisplayName("shutdown waits a bounded time for a hung swap, then stops without it")
+    void shutdownDoesNotWaitForeverOnASwap() throws Exception {
+        bootWith("alpha");
+        host.shutdownWaitMs = 200L;
+        final CountDownLatch hung = new CountDownLatch(1);
+        final CountDownLatch inSwap = new CountDownLatch(1);
+        // Holds the swap (and its transition lock) inside the first progress line, ignoring the
+        // interrupt shutdown sends: a core whose start or stop hangs.
+        SwapListener stuck = new SwapListener() {
+            @Override
+            public void progress(String line) {
+                inSwap.countDown();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (hung.getCount() > 0 && System.nanoTime() < deadline) {
+                    try {
+                        hung.await(50, TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException ignored) {
+                        // Deliberately ignored, like a core that does not answer interrupts.
+                    }
+                }
+            }
+
+            @Override
+            public void finished(SwapOutcome outcome) {
+            }
+        };
+        assertTrue(host.requestSwap(jar("beta"), stuck));
+        assertTrue(inSwap.await(2, TimeUnit.SECONDS));
+        final ShellHost stopping = host;
+        Thread shutdown = new Thread(stopping::shutdown);
+
+        shutdown.start();
+        shutdown.join(5_000L);
+
+        boolean finished = !shutdown.isAlive();
+        hung.countDown();
+        shutdown.join(5_000L);
+        assertTrue(finished, "server shutdown waited on a hung swap");
+        assertTrue(platform.log.errors().stream().anyMatch(e -> e.contains("did not stop")),
+                platform.log.lines().toString());
+        assertTrue(Fixtures.eventually(() -> !stopping.isSwapping()));
+    }
+
+    @Test
+    @DisplayName("a progress listener that throws cannot abort a swap halfway")
+    void throwingListenerCannotAbortASwap() throws Exception {
+        bootWith("alpha");
+        SwapListener broken = new SwapListener() {
+            @Override
+            public void progress(String line) {
+                throw new IllegalStateException("the sender went away");
+            }
+
+            @Override
+            public void finished(SwapOutcome outcome) {
+            }
+        };
+
+        SwapOutcome outcome = host.swap(jar("beta"), broken);
+
+        assertTrue(outcome.succeeded(), outcome.toString());
+        assertEquals("1.0.0-beta", host.runningCore().version());
+        assertSame(LoginGateHolder.State.RUNNING, host.loginGate().state());
+        assertNotNull(host.loginGate().current());
+        assertFalse(host.isSwapping());
+    }
+
+    @Test
+    @DisplayName("a swap cancelled by shutdown during its settle delay is not logged as a failure")
+    void cancelledSettleIsQuiet() throws Exception {
+        ShellHost booted = bootWith("alpha");
+        ShellHost.Generation last = booted.currentGeneration();
+        booted.settleMs = 5_000L;
+        StagedCore beta = staged(
+                Fixtures.release(data, "beta", "1.0.0-beta", ShellContract.VERSION, null));
+        assertTrue(booted.swapTo(beta, "admin"));
+        Thread.sleep(100L);
+
+        booted.shutdown();
+        host = null;
+        last.loaded.closeLoader(platform.log);
+
+        assertTrue(Fixtures.eventually(() -> platform.log.contains("cancelled")),
+                platform.log.lines().toString());
+        assertFalse(platform.log.errors().stream().anyMatch(e -> e.contains("unexpectedly")),
+                platform.log.errors().toString());
+        assertFalse(platform.journal().contains("start 1.0.0-beta count=1"), "the swap still ran");
     }
 
     @Test

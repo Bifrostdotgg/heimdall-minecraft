@@ -218,6 +218,11 @@ public final class UpdateWiring {
             this.service = service;
         }
 
+        /** The service behind {@link #admin()}; for tests in this package. */
+        UpdateService service() {
+            return service;
+        }
+
         /** What {@code /hd version} and {@code /hd update} talk to. Never {@code null}. */
         public UpdateAdmin admin() {
             return admin;

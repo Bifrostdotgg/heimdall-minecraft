@@ -105,6 +105,14 @@ public final class UpdateService {
         this.hotSwap = hotSwap == null ? HotSwap.NONE : hotSwap;
     }
 
+    /**
+     * The downloader {@link #updateNow()} installs with, or {@code null} with no installer. Exposed
+     * so a test can check which release repository it is pinned to (departure D87).
+     */
+    public UpdateDownloader downloader() {
+        return downloader;
+    }
+
     // ── Reads ────────────────────────────────────────────────────────────────
 
     /** The version this server is running, with any leading {@code v} stripped. */

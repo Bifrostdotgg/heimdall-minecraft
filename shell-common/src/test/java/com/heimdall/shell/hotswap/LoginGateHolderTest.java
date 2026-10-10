@@ -11,6 +11,8 @@ import com.heimdall.core.util.Registration;
 import com.heimdall.shell.contract.LoginGate;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -150,9 +152,11 @@ class LoginGateHolderTest {
 
         final CountDownLatch entered = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
+        final AtomicInteger calls = new AtomicInteger();
 
         @Override
         public void decide(Object event) {
+            calls.incrementAndGet();
             entered.countDown();
             try {
                 release.await(5, TimeUnit.SECONDS);
@@ -162,14 +166,69 @@ class LoginGateHolderTest {
         }
     }
 
+    /** A gate that counts its calls and decides nothing. */
+    private static final class CountingGate implements LoginGate {
+
+        final AtomicInteger calls = new AtomicInteger();
+
+        @Override
+        public void decide(Object event) {
+            calls.incrementAndGet();
+        }
+    }
+
+    private LoginGateHolder runningWith(LoginGate gate) {
+        LoginGateHolder gates = new LoginGateHolder(log, 5_000L);
+        gates.bind(gate);
+        gates.state(LoginGateHolder.State.RUNNING);
+        return gates;
+    }
+
     @Test
-    @DisplayName("drain waits for a login a gate is still deciding, and returns once it is done")
+    @DisplayName("a login is counted from the moment it is handed the gate, not when it starts deciding")
+    void leaseCountsFromTheHandOut() {
+        // The interleaving the review found, made deterministic: the login has been handed the old
+        // core's gate, the swap suspends and drains before the login calls decide. The drain must
+        // see it, and the late decision must not run on the old core at all.
+        CountingGate old = new CountingGate();
+        LoginGateHolder gates = runningWith(old);
+        LoginGateHolder.Decision handedOut = gates.await();
+        assertSame(old, handedOut.gate());
+
+        gates.suspend();
+        assertFalse(gates.drain(50L), "the drain must count a login that holds the gate");
+
+        assertFalse(gates.decide(handedOut, "login"), "a voided lease's decision never stands");
+        assertEquals(0, old.calls.get(), "the retired gate was asked anyway");
+        assertTrue(gates.drain(0L));
+    }
+
+    @Test
+    @DisplayName("the non-waiting lease is counted the same way")
+    void nonWaitingLeaseIsCounted() {
+        CountingGate old = new CountingGate();
+        LoginGateHolder gates = runningWith(old);
+        LoginGateHolder.Decision handedOut = gates.lease();
+        assertSame(old, handedOut.gate());
+
+        gates.suspend();
+
+        assertFalse(gates.drain(50L));
+        assertNull(gates.lease(), "nothing to lease while suspended");
+        assertFalse(gates.decide(handedOut, "login"));
+        assertEquals(0, old.calls.get());
+    }
+
+    @Test
+    @DisplayName("drain waits for a login a gate is still deciding, and that decision stands")
     void drainWaitsForInFlight() throws Exception {
-        final LoginGateHolder gates = new LoginGateHolder(log, 5_000L);
         final BlockingGate gate = new BlockingGate();
-        Thread login = new Thread(() -> gates.decide(gate, "login"));
+        final LoginGateHolder gates = runningWith(gate);
+        final AtomicBoolean stood = new AtomicBoolean();
+        Thread login = new Thread(() -> stood.set(gates.decide(gates.await(), "login")));
         login.start();
         assertTrue(gate.entered.await(2, TimeUnit.SECONDS));
+        gates.suspend();
         Thread releaser = new Thread(() -> {
             try {
                 Thread.sleep(150L);
@@ -187,37 +246,81 @@ class LoginGateHolderTest {
         assertTrue(waited >= 100L, "drain returned while a login was in flight: " + waited + "ms");
         login.join();
         releaser.join();
+        assertTrue(stood.get(), "finished before the drain gave up, so the old core's word stands");
     }
 
     @Test
-    @DisplayName("drain gives up after its bound and says so")
-    void drainIsBounded() throws Exception {
-        final LoginGateHolder gates = new LoginGateHolder(log, 5_000L);
+    @DisplayName("a decision that outlives the drain does not stand, whatever the gate decided")
+    void decisionOutlivingTheDrainIsVoided() throws Exception {
         final BlockingGate gate = new BlockingGate();
-        Thread login = new Thread(() -> gates.decide(gate, "login"));
+        final LoginGateHolder gates = runningWith(gate);
+        final AtomicBoolean stood = new AtomicBoolean(true);
+        Thread login = new Thread(() -> stood.set(gates.decide(gates.await(), "login")));
         login.start();
         assertTrue(gate.entered.await(2, TimeUnit.SECONDS));
+        gates.suspend();
 
-        assertFalse(gates.drain(100L));
+        assertFalse(gates.drain(100L), "the drain gives up on a slow decision");
 
         gate.release.countDown();
         login.join();
-        assertTrue(gates.drain(0L), "nothing is in flight any more");
+        assertFalse(stood.get(), "a decision finished after the drain gave up must be refused");
+        assertTrue(gates.drain(0L), "and it is no longer counted");
     }
 
     @Test
-    @DisplayName("a gate that throws still leaves the in-flight count, so a later drain is not stuck")
+    @DisplayName("retiring a generation takes its gate and voids every lease still out")
+    void retireVoidsLeases() {
+        CountingGate old = new CountingGate();
+        LoginGateHolder gates = runningWith(old);
+        LoginGateHolder.Decision handedOut = gates.lease();
+
+        assertEquals(1, gates.retire());
+
+        assertNull(gates.current());
+        assertFalse(gates.decide(handedOut, "login"));
+        assertEquals(0, old.calls.get());
+    }
+
+    @Test
+    @DisplayName("a gate that throws still gives its lease back, so a later drain is not stuck")
     void throwingDecisionIsNotLeftInFlight() {
-        LoginGateHolder gates = new LoginGateHolder(log, 5_000L);
-        LoginGate broken = new LoginGate() {
+        LoginGateHolder gates = runningWith(new LoginGate() {
             @Override
             public void decide(Object event) {
                 throw new IllegalStateException("boom");
             }
-        };
+        });
 
-        assertThrows(IllegalStateException.class, () -> gates.decide(broken, "login"));
+        assertThrows(IllegalStateException.class, () -> gates.decide(gates.await(), "login"));
         assertTrue(gates.drain(0L));
+    }
+
+    @Test
+    @DisplayName("a lease given back without deciding is no longer counted, and cannot decide later")
+    void releasedLeaseIsDone() {
+        CountingGate gate = new CountingGate();
+        LoginGateHolder gates = runningWith(gate);
+        LoginGateHolder.Decision handedOut = gates.lease();
+
+        handedOut.release();
+        handedOut.release();
+
+        assertTrue(gates.drain(0L));
+        assertFalse(gates.decide(handedOut, "login"));
+        assertEquals(0, gate.calls.get());
+    }
+
+    @Test
+    @DisplayName("a refusal is not a lease and cannot decide")
+    void refusalCannotDecide() {
+        LoginGateHolder gates = new LoginGateHolder(log, 5_000L);
+        gates.state(LoginGateHolder.State.DOWN);
+
+        LoginGateHolder.Decision refusal = gates.await();
+
+        assertThrows(IllegalArgumentException.class, () -> gates.decide(refusal, "login"));
+        refusal.release();
     }
 
     @Test

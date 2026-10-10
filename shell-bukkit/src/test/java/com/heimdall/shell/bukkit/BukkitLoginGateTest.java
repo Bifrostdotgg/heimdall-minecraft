@@ -1,6 +1,7 @@
 package com.heimdall.shell.bukkit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -13,6 +14,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 import org.junit.jupiter.api.DisplayName;
@@ -154,5 +157,41 @@ class BukkitLoginGateTest {
 
         assertEquals(1, decisions.get(), "the next core's gate decided it");
         assertSame(AsyncPlayerPreLoginEvent.Result.KICK_WHITELIST, event.getLoginResult());
+    }
+
+    /** A gate that admits (decides nothing) only once {@code release} is counted down. */
+    private static LoginGate slowAdmitting(final CountDownLatch entered, final CountDownLatch release) {
+        return new LoginGate() {
+            @Override
+            public void decide(Object event) {
+                entered.countDown();
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        };
+    }
+
+    @Test
+    @DisplayName("a decision that outlives a swap's drain is refused, though the old core admitted it")
+    void decisionOutlivingTheDrainIsRefused() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        final LoginGateHolder gates = running(slowAdmitting(entered, release));
+        final AsyncPlayerPreLoginEvent event = login();
+        Thread deciding = new Thread(() -> new BukkitLoginGate(gates, log).onPreLogin(event));
+        deciding.start();
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+
+        gates.suspend();
+        assertFalse(gates.drain(100L));
+        release.countDown();
+        deciding.join(2_000L);
+
+        assertSame(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, event.getLoginResult(),
+                "a stopped core's 'allow' admitted the player");
+        assertEquals(ShellMessages.LOGIN_UPDATING, event.getKickMessage());
     }
 }

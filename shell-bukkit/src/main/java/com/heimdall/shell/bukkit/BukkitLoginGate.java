@@ -42,14 +42,22 @@ final class BukkitLoginGate implements Listener {
             event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER, decision.refusal());
             return;
         }
+        boolean stands;
         try {
-            gates.decide(decision.gate(), event);
+            stands = gates.decide(decision, event);
         } catch (Throwable broken) {
             // The core's own listener contains everything, so this is a gate that could not run at
             // all: a classloader closed under it, most likely. No core decided, so the login is
             // refused, as it is whenever no core decides.
             log.error("the core's login gate failed for " + event.getName()
                     + "; refusing the login", broken);
+            event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER,
+                    com.heimdall.shell.hotswap.ShellMessages.LOGIN_UPDATING);
+            return;
+        }
+        if (!stands) {
+            // Decided by a core that a swap stopped before it finished: not a decision any running
+            // core stands behind, so refused, whatever it said (departure D87).
             event.disallow(AsyncPlayerPreLoginEvent.Result.KICK_OTHER,
                     com.heimdall.shell.hotswap.ShellMessages.LOGIN_UPDATING);
         }

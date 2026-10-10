@@ -2,6 +2,9 @@ package com.heimdall.shell.hotswap;
 
 import com.heimdall.core.util.Registration;
 import com.heimdall.shell.contract.LoginGate;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
 
 /**
  * The shell's half of the login gate: which core gate is current, and what to do while there is
@@ -22,6 +25,20 @@ import com.heimdall.shell.contract.LoginGate;
  *   <li><strong>A core running with no gate bound</strong>: a core bug, refused at once. Every
  *       platform core binds one, so this is a guard, not a mode.
  * </ul>
+ *
+ * <h2>Leases: a decision made by a retired core does not count</h2>
+ *
+ * <p>A gate is handed out as a <em>lease</em> ({@link #await}, {@link #lease}), counted from that
+ * moment, under the same lock that hands it out, and released when {@link #decide} returns. A swap
+ * takes the gate away ({@link #suspend}) and then waits a bounded time for every lease to come back
+ * ({@link #drain}). Counting from the hand-out, not from the call into the gate, is what closes the
+ * window between "this login got the old core's gate" and "it started deciding". If the drain gives
+ * up, or a generation is stopped with leases still out ({@link #retire}), those leases are
+ * <strong>voided</strong>: {@link #decide} then answers that the decision does not stand, whatever
+ * the old core decided, and the platform refuses the login with
+ * {@link ShellMessages#LOGIN_UPDATING}. So a slow decision (a bot call can take far longer than the
+ * drain waits) can never admit a player through a core that has since been stopped, where an
+ * API-fallback "allow" would otherwise let it.
  *
  * <p>A running core's own policy is unchanged and separate: its pipeline admits on an internal
  * failure, because a bug in the whitelist check must not lock everybody out. That is a decision a
@@ -46,15 +63,32 @@ public final class LoginGateHolder {
         DOWN
     }
 
-    /** The outcome of {@link #await}: a gate to ask, or a refusal message. */
+    /**
+     * The outcome of {@link #await}: a leased gate to ask, or a refusal message. A lease is given
+     * back by {@link LoginGateHolder#decide}, or by {@link #release()} on a path that will not
+     * decide.
+     */
     public static final class Decision {
 
         private final LoginGate gate;
         private final String refusal;
+        private final LoginGateHolder lessor;
 
-        private Decision(LoginGate gate, String refusal) {
+        /** Guarded by the lessor's lock. */
+        private boolean released;
+        private boolean voided;
+
+        private Decision(LoginGate gate, String refusal, LoginGateHolder lessor) {
             this.gate = gate;
             this.refusal = refusal;
+            this.lessor = lessor;
+        }
+
+        /** Gives the lease back without deciding. Idempotent; a refusal has nothing to give. */
+        public void release() {
+            if (lessor != null) {
+                lessor.release(this);
+            }
         }
 
         /** The gate to ask, or {@code null} when the login must be refused. */
@@ -74,8 +108,9 @@ public final class LoginGateHolder {
     private LoginGate gate;
     private State state = State.STARTING;
 
-    /** Logins a core gate is deciding right now; guarded by {@link #lock}. */
-    private int inFlight;
+    /** Leases handed out and not yet given back; guarded by {@link #lock}. */
+    private final Set<Decision> leased =
+            Collections.newSetFromMap(new IdentityHashMap<Decision, Boolean>());
     private boolean warnedNoGate;
 
     /** How long {@link #await()} waits. */
@@ -113,23 +148,71 @@ public final class LoginGateHolder {
     }
 
     /**
-     * Asks {@code gate} to decide {@code event}, counted as in flight while it does, so a swap can
-     * wait for logins the outgoing core is deciding before it stops that core ({@link #drain}).
-     * Platform listeners call this rather than {@code gate.decide} directly. Throws whatever the
-     * gate throws.
+     * The current gate as a lease, without waiting, or {@code null} when none is bound. For a
+     * platform that decides synchronously when it can and waits elsewhere when it cannot.
      */
-    public void decide(LoginGate gate, Object event) {
+    public Decision lease() {
         synchronized (lock) {
-            inFlight++;
+            return gate == null ? null : leaseLocked();
+        }
+    }
+
+    private Decision leaseLocked() {
+        Decision lease = new Decision(gate, null, this);
+        leased.add(lease);
+        return lease;
+    }
+
+    /**
+     * Asks the leased gate to decide {@code event} and gives the lease back. Platform listeners
+     * call this rather than {@code gate.decide} directly.
+     *
+     * @return whether the decision stands. {@code false} when the lease was voided (the drain gave
+     *     up on it, or its core was stopped) before or while it decided: the platform must then
+     *     refuse the login with {@link ShellMessages#LOGIN_UPDATING}, whatever the event now says.
+     *     A lease voided before deciding never reaches the gate at all.
+     * @throws IllegalArgumentException for a refusal, which has no gate to decide with
+     */
+    public boolean decide(Decision lease, Object event) {
+        if (lease == null || lease.gate == null || lease.lessor != this) {
+            throw new IllegalArgumentException("not a lease from this holder");
+        }
+        boolean live;
+        synchronized (lock) {
+            live = !lease.released && !lease.voided;
         }
         try {
-            gate.decide(event);
+            if (live) {
+                lease.gate.decide(event);
+            }
         } finally {
-            synchronized (lock) {
-                inFlight--;
+            release(lease);
+        }
+        synchronized (lock) {
+            return live && !lease.voided;
+        }
+    }
+
+    private void release(Decision lease) {
+        synchronized (lock) {
+            if (!lease.released) {
+                lease.released = true;
+                leased.remove(lease);
                 lock.notifyAll();
             }
         }
+    }
+
+    /** Voids every lease still out; guarded by {@link #lock}. */
+    private int voidLeasesLocked() {
+        int voided = 0;
+        for (Decision lease : leased) {
+            if (!lease.voided) {
+                lease.voided = true;
+                voided++;
+            }
+        }
+        return voided;
     }
 
     /**
@@ -145,26 +228,45 @@ public final class LoginGateHolder {
     }
 
     /**
-     * Waits up to {@code maxWaitMs} for every in-flight decision to finish.
+     * Waits up to {@code maxWaitMs} for every lease to come back. Any still out when it gives up
+     * are voided, so none of them can admit a login after the core that leased it is stopped.
      *
-     * @return whether none is left
+     * @return whether every lease came back in time
      */
     public boolean drain(long maxWaitMs) {
         long deadline = System.nanoTime() + Math.max(0L, maxWaitMs) * 1_000_000L;
         synchronized (lock) {
-            while (inFlight > 0) {
+            while (!leased.isEmpty()) {
                 long remainingNanos = deadline - System.nanoTime();
                 if (remainingNanos <= 0) {
+                    voidLeasesLocked();
                     return false;
                 }
                 try {
                     lock.wait(Math.max(1L, remainingNanos / 1_000_000L));
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    return inFlight == 0;
+                    voidLeasesLocked();
+                    return leased.isEmpty();
                 }
             }
             return true;
+        }
+    }
+
+    /**
+     * A generation is being stopped: takes its gate away and voids every lease still out, without
+     * waiting. The swap has already drained by the time it stops the outgoing core, so this matters
+     * where nothing drained first: a core that failed during its start, and server shutdown.
+     *
+     * @return how many leases were voided
+     */
+    int retire() {
+        synchronized (lock) {
+            gate = null;
+            int voided = voidLeasesLocked();
+            lock.notifyAll();
+            return voided;
         }
     }
 
@@ -209,15 +311,15 @@ public final class LoginGateHolder {
     }
 
     /**
-     * Returns the current gate, waiting up to {@code maxWaitMs} for one while a core is starting or
-     * swapping. See the class note for every refusal.
+     * Returns the current gate as a lease, waiting up to {@code maxWaitMs} for one while a core is
+     * starting or swapping. See the class note for every refusal, and for leases.
      */
     public Decision await(long maxWaitMs) {
         long deadline = System.nanoTime() + Math.max(0L, maxWaitMs) * 1_000_000L;
         synchronized (lock) {
             while (gate == null) {
                 if (state == State.DOWN) {
-                    return new Decision(null, ShellMessages.LOGIN_NO_CORE);
+                    return new Decision(null, ShellMessages.LOGIN_NO_CORE, null);
                 }
                 if (state == State.RUNNING) {
                     if (!warnedNoGate) {
@@ -225,21 +327,21 @@ public final class LoginGateHolder {
                         log.error("the running core has no login gate bound; refusing logins "
                                 + "until one is (a core bug)", null);
                     }
-                    return new Decision(null, ShellMessages.LOGIN_UPDATING);
+                    return new Decision(null, ShellMessages.LOGIN_UPDATING, null);
                 }
                 long remainingNanos = deadline - System.nanoTime();
                 if (remainingNanos <= 0) {
-                    return new Decision(null, ShellMessages.LOGIN_UPDATING);
+                    return new Decision(null, ShellMessages.LOGIN_UPDATING, null);
                 }
                 try {
                     long millis = remainingNanos / 1_000_000L;
                     lock.wait(Math.max(1L, millis));
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                    return new Decision(null, ShellMessages.LOGIN_UPDATING);
+                    return new Decision(null, ShellMessages.LOGIN_UPDATING, null);
                 }
             }
-            return new Decision(gate, null);
+            return leaseLocked();
         }
     }
 }

@@ -20,6 +20,8 @@ import com.velocitypowered.api.proxy.Player;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;
@@ -200,5 +202,40 @@ class VelocityLoginGateTest {
 
         assertEquals(1, decisions.get());
         assertEquals("not whitelisted", reason(event));
+    }
+
+    /** A gate that admits (decides nothing) only once {@code release} is counted down. */
+    private static LoginGate slowAdmitting(final CountDownLatch entered, final CountDownLatch release) {
+        return new LoginGate() {
+            @Override
+            public void decide(Object event) {
+                entered.countDown();
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        };
+    }
+
+    @Test
+    @DisplayName("a decision that outlives a swap's drain is refused, though the old core admitted it")
+    void decisionOutlivingTheDrainIsRefused() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        final LoginGateHolder gates = running(slowAdmitting(entered, release));
+        final LoginEvent event = login();
+        Thread deciding = new Thread(() -> new VelocityLoginGate(gates, log).executeAsync(event));
+        deciding.start();
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+
+        gates.suspend();
+        assertFalse(gates.drain(100L));
+        release.countDown();
+        deciding.join(2_000L);
+
+        assertFalse(event.getResult().isAllowed(), "a stopped core's 'allow' admitted the player");
+        assertEquals(ShellMessages.LOGIN_UPDATING, reason(event));
     }
 }

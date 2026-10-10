@@ -265,4 +265,43 @@ class BungeeLoginGateTest {
         assertTrue(reason(event).contains("appeal"));
         gate.shutdown();
     }
+
+    /** A gate that admits (decides nothing) only once {@code release} is counted down. */
+    private static LoginGate slowAdmitting(final CountDownLatch entered, final CountDownLatch release) {
+        return new LoginGate() {
+            @Override
+            public void decide(Object event) {
+                entered.countDown();
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        };
+    }
+
+    @Test
+    @DisplayName("a decision that outlives a swap's drain is refused, though the old core admitted it")
+    void decisionOutlivingTheDrainIsRefused() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        LoginGateHolder gates = new LoginGateHolder(log, 2_000L);
+        gates.bind(slowAdmitting(entered, release));
+        gates.state(LoginGateHolder.State.RUNNING);
+        BungeeLoginGate gate = new BungeeLoginGate(plugin, gates, log);
+        Released released = new Released();
+
+        LoginEvent event = drive(gate, released);
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        gates.suspend();
+        assertFalse(gates.drain(100L));
+        release.countDown();
+
+        assertTrue(released.await());
+        assertEquals(1, released.count());
+        assertTrue(event.isCancelled(), "a stopped core's 'allow' admitted the player");
+        assertTrue(reason(event).contains(ShellMessages.LOGIN_UPDATING), reason(event));
+        gate.shutdown();
+    }
 }

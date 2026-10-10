@@ -1,6 +1,5 @@
 package com.heimdall.shell.velocity;
 
-import com.heimdall.shell.contract.LoginGate;
 import com.heimdall.shell.hotswap.LoginGateHolder;
 import com.heimdall.shell.hotswap.ShellLog;
 import com.heimdall.shell.hotswap.ShellMessages;
@@ -38,7 +37,9 @@ final class VelocityLoginGate implements AwaitingEventExecutor<LoginEvent> {
             // Already refused by another plugin; its reason stands.
             return null;
         }
-        LoginGate now = gates.current();
+        // A lease, not a peek at the current gate: it is counted from this moment, so a swap that
+        // starts between here and the decision waits for it instead of stopping the core under it.
+        LoginGateHolder.Decision now = gates.lease();
         if (now != null) {
             decide(now, event);
             return null;
@@ -51,17 +52,23 @@ final class VelocityLoginGate implements AwaitingEventExecutor<LoginEvent> {
                     deny(event, decision.refusal());
                     return;
                 }
-                decide(decision.gate(), event);
+                decide(decision, event);
             }
         });
     }
 
-    private void decide(LoginGate gate, LoginEvent event) {
+    private void decide(LoginGateHolder.Decision lease, LoginEvent event) {
+        boolean stands;
         try {
-            gates.decide(gate, event);
+            stands = gates.decide(lease, event);
         } catch (Throwable broken) {
             log.error("the core's login gate failed for " + event.getPlayer().getUsername()
                     + "; refusing the login", broken);
+            deny(event, ShellMessages.LOGIN_UPDATING);
+            return;
+        }
+        if (!stands) {
+            // Decided by a core that a swap stopped before it finished: refused, whatever it said.
             deny(event, ShellMessages.LOGIN_UPDATING);
         }
     }

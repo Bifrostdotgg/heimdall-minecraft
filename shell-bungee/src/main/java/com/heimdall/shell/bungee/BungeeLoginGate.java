@@ -97,11 +97,17 @@ final class BungeeLoginGate implements Listener {
             deny(event, decision.refusal());
             return;
         }
+        boolean stands;
         try {
-            gates.decide(decision.gate(), event);
+            stands = gates.decide(decision, event);
         } catch (Throwable broken) {
             log.error("the core's login gate failed for " + connection.getName()
                     + "; refusing the login", broken);
+            deny(event, ShellMessages.LOGIN_UPDATING);
+            return;
+        }
+        if (!stands) {
+            // Decided by a core that a swap stopped before it finished: refused, whatever it said.
             deny(event, ShellMessages.LOGIN_UPDATING);
         }
     }
