@@ -31,17 +31,23 @@ import net.md_5.bungee.api.plugin.Plugin;
 public final class HeimdallBungeePlugin extends Plugin {
 
     private ShellHost host;
+    private BungeeLoginGate loginGate;
 
     @Override
     public void onEnable() {
         try {
-            host = new ShellHost(new Platform(), ShellBuildConstants.VERSION);
+            Platform platform = new Platform();
+            host = new ShellHost(platform, ShellBuildConstants.VERSION);
             // The admin verbs before any core runs, so /hdp swap works with no core. Every other
             // proxy command is registered when a core binds it.
             host.relays().installPermanent("hdp", Collections.singletonList("heimdallproxy"),
                     "heimdall.admin", "Heimdall administration", "/hdp", true);
             host.relays().installPermanent("hwl", Collections.singletonList("heimdallwhitelist"),
                     "heimdall.admin", "Deprecated alias for /hdp", "/hwl", true);
+            // The login gate before the core, and for good: a login must never find no listener,
+            // or it would be admitted with no decision at all (departure D87).
+            loginGate = new BungeeLoginGate(this, host.loginGate(), platform.log());
+            getProxy().getPluginManager().registerListener(this, loginGate);
             host.boot();
         } catch (Throwable failed) {
             getLogger().log(Level.SEVERE, "Heimdall's shell could not start; the proxy is "
@@ -64,6 +70,10 @@ public final class HeimdallBungeePlugin extends Plugin {
             stopping.shutdown();
         } catch (Throwable failed) {
             getLogger().log(Level.SEVERE, "Heimdall did not shut down cleanly", failed);
+        }
+        if (loginGate != null) {
+            loginGate.shutdown();
+            loginGate = null;
         }
     }
 

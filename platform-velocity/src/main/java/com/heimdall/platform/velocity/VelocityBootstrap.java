@@ -21,7 +21,6 @@ import com.heimdall.shell.contract.ShellContext;
 import com.velocitypowered.api.event.EventManager;
 import com.velocitypowered.api.event.PostOrder;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
-import com.velocitypowered.api.event.connection.LoginEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.player.PlayerChatEvent;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -287,10 +286,11 @@ final class VelocityBootstrap {
 
     private void registerListeners() {
         EventManager events = proxy.getEventManager();
-        final VelocityLoginListener login = new VelocityLoginListener(
-                logger, runtime.loginPipeline(), platform.integrations().floodgate(), text);
-        registrations.track(VelocityEvents.listen(
-                events, plugin, LoginEvent.class, PostOrder.FIRST, login::onLogin));
+        // The login decision, bound to the shell's permanent LoginEvent handler rather than
+        // registered as a handler of its own: a swap must never leave a window with no login handler
+        // at all, in which everybody would be admitted (departure D87).
+        registrations.keep(shell.bindLoginGate(new VelocityLoginListener(
+                logger, runtime.loginPipeline(), platform.integrations().floodgate(), text)));
         // Join and quit, as core's session notifications. PostLoginEvent rather than LoginEvent and
         // DisconnectEvent rather than ServerDisconnectEvent: see VelocitySessionListener for why
         // each of the obvious alternatives is wrong.

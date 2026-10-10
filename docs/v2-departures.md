@@ -2273,6 +2273,38 @@ never a server thread, because stopping a core waits for its executors to drain.
 The swap is reported to whoever asked (console, player or dashboard) and always to the console. A
 failed swap says which core is running afterwards.
 
+#### The login gate belongs to the shell, and fails closed
+
+The login listener is the one registration that may never have a gap: a window with no listener at
+all is a window in which everyone is admitted. So each platform shell registers its own permanent
+login listener at enable, before any core runs, at exactly the priority the core's used to have
+(`AsyncPlayerPreLoginEvent` at `LOW`, Velocity's `LoginEvent` at `PostOrder.FIRST`, BungeeCord's
+`LoginEvent` at `LOW`), and a core binds its decision to it as a `LoginGate`. Then:
+
+- **A core is running:** its gate decides, as before. Its own policy is unchanged: a bug in the
+  pipeline glue still admits rather than locking the server, because that is a decision a core
+  makes.
+- **A core is starting or a swap is running:** the login waits up to five seconds for the next
+  core's gate, then is refused with *"Server is updating, try again in a moment"*. Every platform's
+  own login timeout is far longer, so the wait never costs a connection by itself.
+- **No core is running** (the core could not start at all, or a swap and its rollback both failed):
+  every login is refused at once with *"This server cannot check logins right now. Please try again
+  later."*, until a core runs again. Entering this state is an error on the console and a message
+  to every online player holding `heimdall.admin`, because from here somebody has to act: stage a
+  good core and run `/hd swap`, or restart.
+
+**This is a deliberate change from the old failure mode.** Before, a Heimdall that failed to enable
+left a server with no login listener, which admitted everybody. Now a server whose Heimdall cannot
+run refuses logins instead. A whitelist that silently stops whitelisting is the worse failure, and
+the operator is told immediately either way.
+
+On BungeeCord the shell also owns the event's *intent*. An intent can only be registered during
+dispatch, a login can arrive while no core exists, and nothing in BungeeCord ever times an intent
+out (D75), so the shell registers it, runs the decision on its own small pool of daemon threads
+that no swap touches, and completes it exactly once in a `finally`. Before the split the decision
+ran on the core's `heimdall-io`, which a swap shuts down: a decision queued behind that drain would
+have been dropped with its intent never completed.
+
 #### Every registration is tracked, because a swap disables nothing
 
 Before the split, "the plugin is disabled" cleaned up whatever the plugin had registered. A swap

@@ -302,13 +302,10 @@ final class BungeeBootstrap {
     }
 
     private void registerListeners() {
-        listen(new BungeeLoginListener(
-                        plugin,
-                        logger,
-                        runtime.loginPipeline(),
-                        platform.integrations().floodgate(),
-                        text,
-                        executors.io()));
+        // The login decision, bound to the shell's permanent LoginEvent listener, which owns the
+        // event's intent and the thread the decision runs on (departure D87).
+        registrations.keep(shell.bindLoginGate(new BungeeLoginListener(
+                logger, runtime.loginPipeline(), platform.integrations().floodgate(), text)));
         listen(new BungeeSessionListener(logger, runtime.playerSessions(), text));
         // Chat, OBSERVED. A proxy still cannot cancel signed chat, so interception remains the
         // backends' — this listener reads and touches nothing, which is what makes a proxy-origin

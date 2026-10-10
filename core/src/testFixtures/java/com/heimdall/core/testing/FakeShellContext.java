@@ -5,6 +5,7 @@ import com.heimdall.core.util.Registration;
 import com.heimdall.shell.contract.CommandBinding;
 import com.heimdall.shell.contract.CoreIdentity;
 import com.heimdall.shell.contract.Handoff;
+import com.heimdall.shell.contract.LoginGate;
 import com.heimdall.shell.contract.Registrations;
 import com.heimdall.shell.contract.ShellContext;
 import com.heimdall.shell.contract.ShellContract;
@@ -36,6 +37,7 @@ public final class FakeShellContext implements ShellContext {
 
     private volatile boolean swapping;
     private volatile TunnelBackend backend;
+    private volatile LoginGate loginGate;
     private volatile Map<String, Object> handoffIn = Collections.emptyMap();
     private volatile Map<String, Object> handoffOut = Collections.emptyMap();
     private volatile boolean deliverAccepts;
@@ -78,6 +80,11 @@ public final class FakeShellContext implements ShellContext {
         synchronized (commands) {
             return new ArrayList<String>(commands.keySet());
         }
+    }
+
+    /** The bound login gate, or {@code null}. */
+    public LoginGate loginGate() {
+        return loginGate;
     }
 
     /** The bound tunnel backend, or {@code null}. */
@@ -179,6 +186,19 @@ public final class FakeShellContext implements ShellContext {
             @Override
             public void run() {
                 commands.remove(binding.name(), binding);
+            }
+        }));
+    }
+
+    @Override
+    public Registration bindLoginGate(final LoginGate gate) {
+        loginGate = gate;
+        return tracked.add(Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                if (loginGate == gate) {
+                    loginGate = null;
+                }
             }
         }));
     }

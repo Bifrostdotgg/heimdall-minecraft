@@ -109,6 +109,12 @@ public interface ShellContext {
     Registration bindCommand(CommandBinding binding);
 
     /**
+     * Makes {@code gate} the login decision the shell's permanent login listener asks. Tracked like
+     * {@link #track}. See {@link LoginGate} for why the listener is the shell's.
+     */
+    Registration bindLoginGate(LoginGate gate);
+
+    /**
      * Makes {@code backend} what the shell's permanent {@code HeimdallTunnel} forwards to. Tracked
      * like {@link #track}; closing it leaves the tunnel disconnected until another core binds.
      */

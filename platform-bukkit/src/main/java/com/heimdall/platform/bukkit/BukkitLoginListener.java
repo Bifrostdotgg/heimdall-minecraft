@@ -7,9 +7,7 @@ import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.pipeline.Verdict;
 import com.heimdall.core.text.Msg;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.EventPriority;
-import org.bukkit.event.Listener;
+import com.heimdall.shell.contract.LoginGate;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 
 /**
@@ -43,7 +41,7 @@ import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
  * act on. Every failure is contained and resolves to admitting the player: a Heimdall bug must not
  * become a locked server.
  */
-final class BukkitLoginListener implements Listener {
+final class BukkitLoginListener implements LoginGate {
 
     private final HeimdallLogger logger;
     private final LoginPipeline pipeline;
@@ -56,11 +54,17 @@ final class BukkitLoginListener implements Listener {
         this.floodgate = floodgate;
     }
 
-    // No ignoreCancelled: AsyncPlayerPreLoginEvent is not a Cancellable, so the flag is inert on it
-    // — Bukkit reads it off the annotation and it never applies. Leaving it there would read as a
-    // deliberate "skip logins another plugin already refused", which is not what it does.
-    @EventHandler(priority = EventPriority.LOW)
-    public void onPreLogin(AsyncPlayerPreLoginEvent event) {
+    /**
+     * The shell's permanent {@code AsyncPlayerPreLoginEvent} listener at {@code LOW} calls this
+     * (departure D87). The listener is the shell's so that a swap never leaves a window with no
+     * login listener at all, in which everyone would be admitted; this class is the decision.
+     */
+    @Override
+    public void decide(Object event) {
+        onPreLogin((AsyncPlayerPreLoginEvent) event);
+    }
+
+    void onPreLogin(AsyncPlayerPreLoginEvent event) {
         if (event.getLoginResult() != AsyncPlayerPreLoginEvent.Result.ALLOWED) {
             // Somebody else has already refused this connection — a ban plugin, an IP-reputation
             // plugin, an anti-bot. v2 bailed here and v3 must too, and `ignoreCancelled` cannot do

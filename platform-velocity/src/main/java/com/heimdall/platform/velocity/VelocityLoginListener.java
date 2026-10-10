@@ -5,6 +5,7 @@ import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.pipeline.LoginAttempt;
 import com.heimdall.core.pipeline.LoginPipeline;
 import com.heimdall.core.pipeline.Verdict;
+import com.heimdall.shell.contract.LoginGate;
 import com.velocitypowered.api.event.ResultedEvent;
 import com.velocitypowered.api.event.connection.LoginEvent;
 import com.velocitypowered.api.proxy.Player;
@@ -43,7 +44,7 @@ import java.net.InetSocketAddress;
  * is unchanged, and that class is where it is now written down — cancelling is still forbidden;
  * observing never was. Departure D81.
  */
-final class VelocityLoginListener {
+final class VelocityLoginListener implements LoginGate {
 
     private final HeimdallLogger logger;
     private final LoginPipeline pipeline;
@@ -61,7 +62,16 @@ final class VelocityLoginListener {
         this.text = text;
     }
 
-    public void onLogin(LoginEvent event) {
+    /**
+     * The shell's permanent {@code LoginEvent} handler at {@code PostOrder.FIRST} calls this
+     * (departure D87), so a swap never leaves a window with no login handler at all.
+     */
+    @Override
+    public void decide(Object event) {
+        onLogin((LoginEvent) event);
+    }
+
+    void onLogin(LoginEvent event) {
         Player player = event.getPlayer();
         if (player == null) {
             return;

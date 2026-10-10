@@ -357,8 +357,11 @@ final class BukkitBootstrap {
     }
 
     private void registerListeners() {
-        listen(new BukkitLoginListener(
-                logger, runtime.loginPipeline(), platform.integrations().floodgate()));
+        // The login decision, bound to the shell's permanent pre-login listener rather than
+        // registered as a listener of its own: a swap must never leave a window with no login
+        // listener at all, in which everybody would be admitted (departure D87).
+        registrations.keep(shell.bindLoginGate(new BukkitLoginListener(
+                logger, runtime.loginPipeline(), platform.integrations().floodgate())));
         // Before the chat listener, so the first line typed already knows whether ChatControl is
         // deciding channels. attach() also registers ChatControl's channel hook when it is there.
         platform.chatControl().attach(runtime.chatPipeline());

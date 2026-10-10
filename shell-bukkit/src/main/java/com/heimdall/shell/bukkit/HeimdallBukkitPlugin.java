@@ -50,6 +50,10 @@ public final class HeimdallBukkitPlugin extends JavaPlugin {
             Platform platform = new Platform();
             host = new ShellHost(platform, ShellBuildConstants.VERSION);
             installDescriptorRelays(host);
+            // The login gate before the core, and for good: a login must never find no listener,
+            // or it would be admitted with no decision at all (departure D87).
+            getServer().getPluginManager().registerEvents(
+                    new BukkitLoginGate(host.loginGate(), platform.log()), this);
             host.boot();
         } catch (Throwable failed) {
             getLogger().log(Level.SEVERE, "Heimdall's shell could not start; the server is "

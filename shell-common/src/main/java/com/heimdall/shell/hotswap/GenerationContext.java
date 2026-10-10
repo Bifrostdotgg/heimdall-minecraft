@@ -5,6 +5,7 @@ import com.heimdall.core.util.Registration;
 import com.heimdall.shell.contract.CommandBinding;
 import com.heimdall.shell.contract.CoreIdentity;
 import com.heimdall.shell.contract.Handoff;
+import com.heimdall.shell.contract.LoginGate;
 import com.heimdall.shell.contract.Registrations;
 import com.heimdall.shell.contract.ShellContext;
 import com.heimdall.shell.contract.ShellContract;
@@ -119,6 +120,14 @@ class GenerationContext implements ShellContext {
             return Registration.NONE;
         }
         return tracked.add(host.bindCommand(binding));
+    }
+
+    @Override
+    public Registration bindLoginGate(LoginGate gate) {
+        if (gate == null || tracked.isClosed()) {
+            return Registration.NONE;
+        }
+        return tracked.add(host.bindLoginGate(gate));
     }
 
     @Override

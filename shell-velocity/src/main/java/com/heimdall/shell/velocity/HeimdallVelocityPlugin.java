@@ -12,7 +12,9 @@ import com.heimdall.shell.hotswap.ShellAudience;
 import com.heimdall.shell.hotswap.ShellHost;
 import com.heimdall.shell.hotswap.ShellLog;
 import com.heimdall.shell.hotswap.ShellPlatform;
+import com.velocitypowered.api.event.PostOrder;
 import com.velocitypowered.api.event.Subscribe;
+import com.velocitypowered.api.event.connection.LoginEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
@@ -80,6 +82,7 @@ public final class HeimdallVelocityPlugin {
         try {
             host = new ShellHost(new Platform(), ShellBuildConstants.VERSION);
             installAdminRelays(host);
+            registerLoginGate(host);
             host.boot();
         } catch (Throwable failed) {
             slf4j.error("Heimdall's shell could not start; the proxy is unaffected", failed);
@@ -114,6 +117,20 @@ public final class HeimdallVelocityPlugin {
                 "heimdall.admin", "Heimdall administration", "/hdp", true);
         target.relays().installPermanent("hwl", Collections.singletonList("heimdallwhitelist"),
                 "heimdall.admin", "Deprecated alias for /hdp", "/hwl", true);
+    }
+
+    /**
+     * Registers the permanent login handler before any core runs, at {@code PostOrder.FIRST} where
+     * the core's own listener sat before the split. A login must never find no handler, or it would
+     * be admitted with no decision at all (departure D87).
+     *
+     * <p>The {@code PostOrder} overload is deprecated in the 3.4 API in favour of a raw priority and
+     * is used anyway, for the reason the core's {@code VelocityEvents} gives.
+     */
+    @SuppressWarnings("deprecation")
+    private void registerLoginGate(ShellHost target) {
+        proxy.getEventManager().register(this, LoginEvent.class, PostOrder.FIRST,
+                new VelocityLoginGate(target.loginGate(), log));
     }
 
     /**

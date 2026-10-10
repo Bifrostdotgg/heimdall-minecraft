@@ -57,6 +57,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>All of it runs on the shell's own {@code heimdall-swap} thread. Stopping a core waits for its
  * executors to drain, which can take seconds; on a server thread that is a watchdog crash.
+ *
+ * <h2>Logins</h2>
+ *
+ * <p>The {@link LoginGateHolder} follows every transition: logins wait while a core starts or a swap
+ * runs, are decided by the core once one is running, and are refused outright when none is. Entering
+ * that last state is reported as an error on the console and to every online admin, because a
+ * server that refuses every login needs a person, now.
  */
 public final class ShellHost {
 
@@ -71,6 +78,7 @@ public final class ShellHost {
     private final String shellVersion;
     private final ShellTunnel tunnel;
     private final RelayTable relays;
+    private final LoginGateHolder gates;
 
     /** Held for a whole transition (boot, swap, shutdown), so two can never interleave. */
     private final Object transition = new Object();
@@ -97,6 +105,7 @@ public final class ShellHost {
         this.log = platform.log();
         this.shellVersion = shellVersion == null ? "unknown" : shellVersion;
         this.tunnel = new ShellTunnel(log, this.shellVersion);
+        this.gates = new LoginGateHolder(log);
         this.relays = new RelayTable(platform.commands(), platform.audience(), log,
                 new RelayTable.State() {
                     @Override
@@ -172,6 +181,11 @@ public final class ShellHost {
         return tunnel;
     }
 
+    /** The login gate the platform shell's permanent login listener asks. */
+    public LoginGateHolder loginGate() {
+        return gates;
+    }
+
     ShellPlatform platform() {
         return platform;
     }
@@ -225,6 +239,7 @@ public final class ShellHost {
             }
             current = started;
             lastProblem = "";
+            gates.state(LoginGateHolder.State.RUNNING);
             log.info("core " + loaded.identity() + " running (shell " + shellVersion
                     + ", contract " + ShellContract.VERSION + ")");
             return true;
@@ -241,6 +256,7 @@ public final class ShellHost {
      */
     public void shutdown() {
         shutDown = true;
+        gates.state(LoginGateHolder.State.DOWN);
         synchronized (transition) {
             Generation stopping = current;
             current = null;
@@ -347,6 +363,7 @@ public final class ShellHost {
             listener.progress("Swapping " + from + " for core " + incoming.identity() + "...");
 
             swapping = true;
+            gates.state(LoginGateHolder.State.SWAPPING);
             try {
                 Map<String, Object> handoff = Collections.emptyMap();
                 if (outgoing != null) {
@@ -359,6 +376,7 @@ public final class ShellHost {
                 if (started != null) {
                     current = started;
                     lastProblem = "";
+                    gates.state(LoginGateHolder.State.RUNNING);
                     if (outgoing != null) {
                         closeLater(outgoing.loaded);
                     }
@@ -379,6 +397,9 @@ public final class ShellHost {
                 return rollBack(outgoing, incoming, handoff, listener);
             } finally {
                 swapping = false;
+                if (current == null) {
+                    gates.state(LoginGateHolder.State.DOWN);
+                }
                 int pruned = relays.prune();
                 if (pruned > 0) {
                     log.debug("removed " + pruned + " command(s) the new core did not register");
@@ -415,6 +436,7 @@ public final class ShellHost {
                     + "rollback to core " + outgoing.loaded.identity());
         }
         current = restored;
+        gates.state(LoginGateHolder.State.RUNNING);
         lastProblem = "core " + failed.identity() + " failed to start; still running core "
                 + again.identity();
         log.warn("rolled back: " + lastProblem);
@@ -436,10 +458,24 @@ public final class ShellHost {
                 why + ". Heimdall is not running; restart the server.", null);
     }
 
-    /** Records and reports that no core is running. */
+    /**
+     * Records and reports that no core is running, and closes the login gate. Loud on purpose: the
+     * console gets an error and every online admin gets told, because from here every login is
+     * refused until somebody acts.
+     */
     private void noCore(String why, Throwable cause) {
         lastProblem = why;
-        log.error(why + ". Heimdall is not running until a core starts.", cause);
+        gates.state(LoginGateHolder.State.DOWN);
+        log.error(why + ". Heimdall is not running, and logins are refused until a core starts: "
+                + "stage a core and run /" + platform.adminLabel() + " swap, or restart.", cause);
+        try {
+            platform.audience().alertOnline(ShellMessages.ADMIN_PERMISSION,
+                    "§4[Heimdall] §cNo core is running, so every login is being refused. "
+                            + "Check the server log, then run §f/" + platform.adminLabel()
+                            + " status§c.");
+        } catch (Throwable unavailable) {
+            // The console line above is the alert that matters.
+        }
     }
 
     // ── One generation ───────────────────────────────────────────────────────
@@ -497,6 +533,9 @@ public final class ShellHost {
         if (tunnel.sweep(retired)) {
             swept++;
         }
+        if (gates.sweep(retired)) {
+            swept++;
+        }
         if (swept > 0) {
             log.warn("removed " + swept + " registration(s) that still pointed at core "
                     + retired.identity() + " after it stopped");
@@ -526,6 +565,10 @@ public final class ShellHost {
 
     Registration bindTunnel(com.heimdall.shell.contract.TunnelBackend backend) {
         return tunnel.bind(backend);
+    }
+
+    Registration bindLoginGate(com.heimdall.shell.contract.LoginGate gate) {
+        return gates.bind(gate);
     }
 
     boolean deliverUnclaimed(String requestId, String type, Payload payload) {
