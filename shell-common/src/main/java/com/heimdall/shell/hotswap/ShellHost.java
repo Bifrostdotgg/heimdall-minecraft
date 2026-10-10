@@ -354,12 +354,43 @@ public final class ShellHost {
         return requestSwap(jar, new AudienceListener(platform.audience(), sender));
     }
 
+    /** Produces the core a swap goes to; runs on the swap thread. */
+    interface CoreSource {
+
+        CoreArchive.CoreJar get() throws CoreArchiveException;
+    }
+
     /**
      * Starts a swap to {@code jar} on the swap thread and returns at once.
      *
      * @return {@code false} if a swap is already queued or running, or the shell is stopping
      */
     public boolean requestSwap(final CoreArchive.CoreJar jar, final SwapListener listener) {
+        return requestSwap(new CoreSource() {
+            @Override
+            public CoreArchive.CoreJar get() {
+                return jar;
+            }
+        }, listener);
+    }
+
+    /**
+     * Stages {@code file} and swaps to it, both on the swap thread, and returns at once.
+     *
+     * <p>For {@code /hd swap}, which arrives on whatever thread the platform dispatches commands on:
+     * the main thread on the Bukkit family. Staging copies and hashes a jar of a few megabytes, which
+     * does not belong on a tick.
+     */
+    public boolean requestSwapFromFile(final Path file, SwapListener listener) {
+        return requestSwap(new CoreSource() {
+            @Override
+            public CoreArchive.CoreJar get() throws CoreArchiveException {
+                return stage(file);
+            }
+        }, listener);
+    }
+
+    private boolean requestSwap(final CoreSource source, final SwapListener listener) {
         if (shutDown || !swapQueued.compareAndSet(false, true)) {
             return false;
         }
@@ -370,7 +401,7 @@ public final class ShellHost {
                 public void run() {
                     SwapOutcome outcome;
                     try {
-                        outcome = swap(jar, told);
+                        outcome = swapTo(source, told);
                     } catch (Throwable broken) {
                         log.error("the swap failed unexpectedly", broken);
                         outcome = new SwapOutcome(SwapOutcome.Kind.REFUSED,
@@ -390,6 +421,17 @@ public final class ShellHost {
             swapQueued.set(false);
             return false;
         }
+    }
+
+    /** Gets the core from {@code source} and swaps to it; an unusable core is a refusal. */
+    private SwapOutcome swapTo(CoreSource source, SwapListener listener) {
+        CoreArchive.CoreJar jar;
+        try {
+            jar = source.get();
+        } catch (CoreArchiveException unusable) {
+            return refuse("the staged core cannot be used: " + unusable.getMessage(), listener);
+        }
+        return swap(jar, listener);
     }
 
     /**

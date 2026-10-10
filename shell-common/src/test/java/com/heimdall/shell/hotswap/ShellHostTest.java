@@ -297,6 +297,56 @@ class ShellHostTest {
     }
 
     @Test
+    @DisplayName("/hd swap stages a release dropped at core/staged.jar on the swap thread and swaps to it")
+    void swapFromAStagedReleaseFile() throws Exception {
+        bootWith("alpha");
+        java.nio.file.Files.copy(
+                Fixtures.release(data, "beta", "1.0.0-beta", ShellContract.VERSION, null),
+                host.stagedPath());
+        final AtomicReference<SwapOutcome> done = new AtomicReference<SwapOutcome>();
+
+        assertTrue(host.requestSwapFromFile(host.stagedPath(), new SwapListener() {
+            @Override
+            public void progress(String line) {
+            }
+
+            @Override
+            public void finished(SwapOutcome outcome) {
+                done.set(outcome);
+            }
+        }));
+
+        assertTrue(Fixtures.eventually(() -> done.get() != null));
+        assertTrue(done.get().succeeded(), done.get().toString());
+        assertEquals("1.0.0-beta", host.runningCore().version());
+    }
+
+    @Test
+    @DisplayName("a staged file that is not a core is refused, and the running core is untouched")
+    void unusableStagedFileIsRefused() throws Exception {
+        bootWith("alpha");
+        java.nio.file.Files.write(host.stagedPath(), "not a jar".getBytes("UTF-8"));
+        final AtomicReference<SwapOutcome> done = new AtomicReference<SwapOutcome>();
+
+        assertTrue(host.requestSwapFromFile(host.stagedPath(), new SwapListener() {
+            @Override
+            public void progress(String line) {
+            }
+
+            @Override
+            public void finished(SwapOutcome outcome) {
+                done.set(outcome);
+            }
+        }));
+
+        assertTrue(Fixtures.eventually(() -> done.get() != null));
+        assertSame(SwapOutcome.Kind.REFUSED, done.get().kind());
+        assertTrue(done.get().message().contains("cannot be used"), done.get().message());
+        assertEquals("1.0.0-alpha", host.runningCore().version());
+        assertEquals(1, platform.journal().size());
+    }
+
+    @Test
     @DisplayName("a second swap request while one is running is refused")
     void oneSwapAtATime() throws Exception {
         bootWith("alpha");

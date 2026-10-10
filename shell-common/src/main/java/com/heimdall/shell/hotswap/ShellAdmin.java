@@ -1,6 +1,5 @@
 package com.heimdall.shell.hotswap;
 
-import com.heimdall.shell.contract.CoreIdentity;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -60,23 +59,14 @@ final class ShellAdmin implements RelayTable.AdminVerbs {
                     + host.stagedPath() + "§c, or run §f/" + label + " update§c.");
             return;
         }
-        CoreArchive.CoreJar jar;
-        try {
-            jar = host.stage(host.stagedPath());
-        } catch (CoreArchiveException unusable) {
-            audience.send(sender, "§cThe staged core cannot be used: " + unusable.getMessage());
-            return;
-        }
-        CoreIdentity running = host.runningCore();
-        if (jar.identity().equals(running)) {
-            audience.send(sender, "§eCore " + jar.identity() + " is already running.");
-            return;
-        }
-        if (!host.requestSwap(jar, new AudienceListener(audience, sender))) {
+        // Staged and checked on the swap thread, not here: this is the main thread on Bukkit, and
+        // staging copies and hashes a jar of a few megabytes. A core that is unusable, built for
+        // another contract or already running is refused there and reported back to the sender.
+        if (!host.requestSwapFromFile(host.stagedPath(), new AudienceListener(audience, sender))) {
             audience.send(sender, "§cA swap is already in progress.");
             return;
         }
-        audience.send(sender, "§7Swap to core §f" + jar.identity() + "§7 started.");
+        audience.send(sender, "§7Swap to the staged core started.");
     }
 
     /** {@code status} with no core: what the shell knows, and how to recover. */
