@@ -72,9 +72,9 @@ final class VelocityBootstrap {
     /**
      * Builds and starts everything.
      *
-     * <p>Never throws. Velocity logs a plugin whose initialise handler throws and carries on with
-     * the plugin half-started, which is strictly worse than a plugin that started in a reduced state
-     * and said which one.
+     * <p>Expected failures leave a reduced state and say which one. A throw is a genuine bug, and
+     * reaches the shell through {@link VelocityCore#start}, which unwinds the half-built generation
+     * (departure D87).
      */
     void enable() {
         try {

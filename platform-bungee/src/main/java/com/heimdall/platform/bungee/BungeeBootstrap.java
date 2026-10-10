@@ -79,8 +79,8 @@ final class BungeeBootstrap {
     /**
      * Builds and starts everything.
      *
-     * <p>Never throws — see {@link HeimdallBungeePlugin#onEnable()} for why a half-started plugin is
-     * the worse of the two outcomes on this platform.
+     * <p>Throws only when the core cannot run at all; {@link BungeeCore#start} reports that to the
+     * shell, which unwinds the half-built generation (departure D87).
      */
     void enable() {
         try {

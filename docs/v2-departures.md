@@ -2175,6 +2175,79 @@ Mojang endpoints are unverified until Third Place runs it.
 - Hidden-component handling covers enchantments, stored enchantments, lore, unbreakable and the whole
   tooltip; attribute modifiers and other tooltip sections are never drawn at all.
 
+
+### D87 - the plugin is a permanent shell that loads a swappable core
+
+**New in 3.1.**
+
+**Before:** one jar, merged into one classloader by the platform. Any update, however small, needed
+a server or proxy restart, and proxies are the thing operators restart least.
+**Now:** the jar the platform loads is a **shell**, and everything else is a **core** that the shell
+loads into a child `URLClassLoader` and can replace while the server runs. The release is still the
+single `heimdall-whitelist-<version>.jar` asset (the v2 self-updater and the bot's download card
+pick exactly that file); the core travels inside it, stored at `META-INF/heimdall/heimdall-core.jar`
+with its version, SHA-256 and contract recorded next to it in `META-INF/heimdall/core.properties`.
+
+**The first hot-swap build still needs one ordinary restart** to install the shell. Every later
+update whose shell contract is unchanged can then be applied live.
+
+#### What lives where, and why
+
+The shell holds only what has to keep its identity for the life of the process:
+
+- the three platform entry points (`com.heimdall.shell.bukkit|velocity|bungee`), which `plugin.yml`,
+  `bungee.yml` and the generated `velocity-plugin.json` now name;
+- the hot-swap loader itself (`:shell-common`, package `com.heimdall.shell.hotswap`);
+- the contract both halves compile against (`:shell-api`, package `com.heimdall.shell.contract`);
+- the public `com.heimdall.api` SPI and the types it exposes: `Payload`, `Envelope`, `Registration`
+  and `OnceRegistration`, which keep their `com.heimdall.core.*` names so the published SPI does not
+  change, plus Gson under `Payload`. A third-party plugin links against these through the shell's
+  loader, so a copy in a swappable core would be a different class from the one it linked against.
+  `Envelope` moves too because it calls `Payload`'s package-private Gson bridge, and package-private
+  access does not work across two classloaders.
+
+The core is everything else: `:core`, the feature modules, and the three platform bindings, which
+now enter through `BukkitCore`, `VelocityCore` and `BungeeCore` instead of plugin main classes.
+
+#### How the two jars are built and checked
+
+`:app` builds each half as its own shadow jar from its own classpath. One jar-wide relocation would
+have rewritten the Velocity shell's native Adventure calls along with the core's shaded copy. The
+shell relocates and bundles Gson only; the core relocates its Gson references to the same
+`com.heimdall.libs.gson` names without bundling Gson, so they resolve to the shell's copy, and
+bundles and relocates nv-websocket, SnakeYAML and Adventure as before.
+
+Three checks run on every build:
+
+- `verifyShadowJar`: the release jar's bytecode levels, relocations and descriptors, as before. The
+  Java 17 exemption moves to `com/heimdall/shell/velocity/`.
+- `verifyCoreJar`: the same bytecode, relocation and logging-facade checks on the core, whose Java 17
+  exemption stays at `com/heimdall/platform/velocity/`.
+- `verifyJarSplit`: the shell carries only shell classes, the core carries none of them, no class
+  is in both, and the nested core is byte-identical to the core this build produced. Parent-first
+  loading makes a class present in both always resolve from the shell, so without this check a
+  duplicated class would silently never be upgraded by any swap.
+
+#### The contract version
+
+`ShellContract.VERSION` is a compile-time integer. A core returns it from `contractVersion()`, and
+javac inlines it, so the value is the one the core was built against. The core manifest and
+`core.properties` carry it too, so the updater can decide without loading a class. **Bump it** when
+anything in `:shell-api` or `:api` changes in a way an older shell could not serve.
+
+#### At server start
+
+The shell reads the core out of the jar the platform loaded (through a fresh `JarFile`, never the
+shell's own classloader), checks it against the recorded hash, writes it to
+`plugins/Heimdall/core/heimdall-core-<version>-<sha12>.jar` (Velocity: `plugins/heimdall/core/`),
+deletes older cores from that folder, and loads it. Core files are content-addressed so a write never
+touches a jar a live classloader has open, which on Windows would fail outright. A core that cannot
+be read, loaded or started is reported, and the shell runs on with no core.
+
+At server stop the shell stops the core but deliberately does not close its classloader: a callback
+still finishing on a library thread would otherwise become a `NoClassDefFoundError` trace in the
+shutdown log.
+
 ---
 
 ## Structure

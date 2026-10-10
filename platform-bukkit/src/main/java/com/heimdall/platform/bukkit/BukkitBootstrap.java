@@ -112,10 +112,10 @@ final class BukkitBootstrap {
     /**
      * Builds and starts everything.
      *
-     * <p>Never throws. A {@code JavaPlugin} whose {@code onEnable} throws is disabled by the server
-     * with a stack trace, and every reason this could fail — no config, no LuckPerms, an
-     * unattachable logging backend — is a reason to run in a reduced state and say so, not a reason
-     * to leave the operator with no Heimdall and no instruction either.
+     * <p>Every expected reason this could fail (no config, no LuckPerms, an unattachable logging
+     * backend) is a reason to run in a reduced state and say so, and none of them throws. What does
+     * throw is a genuine bug, and since departure D87 it reaches the shell through
+     * {@link BukkitCore#start}, which unwinds the half-built generation and reports it.
      */
     void enable() {
         File dataFolder = plugin.getDataFolder();

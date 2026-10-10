@@ -16,6 +16,11 @@ plugins {
 }
 
 dependencies {
+    // The hot-swap contract, and the wire types the public SPI shares with core (Payload, Envelope,
+    // Registration). `api` because nearly every module's public signatures use them. At runtime
+    // they come from the shell, never from the core jar: see :app's verifyJarSplit.
+    api(project(":shell-api"))
+
     // Deliberately `implementation`, not `api`: the shaded libraries are core's
     // private business. A feature module that needs JSON or YAML goes through a
     // core utility rather than importing Gson or SnakeYAML itself. That keeps the
