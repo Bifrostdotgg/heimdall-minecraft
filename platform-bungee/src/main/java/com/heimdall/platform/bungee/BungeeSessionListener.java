@@ -53,8 +53,14 @@ import net.md_5.bungee.event.EventPriority;
  * way; the event is never constructed; and BungeeCord dispatches on the handler's declared parameter
  * type. It does mean the event can now be deferred with an intent the way {@code LoginEvent} is.
  * This handler registers none, so it never is. See departure D74.
+ *
+ * <p><strong>Public, and it has to be.</strong> BungeeCord's {@code EventHandlerMethod} calls
+ * {@code Method.invoke} without {@code setAccessible}, so a handler on a package-private class is
+ * refused and its event bus rethrows that as an {@code Error} out of {@code post()}. Until this was
+ * fixed, this listener never received an event on a real BungeeCord (departure D88). The listener
+ * shape test fails the build on a non-public BungeeCord listener.
  */
-final class BungeeSessionListener implements Listener {
+public final class BungeeSessionListener implements Listener {
 
     private final HeimdallLogger logger;
     private final PlayerSessionEvents sessions;
