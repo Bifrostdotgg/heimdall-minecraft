@@ -405,6 +405,28 @@ class HeimdallBridgeVanishTest {
         }
 
         @Test
+        @DisplayName("a previous session's quit, delivered after a quiet rejoin, keeps the new session")
+        void aStaleQuitLeavesAQuietSessionAlone() {
+            // heimdall-io does not order notifications: the first session's quit can arrive after
+            // the second session's (quiet) join. It must not end the quiet session, or the real
+            // leave later has nothing to go on and is judged by the vanish plugin alone.
+            setUpWithoutSettle(null);
+            enable();
+            sessions.join(steve, 100L);
+            vanish.hide(steve);
+            sessions.join(steve, 300L);
+            vanish.vanished.clear();
+
+            sessions.quit(steve, 200L);
+            assertEquals(1, module.sessionCount(), "the quiet session from the second join survives");
+            sessions.quit(steve, 400L);
+
+            assertEquals(Collections.singletonList("join:Steve@100"), shipped(),
+                    "the stale quit is judged by the newer, quiet session, and the real leave "
+                            + "of a quiet session is never posted");
+        }
+
+        @Test
         @DisplayName("a hide seen before the join notification decides that join")
         void anEarlyToggleBelongsToTheJoin() {
             // PremiumVanish's auto-vanish-on-join fires inside the platform's join event, ahead of
@@ -727,6 +749,13 @@ class HeimdallBridgeVanishTest {
             vanish.backendAtElapsedMs.put(player.uuid(), nowMs());
         }
 
+        /** Runs {@code count} re-checks. */
+        private void runChecks(int count) {
+            for (int i = 0; i < count; i++) {
+                runOneSettleCheck();
+            }
+        }
+
         @Test
         @DisplayName("a visible join posts 1.5 s after the backend connection, not after the join")
         void postsAfterTheBackendWindow() {
@@ -734,9 +763,7 @@ class HeimdallBridgeVanishTest {
             enable();
 
             sessions.join(steve, 1000L);
-            for (int i = 0; i < 12; i++) {
-                runOneSettleCheck();
-            }
+            runChecks(3);
             assertTrue(shipped().isEmpty(), "3 s in and no backend yet: still waiting");
             connectToBackendNow(steve);
             runSettleChecks();
@@ -746,18 +773,79 @@ class HeimdallBridgeVanishTest {
         }
 
         @Test
+        @DisplayName("waiting for a backend re-checks once a second, not four times")
+        void theBackendWaitIsSlow() {
+            setUpProxy(null);
+            enable();
+
+            sessions.join(steve, 1000L);
+            runChecks(5);
+
+            for (Long delay : settleDelays) {
+                assertEquals(HeimdallBridgeModule.BACKEND_RECHECK_MS, delay.longValue());
+            }
+        }
+
+        @Test
+        @DisplayName("an auth limbo past 10 s, then a backend, then vanished: nothing is ever posted")
+        void aLongLimboThenVanishedPostsNothing() {
+            // The cap this replaced would have announced this staff member at 10 s.
+            setUpProxy(null);
+            enable();
+
+            sessions.join(steve, 1000L);
+            runChecks(30);
+            assertTrue(shipped().isEmpty(), "30 s of limbo, and still undecided");
+            connectToBackendNow(steve);
+            runOneSettleCheck();
+            // The backend's PremiumVanish has now told the proxy's.
+            vanish.vanished.add(steve.uuid());
+            runSettleChecks();
+            sessions.quit(steve, 90_000L);
+
+            assertTrue(shipped().isEmpty(), shipped().toString());
+        }
+
+        @Test
+        @DisplayName("an auth limbo past 10 s, then a backend, still visible: the join posts after it")
+        void aLongLimboThenVisiblePostsAfterTheBackend() {
+            setUpProxy(null);
+            enable();
+
+            sessions.join(steve, 1000L);
+            runChecks(30);
+            connectToBackendNow(steve);
+            runSettleChecks();
+
+            assertEquals(Collections.singletonList("join:Steve@1000"), shipped());
+            assertEquals(31_500L, nowMs());
+        }
+
+        @Test
+        @DisplayName("leaving before ever reaching a backend posts neither the join nor the leave")
+        void aDisconnectInLimboPostsNothing() {
+            setUpProxy(null);
+            enable();
+
+            sessions.join(steve, 1000L);
+            runChecks(15);
+            sessions.quit(steve, 16_000L);
+            runSettleChecks();
+
+            assertTrue(shipped().isEmpty(), "nobody in game saw this session: " + shipped());
+            assertEquals(0, module.sessionCount());
+        }
+
+        @Test
         @DisplayName("marked vanished after the backend connection: never posted")
         void aMarkAfterTheBackendIsCaught() {
             setUpProxy(null);
             enable();
 
             sessions.join(steve, 1000L);
-            for (int i = 0; i < 12; i++) {
-                runOneSettleCheck();
-            }
+            runChecks(3);
             connectToBackendNow(steve);
             runOneSettleCheck();
-            // The backend's PremiumVanish has now told the proxy's.
             vanish.vanished.add(steve.uuid());
             runSettleChecks();
             sessions.quit(steve, 9000L);
@@ -766,9 +854,10 @@ class HeimdallBridgeVanishTest {
         }
 
         @Test
-        @DisplayName("no backend connection at all: decided as visible at the 10 s cap")
-        void decidedAtTheCap() {
+        @DisplayName("backend hook unavailable: decided as visible at the 10 s cap, as before")
+        void withoutTheHookTheCapPosts() {
             setUpProxy(null);
+            vanish.backendHook = false;
             enable();
 
             sessions.join(steve, 1000L);
@@ -791,6 +880,7 @@ class HeimdallBridgeVanishTest {
             runOneSettleCheck();
             vanish.toggle(steve, true, true, 1300L);
             vanish.vanished.clear();
+            connectToBackendNow(steve);
             runSettleChecks();
             sessions.quit(steve, 20_000L);
 
@@ -889,8 +979,12 @@ class HeimdallBridgeVanishTest {
          * first backend connection (test-time milliseconds since the join), capped from the join.
          */
         boolean proxy;
+
+        /** Whether the proxy's backend hook is live: no cap, and a join waits for the connection. */
+        boolean backendHook = true;
         final java.util.Map<UUID, Long> backendAtElapsedMs = new ConcurrentHashMap<UUID, Long>();
         static final long CAP_MS = 10_000L;
+        static final long RECHECK_MS = 1000L;
         private final CopyOnWriteArrayList<VanishListener> listeners =
                 new CopyOnWriteArrayList<VanishListener>();
         final AtomicInteger checks = new AtomicInteger();
@@ -929,9 +1023,15 @@ class HeimdallBridgeVanishTest {
             }
             Long connected = backendAtElapsedMs.get(player.uuid());
             if (connected == null) {
-                return Math.max(0L, CAP_MS - elapsedMs);
+                return backendHook ? RECHECK_MS : Math.max(0L, CAP_MS - elapsedMs);
             }
             return Math.max(0L, settleMillis - (elapsedMs - connected));
+        }
+
+        @Override
+        public boolean awaitingBackend(PlayerHandle player) {
+            return proxy && settleMillis > 0L && backendHook
+                    && !backendAtElapsedMs.containsKey(player.uuid());
         }
 
         @Override

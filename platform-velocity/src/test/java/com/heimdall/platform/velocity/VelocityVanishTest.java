@@ -13,6 +13,8 @@ import com.heimdall.core.util.Registration;
 import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.VanishSupport;
 import com.velocitypowered.api.event.EventHandler;
+import com.velocitypowered.api.event.PostOrder;
+import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.player.ServerPostConnectEvent;
 import com.velocitypowered.api.proxy.Player;
 import de.myzelyam.api.vanish.VelocityPlayerHideEvent;
@@ -42,6 +44,14 @@ class VelocityVanishTest {
     private final VelocityText text = new VelocityText(logger);
     private final List<String> toggles = new ArrayList<String>();
 
+    /** The join wait's clock, so a wait is exact however slow the machine. */
+    private final java.util.concurrent.atomic.AtomicLong nanos =
+            new java.util.concurrent.atomic.AtomicLong(1_000_000_000L);
+
+    private void advanceMs(long ms) {
+        nanos.addAndGet(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(ms));
+    }
+
     @AfterEach
     void reset() {
         VelocityVanishAPI.INVISIBLE.clear();
@@ -49,7 +59,7 @@ class VelocityVanishTest {
 
     private VelocityVanish vanish() {
         VelocityVanish vanish = new VelocityVanish(logger, registrations, environment,
-                player -> new VelocityPlayerHandle(player, text));
+                player -> new VelocityPlayerHandle(player, text), () -> nanos.get());
         vanish.onToggle(new VanishListener() {
             @Override
             public void onVanishChanged(
@@ -89,9 +99,8 @@ class VelocityVanishTest {
         VelocityVanishAPI.INVISIBLE.add(steve.getUniqueId());
         environment.online.put(steve.getUniqueId(), steve);
 
-        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS,
-                vanish.joinWaitMillis(new VelocityPlayerHandle(steve, text), 0L),
-                "no backend yet: a proxy waits up to the cap for one");
+        assertTrue(vanish.awaitingBackend(new VelocityPlayerHandle(steve, text)),
+                "no backend yet: a proxy waits for one, uncapped");
         assertTrue(vanish.isVanished(new VelocityPlayerHandle(steve, text)));
 
         environment.online.clear();
@@ -107,8 +116,11 @@ class VelocityVanishTest {
         vanish();
         Player steve = player("Steve");
 
-        assertEquals(Arrays.asList(ServerPostConnectEvent.class, VelocityPlayerHideEvent.class,
-                VelocityPlayerShowEvent.class), new ArrayList<Class<?>>(environment.handlers.keySet()));
+        assertEquals(Arrays.asList(PostLoginEvent.class, ServerPostConnectEvent.class,
+                VelocityPlayerHideEvent.class, VelocityPlayerShowEvent.class),
+                new ArrayList<Class<?>>(environment.handlers.keySet()));
+        assertEquals(PostOrder.FIRST, environment.orders.get(PostLoginEvent.class),
+                "the login must clear the last session before the session listener reports the join");
         environment.fire(new VelocityPlayerHideEvent(steve));
         environment.fire(new VelocityPlayerShowEvent(steve));
 
@@ -122,7 +134,7 @@ class VelocityVanishTest {
         environment.instance = new Object() { };
         vanish();
 
-        assertEquals(3, environment.handlers.size());
+        assertEquals(4, environment.handlers.size());
         registrations.closeAll(logger);
 
         assertTrue(environment.handlers.isEmpty(),
@@ -136,14 +148,34 @@ class VelocityVanishTest {
         VelocityVanish vanish = vanish();
         Player steve = player("Steve");
         VelocityPlayerHandle handle = new VelocityPlayerHandle(steve, text);
-        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS, vanish.joinWaitMillis(handle, 0L));
+        environment.fire(new PostLoginEvent(steve));
+        assertTrue(vanish.awaitingBackend(handle));
+        assertEquals(VanishSupport.BACKEND_RECHECK_MS, vanish.joinWaitMillis(handle, 0L));
+        advanceMs(20_000L);
 
         environment.fire(new ServerPostConnectEvent(steve, null));
-        // The join was a second ago; the backend connection is now.
-        long wait = vanish.joinWaitMillis(handle, 1000L);
+        advanceMs(500L);
 
-        assertTrue(wait > 1000L && wait <= VanishSupport.JOIN_SETTLE_MS,
-                "the settle window starts at the backend connection: " + wait);
+        assertFalse(vanish.awaitingBackend(handle));
+        assertEquals(1000L, vanish.joinWaitMillis(handle, 20_500L),
+                "the settle window starts at the backend connection, however long the limbo was");
+    }
+
+    @Test
+    @DisplayName("a login forgets the previous session's backend connection")
+    void aLoginStartsANewSession() {
+        environment.instance = new Object() { };
+        VelocityVanish vanish = vanish();
+        Player steve = player("Steve");
+        VelocityPlayerHandle handle = new VelocityPlayerHandle(steve, text);
+        environment.fire(new PostLoginEvent(steve));
+        environment.fire(new ServerPostConnectEvent(steve, null));
+        assertFalse(vanish.awaitingBackend(handle));
+
+        environment.fire(new PostLoginEvent(steve));
+
+        assertTrue(vanish.awaitingBackend(handle),
+                "a quick rejoin must not inherit the last session's connection");
     }
 
     @Test
@@ -159,7 +191,7 @@ class VelocityVanishTest {
 
         assertTrue(vanish.isVanished(new VelocityPlayerHandle(steve, text)),
                 "breaking the whole integration here would relay every vanished join again");
-        assertEquals(java.util.Collections.<Class<?>>singletonList(ServerPostConnectEvent.class),
+        assertEquals(Arrays.<Class<?>>asList(PostLoginEvent.class, ServerPostConnectEvent.class),
                 new ArrayList<Class<?>>(environment.handlers.keySet()),
                 "the backend anchor is still registered; the toggles cannot be");
         assertTrue(vanish.brokenReason() == null);
@@ -189,6 +221,7 @@ class VelocityVanishTest {
         final Map<UUID, Player> online = new HashMap<UUID, Player>();
         final Map<Class<?>, EventHandler<Object>> handlers =
                 new LinkedHashMap<Class<?>, EventHandler<Object>>();
+        final Map<Class<?>, PostOrder> orders = new HashMap<Class<?>, PostOrder>();
 
         @SuppressWarnings("unchecked")
         void fire(Object event) {
@@ -225,8 +258,10 @@ class VelocityVanishTest {
 
         @Override
         @SuppressWarnings("unchecked")
-        public <E> Registration listen(final Class<E> type, EventHandler<E> handler) {
+        public <E> Registration listen(
+                final Class<E> type, PostOrder order, EventHandler<E> handler) {
             handlers.put(type, (EventHandler<Object>) handler);
+            orders.put(type, order);
             return Registration.once(() -> handlers.remove(type));
         }
     }

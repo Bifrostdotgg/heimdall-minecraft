@@ -47,8 +47,9 @@ public interface Vanish {
      *
      * <p>The platform decides what the wait is anchored to, which is why this takes the player and
      * the time already waited rather than being a constant: a backend counts from the join, a proxy
-     * from the player's first backend connection, with a cap from the join so a player who never
-     * reaches a backend is still decided.
+     * from the player's first backend connection. While a proxy is still waiting for that connection
+     * {@link #awaitingBackend} says so, and this answers a positive re-check interval with no cap. A
+     * proxy that could not watch backend connections falls back to a cap counted from the join.
      *
      * <p>{@code 0} means decide now. That is the answer whenever PremiumVanish is absent, so a server
      * without it pays no delay at all.
@@ -57,6 +58,24 @@ public interface Vanish {
      * @param elapsedMs how long ago the join was reported, by the caller's own monotonic clock
      */
     long joinWaitMillis(PlayerHandle player, long elapsedMs);
+
+    /**
+     * Whether {@code player}'s join cannot be decided yet because they have not reached a backend,
+     * on a proxy that is watching for that. Departure D88.
+     *
+     * <p>A proxy's PremiumVanish only learns a player's state once they are on a backend, and a
+     * player can sit in an auth limbo (a virtual server) or a slow modded handshake for as long as
+     * they like before that. Deciding at any fixed cap would announce a vanished staff member who
+     * happened to be slow. So while this is {@code true} the caller keeps the join pending and
+     * re-checks; and if the player leaves while it is still {@code true}, the caller posts nothing
+     * for that session at all, neither the join nor the leave, because nobody in game saw them.
+     *
+     * <p>{@code false} everywhere else: on a backend, without PremiumVanish, once the player has
+     * connected, and on a proxy whose backend hook could not be registered.
+     */
+    default boolean awaitingBackend(PlayerHandle player) {
+        return false;
+    }
 
     /**
      * Whether {@code player} is currently hidden.

@@ -9,6 +9,7 @@ import java.lang.reflect.Method;
 import java.util.Collection;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import net.md_5.bungee.api.ProxyServer;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
 import net.md_5.bungee.api.plugin.Listener;
@@ -66,9 +67,24 @@ final class BungeeVanish extends VanishSupport {
             CoreRegistrations registrations,
             Environment environment,
             Function<ProxiedPlayer, PlayerHandle> handles) {
-        super(logger, registrations, true);
+        this(logger, registrations, environment, handles, null);
+    }
+
+    /** With a substitute monotonic clock (nanoseconds), so a test's join wait is exact. */
+    BungeeVanish(
+            HeimdallLogger logger,
+            CoreRegistrations registrations,
+            Environment environment,
+            Function<ProxiedPlayer, PlayerHandle> handles,
+            LongSupplier clock) {
+        super(logger, registrations, true, clock);
         this.environment = environment;
         this.handles = handles;
+    }
+
+    @Override
+    protected boolean isOnline(UUID player) {
+        return environment.onlinePlayer(player) != null;
     }
 
     /** The production wiring: the proxy's plugin manager, with listeners owned by {@code plugin}. */
@@ -128,6 +144,7 @@ final class BungeeVanish extends VanishSupport {
                 // The backend connection anchors the join wait, whether or not there are events.
                 final BungeeBackendListener backends = new BungeeBackendListener(BungeeVanish.this);
                 environment.register(backends);
+                watchingBackends();
                 Listener toggles = null;
                 try {
                     toggles = toggleListener(events, loader);
@@ -185,6 +202,17 @@ final class BungeeVanish extends VanishSupport {
             return true;
         } catch (ClassNotFoundException | LinkageError absent) {
             return false;
+        }
+    }
+
+    /** A proxy login, from {@link BungeeBackendListener}. Never throws into the bus. */
+    void onLogin(ProxiedPlayer player) {
+        try {
+            if (player != null) {
+                sessionStarted(player.getUniqueId());
+            }
+        } catch (Throwable failed) {
+            logger.error("could not note a proxy login for the vanish wait", failed);
         }
     }
 

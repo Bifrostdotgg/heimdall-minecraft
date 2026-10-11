@@ -2617,12 +2617,27 @@ PremiumVanish can mark a player after the platform's join event, and when depend
   `VanishSupport.JOIN_SETTLE_MS` (1.5 s) from the join, re-checking every 250 ms, as margin.
 - **A proxy** only learns a player's state once they have reached a backend and that backend (by
   plugin messaging, or the shared database) has told it, which often takes longer than 1.5 s from
-  `PostLoginEvent`. So the window runs from the player's **first backend connection** after the join
-  (Velocity `ServerPostConnectEvent`, falling back to `ServerConnectedEvent` on a Velocity without
-  it; BungeeCord `ServerConnectedEvent`), with a cap of `PROXY_JOIN_CAP_MS` (10 s) from the join. At
-  the cap with no backend connection, the join is decided with what is known: posted as visible
-  unless the proxy already knows otherwise. A connection from the player's previous session never
-  counts for the next one, and a server switch inside the wait does not extend it.
+  `PostLoginEvent`. So the window runs from the player's **first backend connection** in the
+  session (Velocity `ServerPostConnectEvent`, falling back to `ServerConnectedEvent` on a Velocity
+  without it; BungeeCord `ServerConnectedEvent`).
+- **Until that connection, a proxy join is not decided at all** (`Vanish.awaitingBackend`), and is
+  re-checked once a second. A staff member can sit in an auth limbo (LimboAuth, LibreLogin's virtual
+  server) or a slow modded handshake for as long as they like, and an earlier fixed cap of 10 s
+  announced exactly them. **A player who leaves without ever reaching a backend gets nothing posted,
+  neither the join nor the leave**: nobody in game saw them. The pending session is the bridge's
+  existing per-player record with one re-check scheduled at a time, so a long limbo holds one record
+  and one timer, never a growing set.
+- **The cap survives only as a fallback**, for a proxy whose backend hook could not be registered
+  (or has been taken off): with no listener it can never see the connection, so it decides at
+  `PROXY_JOIN_CAP_MS` (10 s) from the join, posting as visible unless it knows otherwise.
+- **Which connection counts is keyed by session, not by time.** The proxy's login hook (Velocity
+  `PostLoginEvent` at `FIRST`, BungeeCord at `LOWEST`, both ahead of the session listener) forgets the
+  previous session's connection, and only the first connection after it is kept, so a server switch
+  does not extend the wait and a quick rejoin cannot inherit the last session's mark, however late
+  `heimdall-io` gets to the join. Nothing is cleared at disconnect: the bridge decides a quit after
+  the disconnect event has run, and must still be able to tell "reached a backend and left" (post
+  the join and the leave) from "never reached one" (post nothing). The memory is bounded by the
+  players who left and have not returned; past 2048 entries those who are offline are dropped.
 
 Vanished at any check, or a hide event before the decision, decides it quiet at once, and that hide
 is part of the join: it never posts a leave. The join is posted with its own timestamp, so the bot's
@@ -2699,16 +2714,19 @@ with and without a session, the quiet-leave rule (and that it skips the lookup),
 auto-vanish toggle, the deferred join (posted after the window with its own timestamp, a late mark
 caught by a re-check, a hide inside the window, quick join and leave both ways, a death inside the
 window, a disable inside the window), the proxy anchor (posted 1.5 s after the backend connection, a
-mark after the connection, the 10 s cap, a hide before the decision, no proxy announcements),
+mark after the connection, a limbo past 10 s then vanished or visible, a disconnect before any
+backend posting nothing, the 1 s re-check, the cap only without the hook, a hide before the
+decision, no proxy announcements, a stale quit after a quiet rejoin),
 `announceVanishToggles` off and on, silent toggles, the `relayEvents` gate, live flips in both
 directions, seeding, teardown on disable and re-enable, and a throwing integration failing closed.
 `Vanish.NONE` and a zero wait are pinned as the old behaviour with no timer. `VanishSupportTest`
 covers resolution, retry, reload, a moved API, a transient throw answering vanished, the backend
-wait (anchor, cap, a stale connection), and the hook coming off through both `close()` and the
-generation teardown. `BukkitVanishTest`, `VelocityVanishTest` and `BungeeVanishTest` run the real
+wait (anchor, no cap while watching, the cap without the hook or after a failed one, a login
+forgetting the last session, a connection outliving the disconnect, the memory bound), and the hook
+coming off through both `close()` and the generation teardown, which also ends the uncapped wait. `BukkitVanishTest`, `VelocityVanishTest` and `BungeeVanishTest` run the real
 reflective code against stand-ins for PremiumVanish's classes in the test source sets (the metadata
 source, the offline lookups, the event hooks, the pre-change fallback, every event class missing, a
-reload, the backend anchor, teardown).
+reload, the backend anchor and the login hook on an injected clock, teardown).
 
 #### Limits
 
@@ -2718,8 +2736,10 @@ reload, the backend anchor, teardown).
 - **Mid-session toggles need PremiumVanish (or SuperVanish).** The metadata convention has no
   events, so with only EssentialsX a vanish is seen at the next join, leave or death check and
   `announceVanishToggles` has nothing to announce.
-- **A proxy join is posted up to about 11.5 s late** when PremiumVanish is installed there and the
-  player is slow to reach a backend. That is the price of asking a proxy that cannot know sooner.
+- **A proxy join is posted 1.5 s after the player reaches a backend** when PremiumVanish is
+  installed there, however long that takes. A player who spends a minute in an auth limbo has their
+  join posted a minute late. That is the price of asking a proxy that cannot know sooner, and it is
+  the price the operator chose by running PremiumVanish on the proxy.
 - **A swap inside a join's wait drops that join.** The new core seeds the player as visible, so
   their leave still posts later.
 - **Chat is not touched.** A vanished player who talks in public chat is visible to everyone in game

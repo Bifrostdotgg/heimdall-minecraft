@@ -176,9 +176,11 @@ import net.kyori.adventure.text.Component;
  *   <li>With PremiumVanish installed a join waits for as long as {@code Vanish.joinWaitMillis}
  *       says (re-checking every {@value #SETTLE_CHECK_MS} ms) before it is posted, because
  *       PremiumVanish can mark a player after the platform's join event: 1.5 s from the join on a
- *       backend, and on a proxy 1.5 s from the player's first backend connection, capped at 10 s
- *       from the join, since a proxy only learns the state once a backend tells it. A quit or
- *       death inside that window decides the join first, so the two go out together and in order.
+ *       backend, and on a proxy 1.5 s from the player's first backend connection, since a proxy
+ *       only learns the state once a backend tells it. Until that connection the join is not
+ *       decided at all (re-checked every {@value #BACKEND_RECHECK_MS} ms), and a player who leaves
+ *       without ever reaching a backend gets neither a join nor a leave. A quit or death inside
+ *       the window decides the join first, so the two go out together and in order.
  *       Without PremiumVanish there is no window and a join posts at once, as it always did.
  *   <li>Vanishing or reappearing mid-session posts nothing unless {@code announceVanishToggles} is
  *       on, and then it mirrors what players in game saw: a {@code leave} for a vanish and a
@@ -314,6 +316,13 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * without PremiumVanish.
      */
     static final long SETTLE_CHECK_MS = 250L;
+
+    /**
+     * How often a join that is waiting for its player to reach a backend is re-checked, on a proxy
+     * ({@code Vanish.awaitingBackend}). Slower than {@link #SETTLE_CHECK_MS}: that wait has no end
+     * of its own (an auth limbo can last minutes), and nothing about it is urgent.
+     */
+    static final long BACKEND_RECHECK_MS = 1000L;
 
     /**
      * How long a vanish toggle seen <em>before</em> its player's join is trusted when that join
@@ -1544,6 +1553,15 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
     }
 
+    /** {@link Vanish#awaitingBackend}, with a throw treated as "not waiting for one". */
+    private static boolean awaitingBackend(Vanish vanish, PlayerHandle player) {
+        try {
+            return vanish.awaitingBackend(player);
+        } catch (Throwable failed) {
+            return false;
+        }
+    }
+
     /** {@link Vanish#joinWaitMillis}, with a throw treated as "decide now". */
     private static long waitMillis(Vanish vanish, PlayerHandle player, long elapsedMs) {
         try {
@@ -1577,6 +1595,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
         Vanish vanish = vanish(ctx);
         long wait = waitMillis(vanish, player, 0L);
+        boolean awaiting = awaitingBackend(vanish, player);
         boolean vanishedNow = isVanished(vanish, player);
         Session deferred = null;
         synchronized (sessionLock) {
@@ -1594,7 +1613,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             if (vanishedNow || hiddenEarly) {
                 session.hidden = true;
                 session.quiet = true;
-            } else if (wait <= 0L) {
+            } else if (wait <= 0L && !awaiting) {
                 relayEvent("join", player, null, timestampMs);
             } else {
                 session.pending = true;
@@ -1602,7 +1621,8 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             }
         }
         if (deferred != null) {
-            scheduleSettleCheck(ctx, deferred, Math.min(SETTLE_CHECK_MS, wait));
+            scheduleSettleCheck(ctx, deferred,
+                    awaiting ? BACKEND_RECHECK_MS : Math.min(SETTLE_CHECK_MS, wait));
         }
     }
 
@@ -1651,25 +1671,31 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
         Vanish vanish = vanish(ctx);
         boolean vanished = isVanished(vanish, session.player);
+        boolean awaiting = awaitingBackend(vanish, session.player);
         long wait = waitMillis(vanish, session.player, elapsedMs(session));
-        boolean again = false;
+        long next = 0L;
         synchronized (sessionLock) {
             if (sessions.get(uuid) != session || !session.pending) {
                 return;
             }
-            if (vanished || session.hidden) {
+            if (vanished || session.hidden || (awaiting && last)) {
+                // Vanished, or (shutting down) still not on any backend: nothing is posted.
                 session.pending = false;
-                session.hidden = true;
+                session.hidden = session.hidden || vanished;
                 session.quiet = true;
+            } else if (awaiting) {
+                // No backend yet, so no answer yet: an auth limbo can last as long as it likes, and
+                // any cap here would announce a vanished staff member who happened to be slow.
+                next = BACKEND_RECHECK_MS;
             } else if (!last && wait > 0L) {
-                again = true;
+                next = Math.min(SETTLE_CHECK_MS, wait);
             } else {
                 session.pending = false;
                 relayEvent("join", session.player, null, session.joinTs);
             }
         }
-        if (again) {
-            scheduleSettleCheck(ctx, session, Math.min(SETTLE_CHECK_MS, wait));
+        if (next > 0L) {
+            scheduleSettleCheck(ctx, session, next);
         }
     }
 
@@ -1701,7 +1727,9 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 return;
             }
         }
-        boolean vanishedNow = isVanished(vanish(ctx), player);
+        Vanish vanish = vanish(ctx);
+        boolean vanishedNow = isVanished(vanish, player);
+        boolean awaiting = awaitingBackend(vanish, player);
         synchronized (sessionLock) {
             if (context != ctx) {
                 return;
@@ -1730,7 +1758,9 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             }
             if (session.pending) {
                 session.pending = false;
-                if (vanishedNow || session.hidden) {
+                if (vanishedNow || session.hidden || awaiting) {
+                    // Vanished, or gone before ever reaching a backend: nobody in game saw this
+                    // session, so neither its join nor its leave is posted.
                     return;
                 }
                 relayEvent("join", session.player, null, session.joinTs);

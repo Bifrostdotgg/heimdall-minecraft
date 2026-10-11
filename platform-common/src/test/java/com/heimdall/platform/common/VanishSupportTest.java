@@ -60,9 +60,25 @@ class VanishSupportTest {
             this(false);
         }
 
+        /** Whether this proxy's hook manages to register its login and backend listeners. */
+        volatile boolean watchBackends = true;
+        volatile boolean hookFails;
+        volatile boolean online = true;
+        private final boolean proxy;
+
         TestVanish(boolean proxy) {
-            super(VanishSupportTest.this.logger, VanishSupportTest.this.registrations, proxy);
-            clockForTests(() -> nanos.get());
+            super(VanishSupportTest.this.logger, VanishSupportTest.this.registrations, proxy,
+                    () -> VanishSupportTest.this.nanos.get());
+            this.proxy = proxy;
+        }
+
+        @Override
+        protected boolean isOnline(UUID player) {
+            return online;
+        }
+
+        void login(PlayerHandle player) {
+            sessionStarted(player.uuid());
         }
 
         @Override
@@ -103,6 +119,12 @@ class VanishSupportTest {
 
                 @Override
                 public Registration hook() {
+                    if (hookFails) {
+                        throw new IllegalStateException("could not register");
+                    }
+                    if (proxy && watchBackends) {
+                        watchingBackends();
+                    }
                     hooksMade.incrementAndGet();
                     hooksOpen.incrementAndGet();
                     return Registration.once(new Runnable() {
@@ -322,13 +344,15 @@ class VanishSupportTest {
     void aProxyWaitsFromTheBackend() {
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
+        vanish.login(steve);
 
-        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS, vanish.joinWaitMillis(steve, 0L),
-                "no backend yet: the proxy's PremiumVanish cannot know, so wait up to the cap");
+        assertTrue(vanish.awaitingBackend(steve),
+                "no backend yet: the proxy's PremiumVanish cannot know");
+        assertEquals(VanishSupport.BACKEND_RECHECK_MS, vanish.joinWaitMillis(steve, 0L));
         advanceMs(3000L);
-        assertEquals(7000L, vanish.joinWaitMillis(steve, 3000L));
 
         vanish.connect(steve);
+        assertFalse(vanish.awaitingBackend(steve));
         advanceMs(500L);
         assertEquals(1000L, vanish.joinWaitMillis(steve, 3500L),
                 "the settle window now runs from the backend connection");
@@ -339,24 +363,99 @@ class VanishSupportTest {
     }
 
     @Test
-    @DisplayName("a proxy decides at the cap when the player never reaches a backend")
-    void aProxyDecidesAtTheCap() {
+    @DisplayName("a proxy watching backends has no cap: an auth limbo of a minute is still waiting")
+    void aLimboHasNoCap() {
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
+        vanish.login(steve);
+        advanceMs(60_000L);
 
+        assertTrue(vanish.awaitingBackend(steve));
+        assertEquals(VanishSupport.BACKEND_RECHECK_MS, vanish.joinWaitMillis(steve, 60_000L),
+                "any cap would announce a vanished staff member who happened to be slow");
+    }
+
+    @Test
+    @DisplayName("a proxy whose backend hook is not registered falls back to the cap")
+    void withoutTheHookTheCapApplies() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.watchBackends = false;
+
+        assertFalse(vanish.awaitingBackend(steve));
+        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS, vanish.joinWaitMillis(steve, 0L));
         assertEquals(0L, vanish.joinWaitMillis(steve, VanishSupport.PROXY_JOIN_CAP_MS));
     }
 
     @Test
-    @DisplayName("a proxy ignores a backend connection from the player's previous session")
-    void aStaleConnectionDoesNotCount() {
+    @DisplayName("a hook that fails to register falls back to the cap too")
+    void aFailedHookFallsBackToTheCap() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.hookFails = true;
+
+        assertFalse(vanish.awaitingBackend(steve));
+        assertEquals(0L, vanish.joinWaitMillis(steve, VanishSupport.PROXY_JOIN_CAP_MS));
+    }
+
+    @Test
+    @DisplayName("taking the hook off (a swap) ends the uncapped wait, since nothing would see a connection")
+    void teardownEndsTheUncappedWait() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.prepare();
+        assertTrue(vanish.awaitingBackend(steve));
+
+        registrations.closeAll(logger);
+
+        assertFalse(vanish.awaitingBackend(steve));
+    }
+
+    @Test
+    @DisplayName("a login starts a new session: the previous session's connection no longer counts")
+    void aLoginForgetsTheLastSession() {
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
         vanish.connect(steve);
-        advanceMs(5000L);
+        assertFalse(vanish.awaitingBackend(steve));
 
-        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS, vanish.joinWaitMillis(steve, 0L),
-                "a quick reconnect must not inherit the last session's connection");
+        // A quick rejoin, however soon, and however late the join reaches the bridge.
+        vanish.login(steve);
+        assertTrue(vanish.awaitingBackend(steve));
+        advanceMs(200L);
+        vanish.connect(steve);
+
+        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(steve, 5000L),
+                "the new session's connection is the anchor, kept rather than the old one");
+    }
+
+    @Test
+    @DisplayName("a connection is not forgotten at disconnect, so a quit can still tell it happened")
+    void aConnectionOutlivesTheSession() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.login(steve);
+        vanish.connect(steve);
+        vanish.online = false;
+        advanceMs(120_000L);
+
+        assertFalse(vanish.awaitingBackend(steve),
+                "the bridge decides a quit after the disconnect event; it must still see this");
+    }
+
+    @Test
+    @DisplayName("remembered connections are bounded: past the limit, offline players' are dropped")
+    void rememberedConnectionsAreBounded() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.online = false;
+
+        for (int i = 0; i <= VanishSupport.MAX_REMEMBERED_CONNECTIONS + 10; i++) {
+            vanish.connect(FakePlayer.named("player" + i));
+        }
+
+        assertTrue(vanish.rememberedConnections() <= VanishSupport.MAX_REMEMBERED_CONNECTIONS,
+                "remembered: " + vanish.rememberedConnections());
     }
 
     @Test

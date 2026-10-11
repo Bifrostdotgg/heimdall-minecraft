@@ -50,6 +50,14 @@ class BungeeVanishTest {
     private final BungeeText text = new BungeeText();
     private final List<String> toggles = new ArrayList<String>();
 
+    /** The join wait's clock, so a wait is exact however slow the machine. */
+    private final java.util.concurrent.atomic.AtomicLong nanos =
+            new java.util.concurrent.atomic.AtomicLong(1_000_000_000L);
+
+    private void advanceMs(long ms) {
+        nanos.addAndGet(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(ms));
+    }
+
     @AfterEach
     void reset() {
         BungeeVanishAPI.INVISIBLE.clear();
@@ -62,7 +70,7 @@ class BungeeVanishTest {
                     public PlayerHandle apply(ProxiedPlayer player) {
                         return new BungeePlayerHandle(player, text);
                     }
-                });
+                }, () -> nanos.get());
         vanish.onToggle(new VanishListener() {
             @Override
             public void onVanishChanged(
@@ -103,9 +111,8 @@ class BungeeVanishTest {
         BungeeVanishAPI.INVISIBLE.add(steve.getUniqueId());
         environment.online.put(steve.getUniqueId(), steve);
 
-        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS,
-                vanish.joinWaitMillis(new BungeePlayerHandle(steve, text), 0L),
-                "no backend yet: a proxy waits up to the cap for one");
+        assertTrue(vanish.awaitingBackend(new BungeePlayerHandle(steve, text)),
+                "no backend yet: a proxy waits for one, uncapped");
         assertTrue(vanish.isVanished(new BungeePlayerHandle(steve, text)));
 
         environment.online.clear();
@@ -149,12 +156,40 @@ class BungeeVanishTest {
         BungeeVanish vanish = vanish();
         ProxiedPlayer steve = player("Steve");
         BungeePlayerHandle handle = new BungeePlayerHandle(steve, text);
+        environment.bus.post(new PostLoginEvent(steve));
+        assertTrue(vanish.awaitingBackend(handle));
+        advanceMs(20_000L);
 
         environment.bus.post(new ServerConnectedEvent(steve, mock(Server.class)));
-        long wait = vanish.joinWaitMillis(handle, 1000L);
+        advanceMs(500L);
 
-        assertTrue(wait > 1000L && wait <= VanishSupport.JOIN_SETTLE_MS,
-                "the settle window starts at the backend connection: " + wait);
+        assertFalse(vanish.awaitingBackend(handle));
+        assertEquals(1000L, vanish.joinWaitMillis(handle, 20_500L),
+                "the settle window starts at the backend connection, however long the limbo was");
+    }
+
+    @Test
+    @DisplayName("a login, posted on the real bus, forgets the previous session's connection")
+    void aLoginStartsANewSession() {
+        environment.install();
+        BungeeVanish vanish = vanish();
+        ProxiedPlayer steve = player("Steve");
+        BungeePlayerHandle handle = new BungeePlayerHandle(steve, text);
+        environment.bus.post(new ServerConnectedEvent(steve, mock(Server.class)));
+        assertFalse(vanish.awaitingBackend(handle));
+
+        environment.bus.post(new PostLoginEvent(steve));
+
+        assertTrue(vanish.awaitingBackend(handle),
+                "a quick rejoin must not inherit the last session's connection");
+    }
+
+    @Test
+    @DisplayName("the login handler runs first, before the session listener reports the join")
+    void theLoginHandlerRunsFirst() throws NoSuchMethodException {
+        assertEquals(EventPriority.LOWEST, BungeeBackendListener.class
+                .getMethod("onPostLogin", PostLoginEvent.class)
+                .getAnnotation(EventHandler.class).priority());
     }
 
     @Test

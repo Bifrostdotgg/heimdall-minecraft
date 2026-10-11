@@ -7,6 +7,7 @@ import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.VanishSupport;
 import com.velocitypowered.api.event.EventHandler;
 import com.velocitypowered.api.event.PostOrder;
+import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.player.ServerPostConnectEvent;
 import com.velocitypowered.api.plugin.PluginContainer;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 
 /**
  * Vanish on a Velocity proxy: PremiumVanish's {@code VelocityVanishAPI}, reached reflectively.
@@ -51,8 +53,9 @@ import java.util.function.Function;
  * <h2>The join wait is anchored to the backend</h2>
  *
  * <p>The proxy's PremiumVanish learns a player's state only after they reach a backend, which can
- * take longer than the whole settle window. So the wait counts from the first backend connection
- * after the join, capped from the join; see {@link VanishSupport}.
+ * take longer than the whole settle window, or never (an auth limbo). So the wait counts from the
+ * first backend connection of the session, and a join with no connection yet is not decided at
+ * all; see {@link VanishSupport}.
  *
  * <p>Velocity has no plugin unloading, so a binding never goes stale here.
  */
@@ -77,8 +80,8 @@ final class VelocityVanish extends VanishSupport {
         /** The class loader PremiumVanish's own classes live in. */
         ClassLoader loaderOf(Object instance);
 
-        /** Registers {@code handler} for {@code type} at {@link PostOrder#LAST}. */
-        <E> Registration listen(Class<E> type, EventHandler<E> handler);
+        /** Registers {@code handler} for {@code type} at {@code order}. */
+        <E> Registration listen(Class<E> type, PostOrder order, EventHandler<E> handler);
     }
 
     private final Environment environment;
@@ -89,9 +92,24 @@ final class VelocityVanish extends VanishSupport {
             CoreRegistrations registrations,
             Environment environment,
             Function<Player, PlayerHandle> handles) {
-        super(logger, registrations, true);
+        this(logger, registrations, environment, handles, null);
+    }
+
+    /** With a substitute monotonic clock (nanoseconds), so a test's join wait is exact. */
+    VelocityVanish(
+            HeimdallLogger logger,
+            CoreRegistrations registrations,
+            Environment environment,
+            Function<Player, PlayerHandle> handles,
+            LongSupplier clock) {
+        super(logger, registrations, true, clock);
         this.environment = environment;
         this.handles = handles;
+    }
+
+    @Override
+    protected boolean isOnline(UUID player) {
+        return environment.onlinePlayer(player).isPresent();
     }
 
     /** The production wiring: the proxy's plugin and event managers, owned by {@code plugin}. */
@@ -154,9 +172,11 @@ final class VelocityVanish extends VanishSupport {
             public Registration hook() {
                 final List<Registration> made = new ArrayList<Registration>();
                 try {
-                    // The backend connection anchors the join wait, so it is registered whether or
-                    // not this release has the toggle events.
+                    // The login and the backend connection anchor the join wait, so they are
+                    // registered whether or not this release has the toggle events.
+                    made.add(listenForLogins());
                     made.add(listenForBackends());
+                    watchingBackends();
                     if (hidePlayer != null && showPlayer != null) {
                         made.add(listen(hide, hidePlayer, true));
                         made.add(listen(show, showPlayer, false));
@@ -189,7 +209,7 @@ final class VelocityVanish extends VanishSupport {
      */
     private Registration listenForBackends() {
         try {
-            return environment.listen(ServerPostConnectEvent.class,
+            return environment.listen(ServerPostConnectEvent.class, PostOrder.LAST,
                     new EventHandler<ServerPostConnectEvent>() {
                         @Override
                         public void execute(ServerPostConnectEvent event) {
@@ -197,7 +217,7 @@ final class VelocityVanish extends VanishSupport {
                         }
                     });
         } catch (LinkageError tooOld) {
-            return environment.listen(ServerConnectedEvent.class,
+            return environment.listen(ServerConnectedEvent.class, PostOrder.LAST,
                     new EventHandler<ServerConnectedEvent>() {
                         @Override
                         public void execute(ServerConnectedEvent event) {
@@ -205,6 +225,25 @@ final class VelocityVanish extends VanishSupport {
                         }
                     });
         }
+    }
+
+    /**
+     * Each login starts a new session, so the previous session's backend connection stops counting.
+     * {@link PostOrder#FIRST}, so it runs before the session listener (at {@code LAST}) reports the
+     * join and the bridge first asks how long to wait.
+     */
+    private Registration listenForLogins() {
+        return environment.listen(PostLoginEvent.class, PostOrder.FIRST,
+                new EventHandler<PostLoginEvent>() {
+                    @Override
+                    public void execute(PostLoginEvent event) {
+                        try {
+                            sessionStarted(event.getPlayer().getUniqueId());
+                        } catch (Throwable failed) {
+                            logger.error("could not note a proxy login for the vanish wait", failed);
+                        }
+                    }
+                });
     }
 
     private void onBackend(Player player) {
@@ -237,7 +276,7 @@ final class VelocityVanish extends VanishSupport {
 
     @SuppressWarnings("unchecked")
     private Registration listen(Class<?> type, final Method getPlayer, final boolean vanished) {
-        return environment.listen((Class<Object>) type, new EventHandler<Object>() {
+        return environment.listen((Class<Object>) type, PostOrder.LAST, new EventHandler<Object>() {
             @Override
             public void execute(Object event) {
                 onEvent(getPlayer, event, vanished);
@@ -312,9 +351,8 @@ final class VelocityVanish extends VanishSupport {
         }
 
         @Override
-        public <E> Registration listen(Class<E> type, EventHandler<E> handler) {
-            return VelocityEvents.listen(
-                    proxy.getEventManager(), plugin, type, PostOrder.LAST, handler);
+        public <E> Registration listen(Class<E> type, PostOrder order, EventHandler<E> handler) {
+            return VelocityEvents.listen(proxy.getEventManager(), plugin, type, order, handler);
         }
     }
 }

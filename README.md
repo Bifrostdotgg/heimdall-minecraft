@@ -261,8 +261,9 @@ Two notes worth having before you turn something on:
     all, so with one of them, `relayEvents` must be off on the proxy.
   - With PremiumVanish installed, joins are posted a little late while the plugin makes sure the
     player is not being vanished: about a second and a half on a backend, and on a proxy a second
-    and a half after the player reaches a backend (at most about ten seconds). Without PremiumVanish
-    nothing changes.
+    and a half after the player reaches a backend, however long that takes (an auth lobby counts as
+    not there yet). Somebody who disconnects before ever reaching a backend is not announced at
+    all, neither joining nor leaving. Without PremiumVanish nothing changes.
   - `announceVanishToggles` (per server, **off** by default) decides what happens when somebody
     vanishes or reappears mid-session. Off: nothing is posted. On: a backend posts what players in
     game see, a leave when they vanish and a join when they reappear (not for a silent `-s` toggle,

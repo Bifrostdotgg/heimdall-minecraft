@@ -7,7 +7,6 @@ import com.heimdall.core.platform.VanishListener;
 import com.heimdall.core.util.Registration;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Iterator;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -64,9 +63,18 @@ import java.util.function.LongSupplier;
  * join: PremiumVanish marks an auto-vanished player inside the join itself, so this is margin. A
  * proxy cannot count from the join, because its PremiumVanish only learns a player's state once
  * they have reached a backend and that backend has told it, which can take longer than the whole
- * window. So a proxy counts the window from the player's first backend connection after the join
- * ({@link #backendConnected}), with a cap of {@link #PROXY_JOIN_CAP_MS} from the join for a player
- * who never reaches one: at the cap the join is decided with what is known.
+ * window. So a proxy counts the window from the player's first backend connection in this session
+ * ({@link #backendConnected}). Until that connection the join is not decided at all
+ * ({@link #awaitingBackend}): a staff member can sit in an auth limbo or a slow modded handshake for
+ * as long as they like, and any fixed cap would announce them. Only a proxy that could not register
+ * its backend hook falls back to a cap of {@link #PROXY_JOIN_CAP_MS} from the join.
+ *
+ * <p>Which connection counts is keyed by session, not by time: the platform calls
+ * {@link #sessionStarted} at the start of every proxy login (before anything else hears of the
+ * join), which forgets the previous session's connection, and only the first connection after that
+ * is kept. Nothing is cleared at disconnect, because the bridge decides a quit after the disconnect
+ * event has run, and must still be able to tell a player who reached a backend from one who did
+ * not.
  *
  * <h2>Hot swap</h2>
  *
@@ -83,19 +91,27 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     public static final long JOIN_SETTLE_MS = 1500L;
 
     /**
-     * A proxy's cap on the wait, from the join, for a player who has not reached a backend. Long
-     * enough for a slow backend handshake, short enough that a join still reads as news.
+     * A proxy's cap on the wait, from the join, used only when its backend hook could not be
+     * registered: without that hook it cannot know when the player arrives, so it decides here with
+     * what is known.
      */
     public static final long PROXY_JOIN_CAP_MS = 10_000L;
+
+    /** How often a proxy re-checks a join that is still waiting for a backend connection. */
+    public static final long BACKEND_RECHECK_MS = 1000L;
+
+    /**
+     * Above this many remembered backend connections, those of players no longer online are dropped.
+     * Every entry is replaced at that player's next login, so this only bounds players who left and
+     * have not come back.
+     */
+    static final int MAX_REMEMBERED_CONNECTIONS = 2048;
 
     /** At most one transient warning per this interval. */
     static final long TRANSIENT_WARN_NANOS = TimeUnit.SECONDS.toNanos(60);
 
     /** How long a caller waits for another thread's resolution before answering "absent". */
     static final long RESOLVE_WAIT_MS = 2000L;
-
-    /** Backend connections older than this are forgotten; no join waits anywhere near as long. */
-    static final long BACKEND_MEMORY_NANOS = TimeUnit.SECONDS.toNanos(60);
 
     /**
      * One resolved PremiumVanish: the reflective handles a platform found through its class loader.
@@ -112,8 +128,9 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
 
         /**
          * Registers for the events this platform needs: hide and show (delivered through
-         * {@link #toggled}) when the release has them, and on a proxy the backend connection (through
-         * {@link #backendConnected}).
+         * {@link #toggled}) when the release has them, and on a proxy the login and the backend
+         * connection (through {@link #sessionStarted} and {@link #backendConnected}), after which it
+         * calls {@link #watchingBackends()}.
          *
          * @return a handle that unregisters exactly what this registered
          */
@@ -129,7 +146,10 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     /** Serialises resolution, never held across anything a caller of this class waits on. */
     private final ReentrantLock resolveLock = new ReentrantLock();
 
-    /** First backend connection per player, on {@link #nanoNow()}'s clock. Proxies only. */
+    /**
+     * First backend connection in each player's current session, on {@link #nanoNow()}'s clock.
+     * Proxies only. Replaced at the player's next login; see the class javadoc.
+     */
     private final ConcurrentHashMap<UUID, Long> backendConnections =
             new ConcurrentHashMap<UUID, Long>();
 
@@ -138,16 +158,31 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     private volatile boolean closed;
     private volatile String brokenBecause;
     private volatile long nextTransientWarnAt;
-    private volatile LongSupplier clock;
+
+    /** Set by a proxy's hook once its login and backend listeners are registered. */
+    private volatile boolean backendsWatched;
+
+    private final LongSupplier clock;
 
     /**
      * @param proxy whether this platform is a proxy, whose join wait is anchored to the player's
      *     first backend connection rather than to the join
      */
     protected VanishSupport(HeimdallLogger logger, CoreRegistrations registrations, boolean proxy) {
+        this(logger, registrations, proxy, null);
+    }
+
+    /**
+     * @param clock the monotonic clock the join wait reads, in nanoseconds; {@code null} for
+     *     {@link System#nanoTime()}. Tests substitute one so a wait is exact and never depends on how
+     *     fast the machine is
+     */
+    protected VanishSupport(
+            HeimdallLogger logger, CoreRegistrations registrations, boolean proxy, LongSupplier clock) {
         this.logger = logger;
         this.registrations = registrations == null ? CoreRegistrations.untracked() : registrations;
         this.proxy = proxy;
+        this.clock = clock;
         this.nextTransientWarnAt = System.nanoTime();
     }
 
@@ -189,19 +224,27 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         if (!proxy) {
             return Math.max(0L, JOIN_SETTLE_MS - elapsed);
         }
-        long now = nanoNow();
-        long joinedAt = now - TimeUnit.MILLISECONDS.toNanos(elapsed);
         Long connected = player.uuid() == null ? null : backendConnections.get(player.uuid());
-        if (connected != null && connected.longValue() - joinedAt < 0) {
-            // A connection from an earlier session; this join's has not happened yet.
-            backendConnections.remove(player.uuid(), connected);
-            connected = null;
-        }
         if (connected == null) {
+            if (backendsWatched) {
+                // No cap: see awaitingBackend. A positive answer keeps a caller that does not ask
+                // awaitingBackend waiting too.
+                return BACKEND_RECHECK_MS;
+            }
             return Math.max(0L, PROXY_JOIN_CAP_MS - elapsed);
         }
-        long sinceConnect = TimeUnit.NANOSECONDS.toMillis(now - connected.longValue());
+        long sinceConnect = TimeUnit.NANOSECONDS.toMillis(nanoNow() - connected.longValue());
         return Math.max(0L, JOIN_SETTLE_MS - sinceConnect);
+    }
+
+    @Override
+    public final boolean awaitingBackend(PlayerHandle player) {
+        // Resolved first: resolving is what registers the hook that sets backendsWatched.
+        if (!proxy || player == null || player.uuid() == null || binding() == null
+                || !backendsWatched) {
+            return false;
+        }
+        return !backendConnections.containsKey(player.uuid());
     }
 
     @Override
@@ -276,32 +319,60 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     }
 
     /**
+     * Records that a player is logging in to the proxy: a new session, so the previous one's backend
+     * connection no longer counts. Called by a proxy's login hook, which must run before the session
+     * listener reports the join (Velocity {@code PostOrder.FIRST}, BungeeCord {@code LOWEST}).
+     */
+    protected final void sessionStarted(UUID player) {
+        if (player != null) {
+            backendConnections.remove(player);
+        }
+    }
+
+    /**
      * Records that a player reached a backend. Called by a proxy's connection hook. Only the first
-     * connection after a join counts, so a server switch inside the wait does not extend it.
+     * connection in a session counts, so a server switch inside the wait does not extend it.
      */
     protected final void backendConnected(UUID player) {
         if (closed || player == null) {
             return;
         }
-        long now = nanoNow();
-        backendConnections.putIfAbsent(player, now);
-        // Bounded by the players who connected in the last minute; nothing waits longer than that.
-        Iterator<Map.Entry<UUID, Long>> entries = backendConnections.entrySet().iterator();
-        while (entries.hasNext()) {
-            if (now - entries.next().getValue().longValue() > BACKEND_MEMORY_NANOS) {
-                entries.remove();
+        backendConnections.putIfAbsent(player, nanoNow());
+        if (backendConnections.size() > MAX_REMEMBERED_CONNECTIONS) {
+            // Players who left keep their entry until they log in again. Past the bound, forget
+            // those who are not online; nobody's pending join is lost by that.
+            Iterator<UUID> players = backendConnections.keySet().iterator();
+            while (players.hasNext()) {
+                UUID candidate = players.next();
+                if (!isOnline(candidate)) {
+                    players.remove();
+                }
             }
         }
+    }
+
+    /**
+     * Called by a proxy's hook once its login and backend listeners are registered. From then on a
+     * join waits for the backend connection with no cap; until then, and if registering failed, the
+     * cap applies.
+     */
+    protected final void watchingBackends() {
+        backendsWatched = true;
+    }
+
+    /** Whether a player is still on this platform, for bounding the connection memory. */
+    protected boolean isOnline(UUID player) {
+        return true;
+    }
+
+    /** How many backend connections are remembered. For tests. */
+    final int rememberedConnections() {
+        return backendConnections.size();
     }
 
     /** How many toggle listeners are subscribed. For tests. */
     final int listenerCount() {
         return listeners.size();
-    }
-
-    /** Substitutes the monotonic clock the join wait reads. For tests. */
-    final void clockForTests(LongSupplier nanos) {
-        this.clock = nanos;
     }
 
     private long nanoNow() {
@@ -390,12 +461,23 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         try {
             hook = fresh.hook();
         } catch (Throwable failed) {
-            // Queries still work without the hook; only mid-session toggles go unseen.
+            // Queries still work without the hook; only mid-session toggles go unseen, and a proxy
+            // falls back to its capped join wait.
+            backendsWatched = false;
             logger.error("could not register for PremiumVanish's events; joins, leaves and deaths "
                     + "of vanished players are still kept out of Discord, but a player vanishing "
                     + "mid-session will not be noticed until they leave", failed);
         }
-        Registration tracked = registrations.track(hook == null ? Registration.NONE : hook);
+        final Registration registered = hook == null ? Registration.NONE : hook;
+        // Taking the hook off (a reload, a swap, close) also ends the uncapped backend wait: with no
+        // listener, a connection would never be seen.
+        Registration tracked = registrations.track(Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                backendsWatched = false;
+                registered.close();
+            }
+        }));
         bound = fresh;
         hooks = tracked;
         if (closed) {
