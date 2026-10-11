@@ -17,6 +17,9 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -323,6 +326,8 @@ class BukkitItemImagesTest {
         final CountDownLatch entered = new CountDownLatch(1);
         final AtomicInteger requests = new AtomicInteger();
         private final long holdMs;
+        /** Thrown instead of the 404 once the hold is over, when set. */
+        volatile Error thenThrow;
 
         SlowHttp(long holdMs) {
             this.holdMs = holdMs;
@@ -332,14 +337,9 @@ class BukkitItemImagesTest {
         public byte[] get(String url, long maxBytes) throws IOException {
             requests.incrementAndGet();
             entered.countDown();
-            long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(holdMs);
-            while (System.nanoTime() < until) {
-                Thread.interrupted();
-                try {
-                    Thread.sleep(5);
-                } catch (InterruptedException deaf) {
-                    // Deliberately ignored, like a blocked socket read.
-                }
+            deafSleep(holdMs);
+            if (thenThrow != null) {
+                throw thenThrow;
             }
             throw new IOException("HTTP 404");
         }
@@ -349,6 +349,177 @@ class BukkitItemImagesTest {
                 throws IOException {
             return get(url, maxBytes).length;
         }
+    }
+
+    /** Sleeps {@code ms} and ignores interrupts while it does, like a blocked socket read. */
+    private static void deafSleep(long ms) {
+        long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ms);
+        while (System.nanoTime() < until) {
+            Thread.interrupted();
+            try {
+                Thread.sleep(5);
+            } catch (InterruptedException deaf) {
+                // Deliberately ignored.
+            }
+        }
+    }
+
+    private static void awaitStopped(java.util.function.BooleanSupplier stopped) throws Exception {
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (!stopped.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        assertTrue(stopped.getAsBoolean(), "the thread never stopped");
+    }
+
+    @Test
+    void closeWaitsForBothThreadsAgainstOneDeadline() throws Exception {
+        SlowHttp http = new SlowHttp(2_500L);
+        BukkitItemImages service = build(http);
+        service.closeWaitMs = 500L;
+        CountDownLatch rendering = new CountDownLatch(1);
+        service.runOnRenderThread(() -> {
+            rendering.countDown();
+            deafSleep(2_500L);
+        });
+        service.prepare();
+        assertTrue(http.entered.await(5, TimeUnit.SECONDS));
+        assertTrue(rendering.await(5, TimeUnit.SECONDS));
+
+        long started = System.nanoTime();
+        service.close();
+        images = null;
+        long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+        // One shared deadline: about 500 ms. One wait per thread would be about 1000.
+        assertTrue(took < 850L, "close() waited per thread, not once: " + took + "ms");
+        assertTrue(took >= 400L, "close() did not wait at all: " + took + "ms");
+    }
+
+    @Test
+    void theStackIsClosedEvenWhenTheRenderThreadIsStuck() throws Exception {
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        service.render(wardedJar()).get(10, TimeUnit.SECONDS);
+        assertTrue(service.stackOpen(), "a render opens the pack stack");
+        service.closeWaitMs = 100L;
+        CountDownLatch rendering = new CountDownLatch(1);
+        service.runOnRenderThread(() -> {
+            rendering.countDown();
+            deafSleep(1_000L);
+        });
+        assertTrue(rendering.await(5, TimeUnit.SECONDS));
+
+        service.close();
+        images = null;
+
+        assertFalse(service.renderThreadStopped(), "the setup needs the render thread still busy");
+        assertFalse(service.stackOpen(), "close() left the pack zips open");
+    }
+
+    @Test
+    void workQueuedBehindCloseBuildsNothing() throws Exception {
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch rendering = new CountDownLatch(1);
+        service.runOnRenderThread(() -> {
+            rendering.countDown();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertTrue(rendering.await(5, TimeUnit.SECONDS));
+        // Queues the warm-up rebuild behind the blocker once the (failing, offline) prepare ends.
+        service.prepare();
+        awaitStopped(() -> service.assetGeneration.get() == 1);
+        java.util.concurrent.CompletableFuture<byte[]> queued = service.render(wardedJar());
+        logger.clear();
+        new Thread(() -> {
+            deafSleep(150L);
+            release.countDown();
+        }).start();
+
+        service.close();
+        images = null;
+
+        assertTrue(service.renderThreadStopped());
+        assertEquals(null, queued.get(1, TimeUnit.SECONDS), "a render queued behind close drew");
+        assertFalse(service.stackOpen());
+        assertFalse(logger.logged(LogLevel.DEBUG, "pack stack rebuilt"), logger.records().toString());
+    }
+
+    @Test
+    void anErrorAfterCloseIsDroppedSilently() throws Exception {
+        // After a swap's 30 s loader grace, a late asset thread's next class load is a
+        // NoClassDefFoundError. Nothing may escape to the thread's uncaught handler (which prints a
+        // stack trace into the server log), and nothing may be reported as a failure.
+        final List<Throwable> uncaught = Collections.synchronizedList(new ArrayList<Throwable>());
+        Thread.UncaughtExceptionHandler previous = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> uncaught.add(error));
+        try {
+            SlowHttp http = new SlowHttp(400L);
+            http.thenThrow = new NoClassDefFoundError("com/heimdall/Gone");
+            BukkitItemImages service = build(http);
+            service.closeWaitMs = 50L;
+            service.prepare();
+            assertTrue(http.entered.await(5, TimeUnit.SECONDS));
+
+            service.close();
+            images = null;
+            awaitStopped(service::assetThreadStopped);
+            Thread.sleep(50);
+
+            assertTrue(uncaught.isEmpty(), "escaped to the uncaught handler: " + uncaught);
+            assertFalse(logger.logged(LogLevel.WARN, "preparing the assets failed"),
+                    logger.records().toString());
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous);
+        }
+    }
+
+    @Test
+    void anErrorBeforeCloseIsReportedWithItsFrames() throws Exception {
+        SlowHttp http = new SlowHttp(0L);
+        http.thenThrow = new NoClassDefFoundError("com/heimdall/Gone");
+        BukkitItemImages service = build(http);
+        service.prepare();
+        awaitStopped(() -> logger.logged(LogLevel.DEBUG, "where preparing failed"));
+
+        assertTrue(logger.logged(LogLevel.WARN, "preparing the assets failed (java.lang.NoClassDefFoundError)"),
+                logger.records().toString());
+        assertTrue(logger.logged(LogLevel.DEBUG, "at com.heimdall"), logger.records().toString());
+        assertFalse(logger.logged(LogLevel.DEBUG, "com/heimdall/Gone"),
+                "a message is never logged, only frames");
+    }
+
+    @Test
+    void aPackCopyThatOutlivesCloseRebuildsNothing() throws Exception {
+        Path generated = server.resolve("plugins/ItemsAdder/output/generated.zip");
+        Files.createDirectories(generated.getParent());
+        Files.write(generated, Fixtures.zip(Fixtures.files("pack.mcmeta", "{}")));
+        Files.createDirectories(server.resolve("plugins/Heimdall"));
+        Files.write(server.resolve("plugins/Heimdall/item-images.yml"),
+                Fixtures.utf8("download-vanilla-assets: false\n"));
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        service.rescanNanos = 0L;
+        service.closeWaitMs = 50L;
+        CountDownLatch copying = new CountDownLatch(1);
+        service.copier = zip -> {
+            copying.countDown();
+            deafSleep(500L);
+        };
+
+        service.render(ChatItem.builder("stone").build()).get(10, TimeUnit.SECONDS);
+        assertTrue(copying.await(5, TimeUnit.SECONDS), "no copy was requested");
+        int before = service.assetGeneration.get();
+
+        service.close();
+        images = null;
+        awaitStopped(service::assetThreadStopped);
+
+        assertEquals(before, service.assetGeneration.get(),
+                "the copy finished after close() and published its result anyway");
     }
 
     @Test
@@ -393,6 +564,8 @@ class BukkitItemImagesTest {
         assertEquals(1, http.requests.get(), "it went on fetching after close()");
         assertFalse(logger.logged(LogLevel.WARN, "preparing the assets failed"),
                 logger.records().toString());
+        assertFalse(logger.logged(LogLevel.WARN, "could not fetch"),
+                "a stop mid-download is not a failure to retry: " + logger.records());
     }
 
     @Test

@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.heimdall.core.items.Snbt;
 import com.heimdall.core.log.RecordingLogger;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -301,6 +302,76 @@ class VanillaAssetsTest {
                 drip, new java.io.ByteArrayOutputStream(), Long.MAX_VALUE, deadline, "slow.example"));
         assertTrue(failure.getMessage().contains("took too long"));
         assertTrue(failure.getMessage().contains("slow.example"));
+    }
+
+    @Test
+    void aTransferGivesUpOnceItsThreadIsInterrupted() {
+        // A stopping core interrupts the asset thread; a socket read does not notice, so the copy
+        // loop has to, or the stop waits out the transfer.
+        final int[] reads = {0};
+        java.io.InputStream endless = new java.io.InputStream() {
+            @Override
+            public int read() {
+                return 1;
+            }
+
+            @Override
+            public int read(byte[] buffer, int offset, int length) {
+                reads[0]++;
+                Thread.currentThread().interrupt();
+                buffer[offset] = 1;
+                return 1;
+            }
+        };
+        try {
+            InterruptedIOException stopped = assertThrows(InterruptedIOException.class,
+                    () -> HttpSource.Url.copy(endless, new java.io.ByteArrayOutputStream(),
+                            Long.MAX_VALUE, Long.MAX_VALUE, "slow.example"));
+            assertTrue(stopped.getMessage().contains("slow.example"));
+            assertEquals(1, reads[0], "it kept reading after the interrupt");
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void anInterruptedThreadOpensNoConnection() {
+        Thread.currentThread().interrupt();
+        try {
+            AssetException refused = assertThrows(AssetException.class,
+                    () -> new HttpSource.Url().get("http://127.0.0.1:9/manifest.json", 1024));
+            assertTrue(refused.getMessage().contains("InterruptedIOException"), refused.getMessage());
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void ensureMakesNoFurtherRequestOnceInterrupted() throws Exception {
+        final Fixtures.FakeHttp mojang = mojang(Fixtures.zip(Fixtures.files("a", "b")),
+                "0000000000000000000000000000000000000000", 10, false);
+        HttpSource interruptedAfterTheManifest = new HttpSource() {
+            @Override
+            public byte[] get(String url, long maxBytes) throws IOException {
+                byte[] body = mojang.get(url, maxBytes);
+                Thread.currentThread().interrupt();
+                return body;
+            }
+
+            @Override
+            public long download(String url, Path target, long maxBytes) throws IOException {
+                return mojang.download(url, target, maxBytes);
+            }
+        };
+        VanillaAssets assets = new VanillaAssets(new RecordingLogger(true),
+                interruptedAfterTheManifest, temp);
+        try {
+            assertThrows(InterruptedIOException.class, () -> assets.ensure("1.21.5"));
+            assertEquals(1, mojang.requests.size(), "requested more after the interrupt: "
+                    + mojang.requests);
+        } finally {
+            Thread.interrupted();
+        }
     }
 
     @Test
