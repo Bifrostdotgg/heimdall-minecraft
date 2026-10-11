@@ -61,8 +61,14 @@ import net.md_5.bungee.event.EventPriority;
  * <p>Registering this listener does not start relaying anything. The bridge module's
  * {@code relayChat} setting defaults to <em>false</em> on {@code GATEKEEPER}, so on a stock proxy
  * the pipeline has no observer attached and this handler's dispatch reaches nobody.
+ *
+ * <p><strong>Public, and it has to be.</strong> BungeeCord's {@code EventHandlerMethod} calls
+ * {@code Method.invoke} without {@code setAccessible}, so a handler on a package-private class is
+ * refused and its event bus rethrows that as an {@code Error} out of {@code post()}. Until this was
+ * fixed, this listener never received an event on a real BungeeCord (departure D88). The listener
+ * shape test fails the build on a non-public BungeeCord listener.
  */
-final class BungeeChatListener implements Listener {
+public final class BungeeChatListener implements Listener {
 
     private final HeimdallLogger logger;
     private final ChatPipeline pipeline;

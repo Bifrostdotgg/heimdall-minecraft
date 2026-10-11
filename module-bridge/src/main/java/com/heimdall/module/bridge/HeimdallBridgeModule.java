@@ -12,6 +12,8 @@ import com.heimdall.core.pipeline.ChatObserver;
 import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.ItemImages;
 import com.heimdall.core.platform.PlayerHandle;
+import com.heimdall.core.platform.Vanish;
+import com.heimdall.core.platform.VanishListener;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerDeathListener;
@@ -156,6 +158,38 @@ import net.kyori.adventure.text.Component;
  * {@code onPlayerQuit} registrations, made from its own {@code ModuleContext}, so declining to
  * enqueue here cannot affect it. Skipping the enqueue is genuinely local to the relay.
  *
+ * <h2>Vanished players: what the server hid, Discord is not told</h2>
+ *
+ * <p>A staff member who joins vanished is, to everyone in game, not on the server. So a vanished
+ * player's join, leave and death are never posted, from any instance: the proxy asks its own
+ * PremiumVanish as well as each backend asking its own, because the proxy sees the join first and
+ * the bot keeps whichever copy arrives first. The platform answers through {@code Vanish}
+ * (PremiumVanish on every platform, plus the {@code vanished} metadata convention on Bukkit), and
+ * a server with neither answers "nobody is vanished" and behaves exactly as before.
+ *
+ * <p>Each player's session is tracked from join to quit ({@link Session}), because the rules are
+ * about the session, not the moment:
+ *
+ * <ul>
+ *   <li>A join kept quiet keeps its leave quiet too, even if the player has reappeared by the time
+ *       they quit, so Discord never shows a leave without a join.
+ *   <li>With PremiumVanish installed a join waits for as long as {@code Vanish.joinWaitMillis}
+ *       says (re-checking every {@value #SETTLE_CHECK_MS} ms) before it is posted, because
+ *       PremiumVanish can mark a player after the platform's join event: 1.5 s from the join on a
+ *       backend, and on a proxy 1.5 s from the player's first backend connection, since a proxy
+ *       only learns the state once a backend tells it. Until that connection the join is not
+ *       decided at all (re-checked every {@value #BACKEND_RECHECK_MS} ms), and a player who leaves
+ *       without ever reaching a backend gets neither a join nor a leave. A quit or death inside
+ *       the window decides the join first, so the two go out together and in order.
+ *       Without PremiumVanish there is no window and a join posts at once, as it always did.
+ *   <li>Vanishing or reappearing mid-session posts nothing unless {@code announceVanishToggles} is
+ *       on, and then it mirrors what players in game saw: a {@code leave} for a vanish and a
+ *       {@code join} for a reappearance, through {@link #relayEvent} like everything else. Only a
+ *       backend ever announces one: a proxy cannot tell an announced toggle from a silent one, and
+ *       its copy would arrive at a different time from the backend's and post twice, so the proxy
+ *       platforms deliver every toggle as silent.
+ * </ul>
+ *
  * <h2>Chat-plugin channels: a staff channel is not public chat</h2>
  *
  * <p>On a server running ChatControl channels, a line typed into {@code staff} was addressed to
@@ -196,7 +230,10 @@ import net.kyori.adventure.text.Component;
  * <p>The chat observer runs on whatever thread the platform dispatched chat on — Bukkit's async chat
  * thread, a proxy's event executor — and does two things: offer onto a lock-free queue, and ask for
  * an immediate drain (a compare-and-set and an executor offer). Join, quit and death listeners run on
- * {@code heimdall-io} and do the same. The drain and the one-second {@link #flush()} both run on the
+ * {@code heimdall-io} and do the same, after asking the vanish integration (never under
+ * {@link #sessionLock}). Vanish toggles arrive on the vanish plugin's own thread, usually the server's
+ * main thread, and only update the session map and queue. Deferred-join re-checks run on
+ * {@code heimdall-sched}. The drain and the one-second {@link #flush()} both run on the
  * single {@code heimdall-sched} thread and are the only places a frame is built; they snapshot the
  * tunnel into a local before using it, because a scheduled flush can still be mid-run when
  * {@link #disable()} clears the field (cancelling a {@code ScheduledFuture} does not interrupt a run
@@ -248,6 +285,52 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * </ul>
      */
     static final boolean DEFAULT_RELAY_EVENTS = true;
+
+    /**
+     * Whether a player vanishing or reappearing mid-session is announced in Discord. Flat boolean,
+     * per-server, dashboard-owned, read live like {@code relayEvents}. Departure D88.
+     *
+     * <p>{@code true} mirrors what players in game see: PremiumVanish broadcasts a fake leave
+     * message when somebody vanishes and a fake join when they reappear, so this posts a
+     * {@code leave} and a {@code join} with the same kinds a real session uses, and the bot needs no
+     * change to render them. A toggle PremiumVanish was told to keep silent ({@code -s}) is not
+     * announced either way, because players in game saw nothing. {@code false} posts nothing for a
+     * toggle at all.
+     *
+     * <p>Either way a toggle only posts when {@code relayEvents} is on for this instance: it goes
+     * through the same {@link #relayEvent} choke point as everything else.
+     */
+    static final String SETTING_ANNOUNCE_VANISH_TOGGLES = "announceVanishToggles";
+
+    /**
+     * The default for {@link #SETTING_ANNOUNCE_VANISH_TOGGLES}: off. A staff member who vanishes
+     * mid-session has not asked for Discord to be told, and before this setting existed nothing was
+     * (vanish was invisible to the bridge entirely), so off is also the upgrade-continuity answer
+     * for everything except the leak this change exists to close.
+     */
+    static final boolean DEFAULT_ANNOUNCE_VANISH_TOGGLES = false;
+
+    /**
+     * How often a deferred join re-checks whether its player has been marked vanished. The window
+     * itself is the platform's {@code Vanish.joinWaitMillis()}, which is zero (no deferral at all)
+     * without PremiumVanish.
+     */
+    static final long SETTLE_CHECK_MS = 250L;
+
+    /**
+     * How often a join that is waiting for its player to reach a backend is re-checked, on a proxy
+     * ({@code Vanish.awaitingBackend}). Slower than {@link #SETTLE_CHECK_MS}: that wait has no end
+     * of its own (an auth limbo can last minutes), and nothing about it is urgent.
+     */
+    static final long BACKEND_RECHECK_MS = 1000L;
+
+    /**
+     * How long a vanish toggle seen <em>before</em> its player's join is trusted when that join
+     * arrives. PremiumVanish's auto-vanish-on-join fires inside the platform's join event, so its
+     * hide reaches this module a moment before the join notification does (the join is handed off
+     * to {@code heimdall-io} first). Bounded so a stale toggle can never decide a much later join.
+     */
+    static final long EARLY_TOGGLE_TRUST_MS = 10_000L;
 
     /** Batched chat, plugin → bot. */
     static final String FRAME_CHAT = "bridge.chat";
@@ -461,6 +544,29 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /** Snapshotted at {@link #enable}; {@code null} whenever this module is not enabled. */
     private volatile ModuleContext context;
 
+    /**
+     * Guards {@link #sessions} and every decision made from them. Held across the enqueue of what a
+     * decision posts, so a deferred join and the quit that ends it can never reach the queue in the
+     * wrong order. Never held while calling the vanish plugin.
+     */
+    private final Object sessionLock = new Object();
+
+    /**
+     * What this instance has told Discord about each player it has seen join, keyed by UUID. Removed
+     * at the quit; cleared at enable and disable. A stale entry is harmless: the next join replaces
+     * it. Guarded by {@link #sessionLock}. Departure D88.
+     */
+    private final Map<UUID, Session> sessions = new HashMap<UUID, Session>();
+
+    /** The vanish toggle subscription, held so {@link #disable} can close it. */
+    private volatile Registration vanishToggles = Registration.NONE;
+
+    /**
+     * Where deferred-join re-checks are scheduled. {@code null} means {@code heimdall-sched}. Tests
+     * substitute a manual one so the settle window passes when they say.
+     */
+    private volatile DrainScheduler settleScheduler;
+
     private volatile TunnelBus tunnel;
 
     /**
@@ -581,16 +687,23 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         // that have to agree. A fourth kind added later is gated as long as it is routed the same
         // way — a convention this file keeps, not something the types enforce: `events` is still an
         // ordinary field any method here could enqueue onto directly.
+        //
+        // Each passes through the session state machine first, which is what keeps a vanished
+        // player's join, leave and death out of Discord (departure D88); everything it decides to
+        // post still goes through relayEvent.
+        synchronized (sessionLock) {
+            sessions.clear();
+        }
         context.onPlayerJoin(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
-                relayEvent("join", player, null, timestampMs);
+                onJoin(player, timestampMs);
             }
         });
         context.onPlayerQuit(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
-                relayEvent("leave", player, null, timestampMs);
+                onQuit(player, timestampMs);
             }
         });
         // Never fires on a proxy — neither Velocity nor BungeeCord has a death event. The backends
@@ -598,9 +711,23 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         context.onPlayerDeath(new PlayerDeathListener() {
             @Override
             public void onPlayerDeath(PlayerHandle player, String deathMessage, long timestampMs) {
-                relayEvent("death", player, deathMessage, timestampMs);
+                onDeath(player, deathMessage, timestampMs);
             }
         });
+        // Vanishing and reappearing mid-session. Not a ModuleContext registration, so the handle is
+        // held here and closed in disable(); the platform's own hook behind it is tracked against
+        // the core generation, so a hot swap takes that off regardless (D87).
+        vanishToggles = subscribeToggles(context, new VanishListener() {
+            @Override
+            public void onVanishChanged(
+                    PlayerHandle player, boolean vanished, boolean silent, long timestampMs) {
+                onVanishToggle(player, vanished, silent, timestampMs);
+            }
+        });
+        // Players already online have no join to come: after a hot swap, or when the module is
+        // switched on mid-session. Recorded so their leave and any toggle are judged like anybody
+        // else's.
+        seedSessions(context);
 
         // heimdall-io by default, which is what this needs: never the socket's reading thread, and
         // free to hop to the main thread inside PlayerHandle.sendMessage. Tracked by the context, so
@@ -658,6 +785,14 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             chatObserver.close();
             chatObserver = Registration.NONE;
             context = null;
+        }
+        Registration toggles = vanishToggles;
+        vanishToggles = Registration.NONE;
+        toggles.close();
+        synchronized (sessionLock) {
+            // Pending joins go with them: a disabled module posts nothing, and a settle check that
+            // runs after this finds its session gone and does nothing.
+            sessions.clear();
         }
         tunnel = null;
         resetStaging();
@@ -1360,6 +1495,473 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         return ctx.settings().bool(SETTING_RELAY_EVENTS, DEFAULT_RELAY_EVENTS);
     }
 
+    // ── Sessions and vanish ──────────────────────────────────────────────────
+
+    /**
+     * Whether a vanish toggle is announced in Discord, read live on every toggle. See
+     * {@link #SETTING_ANNOUNCE_VANISH_TOGGLES}.
+     */
+    private static boolean announceVanishToggles(ModuleContext ctx) {
+        try {
+            return ctx.settings().bool(
+                    SETTING_ANNOUNCE_VANISH_TOGGLES, DEFAULT_ANNOUNCE_VANISH_TOGGLES);
+        } catch (RuntimeException failed) {
+            return DEFAULT_ANNOUNCE_VANISH_TOGGLES;
+        }
+    }
+
+    /** The platform's vanish integration, never {@code null}. */
+    private static Vanish vanish(ModuleContext ctx) {
+        if (ctx == null) {
+            return Vanish.NONE;
+        }
+        try {
+            Vanish vanish = ctx.platform().integrations().vanish();
+            return vanish == null ? Vanish.NONE : vanish;
+        } catch (Throwable failed) {
+            return Vanish.NONE;
+        }
+    }
+
+    /**
+     * Subscribes to vanish toggles. A throwing integration costs the toggles and nothing else: the
+     * module still enables, and joins, leaves and deaths are still judged by {@link #isVanished}.
+     */
+    private static Registration subscribeToggles(ModuleContext ctx, VanishListener listener) {
+        try {
+            Registration registration = vanish(ctx).onToggle(listener);
+            return registration == null ? Registration.NONE : registration;
+        } catch (Throwable failed) {
+            ctx.logger().warn("could not subscribe to vanish toggles ("
+                    + failed.getClass().getName() + "); a player vanishing mid-session will not be "
+                    + "noticed until they leave");
+            return Registration.NONE;
+        }
+    }
+
+    /**
+     * {@link Vanish#isVanished}, with a throw treated as "vanished": the same answer the integration
+     * gives when one call into the vanish plugin fails. One missing post beats publishing a hidden
+     * staff member. Never called with {@link #sessionLock} held, because it calls into the vanish
+     * plugin, which takes locks of its own.
+     */
+    private static boolean isVanished(Vanish vanish, PlayerHandle player) {
+        try {
+            return vanish.isVanished(player);
+        } catch (Throwable failed) {
+            return true;
+        }
+    }
+
+    /** {@link Vanish#awaitingBackend}, with a throw treated as "not waiting for one". */
+    private static boolean awaitingBackend(Vanish vanish, PlayerHandle player) {
+        try {
+            return vanish.awaitingBackend(player);
+        } catch (Throwable failed) {
+            return false;
+        }
+    }
+
+    /** {@link Vanish#joinWaitMillis}, with a throw treated as "decide now". */
+    private static long waitMillis(Vanish vanish, PlayerHandle player, long elapsedMs) {
+        try {
+            return Math.max(0L, vanish.joinWaitMillis(player, elapsedMs));
+        } catch (Throwable failed) {
+            return 0L;
+        }
+    }
+
+    /** Whether the player is still on this platform; a lookup that throws answers yes. */
+    private static boolean online(ModuleContext ctx, UUID uuid) {
+        try {
+            return ctx.platform().players().byUuid(uuid).isPresent();
+        } catch (Throwable failed) {
+            return true;
+        }
+    }
+
+    /** Milliseconds since {@code session} was recorded, on {@link #nanoNow()}'s clock. */
+    private long elapsedMs(Session session) {
+        return Math.max(0L, TimeUnit.NANOSECONDS.toMillis(nanoNow() - session.createdNanos));
+    }
+
+    /**
+     * A join: announced at once, kept quiet because the player is vanished, or deferred while the
+     * vanish plugin may still mark them.
+     *
+     * <p>Without PremiumVanish the wait is zero, so this posts in the same call, exactly as before
+     * vanish was considered: no delay and no timer.
+     */
+    private void onJoin(PlayerHandle player, long timestampMs) {
+        ModuleContext ctx = context;
+        if (ctx == null || player == null) {
+            return;
+        }
+        UUID uuid = player.uuid();
+        if (uuid == null) {
+            relayEvent("join", player, null, timestampMs);
+            return;
+        }
+        Vanish vanish = vanish(ctx);
+        long wait = waitMillis(vanish, player, 0L);
+        boolean awaiting = awaitingBackend(vanish, player);
+        boolean vanishedNow = isVanished(vanish, player);
+        Session deferred = null;
+        synchronized (sessionLock) {
+            if (context != ctx) {
+                return;
+            }
+            Session early = sessions.get(uuid);
+            // A toggle that arrived just before this join belongs to it: PremiumVanish's
+            // auto-vanish-on-join fires inside the join event, ahead of this notification.
+            boolean hiddenEarly = early != null && !early.joinSeen && early.hidden
+                    && nanoNow() - early.createdNanos
+                            < TimeUnit.MILLISECONDS.toNanos(EARLY_TOGGLE_TRUST_MS);
+            Session session = new Session(player, timestampMs, true, nanoNow());
+            sessions.put(uuid, session);
+            if (vanishedNow || hiddenEarly) {
+                session.hidden = true;
+                session.quiet = true;
+            } else if (wait <= 0L && !awaiting) {
+                relayEvent("join", player, null, timestampMs);
+            } else {
+                session.pending = true;
+                deferred = session;
+            }
+        }
+        if (deferred != null) {
+            scheduleSettleCheck(ctx, deferred,
+                    awaiting ? BACKEND_RECHECK_MS : Math.min(SETTLE_CHECK_MS, wait));
+        }
+    }
+
+    /**
+     * Schedules the next re-check of a deferred join on {@code heimdall-sched}. Directly on the
+     * executor, not through {@code ModuleContext.scheduleOnce}, which tracks every handle until the
+     * module is disabled: one per check per join would grow without bound. A check that runs after a
+     * disable finds its session gone and does nothing.
+     */
+    private void scheduleSettleCheck(ModuleContext ctx, final Session session, long delayMs) {
+        Runnable check = new Runnable() {
+            @Override
+            public void run() {
+                settleCheck(session, false);
+            }
+        };
+        try {
+            DrainScheduler scheduler = settleScheduler;
+            if (scheduler != null) {
+                scheduler.schedule(check, delayMs);
+            } else {
+                ctx.executors().scheduler().schedule(check, delayMs, TimeUnit.MILLISECONDS);
+            }
+        } catch (RuntimeException refused) {
+            // Shutting down. Decide now rather than leave the join pending for ever.
+            settleCheck(session, true);
+        }
+    }
+
+    /**
+     * One re-check of a deferred join. Vanished: decided quiet. Still visible once the platform says
+     * the wait is over: announced, with the timestamp of the join itself, so the bot's duplicate drop
+     * keys it the same way as every other instance's copy. How long that is belongs to the platform
+     * ({@link Vanish#joinWaitMillis}): on a proxy it runs from the player's first backend connection.
+     */
+    private void settleCheck(Session session, boolean last) {
+        ModuleContext ctx = context;
+        if (ctx == null) {
+            return;
+        }
+        UUID uuid = session.player.uuid();
+        synchronized (sessionLock) {
+            if (sessions.get(uuid) != session || !session.pending) {
+                return;
+            }
+        }
+        Vanish vanish = vanish(ctx);
+        boolean vanished = isVanished(vanish, session.player);
+        boolean awaiting = awaitingBackend(vanish, session.player);
+        long wait = waitMillis(vanish, session.player, elapsedMs(session));
+        // Waiting for a backend has no end of its own, so a player who has gone without their quit
+        // ending this session (a quit that overtook its join on heimdall-io) would be re-checked for
+        // ever. Never asked otherwise: a quit still queued must find the session it belongs to.
+        boolean gone = awaiting && !online(ctx, uuid);
+        long next = 0L;
+        synchronized (sessionLock) {
+            if (sessions.get(uuid) != session || !session.pending) {
+                return;
+            }
+            if (gone) {
+                // Nobody in game saw this session: nothing is posted, and nothing is kept.
+                sessions.remove(uuid);
+                return;
+            }
+            if (vanished || session.hidden || (awaiting && last)) {
+                // Vanished, or (shutting down) still not on any backend: nothing is posted.
+                session.pending = false;
+                session.hidden = session.hidden || vanished;
+                session.quiet = true;
+            } else if (awaiting) {
+                // No backend yet, so no answer yet: an auth limbo can last as long as it likes, and
+                // any cap here would announce a vanished staff member who happened to be slow.
+                next = BACKEND_RECHECK_MS;
+            } else if (!last && wait > 0L) {
+                next = Math.min(SETTLE_CHECK_MS, wait);
+            } else {
+                session.pending = false;
+                relayEvent("join", session.player, null, session.joinTs);
+            }
+        }
+        if (next > 0L) {
+            scheduleSettleCheck(ctx, session, next);
+        }
+    }
+
+    /**
+     * A quit. Posted unless the session was kept quiet, the player is hidden, or the vanish plugin
+     * says so now.
+     *
+     * <p>A quit inside a deferred join's window decides that join first, so the two always go out
+     * together and in order: both when the player was visible (players in game saw both), neither
+     * when they were not. A leave is never posted without its join, nor a join after its leave.
+     */
+    private void onQuit(PlayerHandle player, long timestampMs) {
+        ModuleContext ctx = context;
+        if (ctx == null || player == null) {
+            return;
+        }
+        UUID uuid = player.uuid();
+        if (uuid == null) {
+            relayEvent("leave", player, null, timestampMs);
+            return;
+        }
+        synchronized (sessionLock) {
+            Session session = sessions.get(uuid);
+            if (context == ctx && session != null && session.joinSeen && !session.pending
+                    && timestampMs >= session.joinTs && (session.quiet || session.hidden)) {
+                // Already decided quiet. Not asking the vanish plugin is the point: its offline
+                // lookups (isInvisibleOffline, getAllInvisiblePlayers) can be a database query.
+                sessions.remove(uuid);
+                return;
+            }
+        }
+        Vanish vanish = vanish(ctx);
+        boolean vanishedNow = isVanished(vanish, player);
+        boolean awaiting = awaitingBackend(vanish, player);
+        synchronized (sessionLock) {
+            if (context != ctx) {
+                return;
+            }
+            Session session = sessions.get(uuid);
+            if (session != null && session.joinSeen && timestampMs < session.joinTs) {
+                // The quit of an EARLIER session, delivered after the next one's join: heimdall-io
+                // does not order the two (PlayerSessionEvents). It must not end the newer session,
+                // whose state is the best guess there is for the older one.
+                if (!vanishedNow && !session.hidden && !session.quiet) {
+                    relayEvent("leave", player, null, timestampMs);
+                }
+                return;
+            }
+            if (session != null) {
+                sessions.remove(uuid);
+            }
+            if (session == null || !session.joinSeen) {
+                // No session to go on: a player online before the listeners were registered and
+                // missed by the seed, or a quit that overtook its own join. The vanish plugin and
+                // any early toggle are all there is, and a player who never reached a backend gets
+                // no leave: their join was never posted, and will not be.
+                if (!vanishedNow && !awaiting && (session == null || !session.hidden)) {
+                    relayEvent("leave", player, null, timestampMs);
+                }
+                return;
+            }
+            if (session.pending) {
+                session.pending = false;
+                if (vanishedNow || session.hidden || awaiting) {
+                    // Vanished, or gone before ever reaching a backend: nobody in game saw this
+                    // session, so neither its join nor its leave is posted.
+                    return;
+                }
+                relayEvent("join", session.player, null, session.joinTs);
+                relayEvent("leave", player, null, timestampMs);
+                return;
+            }
+            if (session.quiet || session.hidden || vanishedNow) {
+                return;
+            }
+            relayEvent("leave", player, null, timestampMs);
+        }
+    }
+
+    /**
+     * A death. Posted unless the player is vanished or Discord was never told they are here.
+     *
+     * <p>A death inside a deferred join's window decides the join first, for the same ordering
+     * reason as {@link #onQuit}.
+     */
+    private void onDeath(PlayerHandle player, String deathMessage, long timestampMs) {
+        ModuleContext ctx = context;
+        if (ctx == null || player == null) {
+            return;
+        }
+        UUID uuid = player.uuid();
+        if (uuid == null) {
+            relayEvent("death", player, deathMessage, timestampMs);
+            return;
+        }
+        boolean vanishedNow = isVanished(vanish(ctx), player);
+        synchronized (sessionLock) {
+            if (context != ctx) {
+                return;
+            }
+            Session session = sessions.get(uuid);
+            if (session == null || !session.joinSeen) {
+                if (!vanishedNow && (session == null || !session.hidden)) {
+                    relayEvent("death", player, deathMessage, timestampMs);
+                }
+                return;
+            }
+            if (session.pending) {
+                session.pending = false;
+                if (vanishedNow || session.hidden) {
+                    session.hidden = true;
+                    session.quiet = true;
+                    return;
+                }
+                relayEvent("join", session.player, null, session.joinTs);
+                relayEvent("death", player, deathMessage, timestampMs);
+                return;
+            }
+            if (session.quiet || session.hidden || vanishedNow) {
+                return;
+            }
+            relayEvent("death", player, deathMessage, timestampMs);
+        }
+    }
+
+    /**
+     * A player vanished or reappeared mid-session. Runs on the vanish plugin's thread, usually the
+     * server's main thread, so it touches nothing but the session map and the event queue.
+     *
+     * <p>With {@code announceVanishToggles} on, and the toggle not silent, it mirrors what players in
+     * game saw: a vanish posts a {@code leave} if Discord thinks they are here, a reappearance posts a
+     * {@code join} if Discord thinks they are not. Either way the session remembers, so the real
+     * leave at the end follows the same rule: posted after a mirrored reappearance, not after a
+     * mirrored vanish, and not for a player who joined vanished and reappeared silently.
+     */
+    private void onVanishToggle(
+            PlayerHandle player, boolean vanished, boolean silent, long timestampMs) {
+        ModuleContext ctx = context;
+        if (ctx == null || player == null || player.uuid() == null) {
+            return;
+        }
+        boolean announce = !silent && announceVanishToggles(ctx);
+        UUID uuid = player.uuid();
+        synchronized (sessionLock) {
+            if (context != ctx) {
+                return;
+            }
+            Session session = sessions.get(uuid);
+            if (session == null || !session.joinSeen) {
+                // Ahead of this player's join notification (auto-vanish on join), or a player this
+                // module has no session for. Remembered for the join; never posted.
+                Session early = new Session(player, timestampMs, false, nanoNow());
+                early.hidden = vanished;
+                sessions.put(uuid, early);
+                return;
+            }
+            if (session.pending) {
+                // Still inside the join's window, so this is part of the join, not a toggle.
+                if (vanished) {
+                    session.pending = false;
+                    session.hidden = true;
+                    session.quiet = true;
+                } else {
+                    session.hidden = false;
+                }
+                return;
+            }
+            if (vanished) {
+                session.hidden = true;
+                if (announce && !session.quiet) {
+                    session.quiet = true;
+                    relayEvent("leave", player, null, timestampMs);
+                }
+            } else {
+                session.hidden = false;
+                if (announce && session.quiet) {
+                    session.quiet = false;
+                    relayEvent("join", player, null, timestampMs);
+                }
+            }
+        }
+    }
+
+    /**
+     * Records everybody already online, so their leave and their toggles are judged like anybody
+     * else's. A player hidden now is recorded as quiet: whether Discord was told about them before
+     * this enable is unknowable, and quiet is the answer that cannot leak.
+     *
+     * <p>On a proxy, a visible player who has not reached a backend yet (sitting in limbo across a
+     * hot swap) is recorded as a pending join instead, exactly as if they had just logged in: the
+     * previous core never posted their join, so it is posted once they reach a backend and the
+     * window passes (stamped with the time of this seed), and if they leave first, nothing is.
+     */
+    private void seedSessions(ModuleContext ctx) {
+        Collection<PlayerHandle> online;
+        try {
+            online = ctx.platform().players().onlinePlayers();
+        } catch (Throwable failed) {
+            // Unseeded players fall back to the vanish plugin's answer at their quit.
+            ctx.logger().debug(() -> "could not list online players to seed bridge sessions: "
+                    + failed.getClass().getName());
+            return;
+        }
+        if (online == null || online.isEmpty()) {
+            return;
+        }
+        Vanish vanish = vanish(ctx);
+        long seededAt = System.currentTimeMillis();
+        List<Session> seeded = new ArrayList<Session>();
+        for (PlayerHandle player : online) {
+            if (player == null || player.uuid() == null) {
+                continue;
+            }
+            boolean hidden = isVanished(vanish, player);
+            boolean limbo = !hidden && awaitingBackend(vanish, player);
+            Session session = new Session(player, limbo ? seededAt : 0L, true, nanoNow());
+            session.hidden = hidden;
+            session.quiet = hidden;
+            session.pending = limbo;
+            seeded.add(session);
+        }
+        List<Session> pending = new ArrayList<Session>();
+        synchronized (sessionLock) {
+            if (context != ctx) {
+                return;
+            }
+            for (Session session : seeded) {
+                UUID uuid = session.player.uuid();
+                Session existing = sessions.get(uuid);
+                // A join that landed while this was listing knows more than the seed does.
+                if (existing == null || !existing.joinSeen) {
+                    if (existing != null && existing.hidden) {
+                        session.hidden = true;
+                        session.quiet = true;
+                        session.pending = false;
+                    }
+                    sessions.put(uuid, session);
+                    if (session.pending) {
+                        pending.add(session);
+                    }
+                }
+            }
+        }
+        for (Session session : pending) {
+            scheduleSettleCheck(ctx, session, BACKEND_RECHECK_MS);
+        }
+    }
+
     /**
      * The default for {@code relayChat} on a given role.
      *
@@ -1917,6 +2519,47 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     /**
+     * One player's session, as far as Discord is concerned. Departure D88.
+     *
+     * <p>Mutable fields are guarded by {@link #sessionLock}.
+     */
+    private static final class Session {
+
+        final PlayerHandle player;
+
+        /** The join's own timestamp; {@code 0} for a session seeded at enable. */
+        final long joinTs;
+
+        /**
+         * {@code false} for a record made by a vanish toggle that arrived before the player's join
+         * notification: it carries {@link #hidden} for that join and nothing else.
+         */
+        final boolean joinSeen;
+
+        /** When the record was made, on {@link #nanoNow()}'s clock. */
+        final long createdNanos;
+
+        /** The join is waiting for the settle window; nothing has been posted for it yet. */
+        boolean pending;
+
+        /**
+         * Discord does not currently know this player is here: their join was kept quiet, or a
+         * mirrored vanish posted their leave. A quiet session posts no leave and no death.
+         */
+        boolean quiet;
+
+        /** The player was last seen hidden, by a check or a toggle. */
+        boolean hidden;
+
+        Session(PlayerHandle player, long joinTs, boolean joinSeen, long createdNanos) {
+            this.player = player;
+            this.joinTs = joinTs;
+            this.joinSeen = joinSeen;
+            this.createdNanos = createdNanos;
+        }
+    }
+
+    /**
      * One join, leave or death, in flight.
      *
      * <p>{@code detail} carries the server's death message and is absent for everything else. It is
@@ -1972,6 +2615,23 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     /** Routes immediate drains through {@code scheduler} instead of {@code heimdall-sched}. */
     void drainSchedulerForTests(DrainScheduler scheduler) {
         this.drainScheduler = scheduler;
+    }
+
+    /** Routes deferred-join re-checks through {@code scheduler} instead of {@code heimdall-sched}. */
+    void settleSchedulerForTests(DrainScheduler scheduler) {
+        this.settleScheduler = scheduler;
+    }
+
+    /** How many player sessions are being tracked. */
+    int sessionCount() {
+        synchronized (sessionLock) {
+            return sessions.size();
+        }
+    }
+
+    /** Whether a vanish toggle subscription is open. */
+    boolean isWatchingVanish() {
+        return vanishToggles != Registration.NONE;
     }
 
     /** Routes item-image budget timeouts through {@code scheduler} instead of {@code heimdall-sched}. */

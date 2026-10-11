@@ -5,6 +5,7 @@ import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.Integrations;
 import com.heimdall.core.platform.LuckPermsBridge;
+import com.heimdall.core.platform.Vanish;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
 import com.heimdall.platform.common.LuckPermsSupport;
 import java.util.Optional;
@@ -31,11 +32,13 @@ final class VelocityIntegrations implements Integrations {
     private final HeimdallLogger logger;
     private final Executor ioExecutor;
     private final BedrockIdentityProvider floodgate;
+    private final Vanish vanish;
 
-    VelocityIntegrations(HeimdallLogger logger, Executor ioExecutor) {
+    VelocityIntegrations(HeimdallLogger logger, Executor ioExecutor, Vanish vanish) {
         this.logger = logger;
         this.ioExecutor = ioExecutor;
         this.floodgate = FloodgateIdentityProvider.create();
+        this.vanish = vanish == null ? Vanish.NONE : vanish;
     }
 
     /**
@@ -71,6 +74,12 @@ final class VelocityIntegrations implements Integrations {
     @Override
     public BedrockIdentityProvider floodgate() {
         return floodgate;
+    }
+
+    /** PremiumVanish's proxy half, so a vanished player's join and leave stay out of Discord. D88. */
+    @Override
+    public Vanish vanish() {
+        return vanish;
     }
 
     @Override

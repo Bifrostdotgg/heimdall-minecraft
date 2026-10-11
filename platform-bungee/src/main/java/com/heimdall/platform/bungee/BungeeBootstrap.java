@@ -310,6 +310,9 @@ final class BungeeBootstrap {
         registrations.keep(shell.bindLoginGate(new BungeeLoginListener(
                 logger, runtime.loginPipeline(), platform.integrations().floodgate(), text)));
         listen(new BungeeSessionListener(logger, runtime.playerSessions(), text));
+        // PremiumVanish's hide/show hook, in place before the first join when it is already loaded.
+        // A miss (it loads after us) is retried on first use. Departure D88.
+        platform.vanish().prepare();
         // Chat, OBSERVED. A proxy still cannot cancel signed chat, so interception remains the
         // backends' — this listener reads and touches nothing, which is what makes a proxy-origin
         // Discord relay possible. It is inert unless the bridge module's relayChat setting is on,

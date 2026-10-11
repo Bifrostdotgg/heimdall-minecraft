@@ -21,7 +21,12 @@ folia-supported: true
 # first line anybody types already knows which channel it went to. Nothing
 # depends on that order being honoured: the integration resolves lazily and
 # keeps retrying while ChatControl is missing (departure D85).
-softdepend: [ChatControl]
+#
+# PremiumVanish and SuperVanish for the same reason: enabling first means the
+# vanish hook (BukkitVanish) is in place before anybody joins, so a vanished
+# staff member's join is never announced in Discord. Also resolved lazily and
+# retried (departure D88).
+softdepend: [ChatControl, PremiumVanish, SuperVanish]
 
 # Commands that must exist the moment the plugin loads live here. Bukkit fixes a
 # descriptor command's existence at load time; a Disabled stub is the only unbind

@@ -34,8 +34,14 @@ import net.md_5.bungee.event.EventPriority;
  * core that would decide may not exist yet), runs the decision on its own small pool of daemon
  * threads that no swap touches, and completes the intent in a {@code finally} however the decision
  * ends. A pool that refuses the work completes the intent with a refusal on the spot.
+ *
+ * <p><strong>Public, and it has to be.</strong> BungeeCord's {@code EventHandlerMethod} calls
+ * {@code Method.invoke} without {@code setAccessible}, so a handler on a package-private class is
+ * refused and its event bus rethrows that as an {@code Error} out of {@code post()}. Until this was
+ * fixed, this listener never received an event on a real BungeeCord (departure D88). The listener
+ * shape test fails the build on a non-public BungeeCord listener.
  */
-final class BungeeLoginGate implements Listener {
+public final class BungeeLoginGate implements Listener {
 
     /** Concurrent decisions in flight. Logins beyond it are refused, never queued unboundedly. */
     static final int MAX_IN_FLIGHT = 256;

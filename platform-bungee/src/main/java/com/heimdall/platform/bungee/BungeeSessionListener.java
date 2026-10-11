@@ -7,6 +7,7 @@ import net.md_5.bungee.api.event.PlayerDisconnectEvent;
 import net.md_5.bungee.api.event.PostLoginEvent;
 import net.md_5.bungee.api.plugin.Listener;
 import net.md_5.bungee.event.EventHandler;
+import net.md_5.bungee.event.EventPriority;
 
 /**
  * Turns the proxy's login and disconnect into core's session notifications.
@@ -35,6 +36,10 @@ import net.md_5.bungee.event.EventHandler;
  * <p>The timestamp is taken here, on the event thread, and carried across — the dispatch is
  * asynchronous, so by the time a listener runs "now" is some unknown distance later.
  *
+ * <p>Both at {@code HIGHEST}, BungeeCord's last priority, so a vanish plugin listening to the same
+ * events has marked the player before the join is reported (departure D88). Nothing here changes
+ * either event, so running last costs nothing.
+ *
  * <p>Both handlers are total. BungeeCord logs a plugin whose listener throws and carries on, which
  * would leave the whitelist mirror silently missing extensions with the cause a long way from the
  * symptom.
@@ -48,8 +53,14 @@ import net.md_5.bungee.event.EventHandler;
  * way; the event is never constructed; and BungeeCord dispatches on the handler's declared parameter
  * type. It does mean the event can now be deferred with an intent the way {@code LoginEvent} is.
  * This handler registers none, so it never is. See departure D74.
+ *
+ * <p><strong>Public, and it has to be.</strong> BungeeCord's {@code EventHandlerMethod} calls
+ * {@code Method.invoke} without {@code setAccessible}, so a handler on a package-private class is
+ * refused and its event bus rethrows that as an {@code Error} out of {@code post()}. Until this was
+ * fixed, this listener never received an event on a real BungeeCord (departure D88). The listener
+ * shape test fails the build on a non-public BungeeCord listener.
  */
-final class BungeeSessionListener implements Listener {
+public final class BungeeSessionListener implements Listener {
 
     private final HeimdallLogger logger;
     private final PlayerSessionEvents sessions;
@@ -62,7 +73,7 @@ final class BungeeSessionListener implements Listener {
         this.text = text;
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onPostLogin(PostLoginEvent event) {
         long observedAt = System.currentTimeMillis();
         ProxiedPlayer player = event.getPlayer();
@@ -76,7 +87,7 @@ final class BungeeSessionListener implements Listener {
         }
     }
 
-    @EventHandler
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onDisconnect(PlayerDisconnectEvent event) {
         long observedAt = System.currentTimeMillis();
         ProxiedPlayer player = event.getPlayer();

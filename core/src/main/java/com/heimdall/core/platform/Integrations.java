@@ -78,4 +78,19 @@ public interface Integrations {
     default ItemImages itemImages() {
         return ItemImages.NONE;
     }
+
+    /**
+     * Whether players are hidden by a vanish plugin, and when that changes.
+     *
+     * <p>A default method for the same reason as {@link #chatChannels()}: a platform with no vanish
+     * integration needs no change, and {@link Vanish#NONE} is "nobody is hidden", which is exactly
+     * what a server without a vanish plugin has. All three platforms override it with a reflective
+     * PremiumVanish integration; the Bukkit family also reads the {@code vanished} metadata
+     * convention. Departure D88.
+     *
+     * <p>Never {@code null}.
+     */
+    default Vanish vanish() {
+        return Vanish.NONE;
+    }
 }

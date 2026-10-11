@@ -154,6 +154,31 @@ class BungeeLoginGateTest {
     }
 
     @Test
+    @DisplayName("dispatched through BungeeCord's real event bus, the gate decides and releases")
+    void realEventBusDispatches() throws Exception {
+        // The gate used to be package-private, and BungeeCord's EventHandlerMethod calls
+        // Method.invoke without setAccessible: post() threw "Method became inaccessible" and the
+        // gate never ran on a real proxy. Every other test here calls onLogin directly, which is
+        // exactly how that went unseen. Departure D88.
+        LoginGateHolder gates = new LoginGateHolder(log, 2_000L);
+        gates.bind(denying("not whitelisted"));
+        gates.state(LoginGateHolder.State.RUNNING);
+        BungeeLoginGate gate = new BungeeLoginGate(plugin, gates, log);
+        net.md_5.bungee.event.EventBus bus = new net.md_5.bungee.event.EventBus();
+        bus.register(gate);
+        Released released = new Released();
+        LoginEvent event = new LoginEvent(connection(), released);
+
+        bus.post(event);
+        event.postCall();
+
+        assertTrue(released.await(), "the intent was never completed: the player hangs forever");
+        assertTrue(event.isCancelled());
+        assertTrue(reason(event).contains("not whitelisted"));
+        gate.shutdown();
+    }
+
+    @Test
     @DisplayName("mid-swap, a login waits for the next core's gate and is decided by it")
     void heldUntilTheNextCoreBinds() throws Exception {
         final LoginGateHolder gates = new LoginGateHolder(log, 5_000L);

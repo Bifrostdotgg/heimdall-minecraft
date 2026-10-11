@@ -15,6 +15,7 @@ import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.platform.SchedulerBridge;
+import com.heimdall.core.platform.Vanish;
 import com.heimdall.core.util.Registration;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -71,6 +72,7 @@ public final class FakePlatform implements PlatformFacade {
     private volatile CompletableFuture<Payload> traceProbe;
     private volatile ChatChannels chatChannels = ChatChannels.NONE;
     private volatile ItemImages itemImages = ItemImages.NONE;
+    private volatile Vanish vanish = Vanish.NONE;
     private volatile boolean deferLater;
     private volatile boolean deferMainThread;
     private final List<Runnable> mainThreadQueue =
@@ -150,6 +152,15 @@ public final class FakePlatform implements PlatformFacade {
      */
     public FakePlatform withItemImages(ItemImages images) {
         this.itemImages = images == null ? ItemImages.NONE : images;
+        return this;
+    }
+
+    /**
+     * Supplies a vanish integration, as PremiumVanish on any platform would. Defaults to
+     * {@link Vanish#NONE}, which is what a server without a vanish plugin answers.
+     */
+    public FakePlatform withVanish(Vanish integration) {
+        this.vanish = integration == null ? Vanish.NONE : integration;
         return this;
     }
 
@@ -538,6 +549,11 @@ public final class FakePlatform implements PlatformFacade {
             @Override
             public ItemImages itemImages() {
                 return itemImages;
+            }
+
+            @Override
+            public Vanish vanish() {
+                return vanish;
             }
         };
     }

@@ -41,6 +41,7 @@ final class BungeePlatform implements PlatformFacade, AutoCloseable {
     private final BungeeConsoleBridge console;
     private final BungeeCommandRegistrar commands;
     private final BungeeIntegrations integrations;
+    private final BungeeVanish vanish;
 
     BungeePlatform(
             Plugin plugin,
@@ -60,7 +61,10 @@ final class BungeePlatform implements PlatformFacade, AutoCloseable {
         this.consoleTap = new JulConsoleTap(logger, executors.io(), proxy.getLogger());
         this.console = new BungeeConsoleBridge(proxy, consoleTap);
         this.commands = new BungeeCommandRegistrar(registrations, logger, text);
-        this.integrations = new BungeeIntegrations(logger, executors.io());
+        // Resolves nothing yet; PremiumVanish is looked up on first use, and its event hook is
+        // tracked against this generation. Departure D88.
+        this.vanish = BungeeVanish.create(logger, registrations, plugin, proxy, text);
+        this.integrations = new BungeeIntegrations(logger, executors.io(), vanish);
     }
 
     /**
@@ -73,6 +77,11 @@ final class BungeePlatform implements PlatformFacade, AutoCloseable {
      */
     boolean attachConsoleTap() {
         return consoleTap.attach();
+    }
+
+    /** The vanish integration, so the bootstrap can resolve it before anybody joins. */
+    BungeeVanish vanish() {
+        return vanish;
     }
 
     @Override
@@ -127,5 +136,8 @@ final class BungeePlatform implements PlatformFacade, AutoCloseable {
         // cycle — and unlike an appender with no taps, a handler on a JUL logger is invoked for every
         // line the proxy writes for the rest of its life.
         consoleTap.close();
+        // The PremiumVanish hook: a swap is not a plugin disable. Also tracked against this
+        // generation, so this is the first of two ways it comes off.
+        vanish.close();
     }
 }
