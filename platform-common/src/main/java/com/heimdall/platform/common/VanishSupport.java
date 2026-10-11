@@ -6,19 +6,24 @@ import com.heimdall.core.platform.Vanish;
 import com.heimdall.core.platform.VanishListener;
 import com.heimdall.core.util.Registration;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongSupplier;
 
 /**
- * The platform-neutral half of the PremiumVanish integration: resolution, the toggle listeners,
- * containment and teardown, written once for all three platforms. Departure D88.
+ * The platform-neutral half of the PremiumVanish integration: resolution, the join wait, the toggle
+ * listeners, containment and teardown, written once for all three platforms. Departure D88.
  *
  * <p>Each platform subclasses this and supplies only what genuinely differs between them: how to
  * find the plugin and its class loader, which static method answers "is this player invisible" for
- * that platform's player type, and how to register for its hide and show events. Everything that
- * would otherwise be written three times and drift (when to resolve, what to do when the API has
- * moved, how a throwing listener is contained, what closing means for a hot swap) lives here.
+ * that platform's player type, and how to register for its events. Everything that would otherwise
+ * be written three times and drift (when to resolve, what a failure means, how long a join waits,
+ * how a throwing listener is contained, what closing means for a hot swap) lives here.
  *
  * <h2>Reflection, and why</h2>
  *
@@ -33,18 +38,35 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * <p>Lazy, and retried on every call while the plugin is missing: there is no load-order guarantee
  * between plugins (the same reason as LuckPerms, #796 / MC-10), and the callers ask at human rates
- * (a join, a quit, a death), so an unthrottled lookup costs nothing worth designing around. A found
- * plugin is cached, and checked to still be the live one on every call, so a plugin manager that
- * reloads PremiumVanish into a new class loader is followed rather than left listening to the old
- * copy's events.
+ * (a join, a quit, a death), so an unthrottled lookup costs nothing worth designing around. A miss is
+ * never recorded as a failure, so a {@link #prepare()} that runs before PremiumVanish has loaded
+ * costs nothing. A found plugin is cached, and checked to still be the live one on every call, so a
+ * plugin manager that reloads PremiumVanish into a new class loader is followed rather than left
+ * listening to the old copy's events.
  *
- * <p>A <em>resolution</em> failure (a class or method that is not there) means the API moved, and it
- * is permanent for this core: it is logged once, as an error naming the consequence, and the
- * integration answers as if PremiumVanish were absent. That is fail-open, deliberately and unlike
- * ChatControl's fail-closed: failing closed here would mean relaying no join or leave for anybody,
- * which punishes every player for a staff feature, and the PremiumVanish calls used here have not
- * changed in years. PremiumVanish's <em>own code</em> throwing on one call is that call's problem:
- * it answers {@code false} and warns at most once a minute.
+ * <h2>Two kinds of failure</h2>
+ *
+ * <ul>
+ *   <li><strong>The API moved</strong> (a {@link LinkageError}, or a reflective lookup failing):
+ *       permanent for this core. Logged once as an error naming the consequence, and the integration
+ *       answers as if PremiumVanish were absent. Fail-open, deliberately and unlike ChatControl's
+ *       fail-closed: failing closed here would silence every player's join for good. An event class
+ *       that is missing is not this: it costs only the mid-session toggles (older PremiumVanish
+ *       releases shipped the query API before the events), and the queries keep working.
+ *   <li><strong>One call threw</strong> (PremiumVanish's own code, say a database timeout): that call
+ *       answers <em>vanished</em>. One missing join message beats publishing a hidden staff member,
+ *       and the next call asks again. Warned at most once a minute.
+ * </ul>
+ *
+ * <h2>How long a join waits</h2>
+ *
+ * <p>Nothing at all without PremiumVanish. With it, a backend waits {@link #JOIN_SETTLE_MS} from the
+ * join: PremiumVanish marks an auto-vanished player inside the join itself, so this is margin. A
+ * proxy cannot count from the join, because its PremiumVanish only learns a player's state once
+ * they have reached a backend and that backend has told it, which can take longer than the whole
+ * window. So a proxy counts the window from the player's first backend connection after the join
+ * ({@link #backendConnected}), with a cap of {@link #PROXY_JOIN_CAP_MS} from the join for a player
+ * who never reaches one: at the cap the join is decided with what is known.
  *
  * <h2>Hot swap</h2>
  *
@@ -57,18 +79,23 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public abstract class VanishSupport implements Vanish, AutoCloseable {
 
-    /**
-     * How long a join waits for PremiumVanish to mark a player, when it is installed. A backend marks
-     * an auto-vanished player inside the join itself; this is for a proxy, which learns a player's
-     * state from a backend or from PremiumVanish's shared database a moment later.
-     */
+    /** How long a join waits after its anchor (the join, or a proxy's backend connection). */
     public static final long JOIN_SETTLE_MS = 1500L;
+
+    /**
+     * A proxy's cap on the wait, from the join, for a player who has not reached a backend. Long
+     * enough for a slow backend handshake, short enough that a join still reads as news.
+     */
+    public static final long PROXY_JOIN_CAP_MS = 10_000L;
 
     /** At most one transient warning per this interval. */
     static final long TRANSIENT_WARN_NANOS = TimeUnit.SECONDS.toNanos(60);
 
     /** How long a caller waits for another thread's resolution before answering "absent". */
     static final long RESOLVE_WAIT_MS = 2000L;
+
+    /** Backend connections older than this are forgotten; no join waits anywhere near as long. */
+    static final long BACKEND_MEMORY_NANOS = TimeUnit.SECONDS.toNanos(60);
 
     /**
      * One resolved PremiumVanish: the reflective handles a platform found through its class loader.
@@ -84,7 +111,9 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         boolean vanished(PlayerHandle player) throws Throwable;
 
         /**
-         * Registers for the hide and show events, delivering each through {@link #toggled}.
+         * Registers for the events this platform needs: hide and show (delivered through
+         * {@link #toggled}) when the release has them, and on a proxy the backend connection (through
+         * {@link #backendConnected}).
          *
          * @return a handle that unregisters exactly what this registered
          */
@@ -93,21 +122,32 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
 
     protected final HeimdallLogger logger;
     private final CoreRegistrations registrations;
+    private final boolean proxy;
     private final CopyOnWriteArrayList<VanishListener> listeners =
             new CopyOnWriteArrayList<VanishListener>();
 
     /** Serialises resolution, never held across anything a caller of this class waits on. */
     private final ReentrantLock resolveLock = new ReentrantLock();
 
+    /** First backend connection per player, on {@link #nanoNow()}'s clock. Proxies only. */
+    private final ConcurrentHashMap<UUID, Long> backendConnections =
+            new ConcurrentHashMap<UUID, Long>();
+
     private volatile Binding bound;
     private volatile Registration hooks = Registration.NONE;
     private volatile boolean closed;
     private volatile String brokenBecause;
     private volatile long nextTransientWarnAt;
+    private volatile LongSupplier clock;
 
-    protected VanishSupport(HeimdallLogger logger, CoreRegistrations registrations) {
+    /**
+     * @param proxy whether this platform is a proxy, whose join wait is anchored to the player's
+     *     first backend connection rather than to the join
+     */
+    protected VanishSupport(HeimdallLogger logger, CoreRegistrations registrations, boolean proxy) {
         this.logger = logger;
         this.registrations = registrations == null ? CoreRegistrations.untracked() : registrations;
+        this.proxy = proxy;
         this.nextTransientWarnAt = System.nanoTime();
     }
 
@@ -128,21 +168,40 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     }
 
     /**
-     * Resolves now, so the event hook is in place before anybody joins. Called by the bootstrap; a
-     * miss is simply retried by the next call.
+     * Resolves now, so the event hook is in place before anybody joins. Called by the bootstrap. A
+     * miss (PremiumVanish loads after Heimdall) is not a failure, and is simply retried on first use.
      */
     public final void prepare() {
         binding();
     }
 
-    /** Whether PremiumVanish is installed and resolved. For the bootstrap's log and the tests. */
+    /** Whether PremiumVanish is installed and resolved. For the tests. */
     public final boolean present() {
         return binding() != null;
     }
 
     @Override
-    public final long joinSettleMillis() {
-        return binding() != null ? JOIN_SETTLE_MS : 0L;
+    public final long joinWaitMillis(PlayerHandle player, long elapsedMs) {
+        if (player == null || binding() == null) {
+            return 0L;
+        }
+        long elapsed = Math.max(0L, elapsedMs);
+        if (!proxy) {
+            return Math.max(0L, JOIN_SETTLE_MS - elapsed);
+        }
+        long now = nanoNow();
+        long joinedAt = now - TimeUnit.MILLISECONDS.toNanos(elapsed);
+        Long connected = player.uuid() == null ? null : backendConnections.get(player.uuid());
+        if (connected != null && connected.longValue() - joinedAt < 0) {
+            // A connection from an earlier session; this join's has not happened yet.
+            backendConnections.remove(player.uuid(), connected);
+            connected = null;
+        }
+        if (connected == null) {
+            return Math.max(0L, PROXY_JOIN_CAP_MS - elapsed);
+        }
+        long sinceConnect = TimeUnit.NANOSECONDS.toMillis(now - connected.longValue());
+        return Math.max(0L, JOIN_SETTLE_MS - sinceConnect);
     }
 
     @Override
@@ -155,8 +214,10 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
                 return true;
             }
         } catch (Throwable failed) {
-            // A third party's metadata value threw while being read. One call's problem.
-            warnTransient("reading the vanished metadata", failed);
+            // A third party's metadata value threw while being read. That one check answers
+            // "vanished", for the same reason as a throwing PremiumVanish call below.
+            warnTransient("reading the vanished metadata", failed, ANSWERED_VANISHED);
+            return true;
         }
         Binding binding = binding();
         if (binding == null) {
@@ -165,13 +226,15 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         try {
             return binding.vanished(player);
         } catch (Throwable failed) {
-            if (failed instanceof InvocationTargetException) {
-                warnTransient("checking whether a player is vanished",
-                        ((InvocationTargetException) failed).getCause());
-            } else {
+            if (movedApi(failed)) {
                 markBroken("checking whether a player is vanished failed", failed);
+                return false;
             }
-            return false;
+            warnTransient("checking whether a player is vanished",
+                    failed instanceof InvocationTargetException
+                            ? ((InvocationTargetException) failed).getCause()
+                            : failed, ANSWERED_VANISHED);
+            return true;
         }
     }
 
@@ -212,9 +275,38 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         }
     }
 
+    /**
+     * Records that a player reached a backend. Called by a proxy's connection hook. Only the first
+     * connection after a join counts, so a server switch inside the wait does not extend it.
+     */
+    protected final void backendConnected(UUID player) {
+        if (closed || player == null) {
+            return;
+        }
+        long now = nanoNow();
+        backendConnections.putIfAbsent(player, now);
+        // Bounded by the players who connected in the last minute; nothing waits longer than that.
+        Iterator<Map.Entry<UUID, Long>> entries = backendConnections.entrySet().iterator();
+        while (entries.hasNext()) {
+            if (now - entries.next().getValue().longValue() > BACKEND_MEMORY_NANOS) {
+                entries.remove();
+            }
+        }
+    }
+
     /** How many toggle listeners are subscribed. For tests. */
     final int listenerCount() {
         return listeners.size();
+    }
+
+    /** Substitutes the monotonic clock the join wait reads. For tests. */
+    final void clockForTests(LongSupplier nanos) {
+        this.clock = nanos;
+    }
+
+    private long nanoNow() {
+        LongSupplier supplied = clock;
+        return supplied != null ? supplied.getAsLong() : System.nanoTime();
     }
 
     /** Takes the event hook off the platform and stops anything later from registering one. */
@@ -225,6 +317,7 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         hooks = Registration.NONE;
         bound = null;
         listeners.clear();
+        backendConnections.clear();
         closeQuietly(current);
     }
 
@@ -279,8 +372,15 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         try {
             fresh = bind();
         } catch (Throwable failed) {
-            markBroken("PremiumVanish's API could not be found (a PremiumVanish update may have "
-                    + "moved it)", failed);
+            if (movedApi(failed)) {
+                markBroken("PremiumVanish's API could not be found (a PremiumVanish update may have "
+                        + "moved it)", failed);
+            } else {
+                // Not a moved API: something threw while looking (the server, the plugin). Absent
+                // for this call, asked again on the next.
+                warnTransient("looking for PremiumVanish", failed,
+                        "that call treated PremiumVanish as absent and the next one looks again");
+            }
             return null;
         }
         if (fresh == null) {
@@ -291,9 +391,9 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             hook = fresh.hook();
         } catch (Throwable failed) {
             // Queries still work without the hook; only mid-session toggles go unseen.
-            logger.error("could not register for PremiumVanish's vanish and reappear events; joins, "
-                    + "leaves and deaths of vanished players are still kept out of Discord, but a "
-                    + "player vanishing mid-session will not be noticed until they leave", failed);
+            logger.error("could not register for PremiumVanish's events; joins, leaves and deaths "
+                    + "of vanished players are still kept out of Discord, but a player vanishing "
+                    + "mid-session will not be noticed until they leave", failed);
         }
         Registration tracked = registrations.track(hook == null ? Registration.NONE : hook);
         bound = fresh;
@@ -308,6 +408,19 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         logger.info("PremiumVanish detected: joins, leaves and deaths of vanished players are not "
                 + "relayed to Discord");
         return fresh;
+    }
+
+    /**
+     * Whether a failure means PremiumVanish's API is not what this integration was written against:
+     * a linkage error, or a reflective lookup that failed. An {@link InvocationTargetException} is
+     * the opposite (PremiumVanish's own code threw), and anything else is treated as one call's
+     * problem too.
+     */
+    private static boolean movedApi(Throwable failed) {
+        if (failed instanceof InvocationTargetException) {
+            return false;
+        }
+        return failed instanceof LinkageError || failed instanceof ReflectiveOperationException;
     }
 
     private static boolean isCurrent(Binding binding) {
@@ -346,8 +459,11 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
                 + "updated.", cause);
     }
 
+    private static final String ANSWERED_VANISHED =
+            "that one check answered 'vanished', so nothing was posted for it";
+
     /** At most one warning a minute, naming the exception's class only. */
-    private void warnTransient(String what, Throwable thrown) {
+    private void warnTransient(String what, Throwable thrown, String outcome) {
         long now = System.nanoTime();
         if (now - nextTransientWarnAt < 0) {
             return;
@@ -355,11 +471,10 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         nextTransientWarnAt = now + TRANSIENT_WARN_NANOS;
         logger.warn("a vanish plugin threw "
                 + (thrown == null ? "an exception" : thrown.getClass().getName()) + " while Heimdall "
-                + "was " + what + "; that one check answered 'not vanished'. Repeats are reported at "
-                + "most once a minute.");
+                + "was " + what + "; " + outcome + ". Repeats are reported at most once a minute.");
     }
 
-    /** Why the integration is broken, or {@code null}. For tests and the status line. */
+    /** Why the integration is broken, or {@code null}. For tests. */
     public final String brokenReason() {
         return brokenBecause;
     }

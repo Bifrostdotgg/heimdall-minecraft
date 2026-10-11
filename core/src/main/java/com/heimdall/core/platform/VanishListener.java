@@ -12,9 +12,11 @@ public interface VanishListener {
     /**
      * @param player the player who changed state; may name somebody already gone
      * @param vanished {@code true} when they vanished, {@code false} when they reappeared
-     * @param silent {@code true} when the vanish plugin was told not to announce the change in game
-     *     (PremiumVanish's {@code -s}), or the change happened as part of a join. {@code false} when it
-     *     was announced, or when the platform cannot tell
+     * @param silent {@code true} when the change must not be announced: the vanish plugin was told
+     *     not to announce it in game (PremiumVanish's {@code -s}), it happened as part of a join, or
+     *     the platform cannot tell whether it was announced (both proxies, which also hear every
+     *     backend's toggle a moment after that backend does). {@code false} only when the platform
+     *     knows it was announced in game
      * @param timestampMs when the change was observed, taken on the event thread
      */
     void onVanishChanged(PlayerHandle player, boolean vanished, boolean silent, long timestampMs);

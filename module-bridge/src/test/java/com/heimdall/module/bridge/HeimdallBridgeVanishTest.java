@@ -77,6 +77,15 @@ class HeimdallBridgeVanishTest {
     private final List<Runnable> settleChecks = new ArrayList<Runnable>();
     private final List<Long> settleDelays = new ArrayList<Long>();
 
+    /** The module's monotonic clock, advanced by each re-check by the delay it asked for. */
+    private final java.util.concurrent.atomic.AtomicLong testNanos =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Milliseconds of test time since setUp. */
+    private long nowMs() {
+        return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(testNanos.get());
+    }
+
     private final FakePlayer steve = FakePlayer.named("Steve");
     private final FakePlayer alex = FakePlayer.named("Alex");
 
@@ -102,6 +111,8 @@ class HeimdallBridgeVanishTest {
         module = new HeimdallBridgeModule();
         settleChecks.clear();
         settleDelays.clear();
+        testNanos.set(0L);
+        module.nanoClockForTests(() -> testNanos.get());
         // Drains are dropped: every test ships with an explicit flush().
         module.drainSchedulerForTests(new HeimdallBridgeModule.DrainScheduler() {
             @Override
@@ -163,8 +174,10 @@ class HeimdallBridgeVanishTest {
         manager.reconcile(Collections.<String>emptySet());
     }
 
-    /** Runs the next queued re-check. */
+    /** Runs the next queued re-check, once the delay it asked for has passed. */
     private void runOneSettleCheck() {
+        long delay = settleDelays.get(settleDelays.size() - settleChecks.size());
+        testNanos.addAndGet(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(delay));
         settleChecks.remove(0).run();
     }
 
@@ -229,11 +242,11 @@ class HeimdallBridgeVanishTest {
         }
 
         @Test
-        @DisplayName("an integration that throws is treated as 'nobody is vanished'")
-        void aThrowingIntegrationDegradesToNone() {
+        @DisplayName("an integration that throws: the module still enables, and the check fails closed")
+        void aThrowingIntegrationFailsClosed() {
             setUp(new Vanish() {
                 @Override
-                public long joinSettleMillis() {
+                public long joinWaitMillis(PlayerHandle player, long elapsedMs) {
                     throw new IllegalStateException("broken");
                 }
 
@@ -253,7 +266,9 @@ class HeimdallBridgeVanishTest {
             sessions.join(steve, 1L);
             sessions.quit(steve, 2L);
 
-            assertEquals(Arrays.asList("join:Steve@1", "leave:Steve@2"), shipped());
+            assertTrue(shipped().isEmpty(), "a check that could not answer counts as vanished: one "
+                    + "missing post beats publishing a hidden staff member");
+            assertTrue(settleDelays.isEmpty(), "and a wait that could not answer does not wait");
         }
 
         @Test
@@ -343,6 +358,50 @@ class HeimdallBridgeVanishTest {
 
             assertEquals(Collections.singletonList("join:Steve@1"), shipped(),
                     "a vanished player's death and leave are never relayed (decision 2)");
+        }
+
+        @Test
+        @DisplayName("a leave with no session to go on is still suppressed for a vanished player")
+        void aSessionlessLeaveIsSuppressed() {
+            // A player online before the listeners existed and missed by the seed: only the vanish
+            // plugin can say, and it says hidden.
+            setUpWithoutSettle(null);
+            enable();
+            vanish.hide(steve);
+
+            sessions.quit(steve, 1L);
+
+            assertTrue(shipped().isEmpty());
+            assertEquals(0, module.sessionCount());
+        }
+
+        @Test
+        @DisplayName("a death with no session to go on is still suppressed for a vanished player")
+        void aSessionlessDeathIsSuppressed() {
+            setUpWithoutSettle(null);
+            enable();
+            vanish.hide(steve);
+
+            sessions.death(steve, "Steve tried to swim in lava", 1L);
+
+            assertTrue(shipped().isEmpty());
+        }
+
+        @Test
+        @DisplayName("a quiet session's leave does not ask the vanish plugin at all")
+        void aQuietLeaveSkipsTheLookup() {
+            // On a proxy the lookup for a departed player is getAllInvisiblePlayers, which can be a
+            // database query. A session already known to be quiet needs no answer.
+            setUpWithoutSettle(null);
+            enable();
+            vanish.hide(steve);
+            sessions.join(steve, 1L);
+            int checks = vanish.checks.get();
+
+            sessions.quit(steve, 2L);
+
+            assertEquals(checks, vanish.checks.get());
+            assertTrue(shipped().isEmpty());
         }
 
         @Test
@@ -573,6 +632,20 @@ class HeimdallBridgeVanishTest {
         }
 
         @Test
+        @DisplayName("on: a quiet session getting another hide never posts a leave")
+        void aQuietSessionNeverPostsALeaveForAHide() {
+            setUpWithoutSettle(announceToggles(true));
+            enable();
+            vanish.hide(steve);
+            sessions.join(steve, 1L);
+
+            vanish.toggle(steve, true, false, 2L);
+            sessions.quit(steve, 3L);
+
+            assertTrue(shipped().isEmpty(), "Discord was never told Steve is here: " + shipped());
+        }
+
+        @Test
         @DisplayName("on: a silent toggle is not announced, because players in game saw nothing")
         void onIgnoresASilentToggle() {
             setUpWithoutSettle(announceToggles(true));
@@ -636,6 +709,110 @@ class HeimdallBridgeVanishTest {
             sessions.quit(steve, 4L);
 
             assertEquals(Arrays.asList("join:Steve@1", "leave:Steve@4"), shipped());
+        }
+    }
+
+    // ── On a proxy ───────────────────────────────────────────────────────────
+
+    @Nested
+    @DisplayName("on a proxy, the wait is anchored to the backend connection")
+    class OnAProxy {
+
+        private void setUpProxy(Payload settings) {
+            setUpWithPremiumVanish(settings);
+            vanish.proxy = true;
+        }
+
+        private void connectToBackendNow(PlayerHandle player) {
+            vanish.backendAtElapsedMs.put(player.uuid(), nowMs());
+        }
+
+        @Test
+        @DisplayName("a visible join posts 1.5 s after the backend connection, not after the join")
+        void postsAfterTheBackendWindow() {
+            setUpProxy(null);
+            enable();
+
+            sessions.join(steve, 1000L);
+            for (int i = 0; i < 12; i++) {
+                runOneSettleCheck();
+            }
+            assertTrue(shipped().isEmpty(), "3 s in and no backend yet: still waiting");
+            connectToBackendNow(steve);
+            runSettleChecks();
+
+            assertEquals(Collections.singletonList("join:Steve@1000"), shipped());
+            assertEquals(4500L, nowMs(), "decided 1.5 s after the connection at 3 s");
+        }
+
+        @Test
+        @DisplayName("marked vanished after the backend connection: never posted")
+        void aMarkAfterTheBackendIsCaught() {
+            setUpProxy(null);
+            enable();
+
+            sessions.join(steve, 1000L);
+            for (int i = 0; i < 12; i++) {
+                runOneSettleCheck();
+            }
+            connectToBackendNow(steve);
+            runOneSettleCheck();
+            // The backend's PremiumVanish has now told the proxy's.
+            vanish.vanished.add(steve.uuid());
+            runSettleChecks();
+            sessions.quit(steve, 9000L);
+
+            assertTrue(shipped().isEmpty(), "this is the leak a join-anchored window let through");
+        }
+
+        @Test
+        @DisplayName("no backend connection at all: decided as visible at the 10 s cap")
+        void decidedAtTheCap() {
+            setUpProxy(null);
+            enable();
+
+            sessions.join(steve, 1000L);
+            runSettleChecks();
+
+            assertEquals(Collections.singletonList("join:Steve@1000"), shipped());
+            assertEquals(FakeVanish.CAP_MS, nowMs());
+        }
+
+        @Test
+        @DisplayName("a hide before the decision is part of the join: no join, and never a leave")
+        void aHideBeforeTheDecisionSuppressesTheJoin() {
+            // Proxies deliver every toggle as silent (they cannot tell); with the setting on, a hide
+            // arriving while the join is still undecided must neither post a leave nor let the join
+            // through.
+            setUpProxy(announceToggles(true));
+            enable();
+
+            sessions.join(steve, 1000L);
+            runOneSettleCheck();
+            vanish.toggle(steve, true, true, 1300L);
+            vanish.vanished.clear();
+            runSettleChecks();
+            sessions.quit(steve, 20_000L);
+
+            assertTrue(shipped().isEmpty(), shipped().toString());
+        }
+
+        @Test
+        @DisplayName("with the setting on, a proxy's toggles (always silent) announce nothing")
+        void aProxyNeverAnnouncesToggles() {
+            // The backend that announced the vanish in game relays its own leave; the proxy's copy
+            // would land at a different time and slip past the bot's duplicate drop.
+            setUpProxy(announceToggles(true));
+            enable();
+            sessions.join(steve, 1000L);
+            connectToBackendNow(steve);
+            runSettleChecks();
+
+            vanish.toggle(steve, true, true, 20_000L);
+            vanish.toggle(steve, false, true, 21_000L);
+            sessions.quit(steve, 22_000L);
+
+            assertEquals(Arrays.asList("join:Steve@1000", "leave:Steve@22000"), shipped());
         }
     }
 
@@ -706,6 +883,14 @@ class HeimdallBridgeVanishTest {
 
         final Set<UUID> vanished = Collections.newSetFromMap(new ConcurrentHashMap<UUID, Boolean>());
         private final long settleMillis;
+
+        /**
+         * Proxy mode, as {@code VanishSupport} does it: the settle window counts from the player's
+         * first backend connection (test-time milliseconds since the join), capped from the join.
+         */
+        boolean proxy;
+        final java.util.Map<UUID, Long> backendAtElapsedMs = new ConcurrentHashMap<UUID, Long>();
+        static final long CAP_MS = 10_000L;
         private final CopyOnWriteArrayList<VanishListener> listeners =
                 new CopyOnWriteArrayList<VanishListener>();
         final AtomicInteger checks = new AtomicInteger();
@@ -735,8 +920,18 @@ class HeimdallBridgeVanishTest {
         }
 
         @Override
-        public long joinSettleMillis() {
-            return settleMillis;
+        public long joinWaitMillis(PlayerHandle player, long elapsedMs) {
+            if (settleMillis <= 0L) {
+                return 0L;
+            }
+            if (!proxy) {
+                return Math.max(0L, settleMillis - elapsedMs);
+            }
+            Long connected = backendAtElapsedMs.get(player.uuid());
+            if (connected == null) {
+                return Math.max(0L, CAP_MS - elapsedMs);
+            }
+            return Math.max(0L, settleMillis - (elapsedMs - connected));
         }
 
         @Override

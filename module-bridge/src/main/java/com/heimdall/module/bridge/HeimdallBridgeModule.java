@@ -173,14 +173,19 @@ import net.kyori.adventure.text.Component;
  * <ul>
  *   <li>A join kept quiet keeps its leave quiet too, even if the player has reappeared by the time
  *       they quit, so Discord never shows a leave without a join.
- *   <li>With PremiumVanish installed a join waits up to {@code joinSettleMillis()} (re-checking every
- *       {@value #SETTLE_CHECK_MS} ms) before it is posted, because PremiumVanish can mark a player a
- *       moment after the platform's join event, on a proxy especially. A quit or death inside that
- *       window decides the join first, so the two go out together and in order. Without PremiumVanish
- *       the window is zero and a join posts at once, as it always did.
+ *   <li>With PremiumVanish installed a join waits for as long as {@code Vanish.joinWaitMillis}
+ *       says (re-checking every {@value #SETTLE_CHECK_MS} ms) before it is posted, because
+ *       PremiumVanish can mark a player after the platform's join event: 1.5 s from the join on a
+ *       backend, and on a proxy 1.5 s from the player's first backend connection, capped at 10 s
+ *       from the join, since a proxy only learns the state once a backend tells it. A quit or
+ *       death inside that window decides the join first, so the two go out together and in order.
+ *       Without PremiumVanish there is no window and a join posts at once, as it always did.
  *   <li>Vanishing or reappearing mid-session posts nothing unless {@code announceVanishToggles} is
  *       on, and then it mirrors what players in game saw: a {@code leave} for a vanish and a
- *       {@code join} for a reappearance, through {@link #relayEvent} like everything else.
+ *       {@code join} for a reappearance, through {@link #relayEvent} like everything else. Only a
+ *       backend ever announces one: a proxy cannot tell an announced toggle from a silent one, and
+ *       its copy would arrive at a different time from the backend's and post twice, so the proxy
+ *       platforms deliver every toggle as silent.
  * </ul>
  *
  * <h2>Chat-plugin channels: a staff channel is not public chat</h2>
@@ -305,7 +310,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     /**
      * How often a deferred join re-checks whether its player has been marked vanished. The window
-     * itself is the platform's {@code Vanish.joinSettleMillis()}, which is zero (no deferral at all)
+     * itself is the platform's {@code Vanish.joinWaitMillis()}, which is zero (no deferral at all)
      * without PremiumVanish.
      */
     static final long SETTLE_CHECK_MS = 250L;
@@ -1526,32 +1531,39 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     /**
-     * {@link Vanish#isVanished}, with a throw treated as "not vanished": the same answer the
-     * integration gives when it cannot tell. Never called with {@link #sessionLock} held, because it
-     * calls into the vanish plugin, which takes locks of its own.
+     * {@link Vanish#isVanished}, with a throw treated as "vanished": the same answer the integration
+     * gives when one call into the vanish plugin fails. One missing post beats publishing a hidden
+     * staff member. Never called with {@link #sessionLock} held, because it calls into the vanish
+     * plugin, which takes locks of its own.
      */
     private static boolean isVanished(Vanish vanish, PlayerHandle player) {
         try {
             return vanish.isVanished(player);
         } catch (Throwable failed) {
-            return false;
+            return true;
         }
     }
 
-    private static long settleMillis(Vanish vanish) {
+    /** {@link Vanish#joinWaitMillis}, with a throw treated as "decide now". */
+    private static long waitMillis(Vanish vanish, PlayerHandle player, long elapsedMs) {
         try {
-            return Math.max(0L, vanish.joinSettleMillis());
+            return Math.max(0L, vanish.joinWaitMillis(player, elapsedMs));
         } catch (Throwable failed) {
             return 0L;
         }
+    }
+
+    /** Milliseconds since {@code session} was recorded, on {@link #nanoNow()}'s clock. */
+    private long elapsedMs(Session session) {
+        return Math.max(0L, TimeUnit.NANOSECONDS.toMillis(nanoNow() - session.createdNanos));
     }
 
     /**
      * A join: announced at once, kept quiet because the player is vanished, or deferred while the
      * vanish plugin may still mark them.
      *
-     * <p>Without PremiumVanish the settle window is zero, so this posts in the same call, exactly as
-     * before vanish was considered: no delay and no timer.
+     * <p>Without PremiumVanish the wait is zero, so this posts in the same call, exactly as before
+     * vanish was considered: no delay and no timer.
      */
     private void onJoin(PlayerHandle player, long timestampMs) {
         ModuleContext ctx = context;
@@ -1564,7 +1576,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             return;
         }
         Vanish vanish = vanish(ctx);
-        long settle = settleMillis(vanish);
+        long wait = waitMillis(vanish, player, 0L);
         boolean vanishedNow = isVanished(vanish, player);
         Session deferred = null;
         synchronized (sessionLock) {
@@ -1582,17 +1594,15 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             if (vanishedNow || hiddenEarly) {
                 session.hidden = true;
                 session.quiet = true;
-            } else if (settle <= 0L) {
+            } else if (wait <= 0L) {
                 relayEvent("join", player, null, timestampMs);
             } else {
                 session.pending = true;
-                session.checksLeft = (int) Math.max(1L,
-                        (settle + SETTLE_CHECK_MS - 1L) / SETTLE_CHECK_MS);
                 deferred = session;
             }
         }
         if (deferred != null) {
-            scheduleSettleCheck(ctx, deferred);
+            scheduleSettleCheck(ctx, deferred, Math.min(SETTLE_CHECK_MS, wait));
         }
     }
 
@@ -1602,7 +1612,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * module is disabled: one per check per join would grow without bound. A check that runs after a
      * disable finds its session gone and does nothing.
      */
-    private void scheduleSettleCheck(ModuleContext ctx, final Session session) {
+    private void scheduleSettleCheck(ModuleContext ctx, final Session session, long delayMs) {
         Runnable check = new Runnable() {
             @Override
             public void run() {
@@ -1612,9 +1622,9 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         try {
             DrainScheduler scheduler = settleScheduler;
             if (scheduler != null) {
-                scheduler.schedule(check, SETTLE_CHECK_MS);
+                scheduler.schedule(check, delayMs);
             } else {
-                ctx.executors().scheduler().schedule(check, SETTLE_CHECK_MS, TimeUnit.MILLISECONDS);
+                ctx.executors().scheduler().schedule(check, delayMs, TimeUnit.MILLISECONDS);
             }
         } catch (RuntimeException refused) {
             // Shutting down. Decide now rather than leave the join pending for ever.
@@ -1623,9 +1633,10 @@ public final class HeimdallBridgeModule implements HeimdallModule {
     }
 
     /**
-     * One re-check of a deferred join. Vanished: decided quiet. Still visible at the last check:
-     * announced, with the timestamp of the join itself, so the bot's duplicate drop keys it the same
-     * way as every other instance's copy.
+     * One re-check of a deferred join. Vanished: decided quiet. Still visible once the platform says
+     * the wait is over: announced, with the timestamp of the join itself, so the bot's duplicate drop
+     * keys it the same way as every other instance's copy. How long that is belongs to the platform
+     * ({@link Vanish#joinWaitMillis}): on a proxy it runs from the player's first backend connection.
      */
     private void settleCheck(Session session, boolean last) {
         ModuleContext ctx = context;
@@ -1638,7 +1649,9 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 return;
             }
         }
-        boolean vanished = isVanished(vanish(ctx), session.player);
+        Vanish vanish = vanish(ctx);
+        boolean vanished = isVanished(vanish, session.player);
+        long wait = waitMillis(vanish, session.player, elapsedMs(session));
         boolean again = false;
         synchronized (sessionLock) {
             if (sessions.get(uuid) != session || !session.pending) {
@@ -1648,7 +1661,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 session.pending = false;
                 session.hidden = true;
                 session.quiet = true;
-            } else if (!last && --session.checksLeft > 0) {
+            } else if (!last && wait > 0L) {
                 again = true;
             } else {
                 session.pending = false;
@@ -1656,7 +1669,7 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             }
         }
         if (again) {
-            scheduleSettleCheck(ctx, session);
+            scheduleSettleCheck(ctx, session, Math.min(SETTLE_CHECK_MS, wait));
         }
     }
 
@@ -1677,6 +1690,16 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         if (uuid == null) {
             relayEvent("leave", player, null, timestampMs);
             return;
+        }
+        synchronized (sessionLock) {
+            Session session = sessions.get(uuid);
+            if (context == ctx && session != null && session.joinSeen && !session.pending
+                    && timestampMs >= session.joinTs && (session.quiet || session.hidden)) {
+                // Already decided quiet. Not asking the vanish plugin is the point: its offline
+                // lookups (isInvisibleOffline, getAllInvisiblePlayers) can be a database query.
+                sessions.remove(uuid);
+                return;
+            }
         }
         boolean vanishedNow = isVanished(vanish(ctx), player);
         synchronized (sessionLock) {
@@ -2452,9 +2475,6 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
         /** The join is waiting for the settle window; nothing has been posted for it yet. */
         boolean pending;
-
-        /** Re-checks left in the settle window. */
-        int checksLeft;
 
         /**
          * Discord does not currently know this player is here: their join was kept quiet, or a

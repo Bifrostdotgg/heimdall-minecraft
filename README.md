@@ -248,16 +248,26 @@ Two notes worth having before you turn something on:
   - Deaths are the exception to any proxy-origin plan: no proxy has a death event, so those only
     ever come from backends.
   - Both take effect the moment you save — no restart, and no switching the module off and on.
-- **Vanished staff stay vanished in Discord.** With PremiumVanish (or SuperVanish) installed, on the
-  proxy or the backends, a vanished player's join, leave and death are never posted, and nor is the
-  leave of a session whose join was kept quiet. On a Bukkit backend the `vanished` flag that
-  EssentialsX, CMI and other vanish plugins set counts too. With PremiumVanish installed a join is
-  posted about a second and a half late, while the plugin makes sure the player is not being
-  vanished; without it nothing changes.
+- **Vanished staff stay vanished in Discord**, on every server that can see the vanish. A server
+  with PremiumVanish (or SuperVanish) never posts a vanished player's join, leave or death, nor the
+  leave of a session whose join was kept quiet.
+  - **Every server that relays events must be able to see it.** A proxy with `relayEvents` on must
+    run PremiumVanish's proxy half itself; with PremiumVanish only on the backends, the proxy
+    still announces the join the moment the player logs in. If you cannot run it on the proxy,
+    turn `relayEvents` off there and let the backends announce.
+  - On a Bukkit backend the `vanished` flag that EssentialsX, CMI and similar plugins set also
+    counts, on a best-effort basis: some of them (EssentialsX's silent join, for one) set it a
+    moment after the join, so a join can still slip through. A proxy cannot see these plugins at
+    all, so with one of them, `relayEvents` must be off on the proxy.
+  - With PremiumVanish installed, joins are posted a little late while the plugin makes sure the
+    player is not being vanished: about a second and a half on a backend, and on a proxy a second
+    and a half after the player reaches a backend (at most about ten seconds). Without PremiumVanish
+    nothing changes.
   - `announceVanishToggles` (per server, **off** by default) decides what happens when somebody
-    vanishes or reappears mid-session. Off: nothing is posted. On: Discord sees what players in game
-    see, a leave when they vanish and a join when they reappear (not for a silent `-s` toggle, which
-    players do not see either). It only posts where `relayEvents` is on.
+    vanishes or reappears mid-session. Off: nothing is posted. On: a backend posts what players in
+    game see, a leave when they vanish and a join when they reappear (not for a silent `-s` toggle,
+    which players do not see either). A proxy never announces these, because it cannot tell a silent
+    toggle from an announced one. It only posts where `relayEvents` is on.
 
 ### WebSocket Tunnel
 

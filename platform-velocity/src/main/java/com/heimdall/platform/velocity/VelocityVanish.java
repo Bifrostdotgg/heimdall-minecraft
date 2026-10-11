@@ -7,11 +7,15 @@ import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.VanishSupport;
 import com.velocitypowered.api.event.EventHandler;
 import com.velocitypowered.api.event.PostOrder;
+import com.velocitypowered.api.event.player.ServerConnectedEvent;
+import com.velocitypowered.api.event.player.ServerPostConnectEvent;
 import com.velocitypowered.api.plugin.PluginContainer;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
@@ -39,8 +43,16 @@ import java.util.function.Function;
  *
  * <p>{@code VelocityPlayerHideEvent} and {@code VelocityPlayerShowEvent}, registered by class as
  * functional handlers at {@link PostOrder#LAST} through {@link VelocityEvents}, which is the only way
- * to register on Velocity without its method-handle cache pinning a swapped-out core (D87). Velocity
- * cannot tell whether a toggle was silent, so every one is delivered as announced.
+ * to register on Velocity without its method-handle cache pinning a swapped-out core (D87). Both are
+ * optional: they arrived in PremiumVanish well after the query API did. Velocity cannot tell whether
+ * a toggle was announced in game, and the backend that announced it relays its own copy, so every
+ * toggle is delivered as silent and a proxy never announces one (D88).
+ *
+ * <h2>The join wait is anchored to the backend</h2>
+ *
+ * <p>The proxy's PremiumVanish learns a player's state only after they reach a backend, which can
+ * take longer than the whole settle window. So the wait counts from the first backend connection
+ * after the join, capped from the join; see {@link VanishSupport}.
  *
  * <p>Velocity has no plugin unloading, so a binding never goes stale here.
  */
@@ -62,6 +74,9 @@ final class VelocityVanish extends VanishSupport {
         /** The player with this UUID if they are still on the proxy. */
         Optional<Player> onlinePlayer(UUID uuid);
 
+        /** The class loader PremiumVanish's own classes live in. */
+        ClassLoader loaderOf(Object instance);
+
         /** Registers {@code handler} for {@code type} at {@link PostOrder#LAST}. */
         <E> Registration listen(Class<E> type, EventHandler<E> handler);
     }
@@ -74,7 +89,7 @@ final class VelocityVanish extends VanishSupport {
             CoreRegistrations registrations,
             Environment environment,
             Function<Player, PlayerHandle> handles) {
-        super(logger, registrations);
+        super(logger, registrations, true);
         this.environment = environment;
         this.handles = handles;
     }
@@ -101,17 +116,20 @@ final class VelocityVanish extends VanishSupport {
         if (instance == null) {
             return null;
         }
-        ClassLoader loader = instance.getClass().getClassLoader();
+        ClassLoader loader = environment.loaderOf(instance);
         if (loader == null) {
             throw new ClassNotFoundException("PremiumVanish has no class loader");
         }
         Class<?> api = Class.forName(API_CLASS, true, loader);
         final Method isInvisible = api.getMethod("isInvisible", Player.class);
         final Method allInvisible = optionalMethod(api, "getAllInvisiblePlayers");
-        final Class<?> hide = Class.forName(HIDE_EVENT, true, loader);
-        final Class<?> show = Class.forName(SHOW_EVENT, true, loader);
-        final Method hidePlayer = hide.getMethod("getPlayer");
-        final Method showPlayer = show.getMethod("getPlayer");
+        // Optional: PremiumVanish shipped VelocityVanishAPI (2.9.0, November 2023) well over a year
+        // before these events (March 2025). A release from that window still answers isInvisible,
+        // which is what keeps vanished joins out of Discord; only the toggles need the events.
+        final Class<?> hide = optionalClass(loader, HIDE_EVENT);
+        final Class<?> show = optionalClass(loader, SHOW_EVENT);
+        final Method hidePlayer = hide == null ? null : optionalMethod(hide, "getPlayer");
+        final Method showPlayer = show == null ? null : optionalMethod(show, "getPlayer");
 
         return new Binding() {
             @Override
@@ -134,26 +152,87 @@ final class VelocityVanish extends VanishSupport {
 
             @Override
             public Registration hook() {
-                final Registration hides = listen(hide, hidePlayer, true);
-                final Registration shows;
+                final List<Registration> made = new ArrayList<Registration>();
                 try {
-                    shows = listen(show, showPlayer, false);
+                    // The backend connection anchors the join wait, so it is registered whether or
+                    // not this release has the toggle events.
+                    made.add(listenForBackends());
+                    if (hidePlayer != null && showPlayer != null) {
+                        made.add(listen(hide, hidePlayer, true));
+                        made.add(listen(show, showPlayer, false));
+                    } else {
+                        logger.warn("this PremiumVanish has no Velocity vanish and reappear events "
+                                + "(they arrived in a later release); vanished players' joins and "
+                                + "leaves are still kept out of Discord, but a vanish mid-session "
+                                + "is not seen as it happens");
+                    }
                 } catch (RuntimeException | Error failed) {
-                    hides.close();
+                    closeAll(made);
                     throw failed;
                 }
                 return Registration.once(new Runnable() {
                     @Override
                     public void run() {
-                        try {
-                            shows.close();
-                        } finally {
-                            hides.close();
-                        }
+                        closeAll(made);
                     }
                 });
             }
         };
+    }
+
+    /**
+     * The player's backend connections, which anchor a join's wait (see {@link VanishSupport}).
+     * {@code ServerPostConnectEvent} fires once the player is on the backend, which is the moment
+     * PremiumVanish there can tell this proxy anything; a Velocity too old to have it gets
+     * {@code ServerConnectedEvent}, a moment earlier. Each lives in its own anonymous class so the
+     * missing one is never even loaded.
+     */
+    private Registration listenForBackends() {
+        try {
+            return environment.listen(ServerPostConnectEvent.class,
+                    new EventHandler<ServerPostConnectEvent>() {
+                        @Override
+                        public void execute(ServerPostConnectEvent event) {
+                            onBackend(event.getPlayer());
+                        }
+                    });
+        } catch (LinkageError tooOld) {
+            return environment.listen(ServerConnectedEvent.class,
+                    new EventHandler<ServerConnectedEvent>() {
+                        @Override
+                        public void execute(ServerConnectedEvent event) {
+                            onBackend(event.getPlayer());
+                        }
+                    });
+        }
+    }
+
+    private void onBackend(Player player) {
+        try {
+            if (player != null) {
+                backendConnected(player.getUniqueId());
+            }
+        } catch (Throwable failed) {
+            logger.error("could not note a backend connection; that join waits for its cap", failed);
+        }
+    }
+
+    private static void closeAll(List<Registration> registrations) {
+        for (int i = registrations.size() - 1; i >= 0; i--) {
+            try {
+                registrations.get(i).close();
+            } catch (Throwable ignored) {
+                // Teardown; the rest still come off.
+            }
+        }
+    }
+
+    private static Class<?> optionalClass(ClassLoader loader, String name) {
+        try {
+            return Class.forName(name, true, loader);
+        } catch (ClassNotFoundException | LinkageError absent) {
+            return null;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -171,7 +250,9 @@ final class VelocityVanish extends VanishSupport {
         try {
             Object player = getPlayer.invoke(event);
             if (player instanceof Player) {
-                toggled(handles.apply((Player) player), vanished, false);
+                // Always silent: Velocity cannot tell whether PremiumVanish announced the change in
+                // game, and the backend that did announce it relays its own copy (D88).
+                toggled(handles.apply((Player) player), vanished, true);
             }
         } catch (Throwable failed) {
             logger.error("could not read a PremiumVanish vanish event; that one change was not seen",
@@ -223,6 +304,11 @@ final class VelocityVanish extends VanishSupport {
         @Override
         public Optional<Player> onlinePlayer(UUID uuid) {
             return proxy.getPlayer(uuid);
+        }
+
+        @Override
+        public ClassLoader loaderOf(Object instance) {
+            return instance.getClass().getClassLoader();
         }
 
         @Override

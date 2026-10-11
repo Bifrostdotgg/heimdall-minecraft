@@ -27,26 +27,36 @@ import com.heimdall.core.util.Registration;
  * <p>Every method is safe to call from any thread and never throws. {@link #isVanished} may call into
  * the vanish plugin, which can be slow on a MySQL-backed PremiumVanish, so it must not be called on a
  * server's main thread; the bridge calls it from {@code heimdall-io} and {@code heimdall-sched} only.
- * An implementation that cannot answer (the plugin's API moved, the plugin threw) answers
- * {@code false} and says why in the log: a broken integration degrades to the behaviour of a server
- * without one, which is how every other optional integration here behaves.
+ *
+ * <p>Two kinds of "cannot answer", answered differently. The vanish plugin throwing on one call
+ * answers {@code true} for that call: one missing join message beats publishing a hidden staff
+ * member. An integration whose API could not be resolved at all (the plugin moved a class) answers
+ * as if the plugin were absent and says why in the log once, because failing closed there would
+ * silence every player's join for good.
  */
 public interface Vanish {
 
     /**
-     * How long a fresh join may take to be marked vanished, in milliseconds.
+     * How much longer a fresh join should wait before it is decided, in milliseconds.
      *
      * <p>PremiumVanish can mark a player invisible a little after the platform's own join event: its
-     * auto-vanish-on-join runs inside the join, but a proxy only learns a player's state when a
-     * backend or the shared database tells it. A relay that decided at the join event would announce
-     * exactly the joins it should not. So a caller that sees a positive value waits up to that long,
-     * re-checking, before it announces a join.
+     * auto-vanish-on-join runs inside a backend's join, but a proxy only learns a player's state once
+     * they have reached a backend and that backend (or the shared database) has told it. A relay that
+     * decided at the join event would announce exactly the joins it should not. So a caller re-checks
+     * {@link #isVanished} and asks this again until it answers {@code 0}, and only then announces.
      *
-     * <p>{@code 0} means every source this platform has answers immediately, and a join can be decided
-     * at once. That is the answer whenever PremiumVanish is absent, so a server without it pays no
-     * delay at all.
+     * <p>The platform decides what the wait is anchored to, which is why this takes the player and
+     * the time already waited rather than being a constant: a backend counts from the join, a proxy
+     * from the player's first backend connection, with a cap from the join so a player who never
+     * reaches a backend is still decided.
+     *
+     * <p>{@code 0} means decide now. That is the answer whenever PremiumVanish is absent, so a server
+     * without it pays no delay at all.
+     *
+     * @param player the player who joined
+     * @param elapsedMs how long ago the join was reported, by the caller's own monotonic clock
      */
-    long joinSettleMillis();
+    long joinWaitMillis(PlayerHandle player, long elapsedMs);
 
     /**
      * Whether {@code player} is currently hidden.
@@ -74,7 +84,7 @@ public interface Vanish {
     /** No vanish plugin: nobody is hidden, nothing toggles, nothing waits. */
     Vanish NONE = new Vanish() {
         @Override
-        public long joinSettleMillis() {
+        public long joinWaitMillis(PlayerHandle player, long elapsedMs) {
             return 0L;
         }
 

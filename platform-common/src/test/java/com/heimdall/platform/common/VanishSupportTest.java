@@ -33,6 +33,14 @@ class VanishSupportTest {
     private final CoreRegistrations registrations = CoreRegistrations.untracked();
     private final FakePlayer steve = FakePlayer.named("Steve");
 
+    /** The join wait's monotonic clock. */
+    private final java.util.concurrent.atomic.AtomicLong nanos =
+            new java.util.concurrent.atomic.AtomicLong(1_000_000_000L);
+
+    private void advanceMs(long ms) {
+        nanos.addAndGet(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(ms));
+    }
+
     /** A platform whose PremiumVanish the test installs, removes, breaks and reloads at will. */
     private final class TestVanish extends VanishSupport {
 
@@ -40,6 +48,7 @@ class VanishSupportTest {
         volatile boolean current = true;
         volatile Throwable bindFailure;
         volatile Throwable queryFailure;
+        volatile RuntimeException conventionFailure;
         final Set<UUID> invisible = Collections.newSetFromMap(new ConcurrentHashMap<UUID, Boolean>());
         final Set<UUID> byConvention =
                 Collections.newSetFromMap(new ConcurrentHashMap<UUID, Boolean>());
@@ -48,12 +57,24 @@ class VanishSupportTest {
         final AtomicInteger hooksMade = new AtomicInteger();
 
         TestVanish() {
-            super(VanishSupportTest.this.logger, VanishSupportTest.this.registrations);
+            this(false);
+        }
+
+        TestVanish(boolean proxy) {
+            super(VanishSupportTest.this.logger, VanishSupportTest.this.registrations, proxy);
+            clockForTests(() -> nanos.get());
         }
 
         @Override
         protected boolean vanishedByConvention(PlayerHandle player) {
+            if (conventionFailure != null) {
+                throw conventionFailure;
+            }
             return byConvention.contains(player.uuid());
+        }
+
+        void connect(PlayerHandle player) {
+            backendConnected(player.uuid());
         }
 
         @Override
@@ -114,8 +135,9 @@ class VanishSupportTest {
     void absentIsNone() {
         TestVanish vanish = new TestVanish();
 
-        assertEquals(0L, vanish.joinSettleMillis(), "no PremiumVanish must mean no delay at all");
+        assertEquals(0L, vanish.joinWaitMillis(steve, 0L), "no PremiumVanish must mean no delay at all");
         assertFalse(vanish.isVanished(steve));
+        assertNull(vanish.brokenReason(), "a miss (it may load after us) is never a failure");
         assertNotNull(vanish.onToggle(new Recorder()));
         assertEquals(0, vanish.hooksMade.get());
         int before = vanish.binds.get();
@@ -132,7 +154,7 @@ class VanishSupportTest {
         vanish.byConvention.add(steve.uuid());
 
         assertTrue(vanish.isVanished(steve));
-        assertEquals(0L, vanish.joinSettleMillis(), "the convention never asks a join to wait");
+        assertEquals(0L, vanish.joinWaitMillis(steve, 0L), "the convention never asks a join to wait");
     }
 
     @Test
@@ -146,7 +168,7 @@ class VanishSupportTest {
         vanish.invisible.add(steve.uuid());
 
         assertTrue(vanish.isVanished(steve));
-        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinSettleMillis());
+        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(steve, 0L));
         vanish.isVanished(steve);
         assertEquals(1, vanish.hooksMade.get(), "one hook, however many calls");
         assertEquals(1, registrations.size(), "and it is tracked against the core generation");
@@ -209,7 +231,7 @@ class VanishSupportTest {
         assertEquals(0, vanish.hooksOpen.get());
         assertEquals(1, vanish.hooksMade.get(), "no hook after close");
         assertTrue(recorder.seen.isEmpty());
-        assertEquals(0L, vanish.joinSettleMillis());
+        assertEquals(0L, vanish.joinWaitMillis(steve, 0L));
     }
 
     @Test
@@ -220,7 +242,7 @@ class VanishSupportTest {
         vanish.bindFailure = new NoSuchMethodException("isInvisible");
 
         assertFalse(vanish.isVanished(steve));
-        assertEquals(0L, vanish.joinSettleMillis());
+        assertEquals(0L, vanish.joinWaitMillis(steve, 0L));
         int binds = vanish.binds.get();
         vanish.isVanished(steve);
 
@@ -231,18 +253,118 @@ class VanishSupportTest {
     }
 
     @Test
-    @DisplayName("PremiumVanish's own code throwing is one call's problem, not a broken integration")
-    void aThrowingCallIsTransient() {
+    @DisplayName("PremiumVanish's own code throwing answers 'vanished' for that call, and is not broken")
+    void aThrowingCallFailsClosed() {
         TestVanish vanish = new TestVanish();
         vanish.installed = true;
-        vanish.invisible.add(steve.uuid());
         vanish.queryFailure = new InvocationTargetException(new IllegalStateException("db down"));
 
-        assertFalse(vanish.isVanished(steve), "a failed check answers 'not vanished'");
+        assertTrue(vanish.isVanished(steve),
+                "one missing join message beats publishing a hidden staff member");
+        vanish.queryFailure = new IllegalStateException("not reflective at all");
+        assertTrue(vanish.isVanished(steve), "anything but a moved API is one call's problem too");
         vanish.queryFailure = null;
 
-        assertTrue(vanish.isVanished(steve), "and the next call asks again");
+        assertFalse(vanish.isVanished(steve), "and the next call asks again");
         assertNull(vanish.brokenReason());
+    }
+
+    @Test
+    @DisplayName("a moved method at query time breaks the integration, which then answers absent")
+    void aMovedMethodAtQueryTimeIsBroken() {
+        TestVanish vanish = new TestVanish();
+        vanish.installed = true;
+        vanish.queryFailure = new NoSuchMethodError("isInvisible");
+
+        assertFalse(vanish.isVanished(steve));
+        assertNotNull(vanish.brokenReason());
+        assertEquals(0L, vanish.joinWaitMillis(steve, 0L));
+    }
+
+    @Test
+    @DisplayName("a non-reflective throw while looking for the plugin is retried, not broken")
+    void aThrowingLookupIsRetried() {
+        TestVanish vanish = new TestVanish();
+        vanish.installed = true;
+        vanish.bindFailure = new IllegalStateException("plugin manager busy");
+
+        assertFalse(vanish.present());
+        assertNull(vanish.brokenReason());
+        vanish.bindFailure = null;
+
+        assertTrue(vanish.present(), "the next call looks again and finds it");
+    }
+
+    @Test
+    @DisplayName("a metadata value that throws answers 'vanished' for that call")
+    void aThrowingConventionFailsClosed() {
+        TestVanish vanish = new TestVanish();
+        vanish.conventionFailure = new IllegalStateException("lazy value threw");
+
+        assertTrue(vanish.isVanished(steve));
+    }
+
+    // ── The join wait ────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("a backend waits the settle window from the join")
+    void aBackendWaitsFromTheJoin() {
+        TestVanish vanish = new TestVanish(false);
+        vanish.installed = true;
+
+        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(steve, 0L));
+        assertEquals(500L, vanish.joinWaitMillis(steve, 1000L));
+        assertEquals(0L, vanish.joinWaitMillis(steve, 2000L));
+    }
+
+    @Test
+    @DisplayName("a proxy waits from the first backend connection, not from the join")
+    void aProxyWaitsFromTheBackend() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+
+        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS, vanish.joinWaitMillis(steve, 0L),
+                "no backend yet: the proxy's PremiumVanish cannot know, so wait up to the cap");
+        advanceMs(3000L);
+        assertEquals(7000L, vanish.joinWaitMillis(steve, 3000L));
+
+        vanish.connect(steve);
+        advanceMs(500L);
+        assertEquals(1000L, vanish.joinWaitMillis(steve, 3500L),
+                "the settle window now runs from the backend connection");
+        vanish.connect(steve);
+        advanceMs(1000L);
+        assertEquals(0L, vanish.joinWaitMillis(steve, 4500L),
+                "a second connection (a server switch) does not extend it");
+    }
+
+    @Test
+    @DisplayName("a proxy decides at the cap when the player never reaches a backend")
+    void aProxyDecidesAtTheCap() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+
+        assertEquals(0L, vanish.joinWaitMillis(steve, VanishSupport.PROXY_JOIN_CAP_MS));
+    }
+
+    @Test
+    @DisplayName("a proxy ignores a backend connection from the player's previous session")
+    void aStaleConnectionDoesNotCount() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.connect(steve);
+        advanceMs(5000L);
+
+        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS, vanish.joinWaitMillis(steve, 0L),
+                "a quick reconnect must not inherit the last session's connection");
+    }
+
+    @Test
+    @DisplayName("without PremiumVanish a proxy does not wait either")
+    void aProxyWithoutPremiumVanishDoesNotWait() {
+        TestVanish vanish = new TestVanish(true);
+
+        assertEquals(0L, vanish.joinWaitMillis(steve, 0L));
     }
 
     @Test

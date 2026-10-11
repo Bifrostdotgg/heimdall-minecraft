@@ -23,8 +23,10 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.function.Function;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
+import net.md_5.bungee.api.connection.Server;
 import net.md_5.bungee.api.event.PlayerDisconnectEvent;
 import net.md_5.bungee.api.event.PostLoginEvent;
+import net.md_5.bungee.api.event.ServerConnectedEvent;
 import net.md_5.bungee.api.plugin.Listener;
 import net.md_5.bungee.api.plugin.Plugin;
 import net.md_5.bungee.event.EventBus;
@@ -65,7 +67,8 @@ class BungeeVanishTest {
             @Override
             public void onVanishChanged(
                     PlayerHandle player, boolean vanished, boolean silent, long timestampMs) {
-                toggles.add(player.name() + (vanished ? " hid" : " showed"));
+                toggles.add(player.name() + (vanished ? " hid" : " showed")
+                        + (silent ? " silently" : ""));
             }
         });
         return vanish;
@@ -85,7 +88,7 @@ class BungeeVanishTest {
         ProxiedPlayer steve = player("Steve");
         environment.online.put(steve.getUniqueId(), steve);
 
-        assertEquals(0L, vanish.joinSettleMillis(), "no delay without PremiumVanish");
+        assertEquals(0L, vanish.joinWaitMillis(new BungeePlayerHandle(player("Steve"), text), 0L), "no delay without PremiumVanish");
         assertFalse(vanish.isVanished(new BungeePlayerHandle(steve, text)));
         assertTrue(environment.listeners.isEmpty(),
                 "BungeeVanishListener is never even loaded on a proxy without PremiumVanish");
@@ -100,7 +103,9 @@ class BungeeVanishTest {
         BungeeVanishAPI.INVISIBLE.add(steve.getUniqueId());
         environment.online.put(steve.getUniqueId(), steve);
 
-        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinSettleMillis());
+        assertEquals(VanishSupport.PROXY_JOIN_CAP_MS,
+                vanish.joinWaitMillis(new BungeePlayerHandle(steve, text), 0L),
+                "no backend yet: a proxy waits up to the cap for one");
         assertTrue(vanish.isVanished(new BungeePlayerHandle(steve, text)));
 
         environment.online.clear();
@@ -116,11 +121,12 @@ class BungeeVanishTest {
         vanish();
         ProxiedPlayer steve = player("Steve");
 
-        assertEquals(1, environment.listeners.size());
+        assertEquals(2, environment.listeners.size(), "the backend anchor and the toggles");
         environment.bus.post(new BungeePlayerHideEvent(steve));
         environment.bus.post(new BungeePlayerShowEvent(steve));
 
-        assertEquals(Arrays.asList("Steve hid", "Steve showed"), toggles);
+        assertEquals(Arrays.asList("Steve hid silently", "Steve showed silently"), toggles,
+                "a proxy cannot tell an announced toggle from a silent one, so it never announces");
     }
 
     @Test
@@ -134,6 +140,39 @@ class BungeeVanishTest {
 
         assertTrue(environment.listeners.isEmpty());
         assertTrue(toggles.isEmpty());
+    }
+
+    @Test
+    @DisplayName("the join wait runs from the first backend connection, posted on the real bus")
+    void theWaitIsAnchoredToTheBackend() {
+        environment.install();
+        BungeeVanish vanish = vanish();
+        ProxiedPlayer steve = player("Steve");
+        BungeePlayerHandle handle = new BungeePlayerHandle(steve, text);
+
+        environment.bus.post(new ServerConnectedEvent(steve, mock(Server.class)));
+        long wait = vanish.joinWaitMillis(handle, 1000L);
+
+        assertTrue(wait > 1000L && wait <= VanishSupport.JOIN_SETTLE_MS,
+                "the settle window starts at the backend connection: " + wait);
+    }
+
+    @Test
+    @DisplayName("a PremiumVanish without the BungeeCord events still keeps vanished joins out")
+    void missingEventsCostOnlyTheToggles() {
+        environment.install();
+        environment.hidden = Arrays.asList(BungeeVanish.HIDE_EVENT, BungeeVanish.SHOW_EVENT);
+        BungeeVanish vanish = vanish();
+        ProxiedPlayer steve = player("Steve");
+        environment.online.put(steve.getUniqueId(), steve);
+        BungeeVanishAPI.INVISIBLE.add(steve.getUniqueId());
+
+        assertTrue(vanish.isVanished(new BungeePlayerHandle(steve, text)));
+        assertEquals(1, environment.listeners.size(), "the backend anchor only");
+        assertTrue(environment.listeners.get(0) instanceof BungeeBackendListener);
+        assertTrue(vanish.brokenReason() == null);
+        assertTrue(logger.records().toString().contains("not seen as it happens"),
+                logger.records().toString());
     }
 
     @Test
@@ -153,6 +192,7 @@ class BungeeVanishTest {
         final EventBus bus = new EventBus();
         final Map<UUID, ProxiedPlayer> online = new HashMap<UUID, ProxiedPlayer>();
         final List<Listener> listeners = new ArrayList<Listener>();
+        List<String> hidden = java.util.Collections.emptyList();
         Plugin plugin;
 
         void install() {
@@ -166,8 +206,18 @@ class BungeeVanishTest {
 
         @Override
         public ClassLoader loaderOf(Plugin vanish) {
-            // PremiumVanish's own loader: in this test, the one that has the stand-ins.
-            return BungeeVanishTest.class.getClassLoader();
+            // PremiumVanish's own loader: in this test, the one that has the stand-ins, with the
+            // names a test chose to remove made unfindable.
+            return new ClassLoader(BungeeVanishTest.class.getClassLoader()) {
+                @Override
+                protected Class<?> loadClass(String name, boolean resolve)
+                        throws ClassNotFoundException {
+                    if (hidden.contains(name)) {
+                        throw new ClassNotFoundException(name);
+                    }
+                    return super.loadClass(name, resolve);
+                }
+            };
         }
 
         @Override

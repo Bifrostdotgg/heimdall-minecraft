@@ -30,8 +30,10 @@ import org.bukkit.plugin.Plugin;
  * <ul>
  *   <li><strong>The {@code vanished} metadata</strong>, set to a true value by SuperVanish,
  *       EssentialsX, CMI and VanishNoPacket among others. Read first and needs no plugin to be
- *       found, so a server running only EssentialsX gets suppression too. It has no events and it
- *       is set inside the join, so it never asks a join to wait.
+ *       found, so a server running only EssentialsX gets suppression too. It never asks a join to
+ *       wait, so it is best-effort: it has no events, and some plugins set it a moment after the
+ *       join (EssentialsX applies a silent-join vanish in a join task that runs afterwards), so a
+ *       join they hide can be checked before the flag is set.
  *   <li><strong>PremiumVanish's {@code VanishAPI}</strong>, which SuperVanish ships too, under the
  *       same names. {@code isInvisible(Player)} for a player still online, and
  *       {@code isInvisibleOffline(UUID)} once they have gone, because PremiumVanish documents the
@@ -45,7 +47,9 @@ import org.bukkit.plugin.Plugin;
  * {@code PlayerHideEvent} / {@code PlayerShowEvent} at {@code MONITOR}, ignoring cancelled ones,
  * which is the same fact one step earlier. {@code PlayerAutoVanishOnJoinEvent} is a hide that
  * happens inside a join, and is delivered as a silent one. All at {@code MONITOR}: nothing here
- * changes the event.
+ * changes the event. Every event is optional: a release without one still answers the queries, so
+ * vanished joins stay out of Discord, and only that kind of mid-session change goes unseen (one
+ * warning).
  *
  * <p>The listener object is anonymous and so package-private, which keeps Paper 1.16's generated
  * executor cache from pinning a swapped-out core (D87, {@code BukkitListenerShapeTest}).
@@ -93,7 +97,7 @@ final class BukkitVanish extends VanishSupport {
             CoreRegistrations registrations,
             Environment environment,
             Function<Player, PlayerHandle> handles) {
-        super(logger, registrations);
+        super(logger, registrations, false);
         this.environment = environment;
         this.handles = handles;
     }
@@ -151,12 +155,15 @@ final class BukkitVanish extends VanishSupport {
         if (show == null) {
             show = optionalEvent(loader, SHOW_EVENT);
         }
-        if (hide == null || show == null) {
-            throw new ClassNotFoundException("neither PremiumVanish's post-change nor its pre-change "
-                    + "hide and show events were found");
+        // Each event is optional: a release without them still answers isInvisible, which is what
+        // keeps vanished joins out of Discord. Only the mid-session toggles depend on these.
+        final boolean toggles = hide != null && show != null;
+        if (hide != null) {
+            hooks.add(new Hook(hide, true, false));
         }
-        hooks.add(new Hook(hide, true, false));
-        hooks.add(new Hook(show, false, false));
+        if (show != null) {
+            hooks.add(new Hook(show, false, false));
+        }
         Class<? extends Event> autoVanish = optionalEvent(loader, AUTO_VANISH_EVENT);
         if (autoVanish != null) {
             hooks.add(new Hook(autoVanish, true, true));
@@ -184,6 +191,16 @@ final class BukkitVanish extends VanishSupport {
 
             @Override
             public Registration hook() {
+                // A missing auto-vanish event costs nothing (the join's own check sees it), so only
+                // the toggle events are worth a warning.
+                if (!toggles) {
+                    logger.warn("this PremiumVanish has no vanish or reappear event; vanished "
+                            + "players' joins, leaves and deaths are still kept out of Discord, but "
+                            + "a vanish mid-session is not seen as it happens");
+                }
+                if (hooks.isEmpty()) {
+                    return Registration.NONE;
+                }
                 return register(hooks);
             }
         };

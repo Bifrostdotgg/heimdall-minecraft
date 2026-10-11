@@ -23,8 +23,12 @@ import net.md_5.bungee.api.plugin.Plugin;
  * reflective through PremiumVanish's own class loader. The event hook is the exception, and is
  * {@link BungeeVanishListener}'s alone; see there for why BungeeCord forces it.
  *
- * <p>BungeeCord has no plugin unloading and cannot tell whether a toggle was silent, so a binding
- * never goes stale and every toggle is delivered as announced.
+ * <p>The join wait is anchored to the player's first backend connection ({@link
+ * BungeeBackendListener}), as on Velocity. The hide/show events are optional, because the query API
+ * is what keeps vanished joins out and older releases may lack the events. BungeeCord has no plugin
+ * unloading, so a binding never goes stale. It cannot tell whether a toggle was announced in game,
+ * and the backend that announced it relays its own copy, so every toggle is delivered as silent and a
+ * proxy never announces one.
  */
 final class BungeeVanish extends VanishSupport {
 
@@ -62,7 +66,7 @@ final class BungeeVanish extends VanishSupport {
             CoreRegistrations registrations,
             Environment environment,
             Function<ProxiedPlayer, PlayerHandle> handles) {
-        super(logger, registrations);
+        super(logger, registrations, true);
         this.environment = environment;
         this.handles = handles;
     }
@@ -96,9 +100,9 @@ final class BungeeVanish extends VanishSupport {
         Class<?> api = Class.forName(API_CLASS, true, loader);
         final Method isInvisible = api.getMethod("isInvisible", ProxiedPlayer.class);
         final Method allInvisible = optionalMethod(api, "getAllInvisiblePlayers");
-        // Resolved here only to fail the bind, rather than the hook, when the events have moved.
-        Class.forName(HIDE_EVENT, false, loader);
-        Class.forName(SHOW_EVENT, false, loader);
+        // Optional: a PremiumVanish without the events still answers isInvisible, which is what
+        // keeps vanished joins out of Discord. Only the mid-session toggles need them.
+        final boolean events = present(loader, HIDE_EVENT) && present(loader, SHOW_EVENT);
 
         return new Binding() {
             @Override
@@ -121,30 +125,87 @@ final class BungeeVanish extends VanishSupport {
 
             @Override
             public Registration hook() throws Throwable {
-                // The first time BungeeVanishListener is touched, and only now that PremiumVanish is
-                // known to be here.
-                if (!BungeeVanishListener.linksTo(loader)) {
-                    throw new IllegalStateException("PremiumVanish's event classes resolve to a "
-                            + "copy rather than PremiumVanish's own; another plugin has probably "
-                            + "shaded its API");
+                // The backend connection anchors the join wait, whether or not there are events.
+                final BungeeBackendListener backends = new BungeeBackendListener(BungeeVanish.this);
+                environment.register(backends);
+                Listener toggles = null;
+                try {
+                    toggles = toggleListener(events, loader);
+                    if (toggles != null) {
+                        environment.register(toggles);
+                    }
+                } catch (RuntimeException | Error failed) {
+                    environment.unregister(backends);
+                    throw failed;
                 }
-                final BungeeVanishListener listener = new BungeeVanishListener(BungeeVanish.this);
-                environment.register(listener);
+                final Listener registered = toggles;
                 return Registration.once(new Runnable() {
                     @Override
                     public void run() {
-                        environment.unregister(listener);
+                        if (registered != null) {
+                            environment.unregister(registered);
+                        }
+                        environment.unregister(backends);
                     }
                 });
             }
         };
     }
 
+    /**
+     * The hide/show listener, or {@code null} with one warning when this PremiumVanish cannot be
+     * hooked. The first time {@link BungeeVanishListener} is touched, and only once PremiumVanish is
+     * known to be here and to have the events.
+     */
+    private Listener toggleListener(boolean events, ClassLoader loader) {
+        String why = null;
+        if (!events) {
+            why = "this PremiumVanish has no BungeeCord vanish and reappear events";
+        } else {
+            try {
+                if (!BungeeVanishListener.linksTo(loader)) {
+                    why = "PremiumVanish's event classes resolve to a copy rather than its own "
+                            + "(another plugin has probably shaded its API)";
+                }
+            } catch (ClassNotFoundException | LinkageError unlinkable) {
+                why = "PremiumVanish's event classes could not be linked";
+            }
+        }
+        if (why != null) {
+            logger.warn(why + "; vanished players' joins and leaves are still kept out of Discord, "
+                    + "but a vanish mid-session is not seen as it happens");
+            return null;
+        }
+        return new BungeeVanishListener(this);
+    }
+
+    private static boolean present(ClassLoader loader, String name) {
+        try {
+            Class.forName(name, false, loader);
+            return true;
+        } catch (ClassNotFoundException | LinkageError absent) {
+            return false;
+        }
+    }
+
+    /** A backend connection, from {@link BungeeBackendListener}. Never throws into the bus. */
+    void onBackend(ProxiedPlayer player) {
+        try {
+            if (player != null) {
+                backendConnected(player.getUniqueId());
+            }
+        } catch (Throwable failed) {
+            logger.error("could not note a backend connection; that join waits for its cap", failed);
+        }
+    }
+
     /** One hide or show, from {@link BungeeVanishListener}. Never throws into BungeeCord's bus. */
     void onEvent(ProxiedPlayer player, boolean vanished) {
         try {
             if (player != null) {
-                toggled(handles.apply(player), vanished, false);
+                // Always silent: BungeeCord cannot tell whether PremiumVanish announced the change
+                // in game, and the backend that did announce it relays its own copy (D88).
+                toggled(handles.apply(player), vanished, true);
             }
         } catch (Throwable failed) {
             logger.error("could not read a PremiumVanish vanish event; that one change was not seen",

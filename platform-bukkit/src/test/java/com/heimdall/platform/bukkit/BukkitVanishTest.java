@@ -101,7 +101,7 @@ class BukkitVanishTest {
         BukkitVanish vanish = vanish();
         record(vanish);
 
-        assertEquals(0L, vanish.joinSettleMillis(), "no delay without PremiumVanish");
+        assertEquals(0L, vanish.joinWaitMillis(handle(player("Steve", true, null)), 0L), "no delay without PremiumVanish");
         assertFalse(vanish.isVanished(handle(player("Steve", true, null))));
         assertTrue(environment.registered.isEmpty(), "nothing hooked on a server without it");
         assertNull(vanish.brokenReason());
@@ -116,7 +116,7 @@ class BukkitVanishTest {
                 "SuperVanish, EssentialsX, CMI and VanishNoPacket set it");
         assertFalse(vanish.isVanished(handle(player("Alex", true, false))),
                 "a false value is not vanished");
-        assertEquals(0L, vanish.joinSettleMillis(), "metadata is set inside the join; no waiting");
+        assertEquals(0L, vanish.joinWaitMillis(handle(player("Steve", true, null)), 0L), "the metadata convention never asks a join to wait");
     }
 
     @Test
@@ -133,7 +133,7 @@ class BukkitVanishTest {
         environment.install(false);
         BukkitVanish vanish = vanish();
 
-        assertEquals(0L, vanish.joinSettleMillis());
+        assertEquals(0L, vanish.joinWaitMillis(handle(player("Steve", true, null)), 0L));
         assertTrue(environment.registered.isEmpty());
     }
 
@@ -147,7 +147,7 @@ class BukkitVanishTest {
         Player steve = player("Steve", true, null);
         VanishAPI.INVISIBLE.add(steve.getUniqueId());
 
-        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinSettleMillis());
+        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(handle(player("Steve", true, null)), 0L));
         assertTrue(vanish.isVanished(handle(steve)));
         assertFalse(vanish.isVanished(handle(player("Alex", true, null))));
         assertEquals(0, VanishAPI.offlineChecks, "an online player needs no offline lookup");
@@ -201,6 +201,56 @@ class BukkitVanishTest {
     }
 
     @Test
+    @DisplayName("a PremiumVanish with no events at all still answers, and only the toggles are lost")
+    void missingEventsCostOnlyTheToggles() {
+        environment.install(true);
+        environment.hidden = Arrays.asList(BukkitVanish.POST_HIDE_EVENT, BukkitVanish.POST_SHOW_EVENT,
+                BukkitVanish.HIDE_EVENT, BukkitVanish.SHOW_EVENT, BukkitVanish.AUTO_VANISH_EVENT);
+        BukkitVanish vanish = vanish();
+        record(vanish);
+        Player steve = player("Steve", true, null);
+        VanishAPI.INVISIBLE.add(steve.getUniqueId());
+
+        assertTrue(vanish.isVanished(handle(steve)),
+                "the query API is what keeps vanished joins out; it must survive missing events");
+        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(handle(steve), 0L));
+        assertNull(vanish.brokenReason());
+        assertTrue(environment.registered.isEmpty());
+        assertTrue(logger.records().toString().contains("not seen as it happens"),
+                "one warning saying what is lost: " + logger.records());
+    }
+
+    @Test
+    @DisplayName("a reloaded PremiumVanish is followed: the old hook comes off, the new copy is hooked")
+    void aReloadIsFollowed() {
+        environment.install(true);
+        Plugin first = environment.plugin;
+        BukkitVanish vanish = vanish();
+        record(vanish);
+        Listener firstListener = environment.listeners.get(0);
+
+        when(first.isEnabled()).thenReturn(false);
+        environment.install(true);
+        vanish.isVanished(handle(player("Steve", true, null)));
+
+        assertEquals(1, environment.listeners.size(), "exactly one live hook");
+        assertTrue(environment.listeners.get(0) != firstListener,
+                "the old copy's hook is off and the new copy's is on");
+    }
+
+    @Test
+    @DisplayName("a metadata value that throws answers 'vanished' for that call")
+    void aThrowingMetadataValueFailsClosed() {
+        Player steve = player("Steve", true, null);
+        MetadataValue broken = mock(MetadataValue.class);
+        when(broken.asBoolean()).thenThrow(new IllegalStateException("lazy value threw"));
+        when(steve.getMetadata(BukkitVanish.METADATA_KEY))
+                .thenReturn(Collections.singletonList(broken));
+
+        assertTrue(vanish().isVanished(handle(steve)));
+    }
+
+    @Test
     @DisplayName("closing (a swap or a disable) unregisters the hook and stops toggles")
     void closeUnregisters() {
         environment.install(true);
@@ -223,7 +273,7 @@ class BukkitVanishTest {
         environment.hidden = Collections.singletonList(BukkitVanish.API_CLASS);
         BukkitVanish vanish = vanish();
 
-        assertEquals(0L, vanish.joinSettleMillis());
+        assertEquals(0L, vanish.joinWaitMillis(handle(player("Steve", true, null)), 0L));
         assertTrue(vanish.brokenReason() != null);
         assertTrue(environment.registered.isEmpty());
     }
