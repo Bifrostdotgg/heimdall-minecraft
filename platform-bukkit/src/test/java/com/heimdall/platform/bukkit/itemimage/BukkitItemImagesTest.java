@@ -374,13 +374,13 @@ class BukkitItemImagesTest {
 
     @Test
     void closeWaitsForBothThreadsAgainstOneDeadline() throws Exception {
-        SlowHttp http = new SlowHttp(2_500L);
+        SlowHttp http = new SlowHttp(4_000L);
         BukkitItemImages service = build(http);
-        service.closeWaitMs = 500L;
+        service.closeWaitMs = 1_000L;
         CountDownLatch rendering = new CountDownLatch(1);
         service.runOnRenderThread(() -> {
             rendering.countDown();
-            deafSleep(2_500L);
+            deafSleep(4_000L);
         });
         service.prepare();
         assertTrue(http.entered.await(5, TimeUnit.SECONDS));
@@ -391,9 +391,11 @@ class BukkitItemImagesTest {
         images = null;
         long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 
-        // One shared deadline: about 500 ms. One wait per thread would be about 1000.
-        assertTrue(took < 850L, "close() waited per thread, not once: " + took + "ms");
-        assertTrue(took >= 400L, "close() did not wait at all: " + took + "ms");
+        // One shared deadline: about 1000 ms. One wait per thread would be at least 2000, so the
+        // upper bound leaves a loaded runner most of a second. The lower bound cannot flake: a
+        // wait is never shorter than asked while both threads are busy.
+        assertTrue(took < 1_800L, "close() waited per thread, not once: " + took + "ms");
+        assertTrue(took >= 900L, "close() did not wait at all: " + took + "ms");
     }
 
     @Test
@@ -414,6 +416,162 @@ class BukkitItemImagesTest {
 
         assertFalse(service.renderThreadStopped(), "the setup needs the render thread still busy");
         assertFalse(service.stackOpen(), "close() left the pack zips open");
+    }
+
+    /** Lets the prepare and its warm-up finish, so the render queue holds only what a test puts there. */
+    private static void settle(BukkitItemImages service) throws Exception {
+        awaitStopped(() -> service.assetGeneration.get() >= 1);
+        service.cachedCards();
+    }
+
+    @Test
+    void theStackIsClosedWhenTheRenderQueueIsFull() throws Exception {
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        service.render(wardedJar()).get(10, TimeUnit.SECONDS);
+        settle(service);
+        assertTrue(service.stackOpen());
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch rendering = new CountDownLatch(1);
+        service.runOnRenderThread(() -> {
+            rendering.countDown();
+            try {
+                release.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertTrue(rendering.await(5, TimeUnit.SECONDS));
+        for (int i = 0; i < BukkitItemImages.RENDER_QUEUE; i++) {
+            service.runOnRenderThread(() -> { });
+        }
+        new Thread(() -> {
+            deafSleep(150L);
+            release.countDown();
+        }).start();
+
+        service.close();
+        images = null;
+
+        assertTrue(service.renderThreadStopped(), "setup: the render thread finished in time");
+        assertFalse(service.stackOpen(), "with no room to queue the close, nobody closed the stack");
+    }
+
+    @Test
+    void aStackOpenedWhileClosingIsClosedNotInstalled() throws Exception {
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        service.closeWaitMs = 100L;
+        CountDownLatch opening = new CountDownLatch(1);
+        final BukkitItemImages.StackOpener real = service.opener;
+        service.opener = (candidates, vanilla, format) -> {
+            opening.countDown();
+            deafSleep(600L);
+            return real.open(candidates, vanilla, format);
+        };
+        java.util.concurrent.CompletableFuture<byte[]> drawing = service.render(wardedJar());
+        assertTrue(opening.await(5, TimeUnit.SECONDS));
+
+        service.close();
+        images = null;
+        assertFalse(service.renderThreadStopped(), "setup: the render thread is still opening");
+        awaitStopped(service::renderThreadStopped);
+
+        assertFalse(service.stackOpen(),
+                "a stack opened during close was installed, and nothing will ever close it");
+        assertEquals(null, drawing.get(1, TimeUnit.SECONDS));
+    }
+
+    /** Holds a render at {@code step} until the service is closed, and records every step it reaches. */
+    private List<String> holdAt(final BukkitItemImages service, final String step,
+            final RuntimeException thenThrow, final CountDownLatch reached) {
+        final List<String> steps = Collections.synchronizedList(new ArrayList<String>());
+        service.renderStep = name -> {
+            steps.add(name);
+            if (!name.equals(step)) {
+                return;
+            }
+            reached.countDown();
+            long until = System.currentTimeMillis() + 5_000;
+            while (service.available() && System.currentTimeMillis() < until) {
+                deafSleep(5L);
+            }
+            if (thenThrow != null) {
+                throw thenThrow;
+            }
+        };
+        return steps;
+    }
+
+    private void assertARenderStopsAt(String step, boolean halfScale) throws Exception {
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        service.render(ChatItem.builder("stone").build()).get(10, TimeUnit.SECONDS);
+        settle(service);
+        if (halfScale) {
+            service.preferredMaxPngBytes = 1;
+        }
+        CountDownLatch reached = new CountDownLatch(1);
+        List<String> steps = holdAt(service, step, null, reached);
+        java.util.concurrent.CompletableFuture<byte[]> drawing = service.render(wardedJar());
+        assertTrue(reached.await(5, TimeUnit.SECONDS), "never reached " + step + ": " + steps);
+
+        service.close();
+        images = null;
+
+        assertEquals(null, drawing.get(5, TimeUnit.SECONDS), "a render carried on past close");
+        assertEquals(step, steps.get(steps.size() - 1), "it went on past '" + step + "': " + steps);
+    }
+
+    @Test
+    void aRenderStopsAfterRefreshingOnceClosed() throws Exception {
+        assertARenderStopsAt("refreshed", false);
+    }
+
+    @Test
+    void aRenderStopsAfterDrawingOnceClosed() throws Exception {
+        assertARenderStopsAt("drawn", true);
+    }
+
+    @Test
+    void aRenderStopsAfterRedrawingOnceClosed() throws Exception {
+        assertARenderStopsAt("redrawn", true);
+    }
+
+    @Test
+    void aRenderFailingAfterCloseSaysNothing() throws Exception {
+        BukkitItemImages service = build(new Fixtures.FakeHttp());
+        service.render(ChatItem.builder("stone").build()).get(10, TimeUnit.SECONDS);
+        settle(service);
+        CountDownLatch reached = new CountDownLatch(1);
+        holdAt(service, "refreshed", new IllegalStateException("zip file closed"), reached);
+        java.util.concurrent.CompletableFuture<byte[]> drawing = service.render(wardedJar());
+        assertTrue(reached.await(5, TimeUnit.SECONDS));
+        logger.clear();
+
+        service.close();
+        images = null;
+
+        assertEquals(null, drawing.get(5, TimeUnit.SECONDS));
+        assertFalse(logger.logged(LogLevel.DEBUG, "a render failed"), logger.records().toString());
+    }
+
+    @Test
+    void aServerPackFetchCutShortByCloseIsNotAWarning() throws Exception {
+        Files.write(server.resolve("server.properties"),
+                Fixtures.utf8("resource-pack=https\\://packs.example/pack.zip\n"));
+        Files.createDirectories(server.resolve("plugins/Heimdall"));
+        Files.write(server.resolve("plugins/Heimdall/item-images.yml"),
+                Fixtures.utf8("download-vanilla-assets: false\n"));
+        SlowHttp http = new SlowHttp(500L);
+        BukkitItemImages service = build(http);
+        service.closeWaitMs = 50L;
+        service.prepare();
+        assertTrue(http.entered.await(5, TimeUnit.SECONDS), "the server pack was never fetched");
+
+        service.close();
+        images = null;
+        awaitStopped(service::assetThreadStopped);
+
+        assertFalse(logger.logged(LogLevel.WARN, "could not fetch the server resource pack"),
+                "a stop mid-download is not a failure to retry: " + logger.records());
     }
 
     @Test

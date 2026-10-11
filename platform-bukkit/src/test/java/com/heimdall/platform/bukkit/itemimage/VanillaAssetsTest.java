@@ -326,7 +326,7 @@ class VanillaAssetsTest {
         try {
             InterruptedIOException stopped = assertThrows(InterruptedIOException.class,
                     () -> HttpSource.Url.copy(endless, new java.io.ByteArrayOutputStream(),
-                            Long.MAX_VALUE, Long.MAX_VALUE, "slow.example"));
+                            1024L * 1024, Long.MAX_VALUE, "slow.example"));
             assertTrue(stopped.getMessage().contains("slow.example"));
             assertEquals(1, reads[0], "it kept reading after the interrupt");
         } finally {

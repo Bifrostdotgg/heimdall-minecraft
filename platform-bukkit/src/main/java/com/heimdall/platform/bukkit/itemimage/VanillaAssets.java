@@ -106,12 +106,6 @@ final class VanillaAssets {
     }
 
     /**
-     * The cache for {@code version}, downloading and extracting it first if needed.
-     *
-     * @throws IOException on any network, verification or extraction failure; nothing partial is
-     *     left behind to be mistaken for a cache
-     */
-    /**
      * Between the requests {@link #ensure} makes: a stopping core interrupts the asset thread, and
      * the next request is not started for it.
      */
@@ -121,6 +115,12 @@ final class VanillaAssets {
         }
     }
 
+    /**
+     * The cache for {@code version}, downloading and extracting it first if needed.
+     *
+     * @throws IOException on any network, verification or extraction failure; nothing partial is
+     *     left behind to be mistaken for a cache
+     */
     Path ensure(String version) throws IOException {
         Path dir = root.resolve(safeName(version));
         if (isComplete(dir)) {

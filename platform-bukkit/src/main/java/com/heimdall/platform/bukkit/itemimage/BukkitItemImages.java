@@ -123,6 +123,19 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
 
     volatile PackCopier copier;
 
+    /** How the render thread opens a pack stack; a seam so a test can hold it there. */
+    interface StackOpener {
+        PackStack open(List<PackSources.Candidate> candidates, Path vanilla, int packFormat);
+    }
+
+    volatile StackOpener opener;
+
+    /**
+     * Called between render steps with the step's name, when set; a seam so a test can hold a
+     * render at each {@code closed} check. {@code null} in production.
+     */
+    volatile java.util.function.Consumer<String> renderStep;
+
     private final ThreadPoolExecutor assets;
     private final ThreadPoolExecutor renders;
 
@@ -222,6 +235,12 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             @Override
             public void copy(Path zip) throws IOException {
                 sources.privateCopy(zip);
+            }
+        };
+        this.opener = new StackOpener() {
+            @Override
+            public PackStack open(List<PackSources.Candidate> candidates, Path vanilla, int format) {
+                return sources.open(candidates, vanilla, format);
             }
         };
         this.assets = executor("heimdall-item-assets", 4);
@@ -392,8 +411,10 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             closeStack();
         }
         if (!assetsStopped || !rendersStopped) {
-            logger.debug("item images: " + (assetsStopped ? "the render thread" : "the asset thread")
-                    + " is still finishing; it will stop without touching anything else");
+            String which = !assetsStopped && !rendersStopped ? "the asset and render threads are"
+                    : assetsStopped ? "the render thread is" : "the asset thread is";
+            logger.debug("item images: " + which + " still finishing; they stop without touching "
+                    + "anything else");
         }
     }
 
@@ -535,6 +556,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         try {
             Deadline deadline = Deadline.in(RENDER_BUDGET_MS);
             refreshStack(false);
+            step("refreshed");
             // Checked between steps: each can take seconds, and after close the next step may need
             // a class the closed loader can no longer give it.
             PackStack current = stack;
@@ -548,6 +570,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 return cached;
             }
             byte[] png = drawing.render(item, this, defaults, SCALE, deadline);
+            step("drawn");
             if (closed) {
                 return null;
             }
@@ -555,6 +578,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 // Far larger than a card should be (a huge lore block, a noisy HD texture): half
                 // scale rather than ship something near the wire cap.
                 png = drawing.render(item, this, defaults, 1, deadline);
+                step("redrawn");
                 if (closed) {
                     return null;
                 }
@@ -579,6 +603,13 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 logger.debug("item images: a render failed (" + failed.getClass().getName() + ")");
             }
             return null;
+        }
+    }
+
+    private void step(String name) {
+        java.util.function.Consumer<String> hook = renderStep;
+        if (hook != null) {
+            hook.accept(name);
         }
     }
 
@@ -738,7 +769,16 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             stackGeneration = generation;
             return;
         }
-        PackStack fresh = sources.open(candidates, vanillaNow, format);
+        PackStack fresh = opener.open(candidates, vanillaNow, format);
+        // Built outside the lock: loading fonts and indexing them takes a while, and close() takes
+        // the same lock on the thread that is disabling the plugin.
+        CardRenderer drawing;
+        try {
+            drawing = closed ? null : new CardRenderer(fresh);
+        } catch (RuntimeException | Error broken) {
+            fresh.close();
+            throw broken;
+        }
         synchronized (stackLock) {
             if (closed) {
                 // Closed while the packs were opening: close() may already have closed the old
@@ -748,7 +788,7 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             }
             closeStack();
             stack = fresh;
-            renderer = new CardRenderer(fresh);
+            renderer = drawing;
         }
         // After the old stack's zips are closed: Windows cannot delete an open file.
         sources.pruneCopies(fresh.copies());
