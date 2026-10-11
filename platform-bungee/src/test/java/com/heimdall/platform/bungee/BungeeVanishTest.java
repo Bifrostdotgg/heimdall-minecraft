@@ -111,8 +111,6 @@ class BungeeVanishTest {
         BungeeVanishAPI.INVISIBLE.add(steve.getUniqueId());
         environment.online.put(steve.getUniqueId(), steve);
 
-        assertTrue(vanish.awaitingBackend(new BungeePlayerHandle(steve, text)),
-                "no backend yet: a proxy waits for one, uncapped");
         assertTrue(vanish.isVanished(new BungeePlayerHandle(steve, text)));
 
         environment.online.clear();
@@ -166,6 +164,25 @@ class BungeeVanishTest {
         assertFalse(vanish.awaitingBackend(handle));
         assertEquals(1000L, vanish.joinWaitMillis(handle, 20_500L),
                 "the settle window starts at the backend connection, however long the limbo was");
+    }
+
+    @Test
+    @DisplayName("players online when the hook registers are seeded from their current server")
+    void onlinePlayersAreSeededFromTheirServer() {
+        environment.install();
+        ProxiedPlayer steve = player("Steve");
+        ProxiedPlayer alex = player("Alex");
+        when(alex.getServer()).thenReturn(mock(Server.class));
+        environment.online.put(steve.getUniqueId(), steve);
+        environment.online.put(alex.getUniqueId(), alex);
+
+        BungeeVanish vanish = vanish();
+
+        assertTrue(vanish.awaitingBackend(new BungeePlayerHandle(steve, text)),
+                "no current server: still in limbo across the swap");
+        assertFalse(vanish.awaitingBackend(new BungeePlayerHandle(alex, text)));
+        assertTrue(vanish.isOnline(steve.getUniqueId()));
+        assertFalse(vanish.isOnline(player("Bob").getUniqueId()));
     }
 
     @Test
@@ -258,6 +275,11 @@ class BungeeVanishTest {
         @Override
         public ProxiedPlayer onlinePlayer(UUID uuid) {
             return online.get(uuid);
+        }
+
+        @Override
+        public java.util.Collection<ProxiedPlayer> onlinePlayers() {
+            return new ArrayList<ProxiedPlayer>(online.values());
         }
 
         @Override

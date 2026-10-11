@@ -64,6 +64,11 @@ class VanishSupportTest {
         volatile boolean watchBackends = true;
         volatile boolean hookFails;
         volatile boolean online = true;
+        /** Players online even while {@link #online} is false. */
+        final Set<UUID> stillOnline = Collections.newSetFromMap(new ConcurrentHashMap<UUID, Boolean>());
+        /** Seeded at hook registration: on a server, or in limbo. */
+        final Set<UUID> seedOnServer = Collections.newSetFromMap(new ConcurrentHashMap<UUID, Boolean>());
+        final Set<UUID> seedInLimbo = Collections.newSetFromMap(new ConcurrentHashMap<UUID, Boolean>());
         private final boolean proxy;
 
         TestVanish(boolean proxy) {
@@ -74,7 +79,22 @@ class VanishSupportTest {
 
         @Override
         protected boolean isOnline(UUID player) {
-            return online;
+            return online || stillOnline.contains(player);
+        }
+
+        @Override
+        protected void seedBackends() {
+            for (UUID player : seedOnServer) {
+                backendConnected(player);
+            }
+            for (UUID player : seedInLimbo) {
+                stillConnecting(player);
+            }
+        }
+
+        void breakIt() {
+            queryFailure = new NoSuchMethodError("isInvisible");
+            isVanished(steve);
         }
 
         void login(PlayerHandle player) {
@@ -119,11 +139,13 @@ class VanishSupportTest {
 
                 @Override
                 public Registration hook() {
-                    if (hookFails) {
-                        throw new IllegalStateException("could not register");
-                    }
                     if (proxy && watchBackends) {
                         watchingBackends();
+                    }
+                    if (hookFails) {
+                        // After the backend listeners went on: the toggles failed. Registration as a
+                        // whole failed, so the uncapped wait must not be left switched on.
+                        throw new IllegalStateException("could not register");
                     }
                     hooksMade.incrementAndGet();
                     hooksOpen.incrementAndGet();
@@ -344,6 +366,7 @@ class VanishSupportTest {
     void aProxyWaitsFromTheBackend() {
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
+        vanish.prepare();
         vanish.login(steve);
 
         assertTrue(vanish.awaitingBackend(steve),
@@ -367,6 +390,7 @@ class VanishSupportTest {
     void aLimboHasNoCap() {
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
+        vanish.prepare();
         vanish.login(steve);
         advanceMs(60_000L);
 
@@ -388,27 +412,106 @@ class VanishSupportTest {
     }
 
     @Test
-    @DisplayName("a hook that fails to register falls back to the cap too")
+    @DisplayName("a hook that fails to register falls back to the cap, even after its listeners went on")
     void aFailedHookFallsBackToTheCap() {
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
         vanish.hookFails = true;
+        vanish.prepare();
+        vanish.login(steve);
 
-        assertFalse(vanish.awaitingBackend(steve));
+        assertFalse(vanish.awaitingBackend(steve),
+                "a failed registration must not leave the uncapped wait switched on");
         assertEquals(0L, vanish.joinWaitMillis(steve, VanishSupport.PROXY_JOIN_CAP_MS));
     }
 
     @Test
-    @DisplayName("taking the hook off (a swap) ends the uncapped wait, since nothing would see a connection")
-    void teardownEndsTheUncappedWait() {
+    @DisplayName("the hook coming off at a swap never reopens the cap for a player in limbo")
+    void teardownKeepsALimboPlayerWaiting() {
+        // The reviewer's probe: join on a proxy, 15 s in limbo, the hook retired by the generation's
+        // teardown (which runs before the modules stop), and the next re-check must still wait.
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
         vanish.prepare();
-        assertTrue(vanish.awaitingBackend(steve));
+        vanish.login(steve);
+        advanceMs(15_000L);
 
         registrations.closeAll(logger);
 
+        assertTrue(vanish.awaitingBackend(steve));
+        assertEquals(VanishSupport.BACKEND_RECHECK_MS, vanish.joinWaitMillis(steve, 15_000L));
+    }
+
+    @Test
+    @DisplayName("close() never reopens the cap for a player in limbo either")
+    void closeKeepsALimboPlayerWaiting() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.prepare();
+        vanish.login(steve);
+        advanceMs(15_000L);
+
+        vanish.close();
+
+        assertTrue(vanish.awaitingBackend(steve));
+        assertEquals(VanishSupport.BACKEND_RECHECK_MS, vanish.joinWaitMillis(steve, 15_000L));
+    }
+
+    @Test
+    @DisplayName("the integration breaking never reopens the cap for a player in limbo")
+    void breakingKeepsALimboPlayerWaiting() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.prepare();
+        vanish.login(steve);
+        advanceMs(15_000L);
+
+        vanish.breakIt();
+
+        assertNotNull(vanish.brokenReason());
+        assertTrue(vanish.awaitingBackend(steve));
+        assertEquals(VanishSupport.BACKEND_RECHECK_MS, vanish.joinWaitMillis(steve, 15_000L));
+        FakePlayer alex = FakePlayer.named("Alex");
+        assertFalse(vanish.awaitingBackend(alex),
+                "a player the hook never saw log in is not held: the broken integration fails open");
+        assertEquals(0L, vanish.joinWaitMillis(alex, 0L));
+    }
+
+    @Test
+    @DisplayName("players online when the hook registers are seeded: on a server, or still in limbo")
+    void onlinePlayersAreSeeded() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        FakePlayer alex = FakePlayer.named("Alex");
+        vanish.seedInLimbo.add(steve.uuid());
+        vanish.seedOnServer.add(alex.uuid());
+
+        vanish.prepare();
+
+        assertTrue(vanish.awaitingBackend(steve), "in limbo across a swap: still held");
+        assertFalse(vanish.awaitingBackend(alex));
+        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(alex, 0L),
+                "on a server: anchored to the seeded connection, not capped");
+    }
+
+    @Test
+    @DisplayName("the memory bound never evicts an online player's connection")
+    void theBoundKeepsOnlinePlayers() {
+        TestVanish vanish = new TestVanish(true);
+        vanish.installed = true;
+        vanish.prepare();
+        vanish.online = false;
+        vanish.stillOnline.add(steve.uuid());
+        vanish.login(steve);
+        vanish.connect(steve);
+
+        for (int i = 0; i <= VanishSupport.MAX_REMEMBERED_CONNECTIONS + 10; i++) {
+            vanish.connect(FakePlayer.named("player" + i));
+        }
+
         assertFalse(vanish.awaitingBackend(steve));
+        assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(steve, 0L),
+                "steve's connection survived the sweep; without it this would be the cap");
     }
 
     @Test
@@ -416,6 +519,7 @@ class VanishSupportTest {
     void aLoginForgetsTheLastSession() {
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
+        vanish.prepare();
         vanish.connect(steve);
         assertFalse(vanish.awaitingBackend(steve));
 
@@ -434,6 +538,7 @@ class VanishSupportTest {
     void aConnectionOutlivesTheSession() {
         TestVanish vanish = new TestVanish(true);
         vanish.installed = true;
+        vanish.prepare();
         vanish.login(steve);
         vanish.connect(steve);
         vanish.online = false;

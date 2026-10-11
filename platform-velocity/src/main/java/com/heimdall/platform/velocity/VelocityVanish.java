@@ -77,6 +77,9 @@ final class VelocityVanish extends VanishSupport {
         /** The player with this UUID if they are still on the proxy. */
         Optional<Player> onlinePlayer(UUID uuid);
 
+        /** Everyone on the proxy now. */
+        Collection<Player> onlinePlayers();
+
         /** The class loader PremiumVanish's own classes live in. */
         ClassLoader loaderOf(Object instance);
 
@@ -110,6 +113,22 @@ final class VelocityVanish extends VanishSupport {
     @Override
     protected boolean isOnline(UUID player) {
         return environment.onlinePlayer(player).isPresent();
+    }
+
+    /**
+     * After a hot swap, nobody already online logs in again: a player on a server is recorded as
+     * connected, and one with no server (an auth limbo) as still connecting, so their join is held
+     * and a later quit cannot post a leave for a join that was never posted.
+     */
+    @Override
+    protected void seedBackends() {
+        for (Player player : environment.onlinePlayers()) {
+            if (player.getCurrentServer().isPresent()) {
+                backendConnected(player.getUniqueId());
+            } else {
+                stillConnecting(player.getUniqueId());
+            }
+        }
     }
 
     /** The production wiring: the proxy's plugin and event managers, owned by {@code plugin}. */
@@ -343,6 +362,11 @@ final class VelocityVanish extends VanishSupport {
         @Override
         public Optional<Player> onlinePlayer(UUID uuid) {
             return proxy.getPlayer(uuid);
+        }
+
+        @Override
+        public Collection<Player> onlinePlayers() {
+            return proxy.getAllPlayers();
         }
 
         @Override

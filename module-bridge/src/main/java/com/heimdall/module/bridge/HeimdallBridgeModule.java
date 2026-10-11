@@ -1571,6 +1571,15 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         }
     }
 
+    /** Whether the player is still on this platform; a lookup that throws answers yes. */
+    private static boolean online(ModuleContext ctx, UUID uuid) {
+        try {
+            return ctx.platform().players().byUuid(uuid).isPresent();
+        } catch (Throwable failed) {
+            return true;
+        }
+    }
+
     /** Milliseconds since {@code session} was recorded, on {@link #nanoNow()}'s clock. */
     private long elapsedMs(Session session) {
         return Math.max(0L, TimeUnit.NANOSECONDS.toMillis(nanoNow() - session.createdNanos));
@@ -1673,9 +1682,18 @@ public final class HeimdallBridgeModule implements HeimdallModule {
         boolean vanished = isVanished(vanish, session.player);
         boolean awaiting = awaitingBackend(vanish, session.player);
         long wait = waitMillis(vanish, session.player, elapsedMs(session));
+        // Waiting for a backend has no end of its own, so a player who has gone without their quit
+        // ending this session (a quit that overtook its join on heimdall-io) would be re-checked for
+        // ever. Never asked otherwise: a quit still queued must find the session it belongs to.
+        boolean gone = awaiting && !online(ctx, uuid);
         long next = 0L;
         synchronized (sessionLock) {
             if (sessions.get(uuid) != session || !session.pending) {
+                return;
+            }
+            if (gone) {
+                // Nobody in game saw this session: nothing is posted, and nothing is kept.
+                sessions.remove(uuid);
                 return;
             }
             if (vanished || session.hidden || (awaiting && last)) {
@@ -1750,8 +1768,9 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             if (session == null || !session.joinSeen) {
                 // No session to go on: a player online before the listeners were registered and
                 // missed by the seed, or a quit that overtook its own join. The vanish plugin and
-                // any early toggle are all there is.
-                if (!vanishedNow && (session == null || !session.hidden)) {
+                // any early toggle are all there is, and a player who never reached a backend gets
+                // no leave: their join was never posted, and will not be.
+                if (!vanishedNow && !awaiting && (session == null || !session.hidden)) {
                     relayEvent("leave", player, null, timestampMs);
                 }
                 return;
@@ -1882,6 +1901,11 @@ public final class HeimdallBridgeModule implements HeimdallModule {
      * Records everybody already online, so their leave and their toggles are judged like anybody
      * else's. A player hidden now is recorded as quiet: whether Discord was told about them before
      * this enable is unknowable, and quiet is the answer that cannot leak.
+     *
+     * <p>On a proxy, a visible player who has not reached a backend yet (sitting in limbo across a
+     * hot swap) is recorded as a pending join instead, exactly as if they had just logged in: the
+     * previous core never posted their join, so it is posted once they reach a backend and the
+     * window passes (stamped with the time of this seed), and if they leave first, nothing is.
      */
     private void seedSessions(ModuleContext ctx) {
         Collection<PlayerHandle> online;
@@ -1897,16 +1921,21 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             return;
         }
         Vanish vanish = vanish(ctx);
+        long seededAt = System.currentTimeMillis();
         List<Session> seeded = new ArrayList<Session>();
         for (PlayerHandle player : online) {
             if (player == null || player.uuid() == null) {
                 continue;
             }
-            Session session = new Session(player, 0L, true, nanoNow());
-            session.hidden = isVanished(vanish, player);
-            session.quiet = session.hidden;
+            boolean hidden = isVanished(vanish, player);
+            boolean limbo = !hidden && awaitingBackend(vanish, player);
+            Session session = new Session(player, limbo ? seededAt : 0L, true, nanoNow());
+            session.hidden = hidden;
+            session.quiet = hidden;
+            session.pending = limbo;
             seeded.add(session);
         }
+        List<Session> pending = new ArrayList<Session>();
         synchronized (sessionLock) {
             if (context != ctx) {
                 return;
@@ -1919,10 +1948,17 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                     if (existing != null && existing.hidden) {
                         session.hidden = true;
                         session.quiet = true;
+                        session.pending = false;
                     }
                     sessions.put(uuid, session);
+                    if (session.pending) {
+                        pending.add(session);
+                    }
                 }
             }
+        }
+        for (Session session : pending) {
+            scheduleSettleCheck(ctx, session, BACKEND_RECHECK_MS);
         }
     }
 

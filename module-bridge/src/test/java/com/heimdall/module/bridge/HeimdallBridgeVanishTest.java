@@ -745,6 +745,12 @@ class HeimdallBridgeVanishTest {
             vanish.proxy = true;
         }
 
+        /** Enables, then puts Steve on the proxy, as a real login would before the join arrives. */
+        private void enableWithSteveOnline() {
+            enable();
+            platform.join(steve);
+        }
+
         private void connectToBackendNow(PlayerHandle player) {
             vanish.backendAtElapsedMs.put(player.uuid(), nowMs());
         }
@@ -760,7 +766,7 @@ class HeimdallBridgeVanishTest {
         @DisplayName("a visible join posts 1.5 s after the backend connection, not after the join")
         void postsAfterTheBackendWindow() {
             setUpProxy(null);
-            enable();
+            enableWithSteveOnline();
 
             sessions.join(steve, 1000L);
             runChecks(3);
@@ -776,7 +782,7 @@ class HeimdallBridgeVanishTest {
         @DisplayName("waiting for a backend re-checks once a second, not four times")
         void theBackendWaitIsSlow() {
             setUpProxy(null);
-            enable();
+            enableWithSteveOnline();
 
             sessions.join(steve, 1000L);
             runChecks(5);
@@ -791,7 +797,7 @@ class HeimdallBridgeVanishTest {
         void aLongLimboThenVanishedPostsNothing() {
             // The cap this replaced would have announced this staff member at 10 s.
             setUpProxy(null);
-            enable();
+            enableWithSteveOnline();
 
             sessions.join(steve, 1000L);
             runChecks(30);
@@ -810,7 +816,7 @@ class HeimdallBridgeVanishTest {
         @DisplayName("an auth limbo past 10 s, then a backend, still visible: the join posts after it")
         void aLongLimboThenVisiblePostsAfterTheBackend() {
             setUpProxy(null);
-            enable();
+            enableWithSteveOnline();
 
             sessions.join(steve, 1000L);
             runChecks(30);
@@ -825,7 +831,7 @@ class HeimdallBridgeVanishTest {
         @DisplayName("leaving before ever reaching a backend posts neither the join nor the leave")
         void aDisconnectInLimboPostsNothing() {
             setUpProxy(null);
-            enable();
+            enableWithSteveOnline();
 
             sessions.join(steve, 1000L);
             runChecks(15);
@@ -840,7 +846,7 @@ class HeimdallBridgeVanishTest {
         @DisplayName("marked vanished after the backend connection: never posted")
         void aMarkAfterTheBackendIsCaught() {
             setUpProxy(null);
-            enable();
+            enableWithSteveOnline();
 
             sessions.join(steve, 1000L);
             runChecks(3);
@@ -854,11 +860,111 @@ class HeimdallBridgeVanishTest {
         }
 
         @Test
+        @DisplayName("the hook retired mid-limbo (a swap, a shutdown): the next check posts nothing")
+        void aRetiredHookNeverAnnouncesALimboPlayer() {
+            // The reviewer's probe: the generation's teardown takes the hook off before the modules
+            // stop, so a re-check can fire in between. Its wait now answers "decide now", but the
+            // player is still awaiting a backend, and that must win.
+            setUpProxy(null);
+            enableWithSteveOnline();
+
+            sessions.join(steve, 1000L);
+            runChecks(15);
+            vanish.retired = true;
+            runChecks(3);
+
+            assertTrue(shipped().isEmpty(), "a staff member in limbo must not be announced: "
+                    + shipped());
+            assertEquals(1, module.sessionCount(), "still held, waiting for a backend");
+        }
+
+        @Test
+        @DisplayName("the scheduler refusing at shutdown decides a limbo join quiet, for good")
+        void aRefusedRecheckDecidesQuiet() {
+            // A refused re-check is the last one there will be, so a join still awaiting a backend is
+            // decided quiet then, not left pending (where a later connection would post it) and not
+            // posted.
+            setUpProxy(null);
+            enableWithSteveOnline();
+            final java.util.concurrent.atomic.AtomicBoolean refuseNext =
+                    new java.util.concurrent.atomic.AtomicBoolean();
+            module.settleSchedulerForTests(new HeimdallBridgeModule.DrainScheduler() {
+                @Override
+                public void schedule(Runnable check, long delayMs) {
+                    if (refuseNext.getAndSet(false)) {
+                        throw new java.util.concurrent.RejectedExecutionException("shutting down");
+                    }
+                    settleDelays.add(delayMs);
+                    settleChecks.add(check);
+                }
+            });
+
+            sessions.join(steve, 1000L);
+            runChecks(2);
+            refuseNext.set(true);
+            runChecks(1);
+            connectToBackendNow(steve);
+            runSettleChecks();
+
+            assertTrue(shipped().isEmpty(), shipped().toString());
+            assertTrue(settleChecks.isEmpty(), "decided, so nothing is left re-checking");
+        }
+
+        @Test
+        @DisplayName("a quit that overtakes its join: no leave, and the orphaned join is dropped")
+        void aQuitOvertakingItsJoinLeavesNothing() {
+            // heimdall-io does not order notifications. A plugin kicking at PostLogin, or an instant
+            // drop, can deliver the quit first; the join then arrives for somebody already gone.
+            setUpProxy(null);
+            enable();
+
+            sessions.quit(steve, 1001L);
+            sessions.join(steve, 1000L);
+            runChecks(1);
+
+            assertTrue(shipped().isEmpty(),
+                    "no leave for a player who never reached a backend, and no join: " + shipped());
+            assertEquals(0, module.sessionCount(), "the orphan is not re-checked for ever");
+            assertTrue(settleChecks.isEmpty(), "and nothing is left scheduled");
+        }
+
+        @Test
+        @DisplayName("a player in limbo across a swap: held, and posted once they reach a backend")
+        void aLimboPlayerSeededAtEnableIsHeld() {
+            setUpProxy(null);
+            platform.join(steve);
+            enable();
+            assertEquals(1, module.sessionCount());
+
+            runChecks(5);
+            assertTrue(shipped().isEmpty(), "still in limbo: nothing yet");
+            connectToBackendNow(steve);
+            runSettleChecks();
+
+            assertEquals(1, shipped().size(), "the join the previous core never posted: " + shipped());
+            assertTrue(shipped().get(0).startsWith("join:Steve@"));
+        }
+
+        @Test
+        @DisplayName("a player in limbo across a swap who leaves without a backend: no leave posted")
+        void aLimboPlayerSeededAtEnableLeavesQuietly() {
+            setUpProxy(null);
+            platform.join(steve);
+            enable();
+
+            runChecks(2);
+            sessions.quit(steve, System.currentTimeMillis() + 60_000L);
+
+            assertTrue(shipped().isEmpty(), "a leave with no join is exactly what this prevents: "
+                    + shipped());
+        }
+
+        @Test
         @DisplayName("backend hook unavailable: decided as visible at the 10 s cap, as before")
         void withoutTheHookTheCapPosts() {
             setUpProxy(null);
             vanish.backendHook = false;
-            enable();
+            enableWithSteveOnline();
 
             sessions.join(steve, 1000L);
             runSettleChecks();
@@ -874,7 +980,7 @@ class HeimdallBridgeVanishTest {
             // arriving while the join is still undecided must neither post a leave nor let the join
             // through.
             setUpProxy(announceToggles(true));
-            enable();
+            enableWithSteveOnline();
 
             sessions.join(steve, 1000L);
             runOneSettleCheck();
@@ -893,7 +999,7 @@ class HeimdallBridgeVanishTest {
             // The backend that announced the vanish in game relays its own leave; the proxy's copy
             // would land at a different time and slip past the bot's duplicate drop.
             setUpProxy(announceToggles(true));
-            enable();
+            enableWithSteveOnline();
             sessions.join(steve, 1000L);
             connectToBackendNow(steve);
             runSettleChecks();
@@ -982,6 +1088,13 @@ class HeimdallBridgeVanishTest {
 
         /** Whether the proxy's backend hook is live: no cap, and a join waits for the connection. */
         boolean backendHook = true;
+
+        /**
+         * The hook has been taken off (a swap's teardown, close, a broken integration): the wait
+         * answers "decide now", as VanishSupport's would with no binding, while a player it was
+         * already waiting for is still awaiting.
+         */
+        boolean retired;
         final java.util.Map<UUID, Long> backendAtElapsedMs = new ConcurrentHashMap<UUID, Long>();
         static final long CAP_MS = 10_000L;
         static final long RECHECK_MS = 1000L;
@@ -1015,7 +1128,7 @@ class HeimdallBridgeVanishTest {
 
         @Override
         public long joinWaitMillis(PlayerHandle player, long elapsedMs) {
-            if (settleMillis <= 0L) {
+            if (settleMillis <= 0L || retired) {
                 return 0L;
             }
             if (!proxy) {

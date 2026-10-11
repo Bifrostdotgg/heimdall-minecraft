@@ -66,15 +66,23 @@ import java.util.function.LongSupplier;
  * window. So a proxy counts the window from the player's first backend connection in this session
  * ({@link #backendConnected}). Until that connection the join is not decided at all
  * ({@link #awaitingBackend}): a staff member can sit in an auth limbo or a slow modded handshake for
- * as long as they like, and any fixed cap would announce them. Only a proxy that could not register
- * its backend hook falls back to a cap of {@link #PROXY_JOIN_CAP_MS} from the join.
+ * as long as they like, and any fixed cap would announce them.
  *
- * <p>Which connection counts is keyed by session, not by time: the platform calls
- * {@link #sessionStarted} at the start of every proxy login (before anything else hears of the
- * join), which forgets the previous session's connection, and only the first connection after that
- * is kept. Nothing is cleared at disconnect, because the bridge decides a quit after the disconnect
- * event has run, and must still be able to tell a player who reached a backend from one who did
- * not.
+ * <p><strong>"Awaiting a backend" is a fact about a player, not about the hook.</strong> A player is
+ * marked awaiting when they log in while the hook is live ({@link #sessionStarted}), or are found
+ * online with no server when the hook is registered (a hot swap; see {@link #seedBackends}), and
+ * stops awaiting only at their first backend connection. Nothing else clears it: not the hook coming
+ * off at a swap or shutdown, not {@link #close()}, not the integration breaking. A hook that is gone
+ * can never see the connection, and a player it was waiting for must not be announced because the
+ * hook went away (the next re-check would otherwise fall through to a cap and post a staff member
+ * still sitting in limbo). Only a player the hook never saw log in (it could not be registered at
+ * all, or they logged in after it broke) falls back to a cap of {@link #PROXY_JOIN_CAP_MS} from the
+ * join.
+ *
+ * <p>Which connection counts is keyed by session, not by time: each login forgets the previous
+ * session's connection, and only the first connection after it is kept. Nothing is cleared at
+ * disconnect, because the bridge decides a quit after the disconnect event has run, and must still
+ * be able to tell a player who reached a backend from one who did not.
  *
  * <h2>Hot swap</h2>
  *
@@ -147,6 +155,14 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     private final ReentrantLock resolveLock = new ReentrantLock();
 
     /**
+     * Players who logged in (or were found online with no server) while the backend hook was live,
+     * and have not reached a backend since. Proxies only. See the class javadoc for why nothing but a
+     * connection or the player's next login takes an entry out.
+     */
+    private final java.util.Set<UUID> awaitingPlayers =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<UUID, Boolean>());
+
+    /**
      * First backend connection in each player's current session, on {@link #nanoNow()}'s clock.
      * Proxies only. Replaced at the player's next login; see the class javadoc.
      */
@@ -217,7 +233,17 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
 
     @Override
     public final long joinWaitMillis(PlayerHandle player, long elapsedMs) {
-        if (player == null || binding() == null) {
+        if (player == null) {
+            return 0L;
+        }
+        // Resolved first: resolving is what registers the hook and seeds who is awaiting.
+        boolean present = binding() != null;
+        if (awaitingBackend(player)) {
+            // No cap, and whether or not the hook is still there: see the class javadoc. A positive
+            // answer keeps a caller that does not ask awaitingBackend waiting too.
+            return BACKEND_RECHECK_MS;
+        }
+        if (!present) {
             return 0L;
         }
         long elapsed = Math.max(0L, elapsedMs);
@@ -226,11 +252,8 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         }
         Long connected = player.uuid() == null ? null : backendConnections.get(player.uuid());
         if (connected == null) {
-            if (backendsWatched) {
-                // No cap: see awaitingBackend. A positive answer keeps a caller that does not ask
-                // awaitingBackend waiting too.
-                return BACKEND_RECHECK_MS;
-            }
+            // A player the hook never saw log in: it could not be registered, or they logged in
+            // before it was. The cap is all there is.
             return Math.max(0L, PROXY_JOIN_CAP_MS - elapsed);
         }
         long sinceConnect = TimeUnit.NANOSECONDS.toMillis(nanoNow() - connected.longValue());
@@ -239,12 +262,11 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
 
     @Override
     public final boolean awaitingBackend(PlayerHandle player) {
-        // Resolved first: resolving is what registers the hook that sets backendsWatched.
-        if (!proxy || player == null || player.uuid() == null || binding() == null
-                || !backendsWatched) {
+        if (!proxy || player == null || player.uuid() == null) {
             return false;
         }
-        return !backendConnections.containsKey(player.uuid());
+        binding();
+        return awaitingPlayers.contains(player.uuid());
     }
 
     @Override
@@ -324,9 +346,36 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
      * listener reports the join (Velocity {@code PostOrder.FIRST}, BungeeCord {@code LOWEST}).
      */
     protected final void sessionStarted(UUID player) {
-        if (player != null) {
-            backendConnections.remove(player);
+        if (player == null) {
+            return;
         }
+        backendConnections.remove(player);
+        if (backendsWatched && !closed) {
+            awaitingPlayers.add(player);
+            trim(awaitingPlayers);
+        } else {
+            awaitingPlayers.remove(player);
+        }
+    }
+
+    /**
+     * Records, when the hook is registered, that an online player has no backend yet. Called by a
+     * proxy's {@link #seedBackends}: after a hot swap, a player sitting in limbo has no login to come,
+     * and must not later be judged as one the hook never saw.
+     */
+    protected final void stillConnecting(UUID player) {
+        if (player != null && !backendConnections.containsKey(player)) {
+            awaitingPlayers.add(player);
+            trim(awaitingPlayers);
+        }
+    }
+
+    /**
+     * Seeds what the hook missed by not existing yet: for every player already online, either
+     * {@link #backendConnected} (they are on a server) or {@link #stillConnecting} (they are not).
+     * Called once each time a proxy's hook has been registered. Backends have nothing to seed.
+     */
+    protected void seedBackends() {
     }
 
     /**
@@ -337,24 +386,32 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         if (closed || player == null) {
             return;
         }
+        awaitingPlayers.remove(player);
         backendConnections.putIfAbsent(player, nanoNow());
-        if (backendConnections.size() > MAX_REMEMBERED_CONNECTIONS) {
-            // Players who left keep their entry until they log in again. Past the bound, forget
-            // those who are not online; nobody's pending join is lost by that.
-            Iterator<UUID> players = backendConnections.keySet().iterator();
-            while (players.hasNext()) {
-                UUID candidate = players.next();
-                if (!isOnline(candidate)) {
-                    players.remove();
-                }
+        trim(backendConnections.keySet());
+    }
+
+    /**
+     * Players who left keep their entries until they log in again. Past the bound, forget those who
+     * are not online; an online player's entry is never touched, and nobody's pending join is lost.
+     */
+    private void trim(java.util.Set<UUID> players) {
+        if (players.size() <= MAX_REMEMBERED_CONNECTIONS) {
+            return;
+        }
+        Iterator<UUID> each = players.iterator();
+        while (each.hasNext()) {
+            if (!isOnline(each.next())) {
+                each.remove();
             }
         }
     }
 
     /**
      * Called by a proxy's hook once its login and backend listeners are registered. From then on a
-     * join waits for the backend connection with no cap; until then, and if registering failed, the
-     * cap applies.
+     * player who logs in waits for the backend connection with no cap. Reset only if the hook's
+     * registration then fails; a hook that is taken off later leaves it alone (see the class
+     * javadoc).
      */
     protected final void watchingBackends() {
         backendsWatched = true;
@@ -368,6 +425,11 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     /** How many backend connections are remembered. For tests. */
     final int rememberedConnections() {
         return backendConnections.size();
+    }
+
+    /** How many players are awaiting a backend. For tests. */
+    final int awaitingCount() {
+        return awaitingPlayers.size();
     }
 
     /** How many toggle listeners are subscribed. For tests. */
@@ -388,7 +450,8 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         hooks = Registration.NONE;
         bound = null;
         listeners.clear();
-        backendConnections.clear();
+        // The awaiting set and the connections are deliberately kept: a pending join of a player in
+        // limbo must still be told to wait after its generation stops (see the class javadoc).
         closeQuietly(current);
     }
 
@@ -468,16 +531,15 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
                     + "of vanished players are still kept out of Discord, but a player vanishing "
                     + "mid-session will not be noticed until they leave", failed);
         }
-        final Registration registered = hook == null ? Registration.NONE : hook;
-        // Taking the hook off (a reload, a swap, close) also ends the uncapped backend wait: with no
-        // listener, a connection would never be seen.
-        Registration tracked = registrations.track(Registration.once(new Runnable() {
-            @Override
-            public void run() {
-                backendsWatched = false;
-                registered.close();
+        Registration tracked = registrations.track(hook == null ? Registration.NONE : hook);
+        if (proxy && backendsWatched) {
+            try {
+                seedBackends();
+            } catch (Throwable failed) {
+                logger.error("could not record which online players have reached a backend; a "
+                        + "player already in limbo is decided at the cap", failed);
             }
-        }));
+        }
         bound = fresh;
         hooks = tracked;
         if (closed) {

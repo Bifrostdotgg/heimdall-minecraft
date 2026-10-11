@@ -2627,9 +2627,26 @@ PremiumVanish can mark a player after the platform's join event, and when depend
   neither the join nor the leave**: nobody in game saw them. The pending session is the bridge's
   existing per-player record with one re-check scheduled at a time, so a long limbo holds one record
   and one timer, never a growing set.
-- **The cap survives only as a fallback**, for a proxy whose backend hook could not be registered
-  (or has been taken off): with no listener it can never see the connection, so it decides at
-  `PROXY_JOIN_CAP_MS` (10 s) from the join, posting as visible unless it knows otherwise.
+- **"Awaiting a backend" belongs to the player, not to the hook.** A player is marked awaiting when
+  they log in while the hook is live, and stops only at their first backend connection. The hook
+  coming off never clears it: a swap's teardown takes the hook off before the modules stop (so a
+  re-check can run in between), and so does `close()` and the integration breaking. Clearing it
+  there would let the next re-check fall through to a cap and announce a staff member still sitting
+  in limbo, on every swap and every proxy shutdown. A join whose last re-check is refused (the
+  scheduler shutting down) is decided quiet.
+- **The cap survives only for players the hook never saw log in**: a proxy whose backend hook could
+  not be registered at all (a registration that fails part-way turns the uncapped wait back off), or
+  a login after the integration broke. With no listener it can never see the connection, so it
+  decides at `PROXY_JOIN_CAP_MS` (10 s) from the join, posting as visible unless it knows otherwise.
+- **A quit that overtakes its join** (`heimdall-io` does not order the two; a plugin kicking at
+  `PostLoginEvent`, or an instant drop, can do it) posts no leave while the player is still awaiting
+  a backend, and the join that arrives afterwards is dropped at its first re-check, because the
+  player is no longer online. Nothing is re-checked for ever, and nothing holds the player.
+- **A hot swap seeds both halves.** When the new core's hook is registered, every online player is
+  recorded from their current server: on one, as connected; on none (an auth limbo), as awaiting.
+  The bridge seeds an awaiting, visible player as a pending join, so the join the previous core never
+  posted is posted once they reach a backend, and if they leave first, neither a join nor a leave
+  is.
 - **Which connection counts is keyed by session, not by time.** The proxy's login hook (Velocity
   `PostLoginEvent` at `FIRST`, BungeeCord at `LOWEST`, both ahead of the session listener) forgets the
   previous session's connection, and only the first connection after it is kept, so a server switch
@@ -2740,8 +2757,9 @@ reload, the backend anchor and the login hook on an injected clock, teardown).
   installed there, however long that takes. A player who spends a minute in an auth limbo has their
   join posted a minute late. That is the price of asking a proxy that cannot know sooner, and it is
   the price the operator chose by running PremiumVanish on the proxy.
-- **A swap inside a join's wait drops that join.** The new core seeds the player as visible, so
-  their leave still posts later.
+- **A swap inside a backend-anchored window (the 1.5 s after a backend connection) drops that
+  join.** The new core seeds the player as connected and visible, so their leave still posts later.
+  A swap during a limbo does not: that join is held and posted by the new core.
 - **Chat is not touched.** A vanished player who talks in public chat is visible to everyone in game
   anyway, and the chat half has its own settings.
 

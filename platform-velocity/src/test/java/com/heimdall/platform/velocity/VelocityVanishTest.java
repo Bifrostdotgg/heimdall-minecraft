@@ -17,6 +17,7 @@ import com.velocitypowered.api.event.PostOrder;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.player.ServerPostConnectEvent;
 import com.velocitypowered.api.proxy.Player;
+import com.velocitypowered.api.proxy.ServerConnection;
 import de.myzelyam.api.vanish.VelocityPlayerHideEvent;
 import de.myzelyam.api.vanish.VelocityPlayerShowEvent;
 import de.myzelyam.api.vanish.VelocityVanishAPI;
@@ -99,8 +100,6 @@ class VelocityVanishTest {
         VelocityVanishAPI.INVISIBLE.add(steve.getUniqueId());
         environment.online.put(steve.getUniqueId(), steve);
 
-        assertTrue(vanish.awaitingBackend(new VelocityPlayerHandle(steve, text)),
-                "no backend yet: a proxy waits for one, uncapped");
         assertTrue(vanish.isVanished(new VelocityPlayerHandle(steve, text)));
 
         environment.online.clear();
@@ -159,6 +158,39 @@ class VelocityVanishTest {
         assertFalse(vanish.awaitingBackend(handle));
         assertEquals(1000L, vanish.joinWaitMillis(handle, 20_500L),
                 "the settle window starts at the backend connection, however long the limbo was");
+    }
+
+    @Test
+    @DisplayName("players online when the hook registers are seeded from their current server")
+    void onlinePlayersAreSeededFromTheirServer() {
+        // After a hot swap nobody already online logs in again. One in limbo must still be held,
+        // or a later quit posts a leave for a join that was never posted.
+        environment.instance = new Object() { };
+        Player steve = player("Steve");
+        Player alex = player("Alex");
+        when(alex.getCurrentServer()).thenReturn(Optional.of(mock(ServerConnection.class)));
+        environment.online.put(steve.getUniqueId(), steve);
+        environment.online.put(alex.getUniqueId(), alex);
+
+        VelocityVanish vanish = vanish();
+
+        assertTrue(vanish.awaitingBackend(new VelocityPlayerHandle(steve, text)),
+                "no current server: still in limbo");
+        assertFalse(vanish.awaitingBackend(new VelocityPlayerHandle(alex, text)));
+        assertEquals(VanishSupport.JOIN_SETTLE_MS,
+                vanish.joinWaitMillis(new VelocityPlayerHandle(alex, text), 0L),
+                "on a server: anchored to the seeded connection, not capped");
+    }
+
+    @Test
+    @DisplayName("isOnline answers from the proxy, so the memory bound keeps online players")
+    void isOnlineAsksTheProxy() {
+        VelocityVanish vanish = vanish();
+        Player steve = player("Steve");
+        environment.online.put(steve.getUniqueId(), steve);
+
+        assertTrue(vanish.isOnline(steve.getUniqueId()));
+        assertFalse(vanish.isOnline(player("Alex").getUniqueId()));
     }
 
     @Test
@@ -239,6 +271,11 @@ class VelocityVanishTest {
         @Override
         public Optional<Player> onlinePlayer(UUID uuid) {
             return Optional.ofNullable(online.get(uuid));
+        }
+
+        @Override
+        public java.util.Collection<Player> onlinePlayers() {
+            return new ArrayList<Player>(online.values());
         }
 
         @Override

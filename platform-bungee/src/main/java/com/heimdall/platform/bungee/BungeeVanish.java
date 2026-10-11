@@ -52,6 +52,9 @@ final class BungeeVanish extends VanishSupport {
         /** The player with this UUID if they are still on the proxy, else {@code null}. */
         ProxiedPlayer onlinePlayer(UUID uuid);
 
+        /** Everyone on the proxy now. */
+        Collection<ProxiedPlayer> onlinePlayers();
+
         /** Registers {@code listener}'s handlers. */
         void register(Listener listener);
 
@@ -85,6 +88,22 @@ final class BungeeVanish extends VanishSupport {
     @Override
     protected boolean isOnline(UUID player) {
         return environment.onlinePlayer(player) != null;
+    }
+
+    /**
+     * After a hot swap, nobody already online logs in again: a player on a server is recorded as
+     * connected, and one with no server (an auth limbo) as still connecting, so their join is held
+     * and a later quit cannot post a leave for a join that was never posted.
+     */
+    @Override
+    protected void seedBackends() {
+        for (ProxiedPlayer player : environment.onlinePlayers()) {
+            if (player.getServer() != null) {
+                backendConnected(player.getUniqueId());
+            } else {
+                stillConnecting(player.getUniqueId());
+            }
+        }
     }
 
     /** The production wiring: the proxy's plugin manager, with listeners owned by {@code plugin}. */
@@ -273,6 +292,11 @@ final class BungeeVanish extends VanishSupport {
         @Override
         public ProxiedPlayer onlinePlayer(UUID uuid) {
             return proxy.getPlayer(uuid);
+        }
+
+        @Override
+        public Collection<ProxiedPlayer> onlinePlayers() {
+            return proxy.getPlayers();
         }
 
         @Override
