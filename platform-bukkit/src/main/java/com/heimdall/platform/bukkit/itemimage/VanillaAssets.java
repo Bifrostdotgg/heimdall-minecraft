@@ -4,6 +4,7 @@ import com.heimdall.core.items.Snbt;
 import com.heimdall.core.log.HeimdallLogger;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
@@ -105,6 +106,16 @@ final class VanillaAssets {
     }
 
     /**
+     * Between the requests {@link #ensure} makes: a stopping core interrupts the asset thread, and
+     * the next request is not started for it.
+     */
+    private static void stopIfInterrupted() throws InterruptedIOException {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedIOException("stopped between requests");
+        }
+    }
+
+    /**
      * The cache for {@code version}, downloading and extracting it first if needed.
      *
      * @throws IOException on any network, verification or extraction failure; nothing partial is
@@ -122,6 +133,7 @@ final class VanillaAssets {
         }
 
         Map<String, Object> manifest = json(http.get(MANIFEST_URL, MAX_MANIFEST_BYTES));
+        stopIfInterrupted();
         Map<String, Object> entry = pickVersion(manifest, version);
         if (entry == null) {
             throw new AssetException("no release at or below " + version + " in Mojang's manifest");
@@ -132,6 +144,7 @@ final class VanillaAssets {
             throw new AssetException("the manifest entry for " + resolvedId + " has no url");
         }
         byte[] versionBytes = http.get(versionUrl, MAX_VERSION_BYTES);
+        stopIfInterrupted();
         String expectedVersionSha1 = Snbt.asString(entry.get("sha1"));
         // Fail closed: a manifest entry that vouches for nothing is not a chain this cache trusts.
         if (expectedVersionSha1 == null

@@ -65,12 +65,29 @@ import org.bukkit.plugin.Plugin;
  * class itself names no AWT type, so it loads either way; only the renderer classes do, and they are
  * touched only after the probe passes.
  *
+ * <h2>Stopping</h2>
+ *
+ * <p>{@link #close()} stops <strong>both</strong> threads and waits for them, against one shared
+ * deadline of {@value #CLOSE_WAIT_MS} ms, before returning. Code still running on either after the
+ * plugin (or, since the hot-swap split, the core) has been disabled runs against a classloader that
+ * may already be closed: Paper closes a plugin's jar as soon as {@code onDisable} returns, and the
+ * core's own loader delegates every class lookup to that one first, so the next class the thread
+ * needs (an inner class, a lambda's, an exception type in a {@code catch}) fails with "zip file
+ * closed" (departure D87). Work can outlast the wait (a transfer blocked in a socket read, a large
+ * pack being parsed), so both threads also check {@code closed} between steps and stop there, a
+ * transfer gives up when its thread is interrupted, and a failure after close is dropped silently,
+ * by code that loads nothing new: there is nothing left to report it to. The pack stack is closed
+ * whether or not the render thread got to it, so no pack zip stays open.
+ *
  * <p>Logs name files, versions and counts, never an item's name or lore.
  */
 public final class BukkitItemImages implements ItemImages, AutoCloseable {
 
     static final long RENDER_BUDGET_MS = 3000L;
     static final int RENDER_QUEUE = 16;
+
+    /** How long {@link #close()} waits for the asset thread to stop. */
+    static final long CLOSE_WAIT_MS = 2_000L;
     static final long RESCAN_SECONDS = 10L;
     static final int CACHE_ENTRIES = 128;
     static final long CACHE_BYTES = 16L * 1024 * 1024;
@@ -98,6 +115,26 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     private final String version;
     private final VanillaAssets vanilla;
     private final PackSources sources;
+
+    /** How a pack zip is privately copied on the asset thread; a seam so a test can slow it. */
+    interface PackCopier {
+        void copy(Path zip) throws IOException;
+    }
+
+    volatile PackCopier copier;
+
+    /** How the render thread opens a pack stack; a seam so a test can hold it there. */
+    interface StackOpener {
+        PackStack open(List<PackSources.Candidate> candidates, Path vanilla, int packFormat);
+    }
+
+    volatile StackOpener opener;
+
+    /**
+     * Called between render steps with the step's name, when set; a seam so a test can hold a
+     * render at each {@code closed} check. {@code null} in production.
+     */
+    volatile java.util.function.Consumer<String> renderStep;
 
     private final ThreadPoolExecutor assets;
     private final ThreadPoolExecutor renders;
@@ -146,7 +183,11 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     /** Cards over this many bytes are redrawn at scale 1. A field so a test can lower it. */
     volatile int preferredMaxPngBytes = PREFERRED_MAX_PNG_BYTES;
     private final AtomicLong nextPrepareAt = new AtomicLong(Long.MIN_VALUE);
-    private final AtomicInteger assetGeneration = new AtomicInteger();
+    /** Bumped each time prepared assets change; package-private so tests can watch it. */
+    final AtomicInteger assetGeneration = new AtomicInteger();
+
+    /** {@link #CLOSE_WAIT_MS}, as a field so a test can shorten it. */
+    volatile long closeWaitMs = CLOSE_WAIT_MS;
 
     private volatile Path vanillaDir;
     private volatile Path serverPack;
@@ -155,8 +196,13 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
 
     // ── Render thread only ───────────────────────────────────────────────────
 
-    private PackStack stack;
-    private CardRenderer renderer;
+    /**
+     * Written on the render thread, but closed from {@link #close()} too when the render thread
+     * cannot get to it, so volatile and replaced or cleared only under {@link #stackLock}.
+     */
+    private volatile PackStack stack;
+    private volatile CardRenderer renderer;
+    private final Object stackLock = new Object();
     private int stackGeneration = -1;
     private long nextScanAt;
     private long cacheBytes;
@@ -185,6 +231,18 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         this.vanilla = new VanillaAssets(logger, http, cache.resolve("assets"));
         this.sources = new PackSources(logger, serverRoot, pluginsDir, cache);
         this.packFolder = dataDir.resolve("item-images").resolve("packs");
+        this.copier = new PackCopier() {
+            @Override
+            public void copy(Path zip) throws IOException {
+                sources.privateCopy(zip);
+            }
+        };
+        this.opener = new StackOpener() {
+            @Override
+            public PackStack open(List<PackSources.Candidate> candidates, Path vanilla, int format) {
+                return sources.open(candidates, vanilla, format);
+            }
+        };
         this.assets = executor("heimdall-item-assets", 4);
         this.renders = executor("heimdall-item-render", RENDER_QUEUE);
     }
@@ -272,6 +330,14 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 public void run() {
                     try {
                         prepareNow();
+                    } catch (Throwable failed) {
+                        // After close() this may be running against a closed classloader (see the
+                        // class note), and there is no core left to report to.
+                        if (!closed) {
+                            logger.warn("item images: preparing the assets failed ("
+                                    + failed.getClass().getName() + ")");
+                            logger.debug("item images: where preparing failed:" + frames(failed));
+                        }
                     } finally {
                         preparing.set(false);
                     }
@@ -315,7 +381,12 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         if (timer != null) {
             timer.shutdownNow();
         }
+        // Both stopped first, then both waited for against ONE deadline, so the worst case is
+        // closeWaitMs, not one wait per thread. The caller is a plugin disable or a core swap, both
+        // of which are about to close the classloader these threads run code from (class note).
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(Math.max(0L, closeWaitMs));
         assets.shutdownNow();
+        boolean closeQueued;
         try {
             renders.execute(new Runnable() {
                 @Override
@@ -323,18 +394,76 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                     closeStack();
                 }
             });
-        } catch (RejectedExecutionException alreadyGone) {
-            // Nothing queued it; the stack is closed below once the thread has stopped.
+            closeQueued = true;
+        } catch (RejectedExecutionException full) {
+            closeQueued = false;
         }
         renders.shutdown();
-        try {
-            if (!renders.awaitTermination(2, TimeUnit.SECONDS)) {
-                renders.shutdownNow();
-            }
-        } catch (InterruptedException interrupted) {
+        boolean assetsStopped = awaitUntil(assets, deadline);
+        boolean rendersStopped = awaitUntil(renders, deadline);
+        if (!rendersStopped) {
             renders.shutdownNow();
-            Thread.currentThread().interrupt();
         }
+        if (!rendersStopped || !closeQueued) {
+            // The render thread did not close the stack: its queue was full, or it is still busy
+            // past the deadline. Closed here instead, so no pack zip is left open; a render still
+            // using it fails on the closed zip and, being closed, says nothing.
+            closeStack();
+        }
+        if (!assetsStopped || !rendersStopped) {
+            String which = !assetsStopped && !rendersStopped ? "the asset and render threads are"
+                    : assetsStopped ? "the render thread is" : "the asset thread is";
+            logger.debug("item images: " + which + " still finishing; they stop without touching "
+                    + "anything else");
+        }
+    }
+
+    /** Whether the render thread has stopped; for tests. */
+    boolean renderThreadStopped() {
+        return renders.isTerminated();
+    }
+
+    /** Whether a pack stack is open; for tests. */
+    boolean stackOpen() {
+        return stack != null;
+    }
+
+    /** Runs {@code task} on the render thread; for tests that need it busy. */
+    void runOnRenderThread(Runnable task) {
+        renders.execute(task);
+    }
+
+    private static boolean awaitUntil(ThreadPoolExecutor executor, long deadlineNanos) {
+        try {
+            return executor.awaitTermination(Math.max(0L, deadlineNanos - System.nanoTime()),
+                    TimeUnit.NANOSECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return executor.isTerminated();
+        }
+    }
+
+    /**
+     * The top stack frames of {@code failure} and its causes, for a debug line: class, method and
+     * line only, never a message, which could carry a URL or a file's contents.
+     */
+    static String frames(Throwable failure) {
+        StringBuilder out = new StringBuilder();
+        Throwable at = failure;
+        for (int depth = 0; at != null && depth < 3; depth++) {
+            out.append(depth == 0 ? " " : " | caused by ").append(at.getClass().getName());
+            StackTraceElement[] trace = at.getStackTrace();
+            for (int i = 0; i < Math.min(trace.length, 8); i++) {
+                out.append("\n    at ").append(trace[i]);
+            }
+            at = at.getCause();
+        }
+        return out.toString();
+    }
+
+    /** Whether the asset thread has stopped; for tests. */
+    boolean assetThreadStopped() {
+        return assets.isTerminated();
     }
 
     // ── Asset thread ─────────────────────────────────────────────────────────
@@ -356,11 +485,18 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             } catch (IOException | RuntimeException error) {
                 failed = true;
                 // AssetException messages are ours (host, version, size); anything else is named
-                // by class only, since a transport message can carry a full URL.
-                logger.warn("item images: could not fetch the vanilla " + version
-                        + " assets (" + AssetException.describe(error) + "); vanilla icons will "
-                        + "be placeholders. Retrying in 10 minutes.");
+                // by class only, since a transport message can carry a full URL. Not after close:
+                // a stop mid-download is not a failure, and nothing will retry.
+                if (!closed) {
+                    logger.warn("item images: could not fetch the vanilla " + version
+                            + " assets (" + AssetException.describe(error) + "); vanilla icons "
+                            + "will be placeholders. Retrying in 10 minutes.");
+                }
             }
+        }
+        if (closed) {
+            // Closed while the transfer ran: stop before anything else loads a class.
+            return;
         }
         if (dir != null) {
             VanillaAssets.touch(dir);
@@ -375,8 +511,13 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         } catch (IOException | RuntimeException error) {
             // The previous copy, if any, stays in use until a fetch succeeds.
             failed = true;
-            logger.warn("item images: could not fetch the server resource pack ("
-                    + AssetException.describe(error) + "). Retrying in 10 minutes.");
+            if (!closed) {
+                logger.warn("item images: could not fetch the server resource pack ("
+                        + AssetException.describe(error) + "). Retrying in 10 minutes.");
+            }
+        }
+        if (closed) {
+            return;
         }
         vanillaDir = dir;
         nextPrepareAt.set(System.currentTimeMillis()
@@ -391,8 +532,12 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                     try {
                         refreshStack(true);
                     } catch (Throwable failedRefresh) {
-                        logger.debug(() -> "item images: warming the pack stack failed: "
-                                + failedRefresh.getClass().getName());
+                        // No lambda here: linking one is a class load, and after close the loader
+                        // may be gone (class note).
+                        if (!closed) {
+                            logger.debug("item images: warming the pack stack failed: "
+                                    + failedRefresh.getClass().getName());
+                        }
                     }
                 }
             });
@@ -411,32 +556,60 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         try {
             Deadline deadline = Deadline.in(RENDER_BUDGET_MS);
             refreshStack(false);
-            String key = cacheKey(stack, item);
+            step("refreshed");
+            // Checked between steps: each can take seconds, and after close the next step may need
+            // a class the closed loader can no longer give it.
+            PackStack current = stack;
+            CardRenderer drawing = renderer;
+            if (closed || current == null || drawing == null) {
+                return null;
+            }
+            String key = cacheKey(current, item);
             byte[] cached = cached(key);
             if (cached != null) {
                 return cached;
             }
-            byte[] png = renderer.render(item, this, defaults, SCALE, deadline);
+            byte[] png = drawing.render(item, this, defaults, SCALE, deadline);
+            step("drawn");
+            if (closed) {
+                return null;
+            }
             if (png.length > preferredMaxPngBytes) {
                 // Far larger than a card should be (a huge lore block, a noisy HD texture): half
                 // scale rather than ship something near the wire cap.
-                png = renderer.render(item, this, defaults, 1, deadline);
+                png = drawing.render(item, this, defaults, 1, deadline);
+                step("redrawn");
+                if (closed) {
+                    return null;
+                }
             }
             remember(key, png);
             final int size = png.length;
             final long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
             logger.debug(() -> "item images: rendered a card (" + size + " bytes, " + ms + " ms)");
             return png;
-        } catch (Deadline.Exceeded slow) {
-            logger.debug(() -> "item images: a render exceeded its " + RENDER_BUDGET_MS
-                    + " ms budget; the line relays without it");
-            return null;
         } catch (Throwable failed) {
-            // Class name only: an exception message from a pack parser could quote a file, and
-            // nothing here may risk quoting an item's text.
-            logger.debug(() -> "item images: a render failed (" + failed.getClass().getName()
-                    + ")");
+            // One catch of Throwable, no lambdas, and the Deadline check only while open: a catch
+            // clause naming Deadline.Exceeded, or a lambda, is a class load, and after close the
+            // loader may be gone (class note). Class name only: an exception message from a pack
+            // parser could quote a file, and nothing here may risk quoting an item's text.
+            if (closed) {
+                return null;
+            }
+            if (failed instanceof Deadline.Exceeded) {
+                logger.debug("item images: a render exceeded its " + RENDER_BUDGET_MS
+                        + " ms budget; the line relays without it");
+            } else {
+                logger.debug("item images: a render failed (" + failed.getClass().getName() + ")");
+            }
             return null;
+        }
+    }
+
+    private void step(String name) {
+        java.util.function.Consumer<String> hook = renderStep;
+        if (hook != null) {
+            hook.accept(name);
         }
     }
 
@@ -564,6 +737,9 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
 
     /** Rebuilds the pack stack if assets arrived or any pack changed; cheap when nothing did. */
     private void refreshStack(boolean force) {
+        if (closed) {
+            return;
+        }
         long now = System.nanoTime();
         int generation = assetGeneration.get();
         if (!force && stack != null && generation == stackGeneration && now - nextScanAt < 0) {
@@ -588,21 +764,42 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         }
         int format = VanillaAssets.packFormat(vanillaNow);
         String fingerprint = PackSources.fingerprint(candidates, vanillaNow) + "|format:" + format;
-        if (stack != null && fingerprint.equals(stack.fingerprint())) {
+        PackStack open = stack;
+        if (open != null && fingerprint.equals(open.fingerprint())) {
             stackGeneration = generation;
             return;
         }
-        PackStack fresh = sources.open(candidates, vanillaNow, format);
-        closeStack();
+        PackStack fresh = opener.open(candidates, vanillaNow, format);
+        // Built outside the lock: loading fonts and indexing them takes a while, and close() takes
+        // the same lock on the thread that is disabling the plugin.
+        CardRenderer drawing;
+        try {
+            drawing = closed ? null : new CardRenderer(fresh);
+        } catch (RuntimeException | Error broken) {
+            fresh.close();
+            throw broken;
+        }
+        synchronized (stackLock) {
+            if (closed) {
+                // Closed while the packs were opening: close() may already have closed the old
+                // stack, and nothing may install a new one after it.
+                fresh.close();
+                return;
+            }
+            closeStack();
+            stack = fresh;
+            renderer = drawing;
+        }
         // After the old stack's zips are closed: Windows cannot delete an open file.
         sources.pruneCopies(fresh.copies());
         sources.pruneServerPacks(serverPack);
-        stack = fresh;
-        renderer = new CardRenderer(fresh);
         stackGeneration = generation;
         cache.clear();
         cacheBytes = 0;
         english = Collections.unmodifiableMap(fresh.english(Collections.singletonList("minecraft")));
+        if (closed) {
+            return;
+        }
         final int roots = fresh.size();
         final int names = english.size();
         logger.debug(() -> "item images: pack stack rebuilt (" + roots + " source(s), " + names
@@ -621,30 +818,14 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 @Override
                 public void run() {
                     try {
-                        copyAttempts.incrementAndGet();
-                        sources.privateCopy(zip);
-                        copyFailedAt.remove(zip);
-                    } catch (Throwable error) {
-                        copyFailedAt.put(zip, clock.getAsLong());
-                        logger.debug(() -> "item images: copying a pack failed ("
-                                + AssetException.describe(error) + "); retrying in a minute");
-                    } finally {
-                        copying.remove(zip);
-                    }
-                    assetGeneration.incrementAndGet();
-                    try {
-                        renders.execute(new Runnable() {
-                            @Override
-                            public void run() {
-                                try {
-                                    refreshStack(false);
-                                } catch (Throwable ignored) {
-                                    // The next render refreshes it instead.
-                                }
-                            }
-                        });
-                    } catch (RejectedExecutionException busy) {
-                        // The next render refreshes it instead.
+                        copyNow(zip);
+                    } catch (Throwable failed) {
+                        // As in prepare(): after close() there is nothing left to report to.
+                        if (!closed) {
+                            logger.warn("item images: copying a pack failed ("
+                                    + failed.getClass().getName() + ")");
+                            logger.debug("item images: where copying failed:" + frames(failed));
+                        }
                     }
                 }
             });
@@ -653,12 +834,50 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         }
     }
 
+    /** The asset-thread half of {@link #requestCopy}. */
+    private void copyNow(final Path zip) {
+        try {
+            copyAttempts.incrementAndGet();
+            copier.copy(zip);
+            copyFailedAt.remove(zip);
+        } catch (Throwable error) {
+            copyFailedAt.put(zip, clock.getAsLong());
+            if (!closed) {
+                logger.debug("item images: copying a pack failed ("
+                        + AssetException.describe(error) + "); retrying in a minute");
+            }
+        } finally {
+            copying.remove(zip);
+        }
+        if (closed) {
+            return;
+        }
+        assetGeneration.incrementAndGet();
+        try {
+            renders.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        refreshStack(false);
+                    } catch (Throwable ignored) {
+                        // The next render refreshes it instead.
+                    }
+                }
+            });
+        } catch (RejectedExecutionException busy) {
+            // The next render refreshes it instead.
+        }
+    }
+
+    /** Closes the current stack, if any. Idempotent; from the render thread or from close(). */
     private void closeStack() {
-        PackStack old = stack;
-        stack = null;
-        renderer = null;
-        if (old != null) {
-            old.close();
+        synchronized (stackLock) {
+            PackStack old = stack;
+            stack = null;
+            renderer = null;
+            if (old != null) {
+                old.close();
+            }
         }
     }
 

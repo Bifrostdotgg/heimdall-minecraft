@@ -4,6 +4,7 @@ import com.heimdall.core.BuildConstants;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -95,6 +96,10 @@ interface HttpSource {
             boolean secure = false;
             for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
                 URL url = new URL(current);
+                // A stopping core interrupts this thread; a connection is not opened for it.
+                if (Thread.currentThread().isInterrupted()) {
+                    throw wrap(new InterruptedIOException("interrupted"), url.getHost());
+                }
                 String protocol = url.getProtocol().toLowerCase(Locale.ROOT);
                 if (!"https".equals(protocol) && !"http".equals(protocol)) {
                     throw new AssetException("refusing a " + protocol + " URL");
@@ -154,7 +159,9 @@ interface HttpSource {
             byte[] buffer = new byte[16 * 1024];
             long total = 0;
             int read;
-            while ((read = in.read(buffer)) > 0) {
+            // Checked per buffer: a socket read ignores interrupts, so without this a stopping core
+            // would wait out the whole transfer (a read timeout per read, minutes in all).
+            while (!interrupted() && (read = in.read(buffer)) > 0) {
                 total += read;
                 if (total > maxBytes) {
                     throw new AssetException("response from " + host + " larger than " + maxBytes
@@ -165,7 +172,14 @@ interface HttpSource {
                 }
                 out.write(buffer, 0, read);
             }
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedIOException("transfer from " + host + " interrupted");
+            }
             return total;
+        }
+
+        private static boolean interrupted() {
+            return Thread.currentThread().isInterrupted();
         }
 
         private static AssetException wrap(IOException transport, String host) {
