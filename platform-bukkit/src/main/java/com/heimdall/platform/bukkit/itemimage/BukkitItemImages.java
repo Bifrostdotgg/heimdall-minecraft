@@ -65,12 +65,26 @@ import org.bukkit.plugin.Plugin;
  * class itself names no AWT type, so it loads either way; only the renderer classes do, and they are
  * touched only after the probe passes.
  *
+ * <h2>Stopping</h2>
+ *
+ * <p>{@link #close()} interrupts the asset thread and <strong>waits</strong> for it, up to
+ * {@value #CLOSE_WAIT_MS} ms, before returning. Code still running on it after the plugin (or, since
+ * the hot-swap split, the core) has been disabled runs against a classloader that may already be
+ * closed: Paper closes a plugin's jar as soon as {@code onDisable} returns, and the core's own
+ * loader delegates every class lookup to that one first, so the next class the thread needs fails
+ * with "zip file closed" (departure D87). A transfer blocked in a socket read can outlast the wait,
+ * so the asset work also checks {@code closed} after each long step and stops there, and a failure
+ * after close is dropped silently: there is nothing left to report it to.
+ *
  * <p>Logs name files, versions and counts, never an item's name or lore.
  */
 public final class BukkitItemImages implements ItemImages, AutoCloseable {
 
     static final long RENDER_BUDGET_MS = 3000L;
     static final int RENDER_QUEUE = 16;
+
+    /** How long {@link #close()} waits for the asset thread to stop. */
+    static final long CLOSE_WAIT_MS = 2_000L;
     static final long RESCAN_SECONDS = 10L;
     static final int CACHE_ENTRIES = 128;
     static final long CACHE_BYTES = 16L * 1024 * 1024;
@@ -146,7 +160,11 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
     /** Cards over this many bytes are redrawn at scale 1. A field so a test can lower it. */
     volatile int preferredMaxPngBytes = PREFERRED_MAX_PNG_BYTES;
     private final AtomicLong nextPrepareAt = new AtomicLong(Long.MIN_VALUE);
-    private final AtomicInteger assetGeneration = new AtomicInteger();
+    /** Bumped each time prepared assets change; package-private so tests can watch it. */
+    final AtomicInteger assetGeneration = new AtomicInteger();
+
+    /** {@link #CLOSE_WAIT_MS}, as a field so a test can shorten it. */
+    volatile long closeWaitMs = CLOSE_WAIT_MS;
 
     private volatile Path vanillaDir;
     private volatile Path serverPack;
@@ -272,6 +290,13 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 public void run() {
                     try {
                         prepareNow();
+                    } catch (Throwable failed) {
+                        // After close() this may be running against a closed classloader (see the
+                        // class note), and there is no core left to report to.
+                        if (!closed) {
+                            logger.warn("item images: preparing the assets failed ("
+                                    + failed.getClass().getName() + ")");
+                        }
                     } finally {
                         preparing.set(false);
                     }
@@ -316,6 +341,12 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             timer.shutdownNow();
         }
         assets.shutdownNow();
+        // Waited for, not just interrupted: see the class note. The caller is a plugin disable or a
+        // core swap, both of which are about to close the classloader this thread runs code from.
+        if (!awaitStop(assets, closeWaitMs)) {
+            logger.debug("item images: the asset thread is still finishing a transfer; it will "
+                    + "stop without touching anything else");
+        }
         try {
             renders.execute(new Runnable() {
                 @Override
@@ -334,6 +365,20 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
         } catch (InterruptedException interrupted) {
             renders.shutdownNow();
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Whether the asset thread has stopped; for tests. */
+    boolean assetThreadStopped() {
+        return assets.isTerminated();
+    }
+
+    private static boolean awaitStop(ThreadPoolExecutor executor, long waitMs) {
+        try {
+            return executor.awaitTermination(Math.max(0L, waitMs), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return executor.isTerminated();
         }
     }
 
@@ -362,6 +407,10 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                         + "be placeholders. Retrying in 10 minutes.");
             }
         }
+        if (closed) {
+            // Closed while the transfer ran: stop before anything else loads a class.
+            return;
+        }
         if (dir != null) {
             VanillaAssets.touch(dir);
             final int pruned = vanilla.pruneOthers(dir);
@@ -377,6 +426,9 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
             failed = true;
             logger.warn("item images: could not fetch the server resource pack ("
                     + AssetException.describe(error) + "). Retrying in 10 minutes.");
+        }
+        if (closed) {
+            return;
         }
         vanillaDir = dir;
         nextPrepareAt.set(System.currentTimeMillis()
@@ -621,35 +673,51 @@ public final class BukkitItemImages implements ItemImages, AutoCloseable {
                 @Override
                 public void run() {
                     try {
-                        copyAttempts.incrementAndGet();
-                        sources.privateCopy(zip);
-                        copyFailedAt.remove(zip);
-                    } catch (Throwable error) {
-                        copyFailedAt.put(zip, clock.getAsLong());
-                        logger.debug(() -> "item images: copying a pack failed ("
-                                + AssetException.describe(error) + "); retrying in a minute");
-                    } finally {
-                        copying.remove(zip);
-                    }
-                    assetGeneration.incrementAndGet();
-                    try {
-                        renders.execute(new Runnable() {
-                            @Override
-                            public void run() {
-                                try {
-                                    refreshStack(false);
-                                } catch (Throwable ignored) {
-                                    // The next render refreshes it instead.
-                                }
-                            }
-                        });
-                    } catch (RejectedExecutionException busy) {
-                        // The next render refreshes it instead.
+                        copyNow(zip);
+                    } catch (Throwable failed) {
+                        // As in prepare(): after close() there is nothing left to report to.
+                        if (!closed) {
+                            logger.warn("item images: copying a pack failed ("
+                                    + failed.getClass().getName() + ")");
+                        }
                     }
                 }
             });
         } catch (RejectedExecutionException full) {
             copying.remove(zip);
+        }
+    }
+
+    /** The asset-thread half of {@link #requestCopy}. */
+    private void copyNow(final Path zip) {
+        try {
+            copyAttempts.incrementAndGet();
+            sources.privateCopy(zip);
+            copyFailedAt.remove(zip);
+        } catch (Throwable error) {
+            copyFailedAt.put(zip, clock.getAsLong());
+            logger.debug(() -> "item images: copying a pack failed ("
+                    + AssetException.describe(error) + "); retrying in a minute");
+        } finally {
+            copying.remove(zip);
+        }
+        if (closed) {
+            return;
+        }
+        assetGeneration.incrementAndGet();
+        try {
+            renders.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        refreshStack(false);
+                    } catch (Throwable ignored) {
+                        // The next render refreshes it instead.
+                    }
+                }
+            });
+        } catch (RejectedExecutionException busy) {
+            // The next render refreshes it instead.
         }
     }
 

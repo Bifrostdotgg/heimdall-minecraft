@@ -14,9 +14,12 @@ import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.testing.ItemCaptures;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.imageio.ImageIO;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -309,6 +312,87 @@ class BukkitItemImagesTest {
         service.close();
         assertFalse(service.available());
         assertEquals(null, service.render(wardedJar()).get(1, TimeUnit.SECONDS));
+    }
+
+    /**
+     * A network that takes {@code holdMs} to answer 404 and, like a socket read, ignores interrupts
+     * while it does.
+     */
+    private static final class SlowHttp implements HttpSource {
+
+        final CountDownLatch entered = new CountDownLatch(1);
+        final AtomicInteger requests = new AtomicInteger();
+        private final long holdMs;
+
+        SlowHttp(long holdMs) {
+            this.holdMs = holdMs;
+        }
+
+        @Override
+        public byte[] get(String url, long maxBytes) throws IOException {
+            requests.incrementAndGet();
+            entered.countDown();
+            long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(holdMs);
+            while (System.nanoTime() < until) {
+                Thread.interrupted();
+                try {
+                    Thread.sleep(5);
+                } catch (InterruptedException deaf) {
+                    // Deliberately ignored, like a blocked socket read.
+                }
+            }
+            throw new IOException("HTTP 404");
+        }
+
+        @Override
+        public long download(String url, java.nio.file.Path target, long maxBytes)
+                throws IOException {
+            return get(url, maxBytes).length;
+        }
+    }
+
+    @Test
+    void closeWaitsForTheAssetThreadBeforeReturning() throws Exception {
+        // The paper-swap failure: close() interrupted the asset thread and returned while it was
+        // still mid-transfer. The plugin disable finished, Paper closed the plugin's jar, and the
+        // thread's next class load failed with "zip file closed". close() must not return while
+        // that thread can still run plugin code.
+        SlowHttp http = new SlowHttp(400L);
+        BukkitItemImages service = build(http);
+        service.prepare();
+        assertTrue(http.entered.await(5, TimeUnit.SECONDS), "the asset thread never started");
+
+        service.close();
+        images = null;
+
+        assertTrue(service.assetThreadStopped(),
+                "close() returned with the asset thread still running plugin code");
+    }
+
+    @Test
+    void aTransferThatOutlivesCloseTouchesNothingAfterIt() throws Exception {
+        SlowHttp http = new SlowHttp(500L);
+        BukkitItemImages service = build(http);
+        service.closeWaitMs = 50L;
+        service.prepare();
+        assertTrue(http.entered.await(5, TimeUnit.SECONDS));
+
+        long started = System.nanoTime();
+        service.close();
+        images = null;
+        long took = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+        assertTrue(took < 400L, "close() must stay bounded: " + took + "ms");
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (!service.assetThreadStopped() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        assertTrue(service.assetThreadStopped());
+        assertEquals(0, service.assetGeneration.get(),
+                "the asset thread carried on past close() and published its work");
+        assertEquals(1, http.requests.get(), "it went on fetching after close()");
+        assertFalse(logger.logged(LogLevel.WARN, "preparing the assets failed"),
+                logger.records().toString());
     }
 
     @Test
