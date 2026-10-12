@@ -203,7 +203,7 @@ public final class PunishmentView {
     static String appealLink(String url, String id) {
         if (url == null || url.isEmpty()) return "";
         if (id == null || !id.matches("[0-9a-fA-F]{24}")) return url;
-        if (url.contains("#") || url.contains("ref=")) return url;
+        if (url.contains("#") || url.matches(".*[?&]ref=.*")) return url;
         return url + (url.contains("?") ? "&" : "?") + "ref=" + id.toLowerCase(java.util.Locale.ROOT);
     }
 

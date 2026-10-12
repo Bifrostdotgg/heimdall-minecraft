@@ -19,6 +19,9 @@ class PunishmentAppealLinkTest {
                 PunishmentView.appealLink("https://appeals.example/abc?type=minecraft", ID));
         assertEquals("https://appeals.example/abc?ref=" + ID,
                 PunishmentView.appealLink("https://appeals.example/abc", ID.toUpperCase()));
+        // Another parameter that merely ends in "ref" is not a ref.
+        assertEquals("https://appeals.example/abc?xref=1&ref=" + ID,
+                PunishmentView.appealLink("https://appeals.example/abc?xref=1", ID));
     }
 
     @Test
