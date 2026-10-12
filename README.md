@@ -378,6 +378,10 @@ to the same tree and prints a one-time-per-start warning telling you to switch.
   the decision and which check made it
 - `/hd cache stats|clear|cleanup|sync` - inspect, empty, sweep or refresh the local whitelist mirror
 - `/hd offense reload|types` - refresh or list the offense types `/offend` accepts
+- `/hd case note <number> <text>` - add a note to a Heimdall case, by the number the dashboard and
+  Discord show. Written as you, by your account, with your linked Discord account named when you
+  have one. It can only reach a Minecraft case, and a hidden case only if you hold
+  `heimdall.punishments.hidden`. Players only, since a note is signed by the account that wrote it
 - `/hd version` - show the installed version and check for a newer one
 - `/hd update` - download the newest release; applied on the next restart
 - `/hd debug on|off` - toggle debug logging, persisted to `bootstrap.yml`

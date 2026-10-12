@@ -335,6 +335,39 @@ public final class ApiClient {
         });
     }
 
+    /**
+     * {@code POST cases/:number/notes}: add a note to a case from {@code /hd case note}.
+     *
+     * <p>One attempt, not the usual retry budget. A note is not idempotent, and a read timeout
+     * after the bot has saved it would otherwise post it again; a failed note says so and the
+     * moderator types it again, which costs less than a duplicate on the case.
+     *
+     * <p>{@code includeHidden} is sent only when it is true, and only ever because the author holds
+     * {@code heimdall.punishments.hidden}, the same rule as the lookups below. The bot only lets the
+     * note reach a Minecraft case either way.
+     */
+    public CompletableFuture<JsonObject> addCaseNote(
+            final int caseNumber, final String authorUuid, final String authorName,
+            final String text, final boolean includeHidden) {
+        if (caseNumber < 1) throw new IllegalArgumentException("a case number is required");
+        if (Strings.isBlank(authorUuid)) throw new IllegalArgumentException("authorUuid is required");
+        return async(() -> {
+            ApiSettings current = settings;
+            ApiSettings once = current.toBuilder().retries(1).build();
+            JsonObject body = new JsonObject();
+            body.addProperty("authorUuid", authorUuid);
+            addIfPresent(body, "authorName", authorName);
+            body.addProperty("text", text == null ? "" : text);
+            if (includeHidden) {
+                body.addProperty("includeHidden", Boolean.TRUE);
+            }
+            RawResponse response = requests.execute(once,
+                    HttpCall.post(guildPath(current, "cases/" + caseNumber + "/notes"),
+                            body.toString(), current.timeoutMs()));
+            return Envelopes.unwrapObject(response.status(), response.body());
+        });
+    }
+
     public CompletableFuture<JsonObject> issuePunishment(JsonObject body) {
         if (body == null) throw new IllegalArgumentException("body is required");
         return async(() -> {

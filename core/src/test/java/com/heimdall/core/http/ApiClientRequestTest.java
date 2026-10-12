@@ -253,6 +253,33 @@ class ApiClientRequestTest {
         // assertions now sit on that real path, in HiddenPunishmentTest#hiddenNodeAloneIsEnough.
 
         @Test
+        @DisplayName("a case note posts the author and text, and includeHidden only when asked")
+        void caseNoteBody() throws Exception {
+            server.respond(201, "{\"success\":true,\"data\":{\"id\":\"n1\",\"caseNumber\":12}}");
+            await(client.addCaseNote(12, UUID, "Steve", "spoke to them", false));
+            RecordingHttpServer.Request request = server.lastRequest();
+            assertEquals("POST", request.method);
+            assertTrue(request.path.endsWith("/minecraft/cases/12/notes"), request.path);
+            JsonObject sent = bodyOf(request);
+            assertEquals(UUID, sent.get("authorUuid").getAsString());
+            assertEquals("Steve", sent.get("authorName").getAsString());
+            assertEquals("spoke to them", sent.get("text").getAsString());
+            assertFalse(sent.has("includeHidden"));
+
+            server.respond(201, "{\"success\":true,\"data\":{}}");
+            await(client.addCaseNote(12, UUID, "Steve", "x", true));
+            assertTrue(bodyOf(server.lastRequest()).get("includeHidden").getAsBoolean());
+        }
+
+        @Test
+        @DisplayName("a case note is sent once: a retry after a lost answer would post it twice")
+        void caseNoteIsNotRetried() {
+            server.failFirst(99, 503);
+            assertThrows(ApiError.class, () -> await(client.addCaseNote(12, UUID, "Steve", "x", false)));
+            assertEquals(1, server.requestCount());
+        }
+
+        @Test
         @DisplayName("includeHidden appears on a lookup only when it was asked for")
         void lookupsOnlyAskForHiddenWhenTold() throws Exception {
             server.respond(200, "{\"success\":true,\"data\":{\"punishments\":[]}}");

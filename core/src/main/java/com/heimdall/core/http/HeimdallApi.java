@@ -181,6 +181,16 @@ public final class HeimdallApi {
         return gated(() -> client.offend(report));
     }
 
+    /**
+     * {@code POST cases/:number/notes}: {@code /hd case note}. See {@link ApiClient#addCaseNote}.
+     *
+     * @param includeHidden only ever true for an author holding {@code heimdall.punishments.hidden}
+     */
+    public CompletableFuture<JsonObject> addCaseNote(final int caseNumber, final String authorUuid,
+            final String authorName, final String text, final boolean includeHidden) {
+        return gated(() -> client.addCaseNote(caseNumber, authorUuid, authorName, text, includeHidden));
+    }
+
     public CompletableFuture<Payload> issuePunishment(final Payload body) {
         return gated(() -> client.issuePunishment(body).thenApply(HeimdallApi::asPayload));
     }
