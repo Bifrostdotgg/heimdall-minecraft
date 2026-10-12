@@ -213,7 +213,13 @@ class LiteBansRevokeLiftTest {
         LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
                 (family, uuid) -> true, INLINE, platform.console(), new RecordingLogger(), false);
 
-        now[0] += LiteBansRevokeLift.ECHO_WINDOW_MS + 1L;
+        LiteBansRevokeLift.lift(req("mute", UUID_STRING, "manual"),
+                (family, uuid) -> true, INLINE, platform.console(), new RecordingLogger(), false);
+
+        now[0] += LiteBansRevokeLift.ECHO_WINDOW_MS - 1L;
+        assertTrue(LiteBansRevokeLift.isOwnEcho("mute", UUID_STRING),
+                "measured on the lift's clock, this is still inside the window");
+        now[0] += 2L;
         assertFalse(LiteBansRevokeLift.isOwnEcho("ban", UUID_STRING),
                 "a removal long after the lift was not caused by it");
     }

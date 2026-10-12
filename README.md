@@ -335,7 +335,8 @@ Also in **hook mode**, lifting a LiteBans ban or mute from Heimdall (the dashboa
 LiteBans reported to Heimdall and ones imported from LiteBans; a ban issued from the dashboard was
 never in LiteBans, so lifting it leaves LiteBans alone. A ban left over from a time the server ran
 in replace mode counts as LiteBans' too (older bots recorded both the same way), so lifting one
-also lifts any LiteBans ban on that player. The server runs LiteBans' own
+also lifts any LiteBans ban on that player, and Heimdall can go on showing that LiteBans ban as in
+force until it is lifted there by hand. The server runs LiteBans' own
 `litebans:unban <uuid> -s` (or `unmute`) as the console, or the bare verb on a proxy, and only
 when LiteBans still has one in force. A ban running out or being replaced by a newer one is left
 to LiteBans. If the command fails, the server log says so and the ban has to be lifted in
