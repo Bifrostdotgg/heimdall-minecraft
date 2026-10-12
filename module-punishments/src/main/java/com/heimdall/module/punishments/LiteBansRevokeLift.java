@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 /**
@@ -36,6 +37,11 @@ import java.util.regex.Pattern;
  *       imported from it. LiteBans' command lifts "the ban on this player", not a row, so a revoke
  *       of a ban issued from the dashboard would otherwise lift whatever unrelated ban LiteBans has
  *       on the same player. A frame with no {@code source} (an older bot) lifts nothing.
+ *   <li>A {@code command} row counts as LiteBans' too. Until the bot kept the bridge's
+ *       {@code hook} source it stored every bridged row as {@code command}, and those rows are
+ *       the bans in force that people appeal. In hook mode nothing else writes one: the native
+ *       {@code /hd ban} refuses outside replace mode. What this costs is a row left over from a
+ *       spell in replace mode, whose revoke would also lift a LiteBans ban on the same player.
  *   <li>Only a {@code manual} revoke. An {@code expiry} is LiteBans' own business and has already
  *       happened there. An {@code override} is the bot retiring an older row because a newer
  *       punishment replaced it: when that newer one is a LiteBans ban, lifting "the ban on this
@@ -62,8 +68,9 @@ import java.util.regex.Pattern;
  *
  * <p>Our unban fires LiteBans' {@code entryRemoved}, which the bridge would post back as a loose
  * type-and-uuid revoke. The bot has already revoked the row this lift is about, so the echo can
- * only reach others: a second row on the same player, hidden ones included, which the moderator
- * did not ask to lift and may not be allowed to see. {@link #isOwnEcho} lets the bridge drop it.
+ * only reach others: a second row of that type on the same player, hidden ones included, which
+ * the moderator did not ask to lift and may not be allowed to see. {@link #isOwnEcho} lets the
+ * bridge drop it.
  */
 final class LiteBansRevokeLift {
 
@@ -75,6 +82,14 @@ final class LiteBansRevokeLift {
 
     /** Lifts dispatched and not yet echoed, by {@link #echoKey}, with when they were dispatched. */
     private static final Map<String, Long> AWAITING_ECHO = new ConcurrentHashMap<String, Long>();
+
+    /** The clock the echo window is measured on. A field so a test can move it. */
+    static volatile LongSupplier clock = new LongSupplier() {
+        @Override
+        public long getAsLong() {
+            return System.currentTimeMillis();
+        }
+    };
 
     /** The LiteBans command family a revoke maps onto. */
     enum Family {
@@ -101,10 +116,13 @@ final class LiteBansRevokeLift {
 
     /** One lift: what to run, for whom. */
     static final class Request {
+        /** The frame's own type, {@code ban}, {@code ipban} or {@code mute}. */
+        final String type;
         final Family family;
         final UUID uuid;
 
-        Request(Family family, UUID uuid) {
+        Request(String type, Family family, UUID uuid) {
+            this.type = type;
             this.family = family;
             this.uuid = uuid;
         }
@@ -132,7 +150,7 @@ final class LiteBansRevokeLift {
         if (family == null) return null;
         UUID uuid = parseUuid(targetUuid);
         if (uuid == null) return null;
-        return new Request(family, uuid);
+        return new Request(type, family, uuid);
     }
 
     /**
@@ -141,25 +159,25 @@ final class LiteBansRevokeLift {
      * only {@code LiteBansImporter} writes a bare {@code <table>:<id>}.
      */
     static boolean heldByLiteBans(String source, String importProviderId) {
-        if ("hook".equals(source)) return true;
+        if ("hook".equals(source) || "command".equals(source)) return true;
         return "import".equals(source) && importProviderId != null
                 && LITEBANS_IMPORT_ID.matcher(importProviderId).matches();
     }
 
     /**
-     * Whether a LiteBans removal is the echo of a lift this class dispatched. Called by the bridge
-     * before it posts a revoke.
+     * Whether a LiteBans removal is the echo of a lift this class dispatched, consuming it if so.
+     * Called by the bridge before it posts a revoke.
      *
-     * <p>Not consumed on the first match: one {@code unban} can remove a ban and an IP ban on the
-     * same player, and each fires its own {@code entryRemoved}. Anything else removed from the same
-     * player and family inside the window was removed by that same command.
+     * <p>Matched on the exact type, not the family. One {@code unban} can remove a ban and an IP
+     * ban on the same player, and only the one the bot revoked is already settled there. The other
+     * removal is news to the bot, so it goes through: a revoked IP ban whose unban also took the
+     * player's ordinary ban would otherwise leave that ban showing as in force.
      */
     static boolean isOwnEcho(String type, String targetUuid) {
-        Family family = Family.of(type);
         UUID uuid = parseUuid(targetUuid);
-        if (family == null || uuid == null) return false;
-        Long at = AWAITING_ECHO.get(echoKey(family, uuid));
-        return at != null && System.currentTimeMillis() - at.longValue() <= ECHO_WINDOW_MS;
+        if (Family.of(type) == null || uuid == null) return false;
+        Long at = AWAITING_ECHO.remove(echoKey(type, uuid));
+        return at != null && clock.getAsLong() - at.longValue() <= ECHO_WINDOW_MS;
     }
 
     /**
@@ -217,7 +235,7 @@ final class LiteBansRevokeLift {
                     dispatch(request, false, onProxy, console, logger);
                     return;
                 }
-                AWAITING_ECHO.remove(echoKey(request.family, request.uuid));
+                AWAITING_ECHO.remove(echoKey(request.type, request.uuid));
                 logger.warn("Revoked in Heimdall but LiteBans was not told: `" + command
                         + "` failed (" + cause + "). Lift it in LiteBans by hand.");
             }
@@ -225,17 +243,17 @@ final class LiteBansRevokeLift {
     }
 
     private static void expectEcho(Request request) {
-        long now = System.currentTimeMillis();
+        long now = clock.getAsLong();
         // Stale entries are lifts LiteBans never echoed; drop them so the map stays bounded.
         Iterator<Map.Entry<String, Long>> stale = AWAITING_ECHO.entrySet().iterator();
         while (stale.hasNext()) {
             if (now - stale.next().getValue().longValue() > ECHO_WINDOW_MS) stale.remove();
         }
-        AWAITING_ECHO.put(echoKey(request.family, request.uuid), Long.valueOf(now));
+        AWAITING_ECHO.put(echoKey(request.type, request.uuid), Long.valueOf(now));
     }
 
-    private static String echoKey(Family family, UUID uuid) {
-        return family.name() + ":" + uuid;
+    private static String echoKey(String type, UUID uuid) {
+        return type + ":" + uuid;
     }
 
     private static UUID parseUuid(String raw) {
@@ -258,8 +276,19 @@ final class LiteBansRevokeLift {
         return current;
     }
 
-    /** Forgets every lift awaiting its echo. Tests only. */
+    /** Forgets every lift awaiting its echo and resets the clock. Tests only. */
     static void clearForTest() {
         AWAITING_ECHO.clear();
+        clock = new LongSupplier() {
+            @Override
+            public long getAsLong() {
+                return System.currentTimeMillis();
+            }
+        };
+    }
+
+    /** How many lifts are awaiting their echo. Tests only. */
+    static int awaitingEchoForTest() {
+        return AWAITING_ECHO.size();
     }
 }

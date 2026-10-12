@@ -1,6 +1,5 @@
 package com.heimdall.module.punishments;
 
-import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.util.Registration;
@@ -12,6 +11,13 @@ import com.heimdall.core.util.Registration;
 final class LiteBansSupport {
 
     private static volatile Registration hook = Registration.NONE;
+
+    /**
+     * Whether this is a Bukkit server rather than a proxy. Read off the platform, not the
+     * configured role, which an operator can override: it decides whether a bare {@code unban}
+     * could belong to some other plugin.
+     */
+    private static final boolean BUKKIT = classPresent("org.bukkit.Bukkit");
 
     /** Non-null while LiteBans is hooked; the only way the module asks LiteBans anything. */
     private static volatile LiteBansRevokeLift.ActiveCheck activeCheck;
@@ -66,8 +72,7 @@ final class LiteBansSupport {
                 frame.string("importProviderId", ""));
         if (request == null) return;
         LiteBansRevokeLift.lift(request, check, context.executors().io(),
-                context.platform().console(), context.logger(),
-                context.platform().role() == ServerRole.GATEKEEPER);
+                context.platform().console(), context.logger(), !BUKKIT);
     }
 
     /**
@@ -77,6 +82,15 @@ final class LiteBansSupport {
     static void activeCheckForTest(LiteBansRevokeLift.ActiveCheck check) {
         activeCheck = check;
         LiteBansRevokeLift.clearForTest();
+    }
+
+    private static boolean classPresent(String name) {
+        try {
+            Class.forName(name, false, LiteBansSupport.class.getClassLoader());
+            return true;
+        } catch (ClassNotFoundException | LinkageError absent) {
+            return false;
+        }
     }
 
     static void importNow(final ModuleContext context) {

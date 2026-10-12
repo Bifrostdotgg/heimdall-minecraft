@@ -75,7 +75,11 @@ class LiteBansRevokeLiftTest {
         assertNotNull(LiteBansRevokeLift.requestFor("ipban", UUID_STRING, "manual", "import", "ipban:7"));
         assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "dashboard", null),
                 "LiteBans lifts the player, not a row, so this would lift an unrelated ban");
-        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "command", null));
+        assertNotNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "command", null),
+                "the bot stored every bridged row as command until it kept the hook source, and "
+                        + "those are the bans in force people appeal");
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "offend", null));
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "discord", null));
         assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "", null),
                 "an older bot sends no source, and a lift that cannot tell is not made");
         assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
@@ -190,12 +194,60 @@ class LiteBansRevokeLiftTest {
         LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
                 (family, uuid) -> true, INLINE, platform.console(), new RecordingLogger(), false);
 
-        assertTrue(LiteBansRevokeLift.isOwnEcho("ban", UUID_STRING),
-                "posted back, it would sweep every other ban row on the player, hidden ones too");
-        assertTrue(LiteBansRevokeLift.isOwnEcho("ipban", UUID_STRING),
-                "one unban can remove a ban and an IP ban, and each fires its own event");
+        assertFalse(LiteBansRevokeLift.isOwnEcho("ipban", UUID_STRING),
+                "an IP ban the same unban took is news to the bot, which revoked only the ban");
         assertFalse(LiteBansRevokeLift.isOwnEcho("mute", UUID_STRING));
         assertFalse(LiteBansRevokeLift.isOwnEcho("ban", "1f0c0d0e-0000-4000-8000-000000000000"));
+        assertTrue(LiteBansRevokeLift.isOwnEcho("ban", UUID_STRING),
+                "posted back, it would sweep every other ban row on the player, hidden ones too");
+        assertFalse(LiteBansRevokeLift.isOwnEcho("ban", UUID_STRING),
+                "consumed: a later removal on the same player is somebody's real unban");
+    }
+
+    @Test
+    @DisplayName("an echo is only recognised inside its window")
+    void echoWindowExpires() {
+        final long[] now = {1_000_000L};
+        LiteBansRevokeLift.clock = () -> now[0];
+        FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dir);
+        LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
+                (family, uuid) -> true, INLINE, platform.console(), new RecordingLogger(), false);
+
+        now[0] += LiteBansRevokeLift.ECHO_WINDOW_MS + 1L;
+        assertFalse(LiteBansRevokeLift.isOwnEcho("ban", UUID_STRING),
+                "a removal long after the lift was not caused by it");
+    }
+
+    @Test
+    @DisplayName("stale lifts that never echoed are dropped, so the table stays bounded")
+    void staleLiftsAreDropped() {
+        final long[] now = {1_000_000L};
+        LiteBansRevokeLift.clock = () -> now[0];
+        FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dir);
+        LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
+                (family, uuid) -> true, INLINE, platform.console(), new RecordingLogger(), false);
+        now[0] += LiteBansRevokeLift.ECHO_WINDOW_MS + 1L;
+        LiteBansRevokeLift.lift(req("mute", UUID_STRING, "manual"),
+                (family, uuid) -> true, INLINE, platform.console(), new RecordingLogger(), false);
+
+        assertEquals(1, LiteBansRevokeLift.awaitingEchoForTest());
+    }
+
+    @Test
+    @DisplayName("the bridge does not post our own unban back to the bot, and posts anyone else's")
+    void bridgeDropsOnlyOurEcho() {
+        String fakeEntryUuid = "11111111-1111-1111-1111-111111111111";
+        LiteBansHookTest.FakeEntry removed = new LiteBansHookTest.FakeEntry("ban", 1L, 0L);
+        assertNotNull(LiteBansEventBridge.revokeBody(removed, "salt"),
+                "a moderator's unban in LiteBans still reaches the bot");
+
+        FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dir);
+        LiteBansRevokeLift.lift(req("ban", fakeEntryUuid, "manual"),
+                (family, uuid) -> true, INLINE, platform.console(), new RecordingLogger(), false);
+
+        assertNull(LiteBansEventBridge.revokeBody(removed, "salt"),
+                "posted back, it would sweep every other ban row on the player, hidden ones too");
+        assertNotNull(LiteBansEventBridge.revokeBody(removed, "salt"));
     }
 
     @Test
