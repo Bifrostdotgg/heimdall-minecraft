@@ -1,5 +1,6 @@
 package com.heimdall.module.punishments;
 
+import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.util.Registration;
@@ -60,10 +61,13 @@ final class LiteBansSupport {
         LiteBansRevokeLift.Request request = LiteBansRevokeLift.requestFor(
                 frame.string("type", ""),
                 frame.string("targetUuid", ""),
-                frame.string("revokeCause", ""));
+                frame.string("revokeCause", ""),
+                frame.string("source", ""),
+                frame.string("importProviderId", ""));
         if (request == null) return;
         LiteBansRevokeLift.lift(request, check, context.executors().io(),
-                context.platform().console(), context.logger());
+                context.platform().console(), context.logger(),
+                context.platform().role() == ServerRole.GATEKEEPER);
     }
 
     /**
@@ -72,6 +76,7 @@ final class LiteBansSupport {
      */
     static void activeCheckForTest(LiteBansRevokeLift.ActiveCheck check) {
         activeCheck = check;
+        LiteBansRevokeLift.clearForTest();
     }
 
     static void importNow(final ModuleContext context) {

@@ -3,12 +3,16 @@ package com.heimdall.module.punishments;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.ConsoleBridge;
 import com.heimdall.core.platform.UnknownCommandException;
+import java.util.Iterator;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
+import java.util.regex.Pattern;
 
 /**
  * Lifts a ban or a mute in LiteBans when the bot revokes it, in hook mode.
@@ -28,30 +32,49 @@ import java.util.function.BiConsumer;
  * <h2>What is lifted, and what is left alone</h2>
  *
  * <ul>
- *   <li>Only a {@code manual} revoke (or one with no cause, from an older bot). An {@code expiry}
- *       is LiteBans' own business and has already happened there. An {@code override} is the
- *       bot retiring an older row because a newer punishment replaced it: when that newer one is
- *       a LiteBans ban, lifting "the ban on this player" would lift the new ban.
+ *   <li>Only a row LiteBans holds: one its bridge reported ({@code source: "hook"}) or one
+ *       imported from it. LiteBans' command lifts "the ban on this player", not a row, so a revoke
+ *       of a ban issued from the dashboard would otherwise lift whatever unrelated ban LiteBans has
+ *       on the same player. A frame with no {@code source} (an older bot) lifts nothing.
+ *   <li>Only a {@code manual} revoke. An {@code expiry} is LiteBans' own business and has already
+ *       happened there. An {@code override} is the bot retiring an older row because a newer
+ *       punishment replaced it: when that newer one is a LiteBans ban, lifting "the ban on this
+ *       player" would lift the new ban.
  *   <li>Bans, uuid-attached IP bans and mutes. A warn or a kick enforces nothing, and an IP ban
  *       keyed only by an address arrives as a digest, which names no LiteBans target.
- *   <li>Only when LiteBans still has one in force. Every server in a network gets the frame, so
- *       backends sharing one LiteBans database would otherwise each run an unban, and a ban
- *       issued from the dashboard in hook mode was never in LiteBans at all. A failed lookup
- *       dispatches anyway: an unban for a player who is not banned costs one console line, and
- *       a ban left in place is the bug this class exists to fix.
+ *   <li>Only when LiteBans still has one in force, which skips the unban where LiteBans already
+ *       lifted it. It is a check, not a lock: backends sharing one LiteBans database all get the
+ *       frame at once and can all see the ban, and then each runs the unban. The extras cost a
+ *       console line each. A failed lookup dispatches anyway, for the same reason.
  * </ul>
  *
  * <h2>The command</h2>
  *
- * <p>{@code litebans:unban <uuid> -s} first. The namespaced label matters on Bukkit, where
- * Essentials or vanilla can own a bare {@code unban}. A proxy has no namespaced labels, so an
- * unknown-command failure falls back to the bare verb. {@code -s} because this plugin announces
- * the revoke itself, under the hidden and silent rules; an unconditional LiteBans broadcast
- * beside it would print the unban twice and announce a hidden one to everybody. No reason and no
+ * <p>{@code litebans:unban <uuid> -s}. The namespaced label matters on Bukkit, where Essentials or
+ * vanilla can own a bare {@code unban}. A proxy has no namespaced labels, so there, and only there,
+ * an unknown-command failure falls back to the bare verb. {@code -s} because this plugin announces
+ * the revoke itself, under the hidden and silent rules; an unconditional LiteBans broadcast beside
+ * it would print the unban twice and announce a hidden one to everybody. No reason and no
  * {@code --sender}: both would be free text from a dashboard form spliced into a console command
  * line that LiteBans parses flags out of, so LiteBans records the console as the remover.
+ *
+ * <h2>The echo</h2>
+ *
+ * <p>Our unban fires LiteBans' {@code entryRemoved}, which the bridge would post back as a loose
+ * type-and-uuid revoke. The bot has already revoked the row this lift is about, so the echo can
+ * only reach others: a second row on the same player, hidden ones included, which the moderator
+ * did not ask to lift and may not be allowed to see. {@link #isOwnEcho} lets the bridge drop it.
  */
 final class LiteBansRevokeLift {
+
+    /** How long a lift waits for its own echo. LiteBans removes and fires within a tick or two. */
+    static final long ECHO_WINDOW_MS = 30_000L;
+
+    /** The id {@code LiteBansImporter} gives a row: the LiteBans table and its id. */
+    private static final Pattern LITEBANS_IMPORT_ID = Pattern.compile("^(ban|ipban|mute|warn|kick):\\d+$");
+
+    /** Lifts dispatched and not yet echoed, by {@link #echoKey}, with when they were dispatched. */
+    private static final Map<String, Long> AWAITING_ECHO = new ConcurrentHashMap<String, Long>();
 
     /** The LiteBans command family a revoke maps onto. */
     enum Family {
@@ -62,6 +85,12 @@ final class LiteBansRevokeLift {
 
         Family(String verb) {
             this.verb = verb;
+        }
+
+        static Family of(String type) {
+            if ("ban".equals(type) || "ipban".equals(type)) return BAN;
+            if ("mute".equals(type)) return MUTE;
+            return null;
         }
     }
 
@@ -94,27 +123,43 @@ final class LiteBansRevokeLift {
      * <p>The uuid is parsed rather than passed through: it is spliced into a console command, and
      * {@link UUID#toString()} can only ever print hex and dashes.
      */
-    static Request requestFor(String type, String targetUuid, String revokeCause) {
+    static Request requestFor(String type, String targetUuid, String revokeCause, String source,
+            String importProviderId) {
+        if (!heldByLiteBans(source, importProviderId)) return null;
         String cause = revokeCause == null ? "" : revokeCause.trim().toLowerCase(Locale.ROOT);
-        if (!cause.isEmpty() && !"manual".equals(cause)) return null;
-        Family family;
-        if ("ban".equals(type) || "ipban".equals(type)) {
-            family = Family.BAN;
-        } else if ("mute".equals(type)) {
-            family = Family.MUTE;
-        } else {
-            return null;
-        }
-        if (targetUuid == null) return null;
-        String raw = targetUuid.trim();
-        if (raw.length() != 36) return null;
-        UUID uuid;
-        try {
-            uuid = UUID.fromString(raw);
-        } catch (IllegalArgumentException notAUuid) {
-            return null;
-        }
+        if (!"manual".equals(cause)) return null;
+        Family family = Family.of(type);
+        if (family == null) return null;
+        UUID uuid = parseUuid(targetUuid);
+        if (uuid == null) return null;
         return new Request(family, uuid);
+    }
+
+    /**
+     * Whether the revoked row is one LiteBans holds. An import row's provider name cannot say:
+     * every import is stamped "litebans", AdvancedBan and vanilla included. Its id can, because
+     * only {@code LiteBansImporter} writes a bare {@code <table>:<id>}.
+     */
+    static boolean heldByLiteBans(String source, String importProviderId) {
+        if ("hook".equals(source)) return true;
+        return "import".equals(source) && importProviderId != null
+                && LITEBANS_IMPORT_ID.matcher(importProviderId).matches();
+    }
+
+    /**
+     * Whether a LiteBans removal is the echo of a lift this class dispatched. Called by the bridge
+     * before it posts a revoke.
+     *
+     * <p>Not consumed on the first match: one {@code unban} can remove a ban and an IP ban on the
+     * same player, and each fires its own {@code entryRemoved}. Anything else removed from the same
+     * player and family inside the window was removed by that same command.
+     */
+    static boolean isOwnEcho(String type, String targetUuid) {
+        Family family = Family.of(type);
+        UUID uuid = parseUuid(targetUuid);
+        if (family == null || uuid == null) return false;
+        Long at = AWAITING_ECHO.get(echoKey(family, uuid));
+        return at != null && System.currentTimeMillis() - at.longValue() <= ECHO_WINDOW_MS;
     }
 
     /**
@@ -123,33 +168,42 @@ final class LiteBansRevokeLift {
      * <p>Never throws and never blocks the caller, which is the tunnel's reading thread. The
      * LiteBans lookup is a database query, which LiteBans refuses on the Bukkit main thread; the
      * console bridge hops to whichever thread its platform needs.
+     *
+     * @param onProxy whether this server is a proxy, the one place a bare {@code unban} is
+     *     LiteBans' own
      */
     static void lift(final Request request, final ActiveCheck check, Executor io,
-            final ConsoleBridge console, final HeimdallLogger logger) {
+            final ConsoleBridge console, final HeimdallLogger logger, final boolean onProxy) {
         if (request == null || check == null) return;
-        io.execute(new Runnable() {
-            @Override
-            public void run() {
-                boolean active;
-                try {
-                    active = check.isActive(request.family, request.uuid);
-                } catch (Throwable failed) {
-                    logger.debug(() -> "LiteBans lookup failed for " + request.uuid
-                            + ", lifting anyway: " + failed);
-                    active = true;
+        try {
+            io.execute(new Runnable() {
+                @Override
+                public void run() {
+                    boolean active;
+                    try {
+                        active = check.isActive(request.family, request.uuid);
+                    } catch (Throwable failed) {
+                        logger.debug(() -> "LiteBans lookup failed for " + request.uuid
+                                + ", lifting anyway: " + failed);
+                        active = true;
+                    }
+                    if (!active) {
+                        logger.debug(() -> "LiteBans has no " + request.family.name().toLowerCase(
+                                Locale.ROOT) + " in force on " + request.uuid + "; nothing to lift");
+                        return;
+                    }
+                    expectEcho(request);
+                    dispatch(request, true, onProxy, console, logger);
                 }
-                if (!active) {
-                    logger.debug(() -> "LiteBans has no " + request.family.name().toLowerCase(
-                            Locale.ROOT) + " in force on " + request.uuid + "; nothing to lift");
-                    return;
-                }
-                dispatch(request, true, console, logger);
-            }
-        });
+            });
+        } catch (RuntimeException rejected) {
+            // The pool is gone, which means the plugin is shutting down.
+            logger.debug(() -> "LiteBans lift for " + request.uuid + " not scheduled: " + rejected);
+        }
     }
 
     private static void dispatch(final Request request, final boolean namespaced,
-            final ConsoleBridge console, final HeimdallLogger logger) {
+            final boolean onProxy, final ConsoleBridge console, final HeimdallLogger logger) {
         final String command = request.command(namespaced);
         console.dispatchCommand(command).whenComplete(new BiConsumer<String, Throwable>() {
             @Override
@@ -159,14 +213,40 @@ final class LiteBansRevokeLift {
                     return;
                 }
                 Throwable cause = unwrap(failure);
-                if (namespaced && cause instanceof UnknownCommandException) {
-                    dispatch(request, false, console, logger);
+                if (namespaced && onProxy && cause instanceof UnknownCommandException) {
+                    dispatch(request, false, onProxy, console, logger);
                     return;
                 }
+                AWAITING_ECHO.remove(echoKey(request.family, request.uuid));
                 logger.warn("Revoked in Heimdall but LiteBans was not told: `" + command
                         + "` failed (" + cause + "). Lift it in LiteBans by hand.");
             }
         });
+    }
+
+    private static void expectEcho(Request request) {
+        long now = System.currentTimeMillis();
+        // Stale entries are lifts LiteBans never echoed; drop them so the map stays bounded.
+        Iterator<Map.Entry<String, Long>> stale = AWAITING_ECHO.entrySet().iterator();
+        while (stale.hasNext()) {
+            if (now - stale.next().getValue().longValue() > ECHO_WINDOW_MS) stale.remove();
+        }
+        AWAITING_ECHO.put(echoKey(request.family, request.uuid), Long.valueOf(now));
+    }
+
+    private static String echoKey(Family family, UUID uuid) {
+        return family.name() + ":" + uuid;
+    }
+
+    private static UUID parseUuid(String raw) {
+        if (raw == null) return null;
+        String trimmed = raw.trim();
+        if (trimmed.length() != 36) return null;
+        try {
+            return UUID.fromString(trimmed);
+        } catch (IllegalArgumentException notAUuid) {
+            return null;
+        }
     }
 
     private static Throwable unwrap(Throwable failure) {
@@ -176,5 +256,10 @@ final class LiteBansRevokeLift {
             current = current.getCause();
         }
         return current;
+    }
+
+    /** Forgets every lift awaiting its echo. Tests only. */
+    static void clearForTest() {
+        AWAITING_ECHO.clear();
     }
 }

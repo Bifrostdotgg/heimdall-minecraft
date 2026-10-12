@@ -138,6 +138,9 @@ final class LiteBansEventBridge {
         if (entry == null || !context.api().isUsable()) return;
         String type = mapType(entry);
         if (type == null) return;
+        // The removal our own lift caused. The bot already revoked the row it was about, and a
+        // loose type-and-uuid revoke would sweep any other row on the player, hidden ones too.
+        if (LiteBansRevokeLift.isOwnEcho(type, dashedUuid(entry.getUuid()))) return;
         Payload.Builder body = Payload.builder()
                 .put("type", type)
                 .put("opId", UUID.randomUUID().toString())

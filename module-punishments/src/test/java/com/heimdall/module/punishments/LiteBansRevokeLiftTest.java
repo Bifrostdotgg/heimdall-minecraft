@@ -1,6 +1,7 @@
 package com.heimdall.module.punishments;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -15,6 +16,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -47,46 +49,70 @@ class LiteBansRevokeLiftTest {
         LiteBansSupport.activeCheckForTest(null);
     }
 
+    /** A frame about a row LiteBans' bridge reported, which is the case that lifts. */
+    private static LiteBansRevokeLift.Request req(String type, String uuid, String cause) {
+        return LiteBansRevokeLift.requestFor(type, uuid, cause, "hook", null);
+    }
+
     @Test
     @DisplayName("a manual revoke of a ban, an IP ban or a mute maps onto LiteBans' own verb")
     void manualRevokesMapOntoTheVerb() {
         assertEquals("litebans:unban " + UUID_STRING + " -s",
-                LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual").command(true));
+                req("ban", UUID_STRING, "manual").command(true));
         assertEquals("unban " + UUID_STRING + " -s",
-                LiteBansRevokeLift.requestFor("ipban", UUID_STRING, "manual").command(false));
+                req("ipban", UUID_STRING, "manual").command(false));
         assertEquals("litebans:unmute " + UUID_STRING + " -s",
-                LiteBansRevokeLift.requestFor("mute", UUID_STRING, " MANUAL ").command(true));
-        assertNotNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, null),
-                "an absent cause is an older bot, and every revoke it sends is a lifting");
-        assertNotNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, ""));
+                req("mute", UUID_STRING, " MANUAL ").command(true));
+        assertNull(req("ban", UUID_STRING, null),
+                "a frame that carries a source always carries a cause; one without is malformed");
+    }
+
+    @Test
+    @DisplayName("only a row LiteBans holds is lifted there")
+    void onlyLiteBansRowsAreLifted() {
+        assertNotNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "hook", null));
+        assertNotNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import", "ban:42"));
+        assertNotNull(LiteBansRevokeLift.requestFor("ipban", UUID_STRING, "manual", "import", "ipban:7"));
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "dashboard", null),
+                "LiteBans lifts the player, not a row, so this would lift an unrelated ban");
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "command", null));
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "", null),
+                "an older bot sends no source, and a lift that cannot tell is not made");
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "advancedban:ban:" + UUID_STRING + ":1700000000000"),
+                "every import is stamped litebans; only the id shape says which plugin it was");
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "vanilla:player:" + UUID_STRING));
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "banmanager:ban:" + UUID_STRING));
     }
 
     @Test
     @DisplayName("an expiry or an override never lifts anything in LiteBans")
     void bookkeepingRevokesLiftNothing() {
-        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "expiry"),
+        assertNull(req("ban", UUID_STRING, "expiry"),
                 "LiteBans has already ended its own tempban");
-        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "override"),
+        assertNull(req("ban", UUID_STRING, "override"),
                 "the row being retired was replaced by a newer ban, which may be LiteBans' own");
-        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "something-new"),
+        assertNull(req("ban", UUID_STRING, "something-new"),
                 "an unknown cause is not a reason to lift a ban somebody else's plugin holds");
     }
 
     @Test
     @DisplayName("a warn, a kick or an address-only IP ban names nothing LiteBans can lift")
     void unliftableFramesLiftNothing() {
-        assertNull(LiteBansRevokeLift.requestFor("warn", UUID_STRING, "manual"));
-        assertNull(LiteBansRevokeLift.requestFor("kick", UUID_STRING, "manual"));
-        assertNull(LiteBansRevokeLift.requestFor("ipban", "", "manual"));
-        assertNull(LiteBansRevokeLift.requestFor("ipban", null, "manual"));
+        assertNull(req("warn", UUID_STRING, "manual"));
+        assertNull(req("kick", UUID_STRING, "manual"));
+        assertNull(req("ipban", "", "manual"));
+        assertNull(req("ipban", null, "manual"));
     }
 
     @Test
     @DisplayName("only a well-formed uuid ever reaches the console")
     void onlyAUuidReachesTheConsole() {
-        assertNull(LiteBansRevokeLift.requestFor("ban", "Steve", "manual"));
-        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING + " --sender=x", "manual"));
-        assertNull(LiteBansRevokeLift.requestFor("ban", "1-2-3-4-5", "manual"),
+        assertNull(req("ban", "Steve", "manual"));
+        assertNull(req("ban", UUID_STRING + " --sender=x", "manual"));
+        assertNull(req("ban", "1-2-3-4-5", "manual"),
                 "UUID.fromString accepts this, and it would print as a different player");
     }
 
@@ -94,8 +120,8 @@ class LiteBansRevokeLiftTest {
     @DisplayName("nothing is run when LiteBans has nothing in force")
     void nothingInForceRunsNothing() {
         FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dir);
-        LiteBansRevokeLift.lift(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual"),
-                (family, uuid) -> false, INLINE, platform.console(), new RecordingLogger());
+        LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
+                (family, uuid) -> false, INLINE, platform.console(), new RecordingLogger(), false);
 
         assertEquals(Collections.emptyList(), platform.dispatchedCommands(),
                 "every server in a network gets the frame, and a dashboard ban was never in "
@@ -107,39 +133,69 @@ class LiteBansRevokeLiftTest {
     void fallsBackToTheBareVerb() {
         FakePlatform proxy = new FakePlatform(ServerRole.GATEKEEPER, dir).withoutCommand("litebans:unban");
         AtomicInteger asked = new AtomicInteger();
-        LiteBansRevokeLift.lift(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual"),
+        LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
                 (family, uuid) -> {
                     asked.incrementAndGet();
                     assertEquals(LiteBansRevokeLift.Family.BAN, family);
                     assertEquals(PLAYER, uuid);
                     return true;
-                }, INLINE, proxy.console(), new RecordingLogger());
+                }, INLINE, proxy.console(), new RecordingLogger(), true);
 
         assertEquals(1, asked.get());
         assertEquals(Arrays.asList("litebans:unban " + UUID_STRING + " -s",
                 "unban " + UUID_STRING + " -s"), proxy.dispatchedCommands());
 
         FakePlatform bukkit = new FakePlatform(ServerRole.STANDALONE, dir);
-        LiteBansRevokeLift.lift(LiteBansRevokeLift.requestFor("mute", UUID_STRING, "manual"),
-                (family, uuid) -> true, INLINE, bukkit.console(), new RecordingLogger());
+        LiteBansRevokeLift.lift(req("mute", UUID_STRING, "manual"),
+                (family, uuid) -> true, INLINE, bukkit.console(), new RecordingLogger(), false);
         assertEquals(Collections.singletonList("litebans:unmute " + UUID_STRING + " -s"),
-                bukkit.dispatchedCommands(),
+                bukkit.dispatchedCommands());
+
+        FakePlatform noNamespace = new FakePlatform(ServerRole.STANDALONE, dir)
+                .withoutCommand("litebans:unban");
+        LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
+                (family, uuid) -> true, INLINE, noNamespace.console(), new RecordingLogger(), false);
+        assertEquals(Collections.singletonList("litebans:unban " + UUID_STRING + " -s"),
+                noNamespace.dispatchedCommands(),
                 "on Bukkit a bare unban can belong to Essentials or vanilla");
     }
 
     @Test
     @DisplayName("a failed LiteBans lookup lifts anyway, and a failed unban is logged for staff")
     void failuresAreReportedNotSwallowed() {
-        FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dir)
-                .failingDispatch(new IllegalStateException("console unavailable"));
+        CompletableFuture<String> refused = new CompletableFuture<String>();
+        refused.completeExceptionally(new IllegalStateException("console unavailable"));
+        FakePlatform platform = new FakePlatform(ServerRole.GATEKEEPER, dir)
+                .dispatchAnswering(refused);
         RecordingLogger logger = new RecordingLogger();
-        LiteBansRevokeLift.lift(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual"),
+        LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
                 (family, uuid) -> {
                     throw new IllegalStateException("pool exhausted");
-                }, INLINE, platform.console(), logger);
+                }, INLINE, platform.console(), logger, true);
 
         assertTrue(logger.logged(LogLevel.WARN, "Lift it in LiteBans by hand"),
                 logger.records().toString());
+        assertEquals(Collections.singletonList("litebans:unban " + UUID_STRING + " -s"),
+                platform.dispatchedCommands(),
+                "only an unknown command falls back; a failure is not retried as another plugin's");
+        assertFalse(LiteBansRevokeLift.isOwnEcho("ban", UUID_STRING),
+                "a lift that failed has no echo coming, and must not hide a real unban");
+    }
+
+    @Test
+    @DisplayName("the removal our own unban causes is not posted back to the bot")
+    void ownEchoIsRecognised() {
+        FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dir);
+        assertFalse(LiteBansRevokeLift.isOwnEcho("ban", UUID_STRING));
+        LiteBansRevokeLift.lift(req("ban", UUID_STRING, "manual"),
+                (family, uuid) -> true, INLINE, platform.console(), new RecordingLogger(), false);
+
+        assertTrue(LiteBansRevokeLift.isOwnEcho("ban", UUID_STRING),
+                "posted back, it would sweep every other ban row on the player, hidden ones too");
+        assertTrue(LiteBansRevokeLift.isOwnEcho("ipban", UUID_STRING),
+                "one unban can remove a ban and an IP ban, and each fires its own event");
+        assertFalse(LiteBansRevokeLift.isOwnEcho("mute", UUID_STRING));
+        assertFalse(LiteBansRevokeLift.isOwnEcho("ban", "1f0c0d0e-0000-4000-8000-000000000000"));
     }
 
     @Test
@@ -151,6 +207,7 @@ class LiteBansRevokeLiftTest {
                     .put("type", "ban")
                     .put("targetUuid", UUID_STRING)
                     .put("revokeCause", "manual")
+                    .put("source", "hook")
                     .put("revokedBy", "Adam")
                     .build());
 
@@ -170,6 +227,7 @@ class LiteBansRevokeLiftTest {
                     .put("type", "ban")
                     .put("targetUuid", UUID_STRING)
                     .put("revokeCause", "manual")
+                    .put("source", "hook")
                     .build());
 
             Thread.sleep(200);
