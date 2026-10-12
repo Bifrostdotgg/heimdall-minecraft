@@ -1457,6 +1457,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             public void onMessage(Envelope envelope) {
                 if (mirror == null) return;
                 Payload payload = envelope.payload();
+                // Before the mirror, and whether or not this server's mirror holds the row: in
+                // hook mode LiteBans is what keeps the player out, so the revoke is not done
+                // until LiteBans has lifted it as well.
+                LiteBansSupport.liftRevoked(context, payload);
                 String type = payload.string("type", "");
                 String uuid = payload.string("targetUuid", "");
                 String digest = payload.string("ipDigest", "");
