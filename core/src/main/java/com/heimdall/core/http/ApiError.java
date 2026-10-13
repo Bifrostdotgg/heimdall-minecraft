@@ -18,11 +18,13 @@ public final class ApiError extends RuntimeException {
 
     private final int httpStatus;
     private final String code;
+    private final String detail;
 
     ApiError(int httpStatus, String code, String message) {
         super(code + ": " + message + " (HTTP " + httpStatus + ")");
         this.httpStatus = httpStatus;
         this.code = code;
+        this.detail = message == null ? "" : message;
     }
 
     /** The HTTP status the bot answered with. */
@@ -33,6 +35,14 @@ public final class ApiError extends RuntimeException {
     /** The bot's error code, e.g. {@code NOT_CONFIGURED}, or {@code UNKNOWN} when it sent none. */
     public String code() {
         return code;
+    }
+
+    /**
+     * The bot's own sentence, without the code and status around it, for showing a player. Empty
+     * when it sent none.
+     */
+    public String detail() {
+        return detail;
     }
 
     /**
