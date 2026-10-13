@@ -136,8 +136,23 @@ final class LiteBansEventBridge {
 
     private static void postRevoke(ModuleContext context, Entry entry) {
         if (entry == null || !context.api().isUsable()) return;
+        PunishmentSettings settings = PunishmentSettings.from(context.config());
+        Payload body = revokeBody(entry, settings.ipSalt);
+        if (body == null) return;
+        context.api().revokePunishment(body);
+    }
+
+    /**
+     * The revoke payload for one LiteBans removal, or {@code null} when there is nothing to send.
+     *
+     * <p>{@code null} too for the removal our own lift caused ({@link LiteBansRevokeLift}). The bot
+     * already revoked the row it was about, and a loose type-and-uuid revoke would sweep any other
+     * row of that type on the player, hidden ones too.
+     */
+    static Payload revokeBody(Entry entry, String salt) {
         String type = mapType(entry);
-        if (type == null) return;
+        if (type == null) return null;
+        if (LiteBansRevokeLift.isOwnEcho(type, dashedUuid(entry.getUuid()))) return null;
         Payload.Builder body = Payload.builder()
                 .put("type", type)
                 .put("opId", UUID.randomUUID().toString())
@@ -146,12 +161,11 @@ final class LiteBansEventBridge {
         if (entry.getUuid() != null && !entry.getUuid().isEmpty()) {
             body.put("targetUuid", dashedUuid(entry.getUuid()));
         }
-        PunishmentSettings settings = PunishmentSettings.from(context.config());
-        if ("ipban".equals(type) && settings.ipSalt != null && !settings.ipSalt.isEmpty()
+        if ("ipban".equals(type) && salt != null && !salt.isEmpty()
                 && entry.getIp() != null && !entry.getIp().isEmpty()) {
-            body.put("ipDigest", PunishmentIp.hash(entry.getIp(), settings.ipSalt));
+            body.put("ipDigest", PunishmentIp.hash(entry.getIp(), salt));
         }
-        context.api().revokePunishment(body.build());
+        return body.build();
     }
 
     private static String mapType(Entry entry) {
