@@ -1244,9 +1244,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 if (p == null || mirror == null) return;
                 boolean echo = isOwnEcho(payload.string("opId", ""));
                 PunishmentSettings settings = PunishmentSettings.from(context.config());
+                boolean announced = echo
+                        || liteBansAnnounced(payload.string("source", ""), settings);
                 if ("kick".equals(p.type)) {
                     applyLive(p.targetUuid, p, settings);
-                    if (!echo) announce(announcementFor(p, settings));
+                    if (!announced) announce(announcementFor(p, settings));
                     return;
                 }
                 String key = keyFor(p);
@@ -1255,9 +1257,34 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 mirror.record(key, p);
                 refreshRevokeCandidacy(revokeFamily(p.type), p.targetUuid, p.targetName);
                 applyLive(p.targetUuid, p, settings);
-                if (!echo) announce(announcementFor(p, settings));
+                if (!announced) announce(announcementFor(p, settings));
             }
         };
+    }
+
+    /**
+     * Whether LiteBans has already announced the punishment a frame describes, so a Heimdall line
+     * would be the same news twice.
+     *
+     * <p>{@code source} is the punishment's own source on a {@code punish.apply} frame, and the
+     * revoke's {@code revokeSource} on a {@code punish.revoke} frame. {@code hook} means the
+     * LiteBans event bridge reported it: LiteBans ran it and broadcast its own line before the
+     * bot ever heard of it. The bridge posts from the server that ran the command, the bot fans
+     * the frame out to the others, and the proxy in front announced it again, so one mute on a
+     * backend produced two chat lines (reported 2026-10-16). Any other source is something
+     * LiteBans never saw (the dashboard, Discord, {@code /offend}, a native command elsewhere),
+     * so Heimdall's line is the only one there is.
+     *
+     * <p>An absent source is an older bot, which never sent one, and then nothing on the frame
+     * tells a LiteBans punishment from a dashboard one. It falls back to the mode. In replace
+     * mode Heimdall is the punishment system and announces. In hook and offenses-only mode
+     * nearly every frame is a LiteBans punishment already announced, so it stays quiet. The cost
+     * is that a dashboard punishment sent by an older bot in those two modes goes unannounced.
+     */
+    static boolean liteBansAnnounced(String source, PunishmentSettings settings) {
+        String s = source == null ? "" : source.trim();
+        if (s.isEmpty()) return !settings.replaceMode();
+        return "hook".equalsIgnoreCase(s);
     }
 
     /**
@@ -1478,6 +1505,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         revokeFamily(lifted.type), lifted.targetUuid, lifted.targetName);
                 if (!announceableRevoke(payload.string("revokeCause", ""))) return;
                 PunishmentSettings settings = PunishmentSettings.from(context.config());
+                // revokeSource is who lifted it. Not "source", which a newer bot also sends on
+                // this frame and which names where the ROW came from: a dashboard lift of a
+                // LiteBans row is Heimdall's to announce, because LiteBans never broadcast it.
+                if (liteBansAnnounced(payload.string("revokeSource", ""), settings)) return;
                 // Hidden is read off the row being lifted, never off a flag, so a revoke frame
                 // about a hidden row is announced to node holders and to nobody else.
                 announce(PunishmentAnnouncement.revoked(settings.announceRevoke, lifted.type,

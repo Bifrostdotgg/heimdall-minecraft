@@ -136,22 +136,36 @@ final class LiteBansEventBridge {
 
     private static void postRevoke(ModuleContext context, Entry entry) {
         if (entry == null || !context.api().isUsable()) return;
+        PunishmentSettings settings = PunishmentSettings.from(context.config());
+        Payload body = revokeBody(entry, settings.ipSalt);
+        if (body == null) return;
+        context.api().revokePunishment(body);
+    }
+
+    /**
+     * The revoke payload for one removed LiteBans entry, or {@code null} for a type the bot does
+     * not mirror. Split out of {@link #postRevoke} for the same reason as {@link #issueBody}.
+     */
+    static Payload revokeBody(Entry entry, String salt) {
         String type = mapType(entry);
-        if (type == null) return;
+        if (type == null) return null;
         Payload.Builder body = Payload.builder()
                 .put("type", type)
+                // Tells the bot LiteBans lifted this and has announced it, so the revoke it fans
+                // out is not announced a second time. See
+                // HeimdallPunishmentsModule#liteBansAnnounced.
+                .put("source", "hook")
                 .put("opId", UUID.randomUUID().toString())
                 .put("issuedAt", System.currentTimeMillis())
                 .put("revokedBy", entry.getExecutorName() == null ? "" : entry.getExecutorName());
         if (entry.getUuid() != null && !entry.getUuid().isEmpty()) {
             body.put("targetUuid", dashedUuid(entry.getUuid()));
         }
-        PunishmentSettings settings = PunishmentSettings.from(context.config());
-        if ("ipban".equals(type) && settings.ipSalt != null && !settings.ipSalt.isEmpty()
+        if ("ipban".equals(type) && salt != null && !salt.isEmpty()
                 && entry.getIp() != null && !entry.getIp().isEmpty()) {
-            body.put("ipDigest", PunishmentIp.hash(entry.getIp(), settings.ipSalt));
+            body.put("ipDigest", PunishmentIp.hash(entry.getIp(), salt));
         }
-        context.api().revokePunishment(body.build());
+        return body.build();
     }
 
     private static String mapType(Entry entry) {
