@@ -1,6 +1,7 @@
 package com.heimdall.platform.common;
 
 import com.heimdall.core.admin.AdminContext;
+import com.heimdall.core.util.Registration;
 import com.heimdall.core.wiring.HeimdallRuntime;
 import com.heimdall.module.bridge.HeimdallBridgeModule;
 import com.heimdall.module.console.HeimdallConsoleModule;
@@ -8,6 +9,7 @@ import com.heimdall.module.offenses.HeimdallOffensesModule;
 import com.heimdall.module.punishments.HeimdallPunishmentsModule;
 import com.heimdall.module.rolesync.HeimdallRoleSyncModule;
 import com.heimdall.module.whitelist.HeimdallWhitelistModule;
+import com.heimdall.shell.contract.ShellContext;
 
 /**
  * Which feature modules this build ships, how the two that know about each other are joined up, and
@@ -65,10 +67,17 @@ public final class HeimdallModules {
      * as its guild resolves — so a module registered here on an unconfigured server is still holding
      * the right thing after {@code /hd setup} runs, without a restart. Departure D56.
      *
+     * <p>It also binds the punishments module as the backend of the shell's public
+     * {@code HeimdallPunishments}, for the same reason the admin surfaces are handed out here: this
+     * is the one place that holds the module instance and can see the shell contract.
+     *
      * @param admin the context the command tree will be built from; this fills in the module
      *     surfaces on it and leaves everything else to the caller
+     * @param shell this generation's shell; {@code null} skips the public punishment backend
+     * @return a handle that unbinds the public punishment backend; close it before the runtime
      */
-    public static void registerAll(HeimdallRuntime runtime, AdminContext.Builder admin) {
+    public static Registration registerAll(
+            HeimdallRuntime runtime, AdminContext.Builder admin, ShellContext shell) {
         if (runtime == null || admin == null) {
             throw new IllegalArgumentException("a runtime and an admin context builder are required");
         }
@@ -92,6 +101,7 @@ public final class HeimdallModules {
         // The modules themselves implement the admin interfaces. A separate adapter object would
         // only be a place for the two to disagree about whether a module is running.
         admin.whitelist(whitelist).offenses(offenses).punishments(punishments);
+        return PunishmentSpiService.install(punishments, shell);
     }
 
     /**

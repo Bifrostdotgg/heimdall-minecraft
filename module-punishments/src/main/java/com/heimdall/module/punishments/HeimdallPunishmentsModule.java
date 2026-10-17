@@ -2207,22 +2207,33 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     public boolean isFrozen(UUID uuid) {
-        if (uuid == null || mirror == null) return false;
-        ActivePunishment freeze = mirror.get("freeze:" + uuid);
-        return freeze != null && !freeze.expired(System.currentTimeMillis());
+        return activeFor("freeze", uuid) != null;
     }
 
     public boolean isMuted(UUID uuid) {
-        if (uuid == null || mirror == null) return false;
-        ActivePunishment mute = mirror.get("mute:" + uuid);
-        return mute != null && !mute.expired(System.currentTimeMillis());
+        return activeFor("mute", uuid) != null;
     }
 
     /** Whether the active mute on this player is a hidden one. False when there is no mute. */
     public boolean isMuteHidden(UUID uuid) {
-        if (uuid == null || mirror == null) return false;
-        ActivePunishment mute = mirror.get("mute:" + uuid);
-        return mute != null && !mute.expired(System.currentTimeMillis()) && mute.hidden;
+        ActivePunishment mute = activeFor("mute", uuid);
+        return mute != null && mute.hidden;
+    }
+
+    /**
+     * The active, unexpired punishment of a UUID-keyed {@code type} ({@code ban}, {@code mute},
+     * {@code freeze}, {@code warn}) on {@code uuid}, or {@code null}; also {@code null} while the
+     * module is disabled.
+     *
+     * <p>A read of the in-memory mirror and nothing else, so it is safe from any thread, chat
+     * threads included. The public {@code HeimdallPunishments} API answers through this. The row
+     * returned is the mirror's own: read it, never change it.
+     */
+    public ActivePunishment activeFor(String type, UUID uuid) {
+        MirrorStore<ActivePunishment> current = mirror;
+        if (uuid == null || type == null || current == null) return null;
+        ActivePunishment found = current.get(type + ":" + uuid);
+        return found == null || found.expired(System.currentTimeMillis()) ? null : found;
     }
 
     public void notifyStaff(String line) {

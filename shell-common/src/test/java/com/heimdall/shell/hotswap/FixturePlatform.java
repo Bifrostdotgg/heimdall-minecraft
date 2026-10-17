@@ -1,5 +1,6 @@
 package com.heimdall.shell.hotswap;
 
+import com.heimdall.api.HeimdallPunishments;
 import com.heimdall.api.HeimdallTunnel;
 import com.heimdall.core.util.Registration;
 import java.io.File;
@@ -29,6 +30,7 @@ final class FixturePlatform implements ShellPlatform {
     final Path dataDirectory;
     volatile File shellJar;
     volatile HeimdallTunnel published;
+    volatile HeimdallPunishments publishedPunishments;
 
     FixturePlatform(Path dataDirectory) {
         this.dataDirectory = dataDirectory;
@@ -104,6 +106,17 @@ final class FixturePlatform implements ShellPlatform {
             @Override
             public void run() {
                 published = null;
+            }
+        });
+    }
+
+    @Override
+    public Registration publishPunishments(final HeimdallPunishments punishments) {
+        publishedPunishments = punishments;
+        return Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                publishedPunishments = null;
             }
         });
     }

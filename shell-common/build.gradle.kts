@@ -66,14 +66,25 @@ dependencies {
     "fixtureCoreCompileOnly"(project(":shell-api"))
 }
 
+// The contract this shell implements, read from its one definition the way :app reads it, so a
+// bump does not leave every fixture built for the previous contract. "nextcontract" is the core
+// built for a contract this shell does not implement yet.
+val shellContract: Int = rootProject.file(
+    "shell-api/src/main/java/com/heimdall/shell/contract/ShellContract.java",
+).readText().let { source ->
+    val match = Regex("""public static final int VERSION = (\d+);""").find(source)
+        ?: throw GradleException("could not find ShellContract.VERSION in its source file")
+    match.groupValues[1].toInt()
+}
+
 val fixtureCoreContracts = mapOf(
-    "alpha" to "1",
-    "beta" to "1",
-    "failing" to "1",
-    "contradicts" to "1",
-    "leaky" to "1",
-    "fragile" to "1",
-    "contract2" to "2",
+    "alpha" to "$shellContract",
+    "beta" to "$shellContract",
+    "failing" to "$shellContract",
+    "contradicts" to "$shellContract",
+    "leaky" to "$shellContract",
+    "fragile" to "$shellContract",
+    "nextcontract" to "${shellContract + 1}",
 )
 
 val fixtureCoreJars = fixtureCoreContracts.map { (variant, contract) ->

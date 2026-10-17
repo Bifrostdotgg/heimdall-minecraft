@@ -1,5 +1,7 @@
 package com.heimdall.shell.bukkit;
 
+import com.heimdall.api.HeimdallPunishments;
+import com.heimdall.api.HeimdallPunishmentsProvider;
 import com.heimdall.api.HeimdallTunnel;
 import com.heimdall.api.HeimdallTunnelProvider;
 import com.heimdall.core.util.Registration;
@@ -214,6 +216,20 @@ public final class HeimdallBukkitPlugin extends JavaPlugin {
                 public void run() {
                     HeimdallTunnelProvider.uninstall(tunnel);
                     Bukkit.getServicesManager().unregister(HeimdallTunnel.class, tunnel);
+                }
+            });
+        }
+
+        @Override
+        public Registration publishPunishments(final HeimdallPunishments punishments) {
+            HeimdallPunishmentsProvider.install(punishments);
+            Bukkit.getServicesManager().register(HeimdallPunishments.class, punishments,
+                    HeimdallBukkitPlugin.this, ServicePriority.Normal);
+            return Registration.once(new Runnable() {
+                @Override
+                public void run() {
+                    HeimdallPunishmentsProvider.uninstall(punishments);
+                    Bukkit.getServicesManager().unregister(HeimdallPunishments.class, punishments);
                 }
             });
         }

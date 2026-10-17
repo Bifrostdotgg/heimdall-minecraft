@@ -1,6 +1,8 @@
 package com.heimdall.shell.velocity;
 
 import com.google.inject.Inject;
+import com.heimdall.api.HeimdallPunishments;
+import com.heimdall.api.HeimdallPunishmentsProvider;
 import com.heimdall.api.HeimdallTunnel;
 import com.heimdall.api.HeimdallTunnelProvider;
 import com.heimdall.core.util.Registration;
@@ -244,6 +246,17 @@ public final class HeimdallVelocityPlugin {
                 @Override
                 public void run() {
                     HeimdallTunnelProvider.uninstall(tunnel);
+                }
+            });
+        }
+
+        @Override
+        public Registration publishPunishments(final HeimdallPunishments punishments) {
+            HeimdallPunishmentsProvider.install(punishments);
+            return Registration.once(new Runnable() {
+                @Override
+                public void run() {
+                    HeimdallPunishmentsProvider.uninstall(punishments);
                 }
             });
         }

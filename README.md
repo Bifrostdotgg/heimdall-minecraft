@@ -635,6 +635,30 @@ The build generates `BuildConstants.VERSION` from it, substitutes it into
 workflow does — so the tag, the jar name and every in-jar version reference cannot
 drift apart.
 
+### Public API for other plugins
+
+Other plugins compile against `com.heimdall.api` (the `:api` module) and soft-depend on Heimdall.
+Every object below is the shell's, so it survives a hot swap of the core and may be cached.
+
+- `HeimdallPunishments`: `isMuted(UUID)`, `isMuteHidden(UUID)`, `isBanned(UUID)`,
+  `isFrozen(UUID)`, `activePunishment(UUID, type)` and `isAvailable()`. Reads memory only, so it is
+  safe from async chat threads and the main thread. Answers "not punished" while no core or no
+  punishments module is running.
+- `HeimdallTunnel`: publish to, request from and subscribe to the bot over Heimdall's connection.
+
+```java
+// Any platform
+HeimdallPunishments punishments = HeimdallPunishmentsProvider.get();
+// Bukkit family, also
+HeimdallPunishments viaServices = Bukkit.getServicesManager().load(HeimdallPunishments.class);
+
+if (punishments != null && punishments.isMuted(player.getUniqueId())) {
+    // refuse the message
+}
+```
+
+See departures D87 and D89 in `docs/v2-departures.md` for how they stay valid across a swap.
+
 ### API Endpoints Used
 
 - `POST /api/minecraft/connection-attempt` - Check if player should be whitelisted
