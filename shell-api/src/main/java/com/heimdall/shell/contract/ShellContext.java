@@ -121,6 +121,13 @@ public interface ShellContext {
     Registration bindTunnel(TunnelBackend backend);
 
     /**
+     * Makes {@code backend} what the shell's permanent {@code HeimdallPunishments} forwards to.
+     * Tracked like {@link #track}; closing it leaves every punishment query answering "not
+     * punished" until another core binds. Since contract 2.
+     */
+    Registration bindPunishments(PunishmentBackend backend);
+
+    /**
      * Offers an inbound tunnel message no core module claimed to the third-party plugins subscribed
      * through the public SPI.
      *

@@ -6,6 +6,7 @@ import com.heimdall.shell.contract.CommandBinding;
 import com.heimdall.shell.contract.CoreIdentity;
 import com.heimdall.shell.contract.Handoff;
 import com.heimdall.shell.contract.LoginGate;
+import com.heimdall.shell.contract.PunishmentBackend;
 import com.heimdall.shell.contract.Registrations;
 import com.heimdall.shell.contract.ShellContext;
 import com.heimdall.shell.contract.ShellContract;
@@ -38,6 +39,7 @@ public final class FakeShellContext implements ShellContext {
 
     private volatile boolean swapping;
     private volatile TunnelBackend backend;
+    private volatile PunishmentBackend punishments;
     private volatile LoginGate loginGate;
     private volatile Map<String, Object> handoffIn = Collections.emptyMap();
     private volatile Map<String, Object> handoffOut = Collections.emptyMap();
@@ -106,6 +108,11 @@ public final class FakeShellContext implements ShellContext {
     /** The bound tunnel backend, or {@code null}. */
     public TunnelBackend backend() {
         return backend;
+    }
+
+    /** The bound punishment backend, or {@code null}. */
+    public PunishmentBackend punishments() {
+        return punishments;
     }
 
     /** {@code "<id>/<type>"} for each unclaimed message delivered. */
@@ -227,6 +234,19 @@ public final class FakeShellContext implements ShellContext {
             public void run() {
                 if (backend == next) {
                     backend = null;
+                }
+            }
+        }));
+    }
+
+    @Override
+    public Registration bindPunishments(final PunishmentBackend next) {
+        punishments = next;
+        return tracked.add(Registration.once(new Runnable() {
+            @Override
+            public void run() {
+                if (punishments == next) {
+                    punishments = null;
                 }
             }
         }));

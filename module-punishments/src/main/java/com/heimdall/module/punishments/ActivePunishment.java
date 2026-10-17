@@ -47,7 +47,7 @@ public final class ActivePunishment {
     }
 
     /** When it ends, or {@code null} for a permanent punishment or an unparseable instant. */
-    Long expiresAtMillis() {
+    public Long expiresAtMillis() {
         if (expiresAt == null || expiresAt.isEmpty()) return null;
         try {
             return Long.valueOf(java.time.Instant.parse(expiresAt).toEpochMilli());
@@ -56,7 +56,7 @@ public final class ActivePunishment {
         }
     }
 
-    long issuedAtMillis() {
+    public long issuedAtMillis() {
         if (issuedAt == null || issuedAt.isEmpty()) return 0L;
         try {
             return java.time.Instant.parse(issuedAt).toEpochMilli();

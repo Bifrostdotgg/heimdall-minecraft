@@ -99,6 +99,7 @@ public final class ShellHost {
     private final ShellLog log;
     private final String shellVersion;
     private final ShellTunnel tunnel;
+    private final ShellPunishments punishments;
     private final RelayTable relays;
     private final LoginGateHolder gates;
 
@@ -118,6 +119,7 @@ public final class ShellHost {
     private ExecutorService swapThread;
     private ScheduledThreadPoolExecutor timer;
     private Registration publishedTunnel = Registration.NONE;
+    private Registration publishedPunishments = Registration.NONE;
 
     /** How long a retired loader stays open; a field so tests can shorten it. */
     volatile long loaderGraceMs = LOADER_GRACE_MS;
@@ -148,6 +150,7 @@ public final class ShellHost {
         this.log = platform.log();
         this.shellVersion = shellVersion == null ? "unknown" : shellVersion;
         this.tunnel = new ShellTunnel(log, this.shellVersion);
+        this.punishments = new ShellPunishments(log);
         this.gates = gates == null ? new LoginGateHolder(log) : gates;
         this.relays = new RelayTable(platform.commands(), platform.audience(), log,
                 new RelayTable.State() {
@@ -262,6 +265,11 @@ public final class ShellHost {
         return tunnel;
     }
 
+    /** The permanent punishment queries other plugins hold. */
+    public ShellPunishments punishments() {
+        return punishments;
+    }
+
     /** The login gate the platform shell's permanent login listener asks. */
     public LoginGateHolder loginGate() {
         return gates;
@@ -278,7 +286,7 @@ public final class ShellHost {
     // ── Start and stop ───────────────────────────────────────────────────────
 
     /**
-     * Publishes the tunnel, then extracts, loads and starts the core this jar carries.
+     * Publishes the tunnel and the punishment queries, then extracts, loads and starts the core this jar carries.
      *
      * <p>Never throws. A core that cannot be read, loaded or started is reported, and the shell runs
      * on with no core.
@@ -292,6 +300,11 @@ public final class ShellHost {
                 publishedTunnel = platform.publishTunnel(tunnel);
             } catch (Throwable failed) {
                 log.warn("could not publish the HeimdallTunnel service: " + failed);
+            }
+            try {
+                publishedPunishments = platform.publishPunishments(punishments);
+            } catch (Throwable failed) {
+                log.warn("could not publish the HeimdallPunishments service: " + failed);
             }
             CoreArchive.CoreJar jar;
             try {
@@ -331,8 +344,8 @@ public final class ShellHost {
     }
 
     /**
-     * Stops the running core because the server is stopping, and withdraws the shell's commands and
-     * tunnel.
+     * Stops the running core because the server is stopping, and withdraws the shell's commands,
+     * tunnel and punishment queries.
      *
      * <p>The loader is deliberately left open. The JVM is about to exit (or, on a {@code /reload},
      * about to drop every reference), and closing it now would turn any callback still finishing on a
@@ -357,6 +370,12 @@ public final class ShellHost {
                 log.debug("withdrawing the HeimdallTunnel service failed: " + failed);
             }
             publishedTunnel = Registration.NONE;
+            try {
+                publishedPunishments.close();
+            } catch (Throwable failed) {
+                log.debug("withdrawing the HeimdallPunishments service failed: " + failed);
+            }
+            publishedPunishments = Registration.NONE;
         } finally {
             if (locked) {
                 transition.unlock();
@@ -815,6 +834,9 @@ public final class ShellHost {
         if (tunnel.sweep(retired)) {
             swept++;
         }
+        if (punishments.sweep(retired)) {
+            swept++;
+        }
         if (gates.sweep(retired)) {
             swept++;
         }
@@ -847,6 +869,10 @@ public final class ShellHost {
 
     Registration bindTunnel(com.heimdall.shell.contract.TunnelBackend backend) {
         return tunnel.bind(backend);
+    }
+
+    Registration bindPunishments(com.heimdall.shell.contract.PunishmentBackend backend) {
+        return punishments.bind(backend);
     }
 
     Registration bindLoginGate(com.heimdall.shell.contract.LoginGate gate) {

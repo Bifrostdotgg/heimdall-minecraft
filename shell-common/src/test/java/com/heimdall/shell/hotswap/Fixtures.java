@@ -15,7 +15,7 @@ final class Fixtures {
     private Fixtures() {
     }
 
-    /** A fixture core jar by variant: alpha, beta, failing, contradicts, leaky, contract2. */
+    /** A fixture core jar by variant: alpha, beta, failing, contradicts, leaky, nextcontract. */
     static Path core(String variant) {
         String dir = System.getProperty("heimdall.fixtureCores");
         if (dir == null || dir.isEmpty()) {

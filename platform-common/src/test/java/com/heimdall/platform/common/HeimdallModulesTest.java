@@ -1,7 +1,9 @@
 package com.heimdall.platform.common;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -11,8 +13,11 @@ import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.testing.FakePlatform;
+import com.heimdall.core.testing.FakeShellContext;
+import com.heimdall.core.util.Registration;
 import com.heimdall.core.wiring.HeimdallRuntime;
 import com.heimdall.module.punishments.HeimdallPunishmentsModule;
+import com.heimdall.shell.contract.ShellContract;
 import java.nio.file.Path;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,7 +65,7 @@ class HeimdallModulesTest {
     void punishmentSurfaceIsWired() {
         AdminContext.Builder builder = AdminContext.builder(runtime);
 
-        HeimdallModules.registerAll(runtime, builder);
+        HeimdallModules.registerAll(runtime, builder, null);
 
         PunishmentAdmin punishments = builder.build().punishments();
         assertNotSame(PunishmentAdmin.NONE, punishments,
@@ -71,6 +76,20 @@ class HeimdallModulesTest {
         assertFalse(punishments.isAvailable(),
                 "registered is not enabled: nothing has pushed config yet, and the tree has to say "
                         + "so rather than dispatch into a module with no context");
+    }
+
+    @Test
+    @DisplayName("registerAll binds the punishments module as the shell's public punishment backend")
+    void punishmentBackendIsBound() {
+        FakeShellContext shell = new FakeShellContext(ShellContract.PLATFORM_BUKKIT, dataDir);
+
+        Registration bound = HeimdallModules.registerAll(runtime, AdminContext.builder(runtime), shell);
+
+        assertNotNull(shell.punishments(),
+                "unbound, HeimdallPunishments answers 'not muted' for everyone on this core");
+        assertFalse(shell.punishments().isAvailable(), "registered is not enabled");
+        bound.close();
+        assertNull(shell.punishments(), "the bootstrap's disable must be able to unbind it");
     }
 
     @Test
