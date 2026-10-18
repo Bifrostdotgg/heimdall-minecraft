@@ -27,10 +27,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * and #812 a 2023 kick. Rows with no date (vanilla files) go last, since the bot dates them "now".
  *
  * <p>Then they go in sequential batches of {@link #BATCH_SIZE}. The bot refuses more than 5,000
- * rows in one request, and a single request for a whole history refused it all. Each batch is sent
- * once, with {@link com.heimdall.core.http.ApiClient#IMPORT_TIMEOUT_MS} rather than an ordinary
- * call's few seconds: the bot looks every row up and numbers its case, so a batch takes a while,
- * and a retry of a batch still being written would run the two copies side by side. A failed
+ * rows in one request, and a single request for a whole history refused it all. A batch is small
+ * enough to finish inside the gateway's 30 second proxy timeout, the limit that binds in production
+ * (the bot looks every row up and numbers its case). Each batch is sent once, with
+ * {@link com.heimdall.core.http.ApiClient#IMPORT_TIMEOUT_MS} rather than an ordinary call's few
+ * seconds, because a retry of a batch still being written would run the two copies side by side. A failed
  * batch stops the run, saying which batch, so nothing is half-applied out of order behind a
  * failure nobody saw.
  *
@@ -39,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 final class PunishmentImporters {
 
-    static final int BATCH_SIZE = 200;
+    static final int BATCH_SIZE = 100;
     /** Longer than the HTTP call's own timeout, so the call is what gives up and says why. */
     private static final long BATCH_WAIT_SECONDS =
             TimeUnit.MILLISECONDS.toSeconds(com.heimdall.core.http.ApiClient.IMPORT_TIMEOUT_MS) + 30L;

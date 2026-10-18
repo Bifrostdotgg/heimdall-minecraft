@@ -507,8 +507,9 @@ public final class ApiClient {
     }
 
     /**
-     * How long one import batch may take. A batch of hundreds of rows, each numbered as a case in
-     * turn, takes the bot far longer than the few seconds an ordinary call is given.
+     * How long one import batch may take. A batch of rows, each looked up and numbered as a case in
+     * turn, takes the bot far longer than the few seconds an ordinary call is given. Through the
+     * gateway its 30 second proxy timeout answers first; this is the bound on a direct connection.
      */
     public static final int IMPORT_TIMEOUT_MS = 120_000;
 

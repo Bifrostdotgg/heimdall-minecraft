@@ -271,7 +271,13 @@ final class LiteBansImporter {
     /**
      * Asks the driver to stream. Connector/J (and MariaDB's, for compatibility) stream only for
      * {@code Integer.MIN_VALUE}; H2, SQLite and PostgreSQL refuse a negative size and take an
-     * ordinary one instead. A driver that takes neither reads the way it always did.
+     * ordinary one instead. PostgreSQL's driver ignores even that while autocommit is on, which is
+     * LiteBans' pool default, so there the table is still read whole. A driver that takes neither
+     * reads the way it always did.
+     *
+     * <p>A streaming MySQL read holds its connection until the result is closed. That assumes
+     * {@code Database#prepareStatement} hands out a pooled connection of its own, as the API's
+     * close-the-statement contract suggests; unverified against a live LiteBans.
      */
     private static void streamResults(PreparedStatement statement) {
         try {
