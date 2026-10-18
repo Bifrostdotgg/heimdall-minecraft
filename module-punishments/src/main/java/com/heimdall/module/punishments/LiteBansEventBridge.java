@@ -82,13 +82,6 @@ final class LiteBansEventBridge {
         if (entry.getExecutorUUID() != null && !entry.getExecutorUUID().isEmpty()) {
             body.put("issuedByUuid", dashedUuid(entry.getExecutorUUID()));
         }
-        // The row's LiteBans id, in the importer's shape, so an import run later recognises this
-        // punishment as already mirrored instead of importing it a second time.
-        long id = idOf(entry);
-        if (id > 0L) {
-            body.put("importProvider", "litebans");
-            body.put("importProviderId", LiteBansImporter.providerId(type, id));
-        }
         if ("ipban".equals(type)) {
             if (salt == null || salt.isEmpty()) {
                 logger.warn("LiteBans hook skipped IP hash: ip salt has not been pushed");
@@ -173,19 +166,6 @@ final class LiteBansEventBridge {
             body.put("ipDigest", PunishmentIp.hash(entry.getIp(), salt));
         }
         return body.build();
-    }
-
-    /**
-     * The entry's database id, or 0 when this LiteBans build does not expose one. Guarded because
-     * the stub is compiled against, not the real jar: a missing method is a NoSuchMethodError at
-     * runtime, and a mirror without the id is still a mirror.
-     */
-    static long idOf(Entry entry) {
-        try {
-            return entry.getId();
-        } catch (Throwable missing) {
-            return 0L;
-        }
     }
 
     private static String mapType(Entry entry) {

@@ -5,8 +5,6 @@ package litebans.api;
  */
 public abstract class Entry {
 
-    public abstract long getId();
-
     public abstract String getType();
 
     public abstract String getUuid();
