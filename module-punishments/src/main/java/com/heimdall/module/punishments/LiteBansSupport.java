@@ -36,8 +36,4 @@ final class LiteBansSupport {
         hook = Registration.NONE;
         current.close();
     }
-
-    static void importNow(final ModuleContext context) {
-        PunishmentImporters.importAll(context);
-    }
 }

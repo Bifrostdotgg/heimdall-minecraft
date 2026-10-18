@@ -724,6 +724,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         ModuleContext ctx = this.context;
         if (ctx == null) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
+        if ("import".equals(type)) {
+            runImportCommand(source, ctx);
+            return;
+        }
         if (isLookup(type)) {
             lookup(source, type, args);
             return;
@@ -1368,9 +1372,47 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             public void onMessage(Envelope envelope) {
                 ModuleContext ctx = HeimdallPunishmentsModule.this.context;
                 if (ctx == null) return;
-                LiteBansSupport.importNow(ctx);
+                // Hands off at once: this is the tunnel's thread, and the import reads whole tables.
+                if (!startImport(ctx, consoleProgress(ctx))) {
+                    ctx.logger().warn("punishment import requested while one is already running; ignored");
+                }
             }
         };
+    }
+
+    private boolean startImport(ModuleContext ctx, PunishmentImporters.Progress progress) {
+        return PunishmentImporters.start(ctx, lastIps, progress);
+    }
+
+    private static PunishmentImporters.Progress consoleProgress(final ModuleContext ctx) {
+        return new PunishmentImporters.Progress() {
+            @Override
+            public void line(String message) {
+                ctx.logger().info(message);
+            }
+        };
+    }
+
+    /**
+     * {@code /hd import}: the dashboard's Run import, from the game or the console.
+     *
+     * <p>Allowed in every mode. Importing is how a server moves off LiteBans, so it has to work
+     * while LiteBans is still the one enforcing. Lines go to whoever ran it and to the console.
+     */
+    private void runImportCommand(final CommandSource source, ModuleContext ctx) {
+        final ModuleContext context = ctx;
+        PunishmentImporters.Progress progress = new PunishmentImporters.Progress() {
+            @Override
+            public void line(String message) {
+                context.logger().info(message);
+                source.sendMessage(Msg.legacy("§7[import] §f" + message));
+            }
+        };
+        if (!startImport(ctx, progress)) {
+            source.sendMessage(Msg.legacy("§eAn import is already running on this server."));
+            return;
+        }
+        source.sendMessage(Msg.legacy("§aImport started. Progress follows here and in the console."));
     }
 
     /**

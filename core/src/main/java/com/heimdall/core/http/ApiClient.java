@@ -428,13 +428,20 @@ public final class ApiClient {
                 if (row.targetName != null) o.addProperty("targetName", row.targetName);
                 if (row.ipDigest != null) o.addProperty("ipDigest", row.ipDigest);
                 if (row.reason != null) o.addProperty("reason", row.reason);
+                if (row.durationSeconds != null) o.addProperty("durationSeconds", row.durationSeconds);
                 if (row.durationMinutes != null) o.addProperty("durationMinutes", row.durationMinutes);
                 o.addProperty("silent", row.silent);
                 if (row.issuedByName != null) o.addProperty("issuedByName", row.issuedByName);
+                if (row.issuedByUuid != null) o.addProperty("issuedByUuid", row.issuedByUuid);
                 if (row.issuedAtMillis > 0) o.addProperty("issuedAt", row.issuedAtMillis);
                 o.addProperty("importProvider", "litebans");
                 if (row.importProviderId != null) o.addProperty("importProviderId", row.importProviderId);
                 o.addProperty("active", row.active);
+                if (!row.active && row.revokedBy != null) {
+                    o.addProperty("revokedBy", row.revokedBy);
+                    if (row.revokeReason != null) o.addProperty("revokeReason", row.revokeReason);
+                    if (row.revokedAtMillis > 0) o.addProperty("revokedAt", row.revokedAtMillis);
+                }
                 array.add(o);
             }
         }
@@ -504,6 +511,25 @@ public final class ApiClient {
             ApiSettings current = settings;
             RawResponse response = requests.execute(current,
                     HttpCall.post(guildPath(current, "punishments/import"),
+                            body == null ? "{}" : body.toString(), current.timeoutMs()));
+            return Envelopes.unwrapObject(response.status(), response.body());
+        });
+    }
+
+    /**
+     * {@code POST punishments/import/report}: where an import run stands, for the dashboard's
+     * import card. A bot older than the route answers 404, which the caller treats as "nobody is
+     * listening" rather than as a failed import.
+     */
+    public CompletableFuture<JsonObject> reportPunishmentImport(Payload body) {
+        return reportPunishmentImport(payloadObject(body));
+    }
+
+    public CompletableFuture<JsonObject> reportPunishmentImport(JsonObject body) {
+        return async(() -> {
+            ApiSettings current = settings;
+            RawResponse response = requests.execute(current,
+                    HttpCall.post(guildPath(current, "punishments/import/report"),
                             body == null ? "{}" : body.toString(), current.timeoutMs()));
             return Envelopes.unwrapObject(response.status(), response.body());
         });

@@ -23,12 +23,33 @@ public final class PunishmentImportRow {
     public String ip;
     public String ipDigest;
     public String reason;
+    /**
+     * The length in seconds. Wins over {@link #durationMinutes} on the bot when both arrive, and is
+     * what the LiteBans importer sets; the minutes field is still sent for a bot older than that.
+     */
+    public Long durationSeconds;
     public Integer durationMinutes;
     public boolean silent;
     public String issuedByName;
+    /** The staff member's dashed UUID, or {@code null} for the console or an unknown issuer. */
+    public String issuedByUuid;
     public long issuedAtMillis;
     public String importProviderId;
+    /**
+     * Set instead of {@link #importProviderId} when the only stable id is the address itself.
+     * {@link #hashIpWith} appends the salted digest, so the id never carries the raw address.
+     */
+    public String importProviderIdIpPrefix;
     public boolean active;
+    /** Who lifted it, for a row that arrives already lifted by a person. */
+    public String revokedBy;
+    public String revokeReason;
+    public long revokedAtMillis;
+    /**
+     * The provider's server scope when it is narrower than the whole network. Never sent: the bot
+     * has no per-server punishments, so a scoped row is imported network-wide and only counted.
+     */
+    public String serverScope;
 
     /**
      * HMAC the scratch IP with the guild salt, then drop the raw address.
@@ -41,6 +62,10 @@ public final class PunishmentImportRow {
             ipDigest = PunishmentIp.hash(ip, salt);
         }
         ip = null;
+        if (importProviderId == null && importProviderIdIpPrefix != null && ipDigest != null) {
+            importProviderId = importProviderIdIpPrefix + ipDigest;
+        }
+        importProviderIdIpPrefix = null;
     }
 
     /** {@link #hashIpWith} every row. Null list is a no-op. */

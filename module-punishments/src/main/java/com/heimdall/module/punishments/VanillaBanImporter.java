@@ -60,7 +60,8 @@ final class VanillaBanImporter {
             row.ip = item.string("ip", "");
             row.reason = item.string("reason", "");
             row.issuedByName = item.string("source", "Server");
-            row.importProviderId = "vanilla:ip:" + row.ip;
+            // From the digest, never the address: the id is stored by the bot and shown back.
+            row.importProviderIdIpPrefix = "vanilla:ip:";
             row.active = true;
             if (row.ip == null || row.ip.isEmpty()) continue;
             out.add(row);

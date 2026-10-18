@@ -139,6 +139,57 @@ final class LastIpStore {
         dirty = true;
     }
 
+    /**
+     * Folds in a sighting from another plugin's history (LiteBans' {@code {history}}), which can be
+     * older than what this file already holds.
+     *
+     * <p>{@link #record} is for a login happening now and always takes the address as the latest.
+     * An imported sighting only does that when it is newer than the newest one already here;
+     * otherwise it is slotted into the history by date, so a run of the import never makes a
+     * player's last address an old one. A sighting of an address already in the history keeps the
+     * later of the two times instead of adding a second entry.
+     */
+    synchronized void mergeHistorical(String uuid, String name, String ip, long seenAt) {
+        if (uuid == null || uuid.isEmpty() || ip == null || ip.isEmpty() || seenAt <= 0L) {
+            return;
+        }
+        String key = uuid.toLowerCase(Locale.ROOT);
+        PlayerIps row = byUuid.get(key);
+        if (row == null || seenAt > row.seenAt) {
+            record(uuid, name, ip, seenAt);
+            return;
+        }
+        if (row.name == null && name != null) {
+            row.name = name;
+        }
+        for (int i = 0; i < row.history.size(); i++) {
+            Sighting existing = row.history.get(i);
+            if (ip.equals(existing.ip)) {
+                if (seenAt > existing.seenAt) {
+                    row.history.set(i, new Sighting(ip, seenAt));
+                    sortHistory(row);
+                    dirty = true;
+                }
+                return;
+            }
+        }
+        row.history.add(new Sighting(ip, seenAt));
+        sortHistory(row);
+        while (row.history.size() > HISTORY_LIMIT) {
+            row.history.remove(0);
+        }
+        dirty = true;
+    }
+
+    private static void sortHistory(PlayerIps row) {
+        Collections.sort(row.history, new java.util.Comparator<Sighting>() {
+            @Override
+            public int compare(Sighting a, Sighting b) {
+                return Long.compare(a.seenAt, b.seenAt);
+            }
+        });
+    }
+
     synchronized PlayerIps get(String uuid) {
         if (uuid == null) {
             return null;
