@@ -106,6 +106,34 @@ class LiteBansHookTest {
         assertTrue(logger.records().toString().contains("ip salt"), logger.records().toString());
     }
 
+    @Test
+    @DisplayName("a hooked punishment carries its LiteBans id in the importer's shape")
+    void hookCarriesTheLiteBansId() {
+        Payload ban = LiteBansEventBridge.issueBody(entry("ban", START, 0L), "salt", new RecordingLogger());
+        Payload ipban = LiteBansEventBridge.issueBody(
+                new FakeEntry("ban", START, 0L).ipban("203.0.113.9").id(7L), "salt", new RecordingLogger());
+        Payload warn = LiteBansEventBridge.issueBody(
+                new FakeEntry("warning", START, 0L).id(9L), "salt", new RecordingLogger());
+
+        assertEquals("litebans", ban.string("importProvider", null));
+        assertEquals("ban:42", ban.string("importProviderId", null),
+                "the import dedupes on this, so it has to be exactly what LiteBansImporter sends");
+        assertEquals(LiteBansImporter.providerId("ban", 42L), ban.string("importProviderId", null));
+        assertEquals("ipban:7", ipban.string("importProviderId", null));
+        assertEquals("warn:9", warn.string("importProviderId", null));
+    }
+
+    @Test
+    @DisplayName("an entry with no id is still mirrored, just without one")
+    void noIdStillMirrors() {
+        Payload body = LiteBansEventBridge.issueBody(
+                new FakeEntry("mute", START, 0L).id(0L), "salt", new RecordingLogger());
+
+        assertNotNull(body);
+        assertFalse(body.has("importProviderId"), body.toJson());
+        assertFalse(body.has("importProvider"), body.toJson());
+    }
+
     private static Entry entry(String type, long start, long end) {
         return new FakeEntry(type, start, end);
     }
@@ -118,6 +146,7 @@ class LiteBansHookTest {
         private final long end;
         private String ip;
         private boolean ipban;
+        private long id = 42L;
 
         FakeEntry(String type, long start, long end) {
             this.type = type;
@@ -129,6 +158,16 @@ class LiteBansHookTest {
             this.ip = address;
             this.ipban = true;
             return this;
+        }
+
+        FakeEntry id(long value) {
+            this.id = value;
+            return this;
+        }
+
+        @Override
+        public long getId() {
+            return id;
         }
 
         @Override
