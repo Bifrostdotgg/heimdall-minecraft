@@ -10,6 +10,7 @@ import com.heimdall.core.http.model.PunishmentImportRow;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -190,6 +191,27 @@ class LiteBansImporterTest {
         assertEquals("Steve", sighting.name);
         assertNull(sighting.ip);
         assertEquals(START, sighting.seenAt);
+    }
+
+    @Test
+    @DisplayName("sightings are kept for punished players, and for everyone else only when recent")
+    void sightingsKept() {
+        long cutoff = START;
+        java.util.Set<String> punished = Collections.singleton(PLAYER);
+        String other = "99999999-8888-7777-6666-555555555555";
+
+        assertTrue(LiteBansImporter.keepSighting(
+                new LiteBansImporter.Sighting(PLAYER.toUpperCase(), "Steve", "203.0.113.9", 1L),
+                punished, cutoff), "a punished player's old sighting stays, whatever the case");
+        assertFalse(LiteBansImporter.keepSighting(
+                new LiteBansImporter.Sighting(other, "Alex", "203.0.113.9", START - 1L),
+                punished, cutoff), "an unpunished player's old sighting goes");
+        assertTrue(LiteBansImporter.keepSighting(
+                new LiteBansImporter.Sighting(other, "Alex", "203.0.113.9", START),
+                punished, cutoff));
+        assertFalse(LiteBansImporter.keepSighting(
+                new LiteBansImporter.Sighting(PLAYER, "Steve", null, START),
+                punished, cutoff), "no address, nothing to keep");
     }
 
     @Test

@@ -506,20 +506,35 @@ public final class ApiClient {
         });
     }
 
+    /**
+     * How long one import batch may take. A batch of hundreds of rows, each numbered as a case in
+     * turn, takes the bot far longer than the few seconds an ordinary call is given.
+     */
+    public static final int IMPORT_TIMEOUT_MS = 120_000;
+
+    /**
+     * {@code POST punishments/import}, sent once with {@link #IMPORT_TIMEOUT_MS}.
+     *
+     * <p>Not retried: a batch that timed out on this side is usually still being written on the
+     * bot's, and sending it again would run the two side by side. The import is safe to run again
+     * as a whole, so a failed batch ends the run and the next run picks up where it stopped.
+     */
     public CompletableFuture<JsonObject> importPunishments(JsonObject body) {
         return async(() -> {
             ApiSettings current = settings;
-            RawResponse response = requests.execute(current,
+            ApiSettings once = current.toBuilder().retries(1).build();
+            RawResponse response = requests.execute(once,
                     HttpCall.post(guildPath(current, "punishments/import"),
-                            body == null ? "{}" : body.toString(), current.timeoutMs()));
+                            body == null ? "{}" : body.toString(), IMPORT_TIMEOUT_MS));
             return Envelopes.unwrapObject(response.status(), response.body());
         });
     }
 
     /**
      * {@code POST punishments/import/report}: where an import run stands, for the dashboard's
-     * import card. A bot older than the route answers 404, which the caller treats as "nobody is
-     * listening" rather than as a failed import.
+     * import card. A bot older than the route refuses it (404, or 403 where the guild token's scope
+     * does not list it yet), which the caller treats as "nobody is listening" rather than as a
+     * failed import.
      */
     public CompletableFuture<JsonObject> reportPunishmentImport(Payload body) {
         return reportPunishmentImport(payloadObject(body));

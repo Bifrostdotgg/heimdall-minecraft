@@ -9,9 +9,12 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /**
@@ -44,6 +47,23 @@ final class LiteBansImporter {
             "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
     private static final Pattern UUID_PLAIN = Pattern.compile("^[0-9a-fA-F]{32}$");
 
+    /**
+     * How far back an address sighting is kept for a player with no punishment.
+     *
+     * <p>{@code {history}} holds every player who ever joined, and the last-IP file it is merged
+     * into is loaded whole at boot and scanned for alt lookups. A punished player's sightings are
+     * all kept, since those are the ones an IP history lookup is for; everyone else's only when
+     * recent enough to still matter.
+     */
+    static final long SIGHTING_WINDOW_MS = TimeUnit.DAYS.toMillis(180L);
+
+    /** How many rows pass between {@link Ticker} calls while a table is read. */
+    private static final int TICK_EVERY_ROWS = 1000;
+
+    /** MySQL Connector/J's signal to stream a result instead of loading all of it. */
+    private static final int STREAM_FETCH_SIZE = Integer.MIN_VALUE;
+    private static final int FALLBACK_FETCH_SIZE = 1000;
+
     /** One row of {@code {history}}, LiteBans' log of which address each player joined from. */
     static final class Sighting {
         final String uuid;
@@ -64,6 +84,14 @@ final class LiteBansImporter {
         void accept(Sighting sighting);
     }
 
+    /**
+     * Called every so many rows while reading, so a long read can say it is still alive. A large
+     * {@code {history}} takes long enough that the dashboard would otherwise call the run stalled.
+     */
+    interface Ticker {
+        void tick();
+    }
+
     /** What one LiteBans pass produced. */
     static final class Result {
         final List<PunishmentImportRow> rows = new ArrayList<PunishmentImportRow>();
@@ -79,7 +107,7 @@ final class LiteBansImporter {
     private LiteBansImporter() {
     }
 
-    static Result readAll(HeimdallLogger logger, SightingSink sightings) {
+    static Result readAll(HeimdallLogger logger, SightingSink sightings, Ticker ticker) {
         Result result = new Result();
         Object database;
         try {
@@ -93,12 +121,19 @@ final class LiteBansImporter {
             return result;
         }
         result.installed = true;
-        // History first: the names it carries go onto the punishment rows.
-        Map<String, String> names = readHistory(logger, database, sightings, result);
-        readTable(logger, database, "{bans}", "ban", result);
-        readTable(logger, database, "{mutes}", "mute", result);
-        readTable(logger, database, "{warnings}", "warn", result);
-        readTable(logger, database, "{kicks}", "kick", result);
+        Ticker tick = ticker == null ? NO_TICK : ticker;
+        readTable(logger, database, "{bans}", "ban", result, tick);
+        readTable(logger, database, "{mutes}", "mute", result, tick);
+        readTable(logger, database, "{warnings}", "warn", result, tick);
+        readTable(logger, database, "{kicks}", "kick", result, tick);
+        // History last, so it only has to remember names and every sighting for the players the
+        // punishments name, not for everyone who ever joined.
+        Set<String> punished = new HashSet<String>();
+        for (PunishmentImportRow row : result.rows) {
+            if (row.targetUuid != null) punished.add(row.targetUuid.toLowerCase(Locale.ROOT));
+        }
+        long cutoff = System.currentTimeMillis() - SIGHTING_WINDOW_MS;
+        Map<String, String> names = readHistory(logger, database, sightings, result, punished, cutoff, tick);
         for (PunishmentImportRow row : result.rows) {
             if (row.targetName == null && row.targetUuid != null) {
                 row.targetName = names.get(row.targetUuid.toLowerCase(Locale.ROOT));
@@ -115,24 +150,25 @@ final class LiteBansImporter {
      * without names: they are a convenience the bot can also fill on read.
      */
     private static Map<String, String> readHistory(
-            HeimdallLogger logger, Object database, SightingSink sightings, Result out) {
+            HeimdallLogger logger, Object database, final SightingSink sightings, final Result out,
+            final Set<String> punished, final long cutoff, Ticker tick) {
         final Map<String, String> names = new HashMap<String, String>();
         final Map<String, Long> namedAt = new HashMap<String, Long>();
-        boolean ok = query(logger, database, "{history}", new RowHandler() {
+        boolean ok = query(logger, database, "{history}", tick, new RowHandler() {
             @Override
             public void row(Map<String, Object> row) {
                 Sighting sighting = mapSighting(row);
                 if (sighting == null) return;
                 out.historyRows++;
-                if (sighting.name != null) {
-                    String key = sighting.uuid.toLowerCase(Locale.ROOT);
+                String key = sighting.uuid.toLowerCase(Locale.ROOT);
+                if (sighting.name != null && punished.contains(key)) {
                     Long previous = namedAt.get(key);
                     if (previous == null || sighting.seenAt >= previous.longValue()) {
                         names.put(key, sighting.name);
                         namedAt.put(key, Long.valueOf(sighting.seenAt));
                     }
                 }
-                if (sightings != null && sighting.ip != null) {
+                if (sightings != null && keepSighting(sighting, punished, cutoff)) {
                     sightings.accept(sighting);
                 }
             }
@@ -145,10 +181,26 @@ final class LiteBansImporter {
         return names;
     }
 
+    /**
+     * Whether a sighting goes into the last-IP file: one with an address, for a punished player or
+     * seen within {@link #SIGHTING_WINDOW_MS} of {@code cutoff}'s now. Pure.
+     */
+    static boolean keepSighting(Sighting sighting, Set<String> punished, long cutoff) {
+        if (sighting == null || sighting.ip == null) return false;
+        return punished.contains(sighting.uuid.toLowerCase(Locale.ROOT)) || sighting.seenAt >= cutoff;
+    }
+
+    private static final Ticker NO_TICK = new Ticker() {
+        @Override
+        public void tick() {
+        }
+    };
+
     private static void readTable(
-            HeimdallLogger logger, Object database, String placeholder, final String type, final Result out) {
+            HeimdallLogger logger, Object database, String placeholder, final String type,
+            final Result out, Ticker tick) {
         final int[] read = new int[1];
-        boolean ok = query(logger, database, placeholder, new RowHandler() {
+        boolean ok = query(logger, database, placeholder, tick, new RowHandler() {
             @Override
             public void row(Map<String, Object> row) {
                 read[0]++;
@@ -170,9 +222,14 @@ final class LiteBansImporter {
         void row(Map<String, Object> row);
     }
 
-    /** Runs {@code SELECT * FROM placeholder}, handing each row over as lower-cased column names. */
+    /**
+     * Runs {@code SELECT * FROM placeholder}, handing each row over as lower-cased column names.
+     *
+     * <p>The result is streamed: MySQL's driver otherwise loads all of it into the heap before the
+     * first row is handed over, which for {@code {history}} on a large network is millions of rows.
+     */
     private static boolean query(
-            HeimdallLogger logger, Object database, String placeholder, RowHandler handler) {
+            HeimdallLogger logger, Object database, String placeholder, Ticker tick, RowHandler handler) {
         PreparedStatement statement = null;
         ResultSet result = null;
         try {
@@ -183,6 +240,7 @@ final class LiteBansImporter {
                 return false;
             }
             statement = (PreparedStatement) prepared;
+            streamResults(statement);
             result = statement.executeQuery();
             ResultSetMetaData meta = result.getMetaData();
             int columns = meta.getColumnCount();
@@ -190,13 +248,16 @@ final class LiteBansImporter {
             for (int i = 0; i < columns; i++) {
                 labels[i] = meta.getColumnLabel(i + 1).toLowerCase(Locale.ROOT);
             }
+            int read = 0;
             while (result.next()) {
                 Map<String, Object> row = new HashMap<String, Object>();
                 for (int i = 0; i < columns; i++) {
                     row.put(labels[i], result.getObject(i + 1));
                 }
                 handler.row(row);
+                if (++read % TICK_EVERY_ROWS == 0) tick.tick();
             }
+            tick.tick();
             return true;
         } catch (Throwable e) {
             logger.error("LiteBans import could not read " + placeholder, e);
@@ -204,6 +265,25 @@ final class LiteBansImporter {
         } finally {
             closeQuietly(result);
             closeQuietly(statement);
+        }
+    }
+
+    /**
+     * Asks the driver to stream. Connector/J (and MariaDB's, for compatibility) stream only for
+     * {@code Integer.MIN_VALUE}; H2, SQLite and PostgreSQL refuse a negative size and take an
+     * ordinary one instead. A driver that takes neither reads the way it always did.
+     */
+    private static void streamResults(PreparedStatement statement) {
+        try {
+            statement.setFetchSize(STREAM_FETCH_SIZE);
+            return;
+        } catch (Throwable ignored) {
+            // not MySQL: try an ordinary fetch size
+        }
+        try {
+            statement.setFetchSize(FALLBACK_FETCH_SIZE);
+        } catch (Throwable ignored) {
+            // the driver's own default it is
         }
     }
 
@@ -265,7 +345,10 @@ final class LiteBansImporter {
         return out;
     }
 
-    /** The import id the hook bridge also sends, so a hooked row and its imported twin match. */
+    /**
+     * The import id: unique within one LiteBans database. The bot pairs it with a row the hook
+     * mirrored by type, target and time, since the hook does not send it.
+     */
     static String providerId(String type, long id) {
         return type + ":" + id;
     }

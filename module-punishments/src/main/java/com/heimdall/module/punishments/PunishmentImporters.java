@@ -1,5 +1,6 @@
 package com.heimdall.module.punishments;
 
+import com.heimdall.core.http.ApiError;
 import com.heimdall.core.http.model.PunishmentImportRow;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
@@ -26,17 +27,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * and #812 a 2023 kick. Rows with no date (vanilla files) go last, since the bot dates them "now".
  *
  * <p>Then they go in sequential batches of {@link #BATCH_SIZE}. The bot refuses more than 5,000
- * rows in one request, and a single request for a whole history refused it all; a batch also
- * finishes well inside the gateway's timeout. A failed batch stops the run, saying which batch,
- * so nothing is half-applied out of order behind a failure nobody saw.
+ * rows in one request, and a single request for a whole history refused it all. Each batch is sent
+ * once, with {@link com.heimdall.core.http.ApiClient#IMPORT_TIMEOUT_MS} rather than an ordinary
+ * call's few seconds: the bot looks every row up and numbers its case, so a batch takes a while,
+ * and a retry of a batch still being written would run the two copies side by side. A failed
+ * batch stops the run, saying which batch, so nothing is half-applied out of order behind a
+ * failure nobody saw.
  *
  * <p>Runs on the IO executor, never on the tunnel or the main thread (it reads whole tables),
  * and never twice at once on one server.
  */
 final class PunishmentImporters {
 
-    static final int BATCH_SIZE = 500;
-    private static final long BATCH_TIMEOUT_SECONDS = 120L;
+    static final int BATCH_SIZE = 200;
+    /** Longer than the HTTP call's own timeout, so the call is what gives up and says why. */
+    private static final long BATCH_WAIT_SECONDS =
+            TimeUnit.MILLISECONDS.toSeconds(com.heimdall.core.http.ApiClient.IMPORT_TIMEOUT_MS) + 30L;
+    /** How often a long read says it is still going. Well inside the dashboard's stall limit. */
+    private static final long HEARTBEAT_MS = 30_000L;
 
     private static final AtomicBoolean RUNNING = new AtomicBoolean();
 
@@ -102,7 +110,13 @@ final class PunishmentImporters {
                 }
             };
         }
-        LiteBansImporter.Result liteBans = LiteBansImporter.readAll(logger, sink);
+        final Run heartbeat = run;
+        LiteBansImporter.Result liteBans = LiteBansImporter.readAll(logger, sink, new LiteBansImporter.Ticker() {
+            @Override
+            public void tick() {
+                heartbeat.heartbeat();
+            }
+        });
         if (ips != null && sightings[0] > 0) {
             ips.flush();
         }
@@ -153,7 +167,7 @@ final class PunishmentImporters {
             Payload counts;
             try {
                 counts = context.api().importPunishmentRows(slice)
-                        .get(BATCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                        .get(BATCH_WAIT_SECONDS, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 run.fail("interrupted at batch " + (batch + 1) + " of " + run.batches);
@@ -208,6 +222,22 @@ final class PunishmentImporters {
         return root == null ? plugins : root;
     }
 
+    /**
+     * Whether a failed report means the bot will never take one. A bot older than the route
+     * answers 404, or 403 where the guild token's scope does not list the path yet; either way
+     * every later report would be refused too, and logged on the bot each time.
+     */
+    static boolean refusesReports(Throwable failure) {
+        Throwable cause = failure;
+        while (cause != null && !(cause instanceof ApiError) && cause.getCause() != null
+                && cause.getCause() != cause) {
+            cause = cause.getCause();
+        }
+        if (!(cause instanceof ApiError)) return false;
+        int status = ((ApiError) cause).httpStatus();
+        return status == 403 || status == 404;
+    }
+
     /** One run's running totals, and its reports to the bot. */
     private static final class Run {
         final ModuleContext context;
@@ -226,6 +256,7 @@ final class PunishmentImporters {
         long imported;
         /** Whether the bot has said it does not know the report route, so stop asking. */
         volatile boolean reportsUnsupported;
+        private long lastReportAt;
 
         Run(ModuleContext context, Progress progress) {
             this.context = context;
@@ -270,9 +301,15 @@ final class PunishmentImporters {
             report(status, null);
         }
 
+        /** A "reading" report, at most every {@link #HEARTBEAT_MS}, while sources are read. */
+        void heartbeat() {
+            if (System.currentTimeMillis() - lastReportAt >= HEARTBEAT_MS) report("reading");
+        }
+
         /** Best effort: the dashboard card reads these, the import never waits on or fails for one. */
         void report(String status, String error) {
             if (reportsUnsupported) return;
+            lastReportAt = System.currentTimeMillis();
             Payload.Builder counts = Payload.builder();
             for (Map.Entry<String, Long> reason : skippedBy.entrySet()) {
                 counts.put(reason.getKey(), reason.getValue().longValue());
@@ -303,7 +340,7 @@ final class PunishmentImporters {
                 context.api().reportPunishmentImport(body.build()).whenComplete((ok, failure) -> {
                     if (failure != null) {
                         String message = String.valueOf(failure.getMessage());
-                        if (message.contains("404")) reportsUnsupported = true;
+                        if (refusesReports(failure)) reportsUnsupported = true;
                         context.logger().debug(() -> "import report not delivered: " + message);
                     }
                 });
