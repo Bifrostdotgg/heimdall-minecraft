@@ -2821,20 +2821,25 @@ whitelisted server, rejoin and read the code off the kick screen). On a link-onl
 kicks nobody, they joined and saw nothing.
 **Now:** core shows the code by two routes, both ending in `LinkPrompter`:
 
-- **On join.** Two seconds after the join (five on a proxy, see below), off the join path, core
-  asks `POST .../minecraft/pending-link-code` with the same body as `request-link-code`. The route reports and
-  never mints, so asking on every join creates nothing. A 404 (an older bot, or `NOT_CONFIGURED`)
-  and every other failure mean "nothing pending" and end in a debug line. A server whose API is not
+- **On join.** Two seconds after the join (on a proxy, five seconds after the first backend
+  connection; see below), off the join path, core asks `POST .../minecraft/pending-link-code` with
+  the same body as `request-link-code`. The route reports and never mints, so asking on every join
+  creates nothing. It is one attempt with a 2 s connect and read timeout, not the login path's
+  retries: it holds a `heimdall-io` thread while it waits, beside connection attempts and
+  `show_link_code`, and is worth less than either. A 404 (an older bot, or `NOT_CONFIGURED`) and
+  every other failure mean "nothing pending" and end in a debug line. A server whose API is not
   usable yet does not ask.
-- **On push.** The bot sends `show_link_code` `{uuid, username, code, expiresAt}` to a server
+- **On push.** The bot sends `show_link_code` `{uuid, username, code, expiresAt, requestedBy?}` to a server
   that declared `linkprompt@1`. It runs on `heimdall-io` and always answers
   `show_link_code_result`: `{shown: true}`, or `{shown: false, reason}` with `not_online`,
   `invalid_uuid`, `missing_player`, `missing_code`, `expired` or `error`. The player is found by
   `uuid`; with no uuid (a link started for somebody who has never joined), by `username`, exact
   and case-insensitive, a Floodgate name verbatim.
 
-`linkprompt@1` is declared by core itself, not by a module (`HeimdallRuntime`'s capability
-source adds it to the modules' set), and both routes are installed beside `/linkdiscord` and the
+`linkprompt@1` is declared by core itself, not by a module (`Capabilities.CORE`, which
+`HeimdallRuntime`'s capability source adds to the modules' set). An older bot that does not accept
+it gets a debug line, not the "those modules will run" warning, since no module is left
+unconfigured. Both routes are installed beside `/linkdiscord` and the
 tunnel-level requests of D71: the server that needs this most is the one with the whitelist
 module off. `/linkdiscord` is unchanged.
 
@@ -2847,29 +2852,54 @@ seconds; a different code always shows at once. A push that loses the race answe
 
 That memory is per process, so it cannot stop a proxy and a backend that both run Heimdall from
 each showing the code: both join checks fire. The bot reports a given code to only the first
-caller in a short window, and the proxy asks three seconds later than a server does
-(`PROXY_JOIN_DELAY_MS`, 5 s, for a `gatekeeper`; 2 s for every other role), so the backend asks
-first. That is the one to win, because it can open a dialog and the proxy can only send plain text.
-The proxy is chosen by role, since `gatekeeper` is what Velocity and BungeeCord resolve `auto` to
-and what core already means by "the proxy"; an operator who configures a proxy with another role
-gets the server delay.
+caller in a short window, so the backend has to ask first. That is the one to win, because it can
+open a dialog and the proxy can only send plain text.
+
+So a proxy does not time its check from the login. `PostLoginEvent` fires before the player is on
+any server, and a backend join slowed by a resource pack, a limbo or a queue would lose the race.
+The proxies report each backend connection to core (`PlayerSessionEvents.backendConnected`, from
+Velocity's `ServerPostConnectEvent`, or `ServerConnectedEvent` on a Velocity too old to have it,
+and BungeeCord's `ServerConnectedEvent`), and a proxy starts its `PROXY_JOIN_DELAY_MS` (5 s) at
+the first backend connection of each proxy session. A server switch is not a join; the login and
+the disconnect both start a new session. Every other server asks 2 s after its own join. The proxy
+is chosen by role, since `gatekeeper` is what Velocity and BungeeCord resolve `auto` to and what
+core already means by "the proxy"; an operator who configures a proxy with another role gets the
+server timing.
 
 #### Dialog or chat
 
-`PlatformFacade.linkDialogs()` is the seam, `LinkDialogs.NONE` (chat) by default. Chat is two
-lines: the code bold and click-to-copy with a hover hint, then "Enter this code in Discord: open
-the linking panel and press Confirm Code." and the expiry, relative and rounded. On Bukkit those
+`PlatformFacade.linkDialogs()` is the seam, `LinkDialogs.NONE` (chat) by default. Chat is the code
+bold and click-to-copy with a hover hint; then "Enter this code in Discord: open the linking panel
+and press Confirm Code." and the expiry, relative and rounded; then "Requested by <requestedBy> in
+Discord." when the bot names who started the link; then, always, "Only enter this code yourself,
+in Discord. Never give it to anyone. If you didn't ask for it, ignore it." On Bukkit those
 keep click and hover; on Velocity and BungeeCord they arrive as plain text, because both send
 legacy text (D44, D76). Bedrock players, by Floodgate or by a synthetic Floodgate UUID, always get
 chat.
 
 On Paper 1.21.7 and later (Paper's dialog API does not exist in 1.21.6) a client on 1.21.6 or
 later (protocol 771) gets a notice dialog instead: the code in bold green, the instruction, the
-expiry, and a "Copy code" button, or "Close" where the server cannot copy. The client's version
+expiry, the requester, the warning, and a "Copy code" button, or "Close" where the server cannot
+copy. The client's version
 comes from ViaVersion when it is installed, because behind ViaBackwards Paper reports its own
 protocol rather than the client's, and from Paper's `getProtocolVersion()` otherwise. A client that
 cannot be placed gets chat. The decision is made on the player's own thread; anything other than a
 sent dialog runs the chat version instead, so the code arrives once by one route or the other.
+
+That is also why a push answers `shown: true` as soon as the dialog is handed to the player's
+thread, before it is built: whichever way that goes, the player is shown the code. The one case
+where nothing is shown is a player who quits within that tick, and making the reply wait for the
+hop would hold a `heimdall-io` thread on the main thread for every push.
+
+#### Who asked, and the warning
+
+The attack: somebody starts a link in Discord naming a player who is online, then asks that player
+to "read me the code", which links the victim's Minecraft account to the attacker's Discord. Both
+`pending-link-code`'s `pending: true` answer and `show_link_code` may carry `requestedBy`, the
+Discord display name and username of whoever started the link (`"Wild (@lerndmina)"`), and the
+warning line is always shown. A display name is anybody's to choose, so it is cleaned first:
+section signs, control characters and format characters (bidi overrides, zero-width) are
+removed, whitespace collapses, and it is cut to 100 characters.
 
 #### The dialog is reflective, not a Java 21 module
 
@@ -2884,7 +2914,10 @@ initialiser reads the server's registries.
 
 Its tests resolve every lookup against `io.papermc.paper:paper-api:1.21.7-R0.1-SNAPSHOT` on the
 test classpath only, and drive the full build through the API's own static methods with a
-stand-in for the service-loaded server half. What no test here shows is a real server sending the
+stand-in for the service-loaded server half. Those tests run unshaded, where a literal
+`"net.kyori..."` would resolve and pass, so `:app:verifyCoreJar` reads the string constants of
+`PaperLinkDialogs`, `VelocityText` and `VelocityHealthSource` in the shaded core jar and fails on
+one under `com.heimdall.libs.kyori`. What no test here shows is a real server sending the
 dialog or a real client drawing it.
 
 ---
