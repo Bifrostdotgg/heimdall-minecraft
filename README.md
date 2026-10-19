@@ -330,6 +330,20 @@ In **hook mode**, a LiteBans ban longer than ten years is mirrored as permanent 
 refused. Nobody is present to be told, the ban is already live in LiteBans, and `/ban Steve 100y`
 is a common way to spell "forever" there; the server log records the length that was dropped.
 
+Also in **hook mode**, lifting a LiteBans ban or mute from Heimdall (the dashboard,
+`/mc-punish unban`, or accepting an appeal) lifts it in LiteBans too. This covers punishments
+LiteBans reported to Heimdall and ones imported from LiteBans; a ban issued from the dashboard was
+never in LiteBans, so lifting it leaves LiteBans alone. A ban left over from a time the server ran
+in replace mode counts as LiteBans' too (older bots recorded both the same way), so lifting one
+also lifts any LiteBans ban on that player, and Heimdall can go on showing that LiteBans ban as in
+force until it is lifted there by hand. The server runs LiteBans' own
+`litebans:unban <uuid> -s` (or `unmute`) as the console, or the bare verb on a proxy, and only
+when LiteBans still has one in force. A ban running out or being replaced by a newer one is left
+to LiteBans. If the command fails, the server log says so and the ban has to be lifted in
+LiteBans by hand. A server that is offline when the ban is lifted does not catch up later.
+Needs a bot new enough to say where a revoked punishment came from; with an older bot nothing is
+lifted in LiteBans.
+
 **Tab completion** offers player names at the target position - everyone online first, then
 everyone this server has seen or punished - the flags after a `-`, and, on the verbs that have a
 length, a short duration list once a player is named. A flag is offered only where it would
