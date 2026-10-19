@@ -78,14 +78,14 @@ class LinkPrompterTest {
     }
 
     @Test
-    @DisplayName("a platform with no dialog sends the two chat lines")
+    @DisplayName("a platform with no dialog sends the chat lines")
     void chatEverywhereElse() {
         FakePlatform platform = new FakePlatform(ServerRole.GATEKEEPER, dataDir);
         FakePlayer steve = platform.join(FakePlayer.named("Steve"));
 
         assertEquals(LinkPrompter.Outcome.SHOWN, prompter(platform).present(steve, prompt("123456")));
 
-        assertEquals(2, steve.messageText().size());
+        assertEquals(3, steve.messageText().size());
         assertTrue(steve.messageText().get(0).contains("123456"));
         assertTrue(steve.messageText().get(1).contains("Confirm Code"));
     }
@@ -100,13 +100,13 @@ class LinkPrompterTest {
         LinkPrompter prompter = prompter(platform);
 
         prompter.present(oldClient, prompt("111111"));
-        assertEquals(2, oldClient.messageText().size(), "a 1.21.5 client is told in chat");
+        assertEquals(3, oldClient.messageText().size(), "a 1.21.5 client is told in chat");
 
         dialogs.accept = true;
         dialogs.failure = new IllegalStateException("reflection went wrong on this build");
         FakePlayer unlucky = platform.join(FakePlayer.named("Unlucky"));
         prompter.present(unlucky, prompt("222222"));
-        assertEquals(2, unlucky.messageText().size(),
+        assertEquals(3, unlucky.messageText().size(),
                 "a broken dialog path must still get the code to the player");
     }
 
@@ -123,7 +123,7 @@ class LinkPrompterTest {
         // What the Bukkit binding does when building the dialog on the player's thread throws.
         dialogs.fallbacks.get(0).run();
 
-        assertEquals(2, steve.messageText().size());
+        assertEquals(3, steve.messageText().size());
         assertTrue(steve.messageText().get(0).contains("123456"));
     }
 
@@ -146,8 +146,8 @@ class LinkPrompterTest {
         prompter.present(bySynthetic, prompt("654321"));
 
         assertTrue(dialogs.shown.isEmpty(), "no dialog for either: " + dialogs.shown);
-        assertEquals(2, viaFloodgate.messageText().size());
-        assertEquals(2, bySynthetic.messageText().size());
+        assertEquals(3, viaFloodgate.messageText().size());
+        assertEquals(3, bySynthetic.messageText().size());
     }
 
     @Test
@@ -161,11 +161,11 @@ class LinkPrompterTest {
         clock.advance(5_000L);
         assertEquals(LinkPrompter.Outcome.ALREADY_SHOWN, prompter.present(steve, prompt("123456")),
                 "the join check and the bot's push racing each other must not show it twice");
-        assertEquals(2, steve.messageText().size());
+        assertEquals(3, steve.messageText().size());
 
         assertEquals(LinkPrompter.Outcome.SHOWN, prompter.present(steve, prompt("999999")),
                 "a player who restarted linking in Discord needs the new code at once");
-        assertEquals(4, steve.messageText().size());
+        assertEquals(6, steve.messageText().size());
 
         clock.advance(LinkPrompter.REPEAT_WINDOW_MS);
         assertEquals(LinkPrompter.Outcome.SHOWN, prompter.present(steve, prompt("999999")),

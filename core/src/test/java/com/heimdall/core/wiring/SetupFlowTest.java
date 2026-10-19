@@ -306,7 +306,7 @@ class SetupFlowTest {
                     .get(15, TimeUnit.SECONDS);
 
             assertTrue(reply.get("shown").getAsBoolean(), reply.toString());
-            Await.until("the code in chat", () -> steve.messageText().size() == 2, 10_000L);
+            Await.until("the code in chat", () -> steve.messageText().size() == 3, 10_000L);
             assertTrue(steve.messageText().get(0).contains("135790"));
 
             runtime.close();

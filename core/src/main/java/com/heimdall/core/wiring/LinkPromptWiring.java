@@ -60,7 +60,8 @@ import java.util.function.BiConsumer;
  *
  * <h2>On push: {@code show_link_code}, always answered</h2>
  *
- * <p>The bot's request carries {@code uuid}, {@code username}, {@code code} and {@code expiresAt},
+ * <p>The bot's request carries {@code uuid}, {@code username}, {@code code}, {@code expiresAt} and
+ * optionally {@code requestedBy} (who started the link in Discord, shown with the code),
  * and waits for {@code show_link_code_result}: {@code {shown: true}} when the player is online here
  * and the code was presented (or had been, moments before), otherwise {@code {shown: false,
  * reason}}. Every path replies, for the reason {@code RemoteRequestWiring} gives at length: a
@@ -327,7 +328,8 @@ public final class LinkPromptWiring {
                     logger.debug(() -> name + " left before their link code could be shown");
                     return;
                 }
-                prompter.present(online.get(), LinkCodePrompt.of(answer.code(), answer.expiresAt()));
+                prompter.present(online.get(), LinkCodePrompt.of(
+                        answer.code(), answer.expiresAt(), answer.requestedBy()));
             } catch (Throwable broken) {
                 // Contained: this runs on heimdall-io for somebody else's join, and nothing about a
                 // prompt is worth an exception escaping into the pool.
@@ -402,7 +404,8 @@ public final class LinkPromptWiring {
             if (code.isEmpty()) {
                 return notShown("missing_code");
             }
-            LinkCodePrompt prompt = LinkCodePrompt.of(code, request.string("expiresAt", ""));
+            LinkCodePrompt prompt = LinkCodePrompt.of(code, request.string("expiresAt", ""),
+                    request.string("requestedBy", ""));
 
             // The uuid wins whenever there is one. Only a link started in Discord for a player who
             // has never joined comes without one, and then the name is all the bot has: matched

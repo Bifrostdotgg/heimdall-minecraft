@@ -182,6 +182,12 @@ class ApiClientRequestTest {
             assertTrue(answer.pending());
             assertEquals("246810", answer.code());
             assertEquals("2026-10-19T12:05:00.000Z", answer.expiresAt());
+            assertNull(answer.requestedBy(), "absent when the bot does not say");
+
+            server.respond(200, "{\"success\":true,\"data\":{\"pending\":true,\"code\":\"246810\","
+                    + "\"requestedBy\":\"Wild (@lerndmina)\"}}");
+            assertEquals("Wild (@lerndmina)",
+                    await(client.pendingLinkCode("Steve", UUID)).requestedBy());
         }
 
         @Test

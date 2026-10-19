@@ -162,7 +162,8 @@ final class ApiResponses {
         if (!bool(data, "pending")) {
             return PendingLinkCode.none();
         }
-        return PendingLinkCode.of(string(data, "code"), string(data, "expiresAt"));
+        return PendingLinkCode.of(
+                string(data, "code"), string(data, "expiresAt"), string(data, "requestedBy"));
     }
 
     static ResolvedName resolvedName(RawResponse response) {

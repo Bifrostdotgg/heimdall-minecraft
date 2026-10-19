@@ -33,6 +33,20 @@ public final class LinkCodePrompt {
     public static final String INSTRUCTION =
             "Enter this code in Discord: open the linking panel and press Confirm Code.";
 
+    /**
+     * Always shown, in the dialog and in chat.
+     *
+     * <p>The attack it answers: somebody starts a link in Discord naming a player who is online,
+     * then asks that player to "read me the code", which links the victim's Minecraft account to
+     * the attacker's Discord. The code is only ever for the player to type themselves.
+     */
+    public static final String WARNING =
+            "Only enter this code yourself, in Discord. Never give it to anyone. "
+                    + "If you didn't ask for it, ignore it.";
+
+    /** The longest requester text shown; a Discord display name and username fit well inside. */
+    static final int MAX_REQUESTED_BY = 100;
+
     /** The dialog's title. */
     public static final String TITLE = "Link your Discord account";
 
@@ -55,9 +69,13 @@ public final class LinkCodePrompt {
     /** Epoch millis, or {@code 0} when the bot did not say or said something unreadable. */
     private final long expiresAtMs;
 
-    private LinkCodePrompt(String code, long expiresAtMs) {
+    /** Who started the link in Discord, cleaned; empty when the bot did not say. */
+    private final String requestedBy;
+
+    private LinkCodePrompt(String code, long expiresAtMs, String requestedBy) {
         this.code = code;
         this.expiresAtMs = expiresAtMs;
+        this.requestedBy = requestedBy;
     }
 
     /**
@@ -69,16 +87,39 @@ public final class LinkCodePrompt {
      * @throws IllegalArgumentException if the code is blank, which is nothing to show
      */
     public static LinkCodePrompt of(String code, String expiresAt) {
+        return of(code, expiresAt, null);
+    }
+
+    /**
+     * The same, with who started the link in Discord.
+     *
+     * @param requestedBy the bot's {@code requestedBy}, e.g. {@code "Wild (@lerndmina)"}, or
+     *     {@code null}. A Discord display name is anybody's to choose, so it is cleaned: section
+     *     signs, control characters and format characters (bidi overrides, zero-width) go (it is rendered through legacy text on some paths, where a
+     *     {@code §} would restyle what follows), whitespace runs collapse, and it is cut to
+     *     {@value #MAX_REQUESTED_BY} characters.
+     */
+    public static LinkCodePrompt of(String code, String expiresAt, String requestedBy) {
         String cleaned = code == null ? "" : code.replace("\u00A7", "").trim();
         if (cleaned.isEmpty()) {
             throw new IllegalArgumentException("a code is required");
         }
-        return new LinkCodePrompt(cleaned, parseExpiry(expiresAt));
+        return new LinkCodePrompt(cleaned, parseExpiry(expiresAt), cleanRequester(requestedBy));
     }
 
     /** The code itself. */
     public String code() {
         return code;
+    }
+
+    /** Who started the link in Discord, cleaned, or empty when the bot did not say. */
+    public String requestedBy() {
+        return requestedBy;
+    }
+
+    /** {@code "Requested by Wild (@lerndmina) in Discord."}, or empty when nobody is named. */
+    public String requestedByText() {
+        return requestedBy.isEmpty() ? "" : "Requested by " + requestedBy + " in Discord.";
     }
 
     /** When it expires, epoch millis, or {@code 0} if that is not known. */
@@ -116,11 +157,12 @@ public final class LinkCodePrompt {
     }
 
     /**
-     * The chat version: the code on the first line, the instruction and the expiry on the second.
+     * The chat version: the code; the instruction and the expiry; who asked, when the bot said; and
+     * the warning, always.
      *
      * <p>The code is click-to-copy with a hover hint. Where a platform's text path cannot carry
-     * click and hover events (both proxies send legacy text, departures D44 and D76) the same two
-     * lines arrive as plain text, which still says everything a player needs.
+     * click and hover events (both proxies send legacy text, departures D44 and D76) the same lines
+     * arrive as plain text, which still says everything a player needs.
      */
     public List<Component> chatLines(long nowMs) {
         Component codePart = Component.text(code, NamedTextColor.GREEN)
@@ -132,12 +174,46 @@ public final class LinkCodePrompt {
                 .append(codePart)
                 .build();
         String expiry = expiryText(nowMs);
-        Component second = Component.text(
-                expiry.isEmpty() ? INSTRUCTION : INSTRUCTION + " " + expiry, NamedTextColor.GRAY);
-        List<Component> lines = new ArrayList<Component>(2);
+        List<Component> lines = new ArrayList<Component>(4);
         lines.add(first);
-        lines.add(second);
+        lines.add(Component.text(
+                expiry.isEmpty() ? INSTRUCTION : INSTRUCTION + " " + expiry, NamedTextColor.GRAY));
+        if (!requestedBy.isEmpty()) {
+            lines.add(Component.text(requestedByText(), NamedTextColor.WHITE));
+        }
+        lines.add(Component.text(WARNING, NamedTextColor.RED));
         return Collections.unmodifiableList(lines);
+    }
+
+    /** Strips what a display name could use to restyle or break the line, and bounds it. */
+    static String cleanRequester(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(Math.min(raw.length(), MAX_REQUESTED_BY));
+        boolean space = false;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            // Format characters include the bidi overrides and zero-width joiners a name could use
+            // to disguise itself.
+            if (c == '\u00A7' || Character.getType(c) == Character.FORMAT
+                    || (Character.isISOControl(c) && !Character.isWhitespace(c))) {
+                continue;
+            }
+            if (Character.isWhitespace(c)) {
+                space = out.length() > 0;
+                continue;
+            }
+            if (space) {
+                out.append(' ');
+                space = false;
+            }
+            out.append(c);
+        }
+        String cleaned = out.toString();
+        return cleaned.length() > MAX_REQUESTED_BY
+                ? cleaned.substring(0, MAX_REQUESTED_BY).trim()
+                : cleaned;
     }
 
     /**
@@ -177,6 +253,7 @@ public final class LinkCodePrompt {
 
     @Override
     public String toString() {
-        return "LinkCodePrompt{code='" + code + "', expiresAtMs=" + expiresAtMs + "}";
+        return "LinkCodePrompt{code='" + code + "', expiresAtMs=" + expiresAtMs
+                + ", requestedBy='" + requestedBy + "'}";
     }
 }

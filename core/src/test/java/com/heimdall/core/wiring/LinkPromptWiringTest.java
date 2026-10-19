@@ -203,10 +203,32 @@ class LinkPromptWiringTest {
 
         sessions.join(steve, System.currentTimeMillis());
 
-        await("the code in chat", () -> steve.messageText().size() == 2);
+        await("the code in chat", () -> steve.messageText().size() == 3);
         assertTrue(steve.messageText().get(0).contains("246810"), steve.messageText().toString());
         assertTrue(steve.messageText().get(1).contains("Confirm Code"));
         assertEquals("Steve", bot.lastPendingLinkCodeRequest().get("username").getAsString());
+    }
+
+    @Test
+    @DisplayName("the requester the bot names on join, and on a push, is shown above the warning")
+    void requesterIsShown() throws Exception {
+        FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
+        final FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+        FakePlayer alex = platform.join(FakePlayer.named("Alex"));
+        bot.pendLinkCode(steve.uuid().toString(), "246810", inFiveMinutes(), "Wild (@lerndmina)");
+        install(platform, api(true), new LinkPrompter(logger, platform, System::currentTimeMillis), 20L);
+
+        sessions.join(steve, System.currentTimeMillis());
+        await("the code in chat", () -> steve.messageText().size() == 4);
+        assertEquals("Requested by Wild (@lerndmina) in Discord.", steve.messageText().get(2));
+        assertEquals(LinkCodePrompt.WARNING, steve.messageText().get(3));
+
+        Payload reply = push("r-1", Payload.builder().put("uuid", alex.uuid().toString())
+                .put("username", "Alex").put("code", "135790")
+                .put("requestedBy", "Someone (@someone)").build());
+        assertTrue(reply.bool("shown", false), reply.toJson());
+        assertEquals("Requested by Someone (@someone) in Discord.", alex.messageText().get(2));
+        assertEquals(LinkCodePrompt.WARNING, alex.messageText().get(3));
     }
 
     @Test
@@ -363,7 +385,7 @@ class LinkPromptWiringTest {
 
         assertTrue(reply.bool("shown", false), reply.toJson());
         assertFalse(reply.has("reason"));
-        assertEquals(2, steve.messageText().size());
+        assertEquals(3, steve.messageText().size());
         assertTrue(steve.messageText().get(0).contains("135790"));
     }
 
@@ -391,14 +413,14 @@ class LinkPromptWiringTest {
         Payload reply = push("n-1", Payload.builder().put("username", "steve")
                 .put("code", "135790").put("expiresAt", inFiveMinutes()).build());
         assertTrue(reply.bool("shown", false), reply.toJson());
-        assertEquals(2, steve.messageText().size());
+        assertEquals(3, steve.messageText().size());
         assertTrue(steve.messageText().get(0).contains("135790"));
 
         // A blank uuid is an absent one.
         assertTrue(push("n-2", Payload.builder().put("uuid", "  ").put("username", ".BedrockBob")
                 .put("code", "246810").build()).bool("shown", false),
                 "a Floodgate name arrives with its prefix and is matched with it");
-        assertEquals(2, bedrock.messageText().size());
+        assertEquals(3, bedrock.messageText().size());
 
         assertEquals("not_online", push("n-3", Payload.builder().put("username", "BedrockBob")
                 .put("code", "246810").build()).string("reason", ""),
@@ -473,13 +495,13 @@ class LinkPromptWiringTest {
         install(platform);
 
         sessions.join(steve, System.currentTimeMillis());
-        await("the join prompt", () -> steve.messageText().size() == 2);
+        await("the join prompt", () -> steve.messageText().size() == 3);
 
         Payload reply = push("req-4", request(steve.uuid(), "246810", expiry));
 
         assertTrue(reply.bool("shown", false), "the player has the code in front of them");
         assertTrue(reply.bool("alreadyShown", false));
-        assertEquals(2, steve.messageText().size(), "not shown a second time: " + steve.messageText());
+        assertEquals(3, steve.messageText().size(), "not shown a second time: " + steve.messageText());
     }
 
     /** A platform whose player lookup throws, as a server part-way through stopping might. */

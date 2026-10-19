@@ -65,16 +65,19 @@ class LinkCodePromptTest {
     }
 
     @Test
-    @DisplayName("chat is two lines: the code to click and copy, then the instruction and the expiry")
+    @DisplayName("chat: the code to click and copy, the instruction and the expiry, then the warning")
     void chatLines() {
         LinkCodePrompt prompt = LinkCodePrompt.of("123456", "2026-10-19T12:05:00Z");
 
         List<Component> lines = prompt.chatLines(NOON);
 
-        assertEquals(2, lines.size());
+        assertEquals(3, lines.size());
         assertEquals("Your Discord link code: 123456", TestText.plain(lines.get(0)));
         assertEquals("Enter this code in Discord: open the linking panel and press Confirm Code. "
                 + "This code expires in about 5 minutes.", TestText.plain(lines.get(1)));
+        assertEquals("Only enter this code yourself, in Discord. Never give it to anyone. "
+                + "If you didn't ask for it, ignore it.", TestText.plain(lines.get(2)),
+                "always there: the attack is somebody asking the player to read the code out");
 
         Component code = find(lines.get(0), "123456");
         assertNotNull(code, "the code must be its own component so the click lands on it");
@@ -82,6 +85,35 @@ class LinkCodePromptTest {
         assertEquals(ClickEvent.Action.COPY_TO_CLIPBOARD, code.clickEvent().action());
         assertEquals("123456", code.clickEvent().value());
         assertNotNull(code.hoverEvent(), "the hover is how a player learns the code is clickable");
+    }
+
+    @Test
+    @DisplayName("who asked, when the bot says, goes before the warning")
+    void requestedByLine() {
+        LinkCodePrompt prompt = LinkCodePrompt.of("123456", null, "Wild (@lerndmina)");
+
+        List<Component> lines = prompt.chatLines(NOON);
+
+        assertEquals(4, lines.size());
+        assertEquals("Requested by Wild (@lerndmina) in Discord.", TestText.plain(lines.get(2)));
+        assertEquals(LinkCodePrompt.WARNING, TestText.plain(lines.get(3)));
+        assertEquals("", LinkCodePrompt.of("123456", null, "   ").requestedByText(),
+                "a blank requester is no requester");
+    }
+
+    @Test
+    @DisplayName("a display name cannot restyle, disguise or flood the requested-by line")
+    void requesterIsCleaned() {
+        // The sign goes and the character after it stays, as for the code: harmless once the sign
+        // that would have made it a colour is gone.
+        assertEquals("Wildc (@lerndmina)",
+                LinkCodePrompt.of("1", null, " Wild\u00A7c \n\t (@lerndmina)\u202E\u200B ").requestedBy());
+        StringBuilder huge = new StringBuilder();
+        for (int i = 0; i < 300; i++) {
+            huge.append('x');
+        }
+        assertEquals(LinkCodePrompt.MAX_REQUESTED_BY,
+                LinkCodePrompt.of("1", null, huge.toString()).requestedBy().length());
     }
 
     @Test
