@@ -1372,10 +1372,6 @@ public final class HeimdallRuntime implements AutoCloseable {
      */
     private static final class DeclaredCapabilities implements CapabilitySource {
 
-        /** Declared by core on every server. */
-        private static final Set<String> CORE = Collections.unmodifiableSet(
-                new LinkedHashSet<String>(Collections.singletonList(Capabilities.LINK_PROMPT)));
-
         private final CapabilitySource modules;
 
         DeclaredCapabilities(CapabilitySource modules) {
@@ -1385,7 +1381,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         @Override
         public Set<String> capabilities() {
             Set<String> declared = new LinkedHashSet<String>(modules.capabilities());
-            declared.addAll(CORE);
+            declared.addAll(Capabilities.CORE);
             return Collections.unmodifiableSet(declared);
         }
     }

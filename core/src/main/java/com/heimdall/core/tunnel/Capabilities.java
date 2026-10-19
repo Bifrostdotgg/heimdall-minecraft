@@ -1,5 +1,10 @@
 package com.heimdall.core.tunnel;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Set;
+
 /**
  * The capability identifiers a module may claim, in one place.
  *
@@ -102,6 +107,15 @@ public final class Capabilities {
 
     /** Remote configuration: this client accepts {@code config.push} and acknowledges it. */
     public static final String CONFIG = "config@1";
+
+    /**
+     * The capabilities core declares itself on every server, which no module owns.
+     *
+     * <p>Kept apart because "the bot does not support X" means something different for these: no
+     * module is left running unconfigured, a feature simply is not offered by that bot.
+     */
+    public static final Set<String> CORE = Collections.unmodifiableSet(
+            new LinkedHashSet<String>(Arrays.asList(LINK_PROMPT)));
 
     /** Separates a capability's name from its version. */
     private static final char VERSION_SEPARATOR = '@';
