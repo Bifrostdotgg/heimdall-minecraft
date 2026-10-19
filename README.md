@@ -214,6 +214,8 @@ dashboard until cleared (see [Admin Commands](#admin-commands)).
 
 **Linking and role sync do not need the whitelist module.** `/linkdiscord` (alias `/link`) is part of the plugin itself, not of any module: it is registered whenever the plugin is running, whatever modules are on, so players can link their Discord account on an open server too (on a server not yet connected to the bot it says so). Role sync works the same way with the whitelist on or off. When the whitelist module decides a login, the bot's answer already carries the player's role snapshot and nothing extra is asked. When it does not (the whitelist is off, or the player is on the bypass list), the server that would have asked about the login fetches the snapshot from the bot as the player joins, in the background. On a proxied network that is the proxy: a backend that leaves logins to its proxy (`enforceOnBackend` off, or the whitelist off on a backend) does not fetch. A failed fetch changes nothing until the next role change or join.
 
+**A link started in Discord shows up in game.** When a player has a link code waiting, the plugin shows it to them a couple of seconds after they join, and the bot can also push it to a server they are already on, so nobody has to know to type `/linkdiscord`. On Paper 1.21.7 or newer, with a 1.21.6 or newer client, the code opens as a dialog with a button that copies it. Everywhere else, and always for Bedrock players, it arrives in chat, click-to-copy where the server can carry that (Spigot and Paper; on Velocity and BungeeCord it is plain text). Like `/linkdiscord`, this needs no module.
+
 What that costs per login depends on the network:
 
 - **Standalone server:** one request to the bot per login.

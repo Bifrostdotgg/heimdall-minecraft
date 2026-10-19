@@ -2812,6 +2812,74 @@ rather than swapped in live, which is the shell's existing behaviour for a contr
   network, which a chat-thread API must not do.
 - **IP, subnet and country bans.** They match a connection, not a UUID.
 
+### D90 - a pending link code is shown in game, as a dialog where the client can draw one
+
+**New in 3.1.**
+
+**Before:** a player who started linking in Discord had to know to type `/linkdiscord` (or, on a
+whitelisted server, rejoin and read the code off the kick screen). On a link-only server, which
+kicks nobody, they joined and saw nothing.
+**Now:** core shows the code by two routes, both ending in `LinkPrompter`:
+
+- **On join.** Two seconds after the join, off the join path, core asks `POST
+  .../minecraft/pending-link-code` with the same body as `request-link-code`. The route reports and
+  never mints, so asking on every join creates nothing. A 404 (an older bot, or `NOT_CONFIGURED`)
+  and every other failure mean "nothing pending" and end in a debug line. A server whose API is not
+  usable yet does not ask.
+- **On push.** The bot sends `show_link_code` `{uuid, username, code, expiresAt}` to a server
+  that declared `linkprompt@1`. It runs on `heimdall-io` and always answers
+  `show_link_code_result`: `{shown: true}`, or `{shown: false, reason}` with `not_online`,
+  `invalid_uuid`, `missing_player`, `missing_code`, `expired` or `error`. The player is found by
+  `uuid`; with no uuid (a link started for somebody who has never joined), by `username`, exact
+  and case-insensitive, a Floodgate name verbatim.
+
+`linkprompt@1` is declared by core itself, not by a module (`HeimdallRuntime`'s capability
+source adds it to the modules' set), and both routes are installed beside `/linkdiscord` and the
+tunnel-level requests of D71: the server that needs this most is the one with the whitelist
+module off. `/linkdiscord` is unchanged.
+
+#### Once, not twice
+
+The join check and a push for the same code race by design. The last code shown is remembered
+per player, in memory and bounded (1024 players), and the same code is not shown again inside 15
+seconds; a different code always shows at once. A push that loses the race answers
+`{shown: true, alreadyShown: true}`, since the player does have the code in front of them. The
+memory is per process, so on a network where the proxy and a backend both run Heimdall, a player
+can be shown the code by each.
+
+#### Dialog or chat
+
+`PlatformFacade.linkDialogs()` is the seam, `LinkDialogs.NONE` (chat) by default. Chat is two
+lines: the code bold and click-to-copy with a hover hint, then "Enter this code in Discord: open
+the linking panel and press Confirm Code." and the expiry, relative and rounded. On Bukkit those
+keep click and hover; on Velocity and BungeeCord they arrive as plain text, because both send
+legacy text (D44, D76). Bedrock players, by Floodgate or by a synthetic Floodgate UUID, always get
+chat.
+
+On Paper 1.21.7 and later (Paper's dialog API does not exist in 1.21.6) a client on 1.21.6 or
+later (protocol 771) gets a notice dialog instead: the code in bold green, the instruction, the
+expiry, and a "Copy code" button, or "Close" where the server cannot copy. The client's version
+comes from ViaVersion when it is installed, because behind ViaBackwards Paper reports its own
+protocol rather than the client's, and from Paper's `getProtocolVersion()` otherwise. A client that
+cannot be placed gets chat. The decision is made on the player's own thread; anything other than a
+sent dialog runs the chat version instead, so the code arrives once by one route or the other.
+
+#### The dialog is reflective, not a Java 21 module
+
+The obvious build, a module compiled against paper-api 1.21.7 at Java 21, cannot work: the core
+jar relocates `net.kyori`, and Shadow rewrites every `net.kyori` descriptor in the classes it
+merges, so `player.showDialog(dialog)` would ask the server for a relocated `DialogLike` it does
+not have. `PaperLinkDialogs` (in `:platform-bukkit-paper`, loaded by name like the Paper tick
+source) therefore reaches the whole API through `Method`s resolved once at enable, with Adventure
+names joined from fragments as `VelocityText` does. It stays Java 8 bytecode and declines cleanly
+on every older server. Classes are loaded without being initialised, because `Dialog`'s static
+initialiser reads the server's registries.
+
+Its tests resolve every lookup against `io.papermc.paper:paper-api:1.21.7-R0.1-SNAPSHOT` on the
+test classpath only, and drive the full build through the API's own static methods with a
+stand-in for the service-loaded server half. What no test here shows is a real server sending the
+dialog or a real client drawing it.
+
 ---
 
 ## Structure
