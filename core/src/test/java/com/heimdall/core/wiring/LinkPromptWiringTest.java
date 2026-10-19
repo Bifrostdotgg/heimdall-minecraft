@@ -210,38 +210,78 @@ class LinkPromptWiringTest {
     }
 
     @Test
-    @DisplayName("a proxy asks after 5 s so a backend running Heimdall asks first; servers after 2 s")
-    void proxyAsksLater() {
-        assertEquals(5_000L, delayScheduledFor(ServerRole.GATEKEEPER),
-                "the backend can open a dialog and the proxy cannot, so the backend should win");
-        assertEquals(2_000L, delayScheduledFor(ServerRole.STANDALONE));
-        assertEquals(2_000L, delayScheduledFor(ServerRole.ENFORCER));
+    @DisplayName("a server asks 2 s after the join")
+    void serverAsksAfterTheJoin() {
+        for (ServerRole role : new ServerRole[] {ServerRole.STANDALONE, ServerRole.ENFORCER}) {
+            Recorded recorded = installRecording(role);
+            try {
+                recorded.events.join(recorded.steve, System.currentTimeMillis());
+                assertEquals(java.util.Arrays.asList(2_000L), recorded.delays, role.toString());
+                assertEquals(0, recorded.events.backendListenerCount(),
+                        "a backend server has no backends to wait for");
+            } finally {
+                recorded.close();
+            }
+        }
     }
 
-    /** Installs through the production entry point and returns the delay the join check asked for. */
-    private long delayScheduledFor(ServerRole role) {
+    @Test
+    @DisplayName("a proxy asks 5 s after the first backend connection of each session, not the login")
+    void proxyAsksAfterTheFirstBackend() {
+        Recorded recorded = installRecording(ServerRole.GATEKEEPER);
+        try {
+            long now = System.currentTimeMillis();
+            recorded.events.join(recorded.steve, now);
+            assertTrue(recorded.delays.isEmpty(),
+                    "the login is before any backend: a slow backend join would lose the race");
+
+            recorded.events.backendConnected(recorded.steve, now);
+            assertEquals(java.util.Arrays.asList(5_000L), recorded.delays,
+                    "the backend can open a dialog and the proxy cannot, so the backend asks first");
+
+            recorded.events.backendConnected(recorded.steve, now);
+            assertEquals(1, recorded.delays.size(), "a server switch is not a join");
+
+            recorded.events.quit(recorded.steve, now);
+            recorded.events.join(recorded.steve, now);
+            recorded.events.backendConnected(recorded.steve, now);
+            assertEquals(java.util.Arrays.asList(5_000L, 5_000L), recorded.delays,
+                    "a new proxy session is asked again");
+        } finally {
+            recorded.close();
+        }
+    }
+
+    /** An install through the production entry point, recording the delays the join check asks for. */
+    private static final class Recorded {
         final List<Long> delays = new CopyOnWriteArrayList<Long>();
-        ScheduledThreadPoolExecutor recording = new ScheduledThreadPoolExecutor(1) {
+        PlayerSessionEvents events;
+        FakePlayer steve;
+        Registration handle;
+        ScheduledThreadPoolExecutor scheduler;
+
+        void close() {
+            handle.close();
+            scheduler.shutdownNow();
+        }
+    }
+
+    private Recorded installRecording(ServerRole role) {
+        final Recorded recorded = new Recorded();
+        recorded.scheduler = new ScheduledThreadPoolExecutor(1) {
             @Override
             public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
-                delays.add(unit.toMillis(delay));
-                // Recorded, not run: this test is about when, and the other tests cover what.
+                recorded.delays.add(unit.toMillis(delay));
+                // Recorded, not run: this is about when, and the other tests cover what.
                 return super.schedule(command, 1, TimeUnit.DAYS);
             }
         };
-        PlayerSessionEvents events = new PlayerSessionEvents(logger, Runnable::run);
+        recorded.events = new PlayerSessionEvents(logger, Runnable::run);
         FakePlatform platform = new FakePlatform(role, dataDir);
-        FakePlayer steve = platform.join(FakePlayer.named("Steve"));
-        Registration handle = LinkPromptWiring.install(
-                logger, platform, api(true), new RecordingTunnelBus(), events, io, recording);
-        try {
-            events.join(steve, System.currentTimeMillis());
-            assertEquals(1, delays.size(), "one ask per join: " + delays);
-            return delays.get(0);
-        } finally {
-            handle.close();
-            recording.shutdownNow();
-        }
+        recorded.steve = platform.join(FakePlayer.named("Steve"));
+        recorded.handle = LinkPromptWiring.install(logger, platform, api(true),
+                new RecordingTunnelBus(), recorded.events, io, recorded.scheduler);
+        return recorded;
     }
 
     @Test

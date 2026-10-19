@@ -82,6 +82,8 @@ public final class PlayerSessionEvents {
             new CopyOnWriteArrayList<Subscription<PlayerSessionListener>>();
     private final CopyOnWriteArrayList<Subscription<PlayerDeathListener>> deathListeners =
             new CopyOnWriteArrayList<Subscription<PlayerDeathListener>>();
+    private final CopyOnWriteArrayList<Subscription<PlayerSessionListener>> backendListeners =
+            new CopyOnWriteArrayList<Subscription<PlayerSessionListener>>();
 
     /**
      * @param executor where listeners run; {@code heimdall-io} in production. A same-thread executor
@@ -115,6 +117,27 @@ public final class PlayerSessionEvents {
      */
     public Registration onDeath(PlayerDeathListener listener) {
         return register(deathListeners, listener);
+    }
+
+    /**
+     * Subscribes to a proxy's backend connections.
+     *
+     * <p>Fires on Velocity and BungeeCord each time a player finishes connecting to a backend
+     * server: the first one after the join, and again on every server switch. Never fires on a
+     * backend server, which is the backend.
+     */
+    public Registration onBackendConnect(PlayerSessionListener listener) {
+        return register(backendListeners, listener);
+    }
+
+    /**
+     * Reports that a player on this proxy reached a backend server. Called by the proxy adapter, on
+     * the platform's event thread.
+     *
+     * <p>Returns as soon as the hand-off is queued. Never throws.
+     */
+    public void backendConnected(PlayerHandle player, long timestampMs) {
+        dispatchSession("backend connection", backendListeners, player, timestampMs);
     }
 
     /**
@@ -171,6 +194,11 @@ public final class PlayerSessionEvents {
     /** How many quit listeners are registered. For tests and diagnostics. */
     public int quitListenerCount() {
         return quitListeners.size();
+    }
+
+    /** How many backend-connection listeners are registered. For tests and diagnostics. */
+    public int backendListenerCount() {
+        return backendListeners.size();
     }
 
     /** How many death listeners are registered. For tests and diagnostics. */

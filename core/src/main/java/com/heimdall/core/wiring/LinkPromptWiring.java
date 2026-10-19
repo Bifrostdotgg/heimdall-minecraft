@@ -20,8 +20,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -50,7 +52,8 @@ import java.util.function.BiConsumer;
  * <p>Asks {@code pending-link-code}, which reports and never mints, so asking on every join costs
  * the bot a read and creates nothing. The ask waits {@link #JOIN_DELAY_MS} first, so a dialog does
  * not open while the client is still on its loading screen and a chat line is not buried under the
- * server's own join messages. A proxy waits {@link #PROXY_JOIN_DELAY_MS}, so that on a network
+ * server's own join messages. A proxy waits {@link #PROXY_JOIN_DELAY_MS}, counted from the player's
+ * first backend connection rather than the login ({@link ProxyJoinPrompt}), so that on a network
  * running Heimdall on both the backend asks first and shows the dialog. It never blocks the join and can never fail one: it runs after the
  * join has happened, off the event thread, and every failure ends in a debug line. A server whose
  * API is not usable yet (not set up, guild still resolving) does not ask at all.
@@ -96,8 +99,9 @@ public final class LinkPromptWiring {
      * <p>Longer on purpose. On a network where the proxy and a backend both run Heimdall, both join
      * checks fire, and the bot reports a given code to only the first caller in a short window. The
      * backend should be that caller, because it is the one that can open a dialog; the proxy can
-     * only send plain text (departures D44, D76). The proxy still asks, so a network with Heimdall
-     * on the proxy alone loses nothing but three seconds.
+     * only send plain text (departures D44, D76). Counted from the first backend connection, not
+     * the login, so a slow backend join (a resource pack, a limbo, a queue) still asks first. The
+     * proxy still asks, so a network with Heimdall on the proxy alone loses nothing but the wait.
      */
     static final long PROXY_JOIN_DELAY_MS = 5_000L;
 
@@ -156,9 +160,16 @@ public final class LinkPromptWiring {
             ScheduledExecutorService scheduler,
             LinkPrompter prompter,
             long joinDelayMs) {
-        List<Registration> handles = new ArrayList<Registration>(2);
-        handles.add(sessions.onJoin(
-                new JoinPrompt(logger, platform, api, io, scheduler, prompter, joinDelayMs)));
+        List<Registration> handles = new ArrayList<Registration>(4);
+        JoinPrompt join = new JoinPrompt(logger, platform, api, io, scheduler, prompter, joinDelayMs);
+        if (platform.role() == ServerRole.GATEKEEPER) {
+            ProxyJoinPrompt proxy = new ProxyJoinPrompt(join);
+            handles.add(sessions.onJoin(proxy.sessionBoundary()));
+            handles.add(sessions.onQuit(proxy.sessionBoundary()));
+            handles.add(sessions.onBackendConnect(proxy));
+        } else {
+            handles.add(sessions.onJoin(join));
+        }
         handles.add(tunnel.subscribe(
                 SHOW_LINK_CODE, new ShowLinkCodeHandler(logger, platform, tunnel, prompter), io));
         return combine(handles);
@@ -183,6 +194,52 @@ public final class LinkPromptWiring {
      * <p>The player is looked up again once the answer arrives, rather than trusting the handle the
      * join carried: a player who left during the delay or the request is simply not shown anything.
      */
+    /**
+     * The proxy's join check, timed from the player's first backend connection, not the login.
+     *
+     * <p>A proxy's login fires before the player is on any server. A backend join slowed by a
+     * resource pack, a limbo or a queue would then lose the race to the proxy's check, and the
+     * player would get the proxy's plain text and never the backend's dialog. So the proxy starts
+     * its {@link #PROXY_JOIN_DELAY_MS} only once the player has reached a backend, and only for the
+     * first backend of each proxy session: a {@code /server} switch is not a join.
+     *
+     * <p>"Asked this session" is cleared by both the login and the disconnect, so a missed quit
+     * cannot stop the next session being asked, and the set holds roughly the players online.
+     */
+    static final class ProxyJoinPrompt implements PlayerSessionListener {
+
+        private final JoinPrompt join;
+        private final Set<UUID> asked =
+                Collections.newSetFromMap(new ConcurrentHashMap<UUID, Boolean>());
+
+        ProxyJoinPrompt(JoinPrompt join) {
+            this.join = join;
+        }
+
+        /** A backend connection: the first one of a session starts the join check. */
+        @Override
+        public void onPlayerSession(PlayerHandle player, long timestampMs) {
+            if (player == null || player.uuid() == null) {
+                return;
+            }
+            if (asked.add(player.uuid())) {
+                join.onPlayerSession(player, timestampMs);
+            }
+        }
+
+        /** The login and the disconnect, either of which starts a new session. */
+        PlayerSessionListener sessionBoundary() {
+            return new PlayerSessionListener() {
+                @Override
+                public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                    if (player != null && player.uuid() != null) {
+                        asked.remove(player.uuid());
+                    }
+                }
+            };
+        }
+    }
+
     static final class JoinPrompt implements PlayerSessionListener {
 
         private final HeimdallLogger logger;
