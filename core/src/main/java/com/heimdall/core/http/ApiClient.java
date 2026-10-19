@@ -428,13 +428,20 @@ public final class ApiClient {
                 if (row.targetName != null) o.addProperty("targetName", row.targetName);
                 if (row.ipDigest != null) o.addProperty("ipDigest", row.ipDigest);
                 if (row.reason != null) o.addProperty("reason", row.reason);
+                if (row.durationSeconds != null) o.addProperty("durationSeconds", row.durationSeconds);
                 if (row.durationMinutes != null) o.addProperty("durationMinutes", row.durationMinutes);
                 o.addProperty("silent", row.silent);
                 if (row.issuedByName != null) o.addProperty("issuedByName", row.issuedByName);
+                if (row.issuedByUuid != null) o.addProperty("issuedByUuid", row.issuedByUuid);
                 if (row.issuedAtMillis > 0) o.addProperty("issuedAt", row.issuedAtMillis);
                 o.addProperty("importProvider", "litebans");
                 if (row.importProviderId != null) o.addProperty("importProviderId", row.importProviderId);
                 o.addProperty("active", row.active);
+                if (!row.active && row.revokedBy != null) {
+                    o.addProperty("revokedBy", row.revokedBy);
+                    if (row.revokeReason != null) o.addProperty("revokeReason", row.revokeReason);
+                    if (row.revokedAtMillis > 0) o.addProperty("revokedAt", row.revokedAtMillis);
+                }
                 array.add(o);
             }
         }
@@ -499,11 +506,46 @@ public final class ApiClient {
         });
     }
 
+    /**
+     * How long one import batch may take. A batch of rows, each looked up and numbered as a case in
+     * turn, takes the bot far longer than the few seconds an ordinary call is given. Through the
+     * gateway its 30 second proxy timeout answers first; this is the bound on a direct connection.
+     */
+    public static final int IMPORT_TIMEOUT_MS = 120_000;
+
+    /**
+     * {@code POST punishments/import}, sent once with {@link #IMPORT_TIMEOUT_MS}.
+     *
+     * <p>Not retried: a batch that timed out on this side is usually still being written on the
+     * bot's, and sending it again would run the two side by side. The import is safe to run again
+     * as a whole, so a failed batch ends the run and the next run picks up where it stopped.
+     */
     public CompletableFuture<JsonObject> importPunishments(JsonObject body) {
         return async(() -> {
             ApiSettings current = settings;
-            RawResponse response = requests.execute(current,
+            ApiSettings once = current.toBuilder().retries(1).build();
+            RawResponse response = requests.execute(once,
                     HttpCall.post(guildPath(current, "punishments/import"),
+                            body == null ? "{}" : body.toString(), IMPORT_TIMEOUT_MS));
+            return Envelopes.unwrapObject(response.status(), response.body());
+        });
+    }
+
+    /**
+     * {@code POST punishments/import/report}: where an import run stands, for the dashboard's
+     * import card. A bot older than the route refuses it (404, or 403 where the guild token's scope
+     * does not list it yet), which the caller treats as "nobody is listening" rather than as a
+     * failed import.
+     */
+    public CompletableFuture<JsonObject> reportPunishmentImport(Payload body) {
+        return reportPunishmentImport(payloadObject(body));
+    }
+
+    public CompletableFuture<JsonObject> reportPunishmentImport(JsonObject body) {
+        return async(() -> {
+            ApiSettings current = settings;
+            RawResponse response = requests.execute(current,
+                    HttpCall.post(guildPath(current, "punishments/import/report"),
                             body == null ? "{}" : body.toString(), current.timeoutMs()));
             return Envelopes.unwrapObject(response.status(), response.body());
         });

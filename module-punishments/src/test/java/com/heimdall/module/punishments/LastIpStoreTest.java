@@ -88,4 +88,30 @@ class LastIpStoreTest {
         LastIpStore.PlayerIps steve = second.byName("Steve");
         assertEquals("10.0.0.1", steve.lastIp);
     }
+
+    @Test
+    void anImportedOldSightingNeverReplacesANewerLiveLogin() {
+        LastIpStore store = new LastIpStore(new RecordingLogger(true), dir.resolve("ips.json"));
+        store.record(STEVE, "Steve", "203.0.113.20", 5_000L);
+
+        store.mergeHistorical(STEVE, "OldName", "203.0.113.9", 1_000L);
+
+        LastIpStore.PlayerIps row = store.get(STEVE);
+        assertEquals("203.0.113.20", row.lastIp, "the live login is still the last address");
+        assertEquals("Steve", row.name, "and the newer name stands");
+        assertEquals(2, row.history.size());
+        assertEquals("203.0.113.9", row.history.get(0).ip, "the old one is slotted in by date");
+    }
+
+    @Test
+    void anImportedNewerSightingBecomesTheLastAddress() {
+        LastIpStore store = new LastIpStore(new RecordingLogger(true), dir.resolve("ips.json"));
+        store.mergeHistorical(STEVE, "Steve", "203.0.113.9", 1_000L);
+        store.mergeHistorical(STEVE, "Steve", "203.0.113.9", 900L);
+        store.mergeHistorical(ALEX, "Alex", "203.0.113.9", 2_000L);
+
+        assertEquals("203.0.113.9", store.get(STEVE).lastIp);
+        assertEquals(1, store.get(STEVE).history.size(), "a repeat sighting is not a second entry");
+        assertEquals(1, store.altsOf(STEVE, 50).rows.size(), "and imported history finds alts");
+    }
 }

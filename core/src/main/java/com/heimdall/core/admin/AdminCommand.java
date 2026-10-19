@@ -110,6 +110,7 @@ public final class AdminCommand {
                 PunishmentSubcommands.verb("banlist", "", "list active bans", "banlist"),
                 PunishmentSubcommands.verb("dupeip", "<player>", "accounts sharing a last address", "dupeip"),
                 PunishmentSubcommands.verb("iphistory", "<player>", "local address history", "iphistory"),
+                PunishmentSubcommands.verb("import", "", "import punishment history (LiteBans and others)", "import"),
                 new CaseSubcommand(),
                 new UpdateSubcommands.Version(),
                 new UpdateSubcommands.Update(),
