@@ -159,6 +159,59 @@ class ApiClientRequestTest {
         }
 
         @Test
+        @DisplayName("pending-link-code is built like request-link-code and read back as a value")
+        void pendingLinkCodeRequestAndAnswer() throws Exception {
+            client.setBedrockIdentityProvider(uuid -> new BedrockIdentity("BedrockBob", "2535467890123456"));
+            server.respond(200, "{\"success\":true,\"data\":{\"pending\":true,\"code\":\"246810\","
+                    + "\"expiresAt\":\"2026-10-19T12:05:00.000Z\"}}");
+
+            com.heimdall.core.http.model.PendingLinkCode answer =
+                    await(client.pendingLinkCode("  .BedrockBob  ", UUID));
+
+            RecordingHttpServer.Request request = server.lastRequest();
+            assertEquals("POST", request.method);
+            assertEquals("/api/guilds/" + GUILD + "/minecraft/pending-link-code", request.path);
+            JsonObject body = bodyOf(request);
+            assertEquals(".BedrockBob", body.get("username").getAsString(), "verbatim, as on D8");
+            assertEquals(UUID, body.get("uuid").getAsString());
+            assertTrue(body.get("isBedrock").getAsBoolean(),
+                    "the same Bedrock fields as request-link-code, so the bot finds the same player");
+            assertEquals("BedrockBob", body.get("bedrockGamertag").getAsString());
+            assertEquals("2535467890123456", body.get("bedrockXuid").getAsString());
+
+            assertTrue(answer.pending());
+            assertEquals("246810", answer.code());
+            assertEquals("2026-10-19T12:05:00.000Z", answer.expiresAt());
+        }
+
+        @Test
+        @DisplayName("pending-link-code: nothing pending, and a 404, are both 'none'")
+        void pendingLinkCodeNone() throws Exception {
+            server.respond(200, "{\"success\":true,\"data\":{\"pending\":false}}");
+            assertFalse(await(client.pendingLinkCode("Steve", UUID)).pending());
+
+            // An older bot has no route; a guild without the integration answers NOT_CONFIGURED.
+            // Neither is a failure for a join that only wanted to know.
+            server.respond(404, "{\"success\":false,\"error\":{\"code\":\"NOT_CONFIGURED\","
+                    + "\"message\":\"Minecraft integration is not configured\"}}");
+            assertFalse(await(client.pendingLinkCode("Steve", UUID)).pending());
+
+            server.respond(200, "{\"success\":true,\"data\":{\"pending\":true}}");
+            assertFalse(await(client.pendingLinkCode("Steve", UUID)).pending(),
+                    "pending with no code is nothing a player can be shown");
+        }
+
+        @Test
+        @DisplayName("pending-link-code: any other refusal still fails the future")
+        void pendingLinkCodeRefusalIsLoud() {
+            server.respond(401, "{\"success\":false,\"error\":{\"code\":\"UNAUTHORIZED\","
+                    + "\"message\":\"bad signature\"}}");
+
+            assertThrows(ApiError.class, () -> await(client.pendingLinkCode("Steve", UUID)),
+                    "a rejected signature must not read as 'nothing pending' in a debug log");
+        }
+
+        @Test
         @DisplayName("a blank serverIp defaults to localhost, as in v2")
         void serverIpDefaults() throws Exception {
             connect(ConnectionAttempt.builder("Steve", UUID).build());

@@ -11,6 +11,7 @@ import com.heimdall.core.http.model.LinkCodeResult;
 import com.heimdall.core.http.model.OffenseReport;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
+import com.heimdall.core.http.model.PendingLinkCode;
 import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.http.model.PunishmentImportRow;
 import com.heimdall.core.http.model.ResolvedName;
@@ -56,7 +57,7 @@ import java.util.function.Supplier;
  * <table border="1">
  *   <caption>Which budget bounds which call</caption>
  *   <tr><th>Call</th><th>Wait at least</th></tr>
- *   <tr><td>{@link #connectionAttempt}, {@link #requestLinkCode},
+ *   <tr><td>{@link #connectionAttempt}, {@link #requestLinkCode}, {@link #pendingLinkCode},
  *       {@link #requestRoleSyncSnapshot}, {@link #offenseTypes}, {@link #offend}</td><td>{@link ApiSettings#joinTimeoutMs()}</td></tr>
  *   <tr><td>{@link #whitelistSync}</td><td>{@link ApiSettings#whitelistSyncJoinTimeoutMs()}</td></tr>
  *   <tr><td>{@link #latestRelease}</td><td>{@link ApiSettings#updateCheckJoinTimeoutMs()}</td></tr>
@@ -216,6 +217,45 @@ public final class ApiClient {
             return ApiResponses.linkCode(requests.execute(current,
                     HttpCall.post(guildPath(current, "request-link-code"), body.toString(),
                             current.timeoutMs())));
+        });
+    }
+
+    /**
+     * {@code POST pending-link-code}: the code a link the player started in Discord is waiting on,
+     * if there is one.
+     *
+     * <p>Read-only on the bot: it reports a code minted when the player pressed "link" in Discord
+     * and never mints one itself, which is what makes it safe to ask on every join. The body is
+     * built exactly as {@link #requestLinkCode}'s, Bedrock fields included, so the bot finds the
+     * same player by the same rules.
+     *
+     * <p>A {@code 404} is {@link PendingLinkCode#none()}, for the same two reasons as
+     * {@link #requestRoleSyncSnapshot}: a bot older than the plugin has no such route, and a guild
+     * without the Minecraft integration answers {@code NOT_CONFIGURED}. Every other failure
+     * completes the future exceptionally, and the one caller treats that as nothing pending too;
+     * the difference is only what an operator reading a debug log can tell apart.
+     */
+    public CompletableFuture<PendingLinkCode> pendingLinkCode(String username, String uuid) {
+        if (Strings.isBlank(username) || Strings.isBlank(uuid)) {
+            throw new IllegalArgumentException("username and uuid are required");
+        }
+        return async(() -> {
+            ApiSettings current = settings;
+            JsonObject body = new JsonObject();
+            // Verbatim, for the same reason as request-link-code (departure D8).
+            body.addProperty("username", username.trim());
+            body.addProperty("uuid", uuid.trim());
+            addBedrockIdentity(body, uuid.trim());
+            try {
+                return ApiResponses.pendingLinkCode(requests.execute(current,
+                        HttpCall.post(guildPath(current, "pending-link-code"), body.toString(),
+                                current.timeoutMs())));
+            } catch (ApiError refused) {
+                if (refused.httpStatus() == 404) {
+                    return PendingLinkCode.none();
+                }
+                throw refused;
+            }
         });
     }
 

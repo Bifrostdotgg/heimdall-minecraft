@@ -10,6 +10,7 @@ import com.heimdall.core.http.model.ConnectionAttemptResult;
 import com.heimdall.core.http.model.LinkCodeResult;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
+import com.heimdall.core.http.model.PendingLinkCode;
 import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.http.model.ResolvedName;
 import com.heimdall.core.http.model.RoleSyncDirective;
@@ -149,6 +150,19 @@ final class ApiResponses {
                     .build();
         }
         return LinkCodeResult.code(string(data, "code"));
+    }
+
+    /**
+     * Reads {@code POST /pending-link-code}: {@code {pending: false}}, or {@code {pending: true,
+     * code, expiresAt}}. Anything but an explicit {@code pending: true} with a code is
+     * {@link PendingLinkCode#none()}.
+     */
+    static PendingLinkCode pendingLinkCode(RawResponse response) {
+        JsonObject data = Envelopes.unwrapObject(response.status(), response.body());
+        if (!bool(data, "pending")) {
+            return PendingLinkCode.none();
+        }
+        return PendingLinkCode.of(string(data, "code"), string(data, "expiresAt"));
     }
 
     static ResolvedName resolvedName(RawResponse response) {
