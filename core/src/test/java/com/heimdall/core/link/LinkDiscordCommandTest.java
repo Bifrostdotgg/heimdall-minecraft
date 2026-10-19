@@ -129,11 +129,18 @@ class LinkDiscordCommandTest {
 
             h.commands.run(steve, "linkdiscord");
 
-            awaitTold(steve, "Requested by @mallory (Mal) in Discord.");
+            // The warning is the last of the prompt's lines, so everything before it has landed.
+            awaitTold(steve, LinkCodePrompt.WARNING);
+            assertTrue(steve.wasTold("Requested by @mallory (Mal) in Discord."),
+                    steve.messageText().toString());
             assertTrue(steve.wasTold("424242"), steve.messageText().toString());
-            assertTrue(steve.wasTold(LinkCodePrompt.WARNING), steve.messageText().toString());
+            // The join prompt's lines, not the own-code ones: who asked, then the warning.
             assertFalse(steve.wasTold("Your Discord Link Code:"),
-                    "it is not the player's own code: " + steve.messageText());
+                    "the own-code lines were used: " + steve.messageText());
+            java.util.List<String> said = steve.messageText();
+            int requester = said.indexOf("Requested by @mallory (Mal) in Discord.");
+            assertTrue(requester >= 0 && said.indexOf(LinkCodePrompt.WARNING) == requester + 1,
+                    "the warning follows who asked: " + said);
         }
     }
 

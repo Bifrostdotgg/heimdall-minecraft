@@ -95,9 +95,10 @@ public final class LinkCodePrompt {
      *
      * @param requestedBy the bot's {@code requestedBy}, e.g. {@code "@lerndmina (Wild)"}, or
      *     {@code null}. A Discord display name is anybody's to choose, so it is cleaned: section
-     *     signs, control characters and format characters (bidi overrides, zero-width) go (it is rendered through legacy text on some paths, where a
+     *     signs, control characters, format characters (bidi overrides, zero-width, tags) and
+     *     unpaired surrogates go (it is rendered through legacy text on some paths, where a
      *     {@code §} would restyle what follows), whitespace runs collapse, and it is cut to
-     *     {@value #MAX_REQUESTED_BY} characters.
+     *     {@value #MAX_REQUESTED_BY} code points.
      */
     public static LinkCodePrompt of(String code, String expiresAt, String requestedBy) {
         String cleaned = code == null ? "" : code.replace("\u00A7", "").trim();
@@ -201,7 +202,8 @@ public final class LinkCodePrompt {
             i += Character.charCount(c);
             // Format characters include the bidi overrides and zero-width joiners a name could use
             // to disguise itself.
-            if (c == '\u00A7' || Character.getType(c) == Character.FORMAT
+            int type = Character.getType(c);
+            if (c == '\u00A7' || type == Character.FORMAT || type == Character.SURROGATE
                     || (Character.isISOControl(c) && !Character.isWhitespace(c))) {
                 continue;
             }
@@ -224,8 +226,9 @@ public final class LinkCodePrompt {
      * The requester line for chat, with every {@code .} swapped for a one-dot leader
      * ({@code U+2024}), which looks the same.
      *
-     * <p>Both proxies send chat as legacy text (D44, D76), and so does Bukkit's fallback; on those
-     * paths a word shaped like a domain becomes a clickable link. A display name is anybody's to
+     * <p>BungeeCord sends chat as legacy text through {@code fromLegacyText} (D76), and so does
+     * Bukkit's fallback; on those paths a word shaped like a domain becomes a clickable link.
+     * Velocity's serializer does not extract links, so there the swap is only harmless. A display name is anybody's to
      * choose, so "free-rank.gg" beside a link code would be a link the warning sits under. Only the
      * chat line needs this: the dialog's text never links.
      */

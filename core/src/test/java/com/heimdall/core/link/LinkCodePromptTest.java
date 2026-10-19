@@ -122,6 +122,8 @@ class LinkCodePromptTest {
         // U+E0041 TAG LATIN CAPITAL LETTER A, a format character outside the BMP.
         String tag = new String(Character.toChars(0xE0041));
         assertEquals("Wild", LinkCodePrompt.of("1", null, "Wi" + tag + "ld" + tag).requestedBy());
+        assertEquals("Wild", LinkCodePrompt.of("1", null, "Wi\uD800ld").requestedBy(),
+                "an unpaired surrogate goes too");
     }
 
     @Test

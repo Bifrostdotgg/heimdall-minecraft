@@ -2901,8 +2901,9 @@ warning line is always shown. A display name is anybody's to choose, so it is cl
 section signs, control characters and format characters (bidi overrides, zero-width, the tag
 characters outside the BMP) are removed, whitespace collapses, and it is cut to 100 code points.
 The handle leads because it is the part nobody can fake. In chat every `.` in the name becomes a
-one-dot leader (U+2024): both proxies and Bukkit's fallback send legacy text, which turns a word
-shaped like a domain into a clickable link. The dialog keeps the name as it is.
+one-dot leader (U+2024): BungeeCord's `fromLegacyText` and Bukkit's fallback turn a word shaped
+like a domain into a clickable link (Velocity's serializer does not, so there it is only
+harmless). The dialog keeps the name as it is.
 
 `/linkdiscord` is the same route in. The bot answers `request-link-code` for a player with an
 unexpired Discord request by handing back that request's own code, so `request-link-code` carries

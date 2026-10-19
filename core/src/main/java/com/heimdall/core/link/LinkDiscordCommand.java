@@ -241,7 +241,7 @@ public final class LinkDiscordCommand {
         LinkCodePrompt prompt =
                 LinkCodePrompt.of(result.code(), result.expiresAt(), result.requestedBy());
         send(source, BORDER);
-        if (Strings.isNotBlank(result.requestedBy())) {
+        if (!prompt.requestedBy().isEmpty()) {
             // Somebody started this link from Discord, and the bot handed back the code that
             // request is waiting on. It is bound to THEIR account, so it is shown exactly as the
             // in-game prompt shows it: who asked, and the warning. "Run /linkdiscord and read me
