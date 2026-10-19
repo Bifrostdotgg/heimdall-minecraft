@@ -159,7 +159,7 @@ public final class PaperLinkDialogs implements LinkDialogPresenter {
 
     /** Builds the dialog. Needs a running server: Paper's builders are service-loaded. */
     Object dialog(LinkCodePrompt prompt, long nowMs) throws ReflectiveOperationException {
-        List<Object> body = new ArrayList<Object>(3);
+        List<Object> body = new ArrayList<Object>(5);
         body.add(plainMessage.invoke(null, server(Component.text(prompt.code(), NamedTextColor.GREEN)
                 .decorate(TextDecoration.BOLD))));
         body.add(plainMessage.invoke(null, server(Component.text(LinkCodePrompt.INSTRUCTION))));
@@ -167,6 +167,13 @@ public final class PaperLinkDialogs implements LinkDialogPresenter {
         if (!expiry.isEmpty()) {
             body.add(plainMessage.invoke(null, server(Component.text(expiry, NamedTextColor.GRAY))));
         }
+        String requestedBy = prompt.requestedByText();
+        if (!requestedBy.isEmpty()) {
+            body.add(plainMessage.invoke(null, server(Component.text(requestedBy))));
+        }
+        // Always: the code is only ever for the player to type, never to read out to somebody.
+        body.add(plainMessage.invoke(null,
+                server(Component.text(LinkCodePrompt.WARNING, NamedTextColor.RED))));
 
         Object base = baseBuilder.invoke(null, server(Component.text(LinkCodePrompt.TITLE)));
         baseCanCloseWithEscape.invoke(base, Boolean.TRUE);

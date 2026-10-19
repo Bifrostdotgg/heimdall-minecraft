@@ -105,18 +105,22 @@ class PaperLinkDialogsTest {
         PaperLinkDialogs dialogs = PaperLinkDialogs.tryCreate(logger);
         Player steve = player(772);
 
-        assertTrue(dialogs.show(steve, LinkCodePrompt.of("123456", "2026-10-19T12:05:00Z"), NOON));
+        assertTrue(dialogs.show(steve,
+                LinkCodePrompt.of("123456", "2026-10-19T12:05:00Z", "Wild (@lerndmina)"), NOON));
 
         verify(steve).showDialog(server.dialog);
         assertEquals(LinkCodePrompt.TITLE, TestText.plain(server.title));
 
-        assertEquals(3, server.body.size(), "code, instruction, expiry: " + server.body);
+        assertEquals(5, server.body.size(),
+                "code, instruction, expiry, requester, warning: " + server.body);
         Component code = server.body.get(0);
         assertEquals("123456", TestText.plain(code));
         assertEquals(NamedTextColor.GREEN, colourOf(code));
         assertTrue(isBold(code), "the code is the thing to read; it is bold: " + code);
         assertEquals(LinkCodePrompt.INSTRUCTION, TestText.plain(server.body.get(1)));
         assertEquals("This code expires in about 5 minutes.", TestText.plain(server.body.get(2)));
+        assertEquals("Requested by Wild (@lerndmina) in Discord.", TestText.plain(server.body.get(3)));
+        assertEquals(LinkCodePrompt.WARNING, TestText.plain(server.body.get(4)));
 
         verify(server.base).canCloseWithEscape(true);
         verify(server.base).body(anyList());
@@ -136,14 +140,16 @@ class PaperLinkDialogsTest {
     }
 
     @Test
-    @DisplayName("with no expiry known, the dialog has no expiry line")
+    @DisplayName("with no expiry and no requester, those lines go and the warning stays")
     void noExpiryLine() {
         FakeDialogServer.Recorder server = FakeDialogServer.start();
 
         assertTrue(PaperLinkDialogs.tryCreate(logger)
                 .show(player(772), LinkCodePrompt.of("123456", null), NOON));
 
-        assertEquals(2, server.body.size(), "code and instruction only: " + server.body);
+        assertEquals(3, server.body.size(),
+                "code, instruction and the warning, which is never dropped: " + server.body);
+        assertEquals(LinkCodePrompt.WARNING, TestText.plain(server.body.get(2)));
     }
 
     @Test
