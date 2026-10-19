@@ -5,12 +5,13 @@ import com.heimdall.core.session.PlayerSessionEvents;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
 import net.md_5.bungee.api.event.PlayerDisconnectEvent;
 import net.md_5.bungee.api.event.PostLoginEvent;
+import net.md_5.bungee.api.event.ServerConnectedEvent;
 import net.md_5.bungee.api.plugin.Listener;
 import net.md_5.bungee.event.EventHandler;
 import net.md_5.bungee.event.EventPriority;
 
 /**
- * Turns the proxy's login and disconnect into core's session notifications.
+ * Turns the proxy's login, backend connections and disconnect into core's session notifications.
  *
  * <h2>Which two events, and why this platform needs no filter</h2>
  *
@@ -84,6 +85,25 @@ public final class BungeeSessionListener implements Listener {
             sessions.join(new BungeePlayerHandle(player, text), observedAt);
         } catch (Throwable broken) {
             logger.error("could not report the join of " + player.getName(), broken);
+        }
+    }
+
+    /**
+     * A player finished connecting to a backend: the first after the login, or a server switch.
+     * Core decides what a switch means; the link prompt counts only the first backend of each
+     * session (departure D90).
+     */
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onServerConnected(ServerConnectedEvent event) {
+        long observedAt = System.currentTimeMillis();
+        ProxiedPlayer player = event.getPlayer();
+        if (player == null) {
+            return;
+        }
+        try {
+            sessions.backendConnected(new BungeePlayerHandle(player, text), observedAt);
+        } catch (Throwable broken) {
+            logger.error("could not report " + player.getName() + "'s backend connection", broken);
         }
     }
 

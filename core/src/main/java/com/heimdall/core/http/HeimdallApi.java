@@ -7,6 +7,7 @@ import com.heimdall.core.http.model.LinkCodeResult;
 import com.heimdall.core.http.model.OffenseReport;
 import com.heimdall.core.http.model.OffenseResult;
 import com.heimdall.core.http.model.OffenseType;
+import com.heimdall.core.http.model.PendingLinkCode;
 import com.heimdall.core.http.model.PluginRelease;
 import com.heimdall.core.http.model.PunishmentImportRow;
 import com.heimdall.core.http.model.ResolvedName;
@@ -153,6 +154,14 @@ public final class HeimdallApi {
     /** {@code POST request-link-code} — mint a Discord linking code. */
     public CompletableFuture<LinkCodeResult> requestLinkCode(final String username, final String uuid) {
         return gated(() -> client.requestLinkCode(username, uuid));
+    }
+
+    /**
+     * {@code POST pending-link-code}: the code a link started in Discord is waiting on, or
+     * {@link PendingLinkCode#none()}. Never mints one. See {@link ApiClient#pendingLinkCode}.
+     */
+    public CompletableFuture<PendingLinkCode> pendingLinkCode(final String username, final String uuid) {
+        return gated(() -> client.pendingLinkCode(username, uuid));
     }
 
     /**

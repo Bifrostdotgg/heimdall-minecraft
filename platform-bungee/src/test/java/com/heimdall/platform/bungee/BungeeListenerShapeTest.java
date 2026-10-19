@@ -29,6 +29,7 @@ import net.md_5.bungee.api.connection.Server;
 import net.md_5.bungee.api.event.ChatEvent;
 import net.md_5.bungee.api.event.PlayerDisconnectEvent;
 import net.md_5.bungee.api.event.PostLoginEvent;
+import net.md_5.bungee.api.event.ServerConnectedEvent;
 import net.md_5.bungee.api.plugin.Listener;
 import net.md_5.bungee.event.EventBus;
 import net.md_5.bungee.event.EventHandler;
@@ -95,7 +96,7 @@ class BungeeListenerShapeTest {
     }
 
     @Test
-    @DisplayName("join and quit reach core through BungeeCord's real event bus")
+    @DisplayName("join, backend connection and quit reach core through BungeeCord's real event bus")
     void sessionEventsDispatch() {
         PlayerSessionEvents sessions = new PlayerSessionEvents(logger, Runnable::run);
         final List<String> seen = new ArrayList<String>();
@@ -111,13 +112,20 @@ class BungeeListenerShapeTest {
                 seen.add("quit " + player.name());
             }
         });
+        sessions.onBackendConnect(new PlayerSessionListener() {
+            @Override
+            public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                seen.add("backend " + player.name());
+            }
+        });
         EventBus bus = new EventBus();
         bus.register(new BungeeSessionListener(logger, sessions, new BungeeText()));
 
         bus.post(new PostLoginEvent(steve()));
+        bus.post(new ServerConnectedEvent(steve(), mock(Server.class)));
         bus.post(new PlayerDisconnectEvent(steve()));
 
-        assertEquals(java.util.Arrays.asList("join Steve", "quit Steve"), seen);
+        assertEquals(java.util.Arrays.asList("join Steve", "backend Steve", "quit Steve"), seen);
     }
 
     @Test

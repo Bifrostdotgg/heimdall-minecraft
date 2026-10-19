@@ -57,6 +57,9 @@ final class RecordingHttpServer implements AutoCloseable {
     private volatile int failuresBeforeSuccess;
     private volatile int failureStatus = 500;
 
+    /** How long to sit on each request before answering it. */
+    private volatile long delayMs;
+
     RecordingHttpServer() {
         try {
             server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -79,6 +82,12 @@ final class RecordingHttpServer implements AutoCloseable {
 
     RecordingHttpServer withEtag(String value) {
         this.etag = value;
+        return this;
+    }
+
+    /** Answers every request only after {@code ms}, for a client timeout to beat. */
+    RecordingHttpServer delay(long ms) {
+        this.delayMs = ms;
         return this;
     }
 
@@ -120,6 +129,14 @@ final class RecordingHttpServer implements AutoCloseable {
                     exchange.getRequestMethod(), path, readBody(exchange), exchange.getRequestHeaders()));
 
             int attempt = served.incrementAndGet();
+            if (delayMs > 0) {
+                try {
+                    Thread.sleep(delayMs);
+                } catch (InterruptedException stopping) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
             if (attempt <= failuresBeforeSuccess) {
                 send(exchange, failureStatus,
                         "{\"success\":false,\"error\":{\"code\":\"SCRIPTED\",\"message\":\"failure "

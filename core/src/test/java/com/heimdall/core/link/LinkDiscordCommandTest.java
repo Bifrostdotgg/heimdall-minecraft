@@ -112,6 +112,35 @@ class LinkDiscordCommandTest {
             awaitTold(steve, "Your Discord Link Code:");
             assertTrue(steve.wasTold("/confirm-code"),
                     "the code is useless without the Discord command: " + steve.messageText());
+            assertTrue(steve.wasTold(LinkCodePrompt.WARNING), steve.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("a code somebody started in Discord says who, and warns, rather than claiming it")
+    void discordStartedCodeNamesTheRequester() {
+        try (Harness h = new Harness(true)) {
+            // "Run /linkdiscord and read me the code" is the attack: the bot hands back the code the
+            // stranger's request is waiting on, bound to the stranger's Discord account.
+            h.bot.pendLinkCode(ALLOWED, "424242", "2099-01-01T00:00:00.000Z", "@mallory (Mal)");
+            FakeCommandSource steve = FakeCommandSource
+                    .player(UUID.fromString(ALLOWED), "Steve")
+                    .grant(LinkDiscordCommand.PERMISSION);
+
+            h.commands.run(steve, "linkdiscord");
+
+            // The warning is the last of the prompt's lines, so everything before it has landed.
+            awaitTold(steve, LinkCodePrompt.WARNING);
+            assertTrue(steve.wasTold("Requested by @mallory (Mal) in Discord."),
+                    steve.messageText().toString());
+            assertTrue(steve.wasTold("424242"), steve.messageText().toString());
+            // The join prompt's lines, not the own-code ones: who asked, then the warning.
+            assertFalse(steve.wasTold("Your Discord Link Code:"),
+                    "the own-code lines were used: " + steve.messageText());
+            java.util.List<String> said = steve.messageText();
+            int requester = said.indexOf("Requested by @mallory (Mal) in Discord.");
+            assertTrue(requester >= 0 && said.indexOf(LinkCodePrompt.WARNING) == requester + 1,
+                    "the warning follows who asked: " + said);
         }
     }
 

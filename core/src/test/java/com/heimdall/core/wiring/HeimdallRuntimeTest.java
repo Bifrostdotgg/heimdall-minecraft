@@ -17,6 +17,7 @@ import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.module.ModuleState;
 import com.heimdall.core.testing.FakePlatform;
+import com.heimdall.core.tunnel.Capabilities;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Collections;
@@ -159,6 +160,34 @@ class HeimdallRuntimeTest {
 
             assertFalse(runtime.tunnel().hasSubscribers("get_players"),
                     "the handle goes in the runtime's registration list, so close() unwinds it");
+        }
+
+        @Test
+        @DisplayName("link prompts are core's: linkprompt@1 is declared and show_link_code is handled with no module")
+        void linkPromptsNeedNoModule(@TempDir Path dataDir) {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            HeimdallRuntime runtime = runtime(dataDir, store).build();
+
+            // Declared from construction, like health, and with no module registered that claims it:
+            // the link-only server with the whitelist off is the one that needs it most.
+            assertTrue(runtime.declaredCapabilities().contains(Capabilities.LINK_PROMPT),
+                    "declared: " + runtime.declaredCapabilities());
+            assertTrue(runtime.declaredCapabilities().containsAll(runtime.modules().capabilities()),
+                    "and the modules' own capabilities are still declared beside it");
+            assertFalse(runtime.modules().capabilities().contains(Capabilities.LINK_PROMPT),
+                    "not a module's capability, so no module toggle can take it away");
+
+            assertFalse(runtime.tunnel().hasSubscribers("show_link_code"), "nothing until start()");
+            runtime.start();
+            assertTrue(runtime.tunnel().hasSubscribers("show_link_code"),
+                    "subscribed before the not-configured return, so /hd setup needs no restart");
+            assertEquals(1, runtime.playerSessions().joinListenerCount(),
+                    "the join check is installed whatever modules are on");
+
+            runtime.close();
+
+            assertFalse(runtime.tunnel().hasSubscribers("show_link_code"));
+            assertEquals(0, runtime.playerSessions().joinListenerCount());
         }
 
         @Test

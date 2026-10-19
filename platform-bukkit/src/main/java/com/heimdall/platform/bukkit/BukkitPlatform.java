@@ -6,6 +6,7 @@ import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.platform.ConsoleBridge;
 import com.heimdall.core.platform.Integrations;
+import com.heimdall.core.platform.LinkDialogs;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.PlayerHandle;
@@ -45,6 +46,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     private final ChatControlChannels chatControl;
     private final BukkitItemImages itemImages;
     private final BukkitVanish vanish;
+    private final LinkDialogs linkDialogs;
 
     /**
      * Builds every collaborator, and cleans up after itself if one of them throws.
@@ -102,6 +104,9 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
                     });
             this.integrations = new BukkitIntegrations(
                     logger, executors.io(), chatControl, itemImages, vanish);
+            // A handful of reflective lookups and nothing else: no dialog is built until a player
+            // has a code to be shown, and a server without Paper's dialog API gets chat.
+            this.linkDialogs = BukkitLinkDialogs.create(logger, mainThread);
         } catch (Throwable halfBuilt) {
             closeQuietly(builtTap);
             closeQuietly(messenger);
@@ -233,6 +238,11 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     @Override
     public Integrations integrations() {
         return integrations;
+    }
+
+    @Override
+    public LinkDialogs linkDialogs() {
+        return linkDialogs;
     }
 
     @Override

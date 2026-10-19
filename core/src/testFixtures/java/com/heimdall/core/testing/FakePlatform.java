@@ -9,6 +9,7 @@ import com.heimdall.core.platform.ConsoleBridge;
 import com.heimdall.core.platform.ChatChannels;
 import com.heimdall.core.platform.Integrations;
 import com.heimdall.core.platform.ItemImages;
+import com.heimdall.core.platform.LinkDialogs;
 import com.heimdall.core.platform.LogLine;
 import com.heimdall.core.platform.LuckPermsBridge;
 import com.heimdall.core.platform.PlatformFacade;
@@ -73,6 +74,7 @@ public final class FakePlatform implements PlatformFacade {
     private volatile ChatChannels chatChannels = ChatChannels.NONE;
     private volatile ItemImages itemImages = ItemImages.NONE;
     private volatile Vanish vanish = Vanish.NONE;
+    private volatile LinkDialogs linkDialogs = LinkDialogs.NONE;
     private volatile boolean deferLater;
     private volatile boolean deferMainThread;
     private final List<Runnable> mainThreadQueue =
@@ -161,6 +163,15 @@ public final class FakePlatform implements PlatformFacade {
      */
     public FakePlatform withVanish(Vanish integration) {
         this.vanish = integration == null ? Vanish.NONE : integration;
+        return this;
+    }
+
+    /**
+     * Supplies the link-code dialog, as a Paper 1.21.7+ server would. Left unset this is
+     * {@link LinkDialogs#NONE}, which is every other platform: the code goes to chat.
+     */
+    public FakePlatform withLinkDialogs(LinkDialogs dialogs) {
+        this.linkDialogs = dialogs == null ? LinkDialogs.NONE : dialogs;
         return this;
     }
 
@@ -517,6 +528,11 @@ public final class FakePlatform implements PlatformFacade {
     @Override
     public CommandRegistrar commands() {
         return commands;
+    }
+
+    @Override
+    public LinkDialogs linkDialogs() {
+        return linkDialogs;
     }
 
     @Override

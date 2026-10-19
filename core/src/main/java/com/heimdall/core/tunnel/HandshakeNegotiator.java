@@ -240,14 +240,25 @@ final class HandshakeNegotiator {
             return;
         }
         List<String> unaccepted = new ArrayList<String>();
+        final List<String> coreUnaccepted = new ArrayList<String>();
         for (String capability : declared) {
             if (!acceptedCapabilities.contains(capability)) {
-                unaccepted.add(capability);
+                if (Capabilities.CORE.contains(capability)) {
+                    coreUnaccepted.add(capability);
+                } else {
+                    unaccepted.add(capability);
+                }
             }
         }
         if (!unaccepted.isEmpty()) {
             logger.warn("the bot does not support " + unaccepted + " — those modules will run but "
                     + "will never be configured or driven by it");
+        }
+        if (!coreUnaccepted.isEmpty()) {
+            // Not a module, so nothing is left running unconfigured: an older bot just never asks
+            // for that feature. Every server declares these, so a warning would be noise.
+            logger.debug(() -> "the bot does not support " + coreUnaccepted
+                    + "; that feature is not offered by it");
         }
     }
 

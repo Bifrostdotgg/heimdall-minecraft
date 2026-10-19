@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
+import net.kyori.adventure.text.Component;
 
 /**
  * {@code /linkdiscord} and its alias {@code /link}: a six-digit code, and a cooldown.
@@ -236,10 +237,25 @@ public final class LinkDiscordCommand {
             send(source, "&cThe bot did not return a code. Please try again, or contact staff.");
             return;
         }
+        long now = System.currentTimeMillis();
+        LinkCodePrompt prompt =
+                LinkCodePrompt.of(result.code(), result.expiresAt(), result.requestedBy());
         send(source, BORDER);
-        send(source, "&eYour Discord Link Code: &a&l" + result.code());
-        send(source, "&7Go to Discord and use: &f/confirm-code " + result.code());
-        send(source, "&7This code expires in 5 minutes");
+        if (!prompt.requestedBy().isEmpty()) {
+            // Somebody started this link from Discord, and the bot handed back the code that
+            // request is waiting on. It is bound to THEIR account, so it is shown exactly as the
+            // in-game prompt shows it: who asked, and the warning. "Run /linkdiscord and read me
+            // the code" is the attack, and a bare "Your Discord Link Code" would help it along.
+            for (Component line : prompt.chatLines(now)) {
+                source.sendMessage(line);
+            }
+        } else {
+            send(source, "&eYour Discord Link Code: &a&l" + result.code());
+            send(source, "&7Go to Discord and use: &f/confirm-code " + result.code());
+            String expiry = prompt.expiryText(now);
+            send(source, "&7" + (expiry.isEmpty() ? "This code expires in 5 minutes." : expiry));
+            send(source, "&c" + LinkCodePrompt.WARNING);
+        }
         send(source, BORDER);
     }
 

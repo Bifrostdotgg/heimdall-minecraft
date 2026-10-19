@@ -50,6 +50,27 @@ class VelocitySessionListenerTest {
     }
 
     @Test
+    @DisplayName("a backend connection is reported to core, and a null player is not")
+    void backendConnectionReported() {
+        final AtomicInteger backends = new AtomicInteger();
+        sessions.onBackendConnect(new PlayerSessionListener() {
+            @Override
+            public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                backends.incrementAndGet();
+            }
+        });
+        VelocitySessionListener listener = listener();
+        Player player = mock(Player.class);
+        when(player.getUsername()).thenReturn("Steve");
+        when(player.getUniqueId()).thenReturn(UUID.randomUUID());
+
+        listener.onBackend(player);
+        listener.onBackend(null);
+
+        assertEquals(1, backends.get());
+    }
+
+    @Test
     @DisplayName("a successful login's disconnect is a quit")
     void successfulLoginQuits() {
         listener().onDisconnect(disconnect(DisconnectEvent.LoginStatus.SUCCESSFUL_LOGIN));

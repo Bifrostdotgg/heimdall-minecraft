@@ -282,6 +282,17 @@ val verifyCoreJar by tasks.registering(VerifyShadowJar::class) {
         ),
     )
 
+    // The classes that reach the server's own Adventure by name. Their tests run unshaded, so only
+    // this jar can show a literal "net.kyori..." that Shadow relocated into a name the server lacks.
+    serverLibraryClasses.set(
+        listOf(
+            "com/heimdall/platform/bukkit/paper/PaperLinkDialogs",
+            "com/heimdall/platform/velocity/VelocityText",
+            "com/heimdall/platform/velocity/VelocityHealthSource",
+        ),
+    )
+    serverLibraryRelocatedPackage.set("com.heimdall.libs.kyori")
+
     // platform/velocity is outside libs/ and keeps its injected org.slf4j.Logger, which Velocity
     // itself provides.
     shadedLibraryPrefix.set("com/heimdall/libs/")

@@ -122,8 +122,28 @@ abstract class VerifyShadowJar : DefaultTask() {
     @get:Input
     abstract val checkDescriptors: Property<Boolean>
 
+    /**
+     * Classes (entry-name prefixes) that reach the *server's* copy of a relocated library by name.
+     *
+     * Each one builds its class names from fragments at runtime (`VelocityText`, D44), because
+     * Shadow rewrites a string constant that matches a relocation pattern just as it rewrites a
+     * class reference. Their tests run unshaded, where a literal `"net.kyori..."` resolves and
+     * every assertion passes; only this jar shows the literal turned into
+     * [serverLibraryRelocatedPackage], a package the server does not have. So a string constant
+     * under it in one of these classes fails the build. Every prefix must match a class, so a
+     * rename cannot quietly turn the check off.
+     */
+    @get:Input
+    abstract val serverLibraryClasses: ListProperty<String>
+
+    /** The relocated package, dotted, e.g. `com.heimdall.libs.kyori`. */
+    @get:Input
+    abstract val serverLibraryRelocatedPackage: Property<String>
+
     init {
         checkDescriptors.convention(true)
+        serverLibraryClasses.convention(emptyList())
+        serverLibraryRelocatedPackage.convention("")
         expectedVersion.convention("")
         expectedVelocityPluginId.convention("")
         expectedBungeeMain.convention("")
@@ -151,6 +171,7 @@ abstract class VerifyShadowJar : DefaultTask() {
             checkShadedLibrariesAreSelfContained(zip, classes, problems)
             checkBytecodeLevels(zip, classes, problems)
             checkExemptModuleStillDiffers(zip, problems)
+            checkServerLibraryNamesSurvived(zip, classes, problems)
             if (checkDescriptors.get()) {
                 checkPluginYml(zip, problems)
                 checkVelocityPluginJson(zip, problems)
@@ -212,6 +233,33 @@ abstract class VerifyShadowJar : DefaultTask() {
                         "would throw NoClassDefFoundError the moment this class initialises"
                 }
             }
+    }
+
+    private fun checkServerLibraryNamesSurvived(
+        zip: ZipFile,
+        classes: List<ZipEntry>,
+        problems: MutableList<String>,
+    ) {
+        val relocated = serverLibraryRelocatedPackage.get()
+        serverLibraryClasses.get().forEach { prefix ->
+            val matched = classes.filter { it.name.startsWith(prefix) }
+            if (matched.isEmpty()) {
+                problems += "no class matches $prefix, which must be checked for relocated " +
+                    "server-library names; update serverLibraryClasses if it was renamed"
+                return@forEach
+            }
+            matched.forEach { entry ->
+                val bytes = zip.getInputStream(entry).use { it.readBytes() }
+                ConstantPool.stringConstants(bytes)
+                    .filter { it.startsWith(relocated) }
+                    .forEach { literal ->
+                        problems += "${entry.name} has the string constant \"$literal\": Shadow " +
+                            "relocated a literal that names the server's library, so it looks " +
+                            "for a class the server does not have. Join the name from fragments " +
+                            "at runtime (see VelocityText, departure D44)"
+                    }
+            }
+        }
     }
 
     private fun checkBytecodeLevels(

@@ -327,6 +327,33 @@ class StubHttpApiTest {
     }
 
     @Test
+    void pendingLinkCodeReportsNothingUntilACodeIsPending() throws Exception {
+        String uuid = "33333333-3333-3333-3333-333333333333";
+        String body = "{\"username\":\"PendingCode\",\"uuid\":\"" + uuid + "\"}";
+
+        assertFalse(SignedClient.data(client.post(PREFIX + "/pending-link-code", body))
+                .get("pending").getAsBoolean());
+
+        bot.pendLinkCode(uuid.toUpperCase(java.util.Locale.ROOT), "246810", "2026-10-19T12:05:00.000Z");
+        JsonObject data = SignedClient.data(client.post(PREFIX + "/pending-link-code", body));
+        assertTrue(data.get("pending").getAsBoolean());
+        assertEquals("246810", data.get("code").getAsString());
+        assertEquals("2026-10-19T12:05:00.000Z", data.get("expiresAt").getAsString());
+        assertEquals("PendingCode", bot.lastPendingLinkCodeRequest().get("username").getAsString());
+        assertFalse(data.has("requestedBy"), "left out when the test did not name a requester");
+
+        bot.pendLinkCode(uuid, "246810", null, "@lerndmina (Wild)");
+        assertEquals("@lerndmina (Wild)", SignedClient.data(
+                client.post(PREFIX + "/pending-link-code", body)).get("requestedBy").getAsString());
+
+        bot.clearPendingLinkCode(uuid);
+        assertFalse(SignedClient.data(client.post(PREFIX + "/pending-link-code", body))
+                .get("pending").getAsBoolean());
+        assertEquals(400, client.post(PREFIX + "/pending-link-code", "{}").statusCode(),
+                "validated before anything else, like request-link-code");
+    }
+
+    @Test
     void offenseTypesAreReturnedAsAnArray() throws Exception {
         JsonObject envelope = SignedClient.envelope(client.get(PREFIX + "/offense-types"));
         JsonArray types = envelope.getAsJsonArray("data");

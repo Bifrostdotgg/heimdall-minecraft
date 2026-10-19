@@ -98,4 +98,17 @@ public interface PlatformFacade {
 
     /** The optional plugins Heimdall talks to — LuckPerms, Floodgate, Trace. */
     Integrations integrations();
+
+    /**
+     * Link-code dialogs, where the server has an API for them.
+     *
+     * <p>A default method because only the Bukkit family can ever have one (Paper 1.21.7 and later),
+     * and {@link LinkDialogs#NONE} is exactly right for both proxies: core then sends the code in
+     * chat. Departure D90.
+     *
+     * <p>Never {@code null}.
+     */
+    default LinkDialogs linkDialogs() {
+        return LinkDialogs.NONE;
+    }
 }

@@ -225,6 +225,24 @@ class HandshakeNegotiatorTest {
     }
 
     @Test
+    @DisplayName("a core capability an older bot lacks is a debug line, not the module warning")
+    void unacceptedCoreCapabilityIsNotAModuleWarning() {
+        RecordingLogger logger = new RecordingLogger(true);
+        HandshakeNegotiator negotiator = negotiator(logger,
+                new LinkedHashSet<String>(
+                        Arrays.asList(Capabilities.WHITELIST, Capabilities.LINK_PROMPT)));
+        negotiator.onOpen(SETTINGS);
+
+        negotiator.handle(Envelope.of("fresh", "identify_ack",
+                acceptedList(1, Capabilities.WHITELIST)));
+
+        assertFalse(logger.logged(LogLevel.WARN, Capabilities.LINK_PROMPT),
+                "linkprompt is not a module; 'those modules will run' would be wrong: "
+                        + logger.records());
+        assertTrue(logger.logged(LogLevel.DEBUG, Capabilities.LINK_PROMPT), logger.records().toString());
+    }
+
+    @Test
     @DisplayName("an empty accepted list is a successful handshake, and names nothing")
     void anEmptyAcceptedListIsStillV3() {
         RecordingLogger logger = new RecordingLogger(true);

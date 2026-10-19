@@ -152,6 +152,7 @@ Successful responses use the envelope `{"success": true, "data": {…}}`; errors
 | `POST` | `…/connection-attempt` | The login gate. Called on every join. |
 | `GET` | `…/whitelist/sync` | Full whitelist for the pre-warm cache. ETag + `304`. |
 | `POST` | `…/request-link-code` | `/linkdiscord` in game → a 6-digit code. |
+| `POST` | `…/pending-link-code` | The code a link started in Discord is waiting on, shown on join. Never mints. |
 | `POST` | `…/role-sync/snapshot` | The `roleSync` block on its own, for a server whose whitelist module is off. |
 | `GET` | `…/offense-types` | Offense types with escalation tiers. `data` is an **array**. |
 | `POST` | `…/offend` | Record an offense, resolve the escalation tier. |
@@ -238,6 +239,17 @@ Golden ETags (asserted in `WhitelistEtagTest`, computed independently in PowerSh
 
 The real bot mints a random code; the stub derives a stable one from the UUID (or uses the fixture's
 `authCode`) so a test can assert the exact value.
+
+### `POST …/pending-link-code`
+
+`{"username", "uuid", "isBedrock"?, "bedrockGamertag"?, "bedrockXuid"?}` → `{"pending": false}`, or
+`{"pending": true, "code", "expiresAt", "requestedBy"?}` once a test has called `bot.pendLinkCode(uuid,
+code, expiresAt)` (the state a link started from Discord leaves the real bot in).
+`bot.pendLinkCode(uuid, code, expiresAt, requestedBy)` adds `requestedBy`, the Discord display name
+and username of whoever started the link (e.g. `"@lerndmina (Wild)"`), which the plugin shows with
+the code; without it the key is left out. Read-only, like the
+bot's: it reports and never mints. `bot.clearPendingLinkCode(uuid)` empties it again, and
+`bot.lastPendingLinkCodeRequest()` returns the last body.
 
 ### `POST …/role-sync/snapshot`
 
@@ -399,6 +411,7 @@ Bot → plugin:
 | `get_players` | `{}` | Yes → `player_list`. |
 | `run_command` | `{command}` | Yes → `command_result`. |
 | `probe_player` | `{uuid, username}` | Yes → `probe_result`. |
+| `show_link_code` | `{uuid?, username?, code, expiresAt, requestedBy?}` | Yes → `show_link_code_result`: `{shown: true}` (plus `alreadyShown: true` when the join check showed the same code moments before), or `{shown: false, reason}` with `not_online`, `invalid_uuid`, `missing_player`, `missing_code`, `expired` or `error`. Only sent to a server that declared `linkprompt@1`. The player is found by `uuid` when present; with `uuid` absent or blank, by `username`, exact and case-insensitive (a Floodgate name verbatim, prefix included). `invalid_uuid` means a uuid that is present and unparseable; `missing_player` means neither was sent. `requestedBy` (who started the link in Discord) is shown with the code when present. |
 | `update` | `{}` | Yes → `update_result`. |
 | `identify_ack` | `{protocolVersion, accepted, configVersion}` | v3 only; **fresh id — it does NOT echo the `identify` id**. |
 | `pong` | `{}` | v3 only; echoes the client `ping` id. Gives **no** liveness credit. |
@@ -416,7 +429,7 @@ Plugin → bot:
 | `trace.report` / `trace.annotation` | trace payloads | **Real bot-side sinks**, not test noise: the bot's `onClientMessage` listener persists them to Mongo via `traceIngest.ts`. The stub has no database, so it forwards them to its `WsMessageListener` like any other unsolicited message. |
 | `ping` | `{}` | v3 only: answered with `pong` echoing the id. A v2 connection gets **silence**. Never a liveness signal. |
 | `player_join` / `player_leave` / anything else | — | Forwarded to the `WsMessageListener`. |
-| `player_list` / `command_result` / `probe_result` / `update_result` | — | Correlated by id. |
+| `player_list` / `command_result` / `probe_result` / `update_result` / `show_link_code_result` | - | Correlated by id. |
 
 > **A client `ping` is answered only for a v3 connection, and never credits liveness.** Both halves
 > matter. A v2 connection has no declared capabilities, so its ping falls through to id-correlation
@@ -489,8 +502,8 @@ rather than an error. Reproduce it with `STUB_BOT_UNREGISTERED_SERVERS`.
 
 #### Which capabilities are accepted
 
-Exact major match against a fixed table — `whitelist`, `rolesync`, `console`, `health`, `modules`,
-`config`, all at major 1:
+Exact major match against a fixed table: `whitelist`, `rolesync`, `console`, `health`, `status`,
+`bridge`, `modules`, `config` and `linkprompt`, all at major 1:
 
 | Declared | Accepted | Why |
 | --- | --- | --- |

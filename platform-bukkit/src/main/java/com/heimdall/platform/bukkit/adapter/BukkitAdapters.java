@@ -56,6 +56,35 @@ public final class BukkitAdapters {
         return TickSource.UNAVAILABLE;
     }
 
+    /**
+     * Paper's dialog API, if this server has it (Paper 1.21.7 and later).
+     *
+     * <p>Loaded by name for the same reason as the tick source: {@code :platform-bukkit} must never
+     * depend on {@code :platform-bukkit-paper}. The implementation probes for the API itself and
+     * answers {@code null} when any piece of it is missing, so a Spigot, an older Paper, or a
+     * future Paper that renamed something all land on chat.
+     *
+     * @return the presenter, or {@code null} for chat only
+     */
+    public static LinkDialogPresenter linkDialogs(HeimdallLogger logger) {
+        try {
+            Class<?> implementation =
+                    Class.forName("com.heimdall.platform.bukkit.paper.PaperLinkDialogs");
+            Object created =
+                    implementation.getMethod("tryCreate", HeimdallLogger.class).invoke(null, logger);
+            if (created instanceof LinkDialogPresenter) {
+                final LinkDialogPresenter presenter = (LinkDialogPresenter) created;
+                logger.debug(() -> "link dialogs: " + presenter.describe());
+                return presenter;
+            }
+        } catch (Throwable unavailable) {
+            logger.debug(() -> "link dialogs: could not load the Paper binding: " + unavailable);
+            return null;
+        }
+        logger.debug("link dialogs: none on this server, link codes are shown in chat");
+        return null;
+    }
+
     private static TickSource loadPaperTickSource(HeimdallLogger logger) {
         try {
             Class<?> support = Class.forName("com.heimdall.platform.bukkit.paper.PaperSupport");

@@ -203,6 +203,37 @@ public final class StubBot implements AutoCloseable {
         return http.lastConnectionAttemptRequest();
     }
 
+    /**
+     * Puts a code in the state a link started from Discord leaves it in, so
+     * {@code POST pending-link-code} reports it for this player. {@code expiresAt} is ISO-8601, or
+     * {@code null} to leave the key out.
+     */
+    public void pendLinkCode(String uuid, String code, String expiresAt) {
+        http.pendLinkCode(uuid, code, expiresAt);
+    }
+
+    /**
+     * The same, with who started the link in Discord, reported as {@code requestedBy} (the real bot
+     * sends the display name and username, e.g. {@code "@lerndmina (Wild)"}). {@code null} leaves
+     * the key out, which is what a bot that does not send it answers.
+     */
+    public void pendLinkCode(String uuid, String code, String expiresAt, String requestedBy) {
+        http.pendLinkCode(uuid, code, expiresAt, requestedBy);
+    }
+
+    /** Clears what {@link #pendLinkCode} set, so the player has nothing pending again. */
+    public void clearPendingLinkCode(String uuid) {
+        http.clearPendingLinkCode(uuid);
+    }
+
+    /**
+     * The body of the most recent {@code pending-link-code} request, a copy, or {@code null} if
+     * there has not been one.
+     */
+    public com.google.gson.JsonObject lastPendingLinkCodeRequest() {
+        return http.lastPendingLinkCodeRequest();
+    }
+
     @Override
     public void close() {
         multiplexer.close();
