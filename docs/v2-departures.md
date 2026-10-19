@@ -2821,8 +2821,8 @@ whitelisted server, rejoin and read the code off the kick screen). On a link-onl
 kicks nobody, they joined and saw nothing.
 **Now:** core shows the code by two routes, both ending in `LinkPrompter`:
 
-- **On join.** Two seconds after the join, off the join path, core asks `POST
-  .../minecraft/pending-link-code` with the same body as `request-link-code`. The route reports and
+- **On join.** Two seconds after the join (five on a proxy, see below), off the join path, core
+  asks `POST .../minecraft/pending-link-code` with the same body as `request-link-code`. The route reports and
   never mints, so asking on every join creates nothing. A 404 (an older bot, or `NOT_CONFIGURED`)
   and every other failure mean "nothing pending" and end in a debug line. A server whose API is not
   usable yet does not ask.
@@ -2843,9 +2843,16 @@ module off. `/linkdiscord` is unchanged.
 The join check and a push for the same code race by design. The last code shown is remembered
 per player, in memory and bounded (1024 players), and the same code is not shown again inside 15
 seconds; a different code always shows at once. A push that loses the race answers
-`{shown: true, alreadyShown: true}`, since the player does have the code in front of them. The
-memory is per process, so on a network where the proxy and a backend both run Heimdall, a player
-can be shown the code by each.
+`{shown: true, alreadyShown: true}`, since the player does have the code in front of them.
+
+That memory is per process, so it cannot stop a proxy and a backend that both run Heimdall from
+each showing the code: both join checks fire. The bot reports a given code to only the first
+caller in a short window, and the proxy asks three seconds later than a server does
+(`PROXY_JOIN_DELAY_MS`, 5 s, for a `gatekeeper`; 2 s for every other role), so the backend asks
+first. That is the one to win, because it can open a dialog and the proxy can only send plain text.
+The proxy is chosen by role, since `gatekeeper` is what Velocity and BungeeCord resolve `auto` to
+and what core already means by "the proxy"; an operator who configures a proxy with another role
+gets the server delay.
 
 #### Dialog or chat
 
