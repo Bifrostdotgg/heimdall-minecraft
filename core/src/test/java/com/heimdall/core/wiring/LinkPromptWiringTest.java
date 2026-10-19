@@ -40,6 +40,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
@@ -204,6 +207,41 @@ class LinkPromptWiringTest {
         assertTrue(steve.messageText().get(0).contains("246810"), steve.messageText().toString());
         assertTrue(steve.messageText().get(1).contains("Confirm Code"));
         assertEquals("Steve", bot.lastPendingLinkCodeRequest().get("username").getAsString());
+    }
+
+    @Test
+    @DisplayName("a proxy asks after 5 s so a backend running Heimdall asks first; servers after 2 s")
+    void proxyAsksLater() {
+        assertEquals(5_000L, delayScheduledFor(ServerRole.GATEKEEPER),
+                "the backend can open a dialog and the proxy cannot, so the backend should win");
+        assertEquals(2_000L, delayScheduledFor(ServerRole.STANDALONE));
+        assertEquals(2_000L, delayScheduledFor(ServerRole.ENFORCER));
+    }
+
+    /** Installs through the production entry point and returns the delay the join check asked for. */
+    private long delayScheduledFor(ServerRole role) {
+        final List<Long> delays = new CopyOnWriteArrayList<Long>();
+        ScheduledThreadPoolExecutor recording = new ScheduledThreadPoolExecutor(1) {
+            @Override
+            public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+                delays.add(unit.toMillis(delay));
+                // Recorded, not run: this test is about when, and the other tests cover what.
+                return super.schedule(command, 1, TimeUnit.DAYS);
+            }
+        };
+        PlayerSessionEvents events = new PlayerSessionEvents(logger, Runnable::run);
+        FakePlatform platform = new FakePlatform(role, dataDir);
+        FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+        Registration handle = LinkPromptWiring.install(
+                logger, platform, api(true), new RecordingTunnelBus(), events, io, recording);
+        try {
+            events.join(steve, System.currentTimeMillis());
+            assertEquals(1, delays.size(), "one ask per join: " + delays);
+            return delays.get(0);
+        } finally {
+            handle.close();
+            recording.shutdownNow();
+        }
     }
 
     @Test

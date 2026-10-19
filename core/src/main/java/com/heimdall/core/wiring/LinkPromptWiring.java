@@ -1,5 +1,6 @@
 package com.heimdall.core.wiring;
 
+import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.http.model.PendingLinkCode;
 import com.heimdall.core.json.Envelope;
@@ -49,7 +50,8 @@ import java.util.function.BiConsumer;
  * <p>Asks {@code pending-link-code}, which reports and never mints, so asking on every join costs
  * the bot a read and creates nothing. The ask waits {@link #JOIN_DELAY_MS} first, so a dialog does
  * not open while the client is still on its loading screen and a chat line is not buried under the
- * server's own join messages. It never blocks the join and can never fail one: it runs after the
+ * server's own join messages. A proxy waits {@link #PROXY_JOIN_DELAY_MS}, so that on a network
+ * running Heimdall on both the backend asks first and shows the dialog. It never blocks the join and can never fail one: it runs after the
  * join has happened, off the event thread, and every failure ends in a debug line. A server whose
  * API is not usable yet (not set up, guild still resolving) does not ask at all.
  *
@@ -81,12 +83,23 @@ public final class LinkPromptWiring {
     static final String SHOW_LINK_CODE_RESULT = "show_link_code_result";
 
     /**
-     * How long after a join the pending code is asked for.
+     * How long after a join a server asks for the pending code.
      *
      * <p>Two seconds: long enough for the client to be past its terrain screen on an ordinary
      * server, short enough that the player is still looking for what to do next.
      */
     static final long JOIN_DELAY_MS = 2_000L;
+
+    /**
+     * How long after a join a proxy asks.
+     *
+     * <p>Longer on purpose. On a network where the proxy and a backend both run Heimdall, both join
+     * checks fire, and the bot reports a given code to only the first caller in a short window. The
+     * backend should be that caller, because it is the one that can open a dialog; the proxy can
+     * only send plain text (departures D44, D76). The proxy still asks, so a network with Heimdall
+     * on the proxy alone loses nothing but three seconds.
+     */
+    static final long PROXY_JOIN_DELAY_MS = 5_000L;
 
     private LinkPromptWiring() {
     }
@@ -111,7 +124,19 @@ public final class LinkPromptWiring {
             ScheduledExecutorService scheduler) {
         LinkPrompter prompter = new LinkPrompter(logger, platform, System::currentTimeMillis);
         return install(logger, platform, api, tunnel, sessions, io, scheduler, prompter,
-                JOIN_DELAY_MS);
+                joinDelayFor(platform.role()));
+    }
+
+    /**
+     * The join delay for a server in this role: {@link #PROXY_JOIN_DELAY_MS} for the proxy,
+     * {@link #JOIN_DELAY_MS} for everything else.
+     *
+     * <p>Keyed on the role rather than the platform type because the role is what core already
+     * means by "the proxy": Velocity and BungeeCord resolve {@code auto} to
+     * {@link ServerRole#GATEKEEPER}, and the Bukkit family never does.
+     */
+    static long joinDelayFor(ServerRole role) {
+        return role == ServerRole.GATEKEEPER ? PROXY_JOIN_DELAY_MS : JOIN_DELAY_MS;
     }
 
     /**
@@ -119,7 +144,7 @@ public final class LinkPromptWiring {
      *
      * <p>So a test can share one prompter between the two routes and prove the de-duplication, and
      * can run the join check without waiting two seconds for it. Production passes
-     * {@link #JOIN_DELAY_MS}.
+     * {@link #joinDelayFor} of the platform's role.
      */
     static Registration install(
             HeimdallLogger logger,
