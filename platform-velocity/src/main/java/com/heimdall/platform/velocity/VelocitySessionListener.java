@@ -4,9 +4,10 @@ import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.session.PlayerSessionEvents;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
+import com.velocitypowered.api.proxy.Player;
 
 /**
- * Turns the proxy's login and disconnect into core's session notifications.
+ * Turns the proxy's login, backend connections and disconnect into core's session notifications.
  *
  * <h2>Which two events, and why not the obvious pair</h2>
  *
@@ -44,6 +45,27 @@ public final class VelocitySessionListener {
             sessions.join(new VelocityPlayerHandle(event.getPlayer(), text), observedAt);
         } catch (Throwable broken) {
             logger.error("could not report the join of " + event.getPlayer().getUsername(), broken);
+        }
+    }
+
+    /**
+     * A player finished connecting to a backend: the first after the login, or a server switch.
+     *
+     * <p>Takes the player rather than the event because the bootstrap listens to
+     * {@code ServerPostConnectEvent} where it exists and {@code ServerConnectedEvent} on a Velocity
+     * too old to have it, and both carry the same player. Core decides what a switch means; the
+     * link prompt counts only the first backend of each session (departure D90).
+     */
+    public void onBackend(Player player) {
+        long observedAt = System.currentTimeMillis();
+        if (player == null) {
+            return;
+        }
+        try {
+            sessions.backendConnected(new VelocityPlayerHandle(player, text), observedAt);
+        } catch (Throwable broken) {
+            logger.error("could not report " + player.getUsername() + "'s backend connection",
+                    broken);
         }
     }
 

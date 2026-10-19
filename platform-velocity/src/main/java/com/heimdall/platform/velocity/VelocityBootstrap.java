@@ -19,11 +19,14 @@ import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
 import com.heimdall.shell.contract.ShellContext;
+import com.velocitypowered.api.event.EventHandler;
 import com.velocitypowered.api.event.EventManager;
 import com.velocitypowered.api.event.PostOrder;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.player.PlayerChatEvent;
+import com.velocitypowered.api.event.player.ServerConnectedEvent;
+import com.velocitypowered.api.event.player.ServerPostConnectEvent;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -315,6 +318,8 @@ final class VelocityBootstrap {
                 events, plugin, PostLoginEvent.class, PostOrder.LAST, sessions::onPostLogin));
         registrations.track(VelocityEvents.listen(
                 events, plugin, DisconnectEvent.class, PostOrder.LAST, sessions::onDisconnect));
+        // Backend connections, which time the proxy's link-code join check (departure D90).
+        registrations.track(listenForBackends(events, sessions));
         // PremiumVanish's hide/show hook, in place before the first join when it is already loaded.
         // A miss (it loads after us) is retried on first use.
         platform.vanish().prepare();
@@ -325,6 +330,32 @@ final class VelocityBootstrap {
         final VelocityChatListener chat = new VelocityChatListener(logger, runtime.chatPipeline());
         registrations.track(VelocityEvents.listen(
                 events, plugin, PlayerChatEvent.class, PostOrder.LAST, chat::onChat));
+    }
+
+    /**
+     * {@code ServerPostConnectEvent}, which fires once the player is on the backend; a Velocity too
+     * old to have it gets {@code ServerConnectedEvent}, a moment earlier. Each lives in its own
+     * anonymous class so the missing one is never loaded, as in {@code VelocityVanish}.
+     */
+    private Registration listenForBackends(
+            EventManager events, final VelocitySessionListener sessions) {
+        try {
+            return VelocityEvents.listen(events, plugin, ServerPostConnectEvent.class, PostOrder.LAST,
+                    new EventHandler<ServerPostConnectEvent>() {
+                        @Override
+                        public void execute(ServerPostConnectEvent event) {
+                            sessions.onBackend(event.getPlayer());
+                        }
+                    });
+        } catch (LinkageError tooOld) {
+            return VelocityEvents.listen(events, plugin, ServerConnectedEvent.class, PostOrder.LAST,
+                    new EventHandler<ServerConnectedEvent>() {
+                        @Override
+                        public void execute(ServerConnectedEvent event) {
+                            sessions.onBackend(event.getPlayer());
+                        }
+                    });
+        }
     }
 
     /**
