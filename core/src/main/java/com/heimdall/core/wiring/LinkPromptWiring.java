@@ -60,8 +60,15 @@ import java.util.function.BiConsumer;
  * and the code was presented (or had been, moments before), otherwise {@code {shown: false,
  * reason}}. Every path replies, for the reason {@code RemoteRequestWiring} gives at length: a
  * request left unanswered looks to the bot exactly like a server that is down. The reasons are
- * short machine words ({@code not_online}, {@code invalid_uuid}, {@code missing_code},
- * {@code expired}, {@code error}) because the bot branches on them rather than showing them.
+ * short machine words ({@code not_online}, {@code invalid_uuid}, {@code missing_player},
+ * {@code missing_code}, {@code expired}, {@code error}) because the bot branches on them rather
+ * than showing them.
+ *
+ * <p>The player is found by {@code uuid} when the request has one. A link started in Discord for
+ * somebody who has never joined has no uuid on the bot's side, so with {@code uuid} absent or blank
+ * the online player is found by {@code username} instead, exactly and case-insensitively.
+ * {@code invalid_uuid} is only for a uuid that is present and unparseable; with neither, the answer
+ * is {@code missing_player}.
  *
  * <p>Subscribed on {@code heimdall-io}, never the socket's reading thread (departure D27).
  */
@@ -295,15 +302,19 @@ public final class LinkPromptWiring {
 
         private Payload decide(Payload request) {
             final String raw = Strings.trimToEmpty(request.string("uuid", ""));
-            UUID uuid;
-            try {
-                if (raw.isEmpty()) {
+            final String username = Strings.trimToEmpty(request.string("username", ""));
+            UUID uuid = null;
+            if (!raw.isEmpty()) {
+                try {
+                    uuid = UUID.fromString(raw);
+                } catch (IllegalArgumentException notAUuid) {
+                    // Present and wrong is a bot bug, and is said so rather than papered over with
+                    // the username: a uuid that fails to parse may also be naming someone else.
+                    logger.debug(() -> "show_link_code for an unparseable uuid '" + raw + "'");
                     return notShown("invalid_uuid");
                 }
-                uuid = UUID.fromString(raw);
-            } catch (IllegalArgumentException notAUuid) {
-                logger.debug(() -> "show_link_code for an unparseable uuid '" + raw + "'");
-                return notShown("invalid_uuid");
+            } else if (username.isEmpty()) {
+                return notShown("missing_player");
             }
             String code = Strings.trimToEmpty(request.string("code", ""));
             if (code.isEmpty()) {
@@ -311,7 +322,13 @@ public final class LinkPromptWiring {
             }
             LinkCodePrompt prompt = LinkCodePrompt.of(code, request.string("expiresAt", ""));
 
-            Optional<PlayerHandle> online = platform.players().byUuid(uuid);
+            // The uuid wins whenever there is one. Only a link started in Discord for a player who
+            // has never joined comes without one, and then the name is all the bot has: matched
+            // exactly and case-insensitively (never by prefix), and verbatim, so a Floodgate name
+            // keeps its prefix.
+            Optional<PlayerHandle> online = uuid != null
+                    ? platform.players().byUuid(uuid)
+                    : platform.players().byName(username);
             if (!online.isPresent()) {
                 return notShown("not_online");
             }

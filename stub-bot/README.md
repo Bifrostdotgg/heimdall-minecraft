@@ -408,6 +408,7 @@ Bot → plugin:
 | `get_players` | `{}` | Yes → `player_list`. |
 | `run_command` | `{command}` | Yes → `command_result`. |
 | `probe_player` | `{uuid, username}` | Yes → `probe_result`. |
+| `show_link_code` | `{uuid?, username?, code, expiresAt}` | Yes → `show_link_code_result`: `{shown: true}` (plus `alreadyShown: true` when the join check showed the same code moments before), or `{shown: false, reason}` with `not_online`, `invalid_uuid`, `missing_player`, `missing_code`, `expired` or `error`. Only sent to a server that declared `linkprompt@1`. The player is found by `uuid` when present; with `uuid` absent or blank, by `username`, exact and case-insensitive (a Floodgate name verbatim, prefix included). `invalid_uuid` means a uuid that is present and unparseable; `missing_player` means neither was sent. |
 | `update` | `{}` | Yes → `update_result`. |
 | `identify_ack` | `{protocolVersion, accepted, configVersion}` | v3 only; **fresh id — it does NOT echo the `identify` id**. |
 | `pong` | `{}` | v3 only; echoes the client `ping` id. Gives **no** liveness credit. |
@@ -425,7 +426,7 @@ Plugin → bot:
 | `trace.report` / `trace.annotation` | trace payloads | **Real bot-side sinks**, not test noise: the bot's `onClientMessage` listener persists them to Mongo via `traceIngest.ts`. The stub has no database, so it forwards them to its `WsMessageListener` like any other unsolicited message. |
 | `ping` | `{}` | v3 only: answered with `pong` echoing the id. A v2 connection gets **silence**. Never a liveness signal. |
 | `player_join` / `player_leave` / anything else | — | Forwarded to the `WsMessageListener`. |
-| `player_list` / `command_result` / `probe_result` / `update_result` | — | Correlated by id. |
+| `player_list` / `command_result` / `probe_result` / `update_result` / `show_link_code_result` | — | Correlated by id. |
 
 > **A client `ping` is answered only for a v3 connection, and never credits liveness.** Both halves
 > matter. A v2 connection has no declared capabilities, so its ping falls through to id-correlation

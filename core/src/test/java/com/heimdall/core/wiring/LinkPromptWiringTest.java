@@ -302,17 +302,67 @@ class LinkPromptWiringTest {
     }
 
     @Test
+    @DisplayName("with no uuid, the player is found by username: exact, case-insensitive, verbatim")
+    void pushByUsername() {
+        FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
+        FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+        FakePlayer bedrock = platform.join(FakePlayer.named(".BedrockBob"));
+        install(platform);
+
+        // Never joined, so the bot's row has a name and no uuid.
+        Payload reply = push("n-1", Payload.builder().put("username", "steve")
+                .put("code", "135790").put("expiresAt", inFiveMinutes()).build());
+        assertTrue(reply.bool("shown", false), reply.toJson());
+        assertEquals(2, steve.messageText().size());
+        assertTrue(steve.messageText().get(0).contains("135790"));
+
+        // A blank uuid is an absent one.
+        assertTrue(push("n-2", Payload.builder().put("uuid", "  ").put("username", ".BedrockBob")
+                .put("code", "246810").build()).bool("shown", false),
+                "a Floodgate name arrives with its prefix and is matched with it");
+        assertEquals(2, bedrock.messageText().size());
+
+        assertEquals("not_online", push("n-3", Payload.builder().put("username", "BedrockBob")
+                .put("code", "246810").build()).string("reason", ""),
+                "exact means exact: without the prefix it is somebody else");
+        assertEquals("not_online", push("n-4", Payload.builder().put("username", "Ste")
+                .put("code", "246810").build()).string("reason", ""),
+                "never a prefix match");
+    }
+
+    @Test
+    @DisplayName("a uuid wins over the username, even when only the name is online")
+    void uuidWins() {
+        FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
+        FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+        install(platform);
+
+        // request() also carries username "Steve"; the uuid names somebody who is not here.
+        Payload reply = push("w-1", request(UUID.randomUUID(), "135790", inFiveMinutes()));
+
+        assertEquals("not_online", reply.string("reason", ""));
+        assertTrue(steve.messageText().isEmpty(), "Steve is not who the bot asked for");
+    }
+
+    @Test
     @DisplayName("every malformed or refused push is still answered, with a reason")
     void everyPathReplies() {
         FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
         FakePlayer steve = platform.join(FakePlayer.named("Steve"));
         install(platform);
 
-        assertEquals("invalid_uuid",
-                push("a", request(null, "135790", null)).string("reason", ""));
+        assertEquals("missing_player",
+                push("a", Payload.builder().put("code", "135790").build()).string("reason", ""));
+        assertEquals("missing_player",
+                push("a2", Payload.builder().put("uuid", " ").put("username", "").put("code", "1")
+                        .build()).string("reason", ""));
         assertEquals("invalid_uuid",
                 push("b", Payload.builder().put("uuid", "not-a-uuid").put("code", "1").build())
                         .string("reason", ""));
+        assertEquals("invalid_uuid",
+                push("b2", Payload.builder().put("uuid", "not-a-uuid").put("username", "Steve")
+                        .put("code", "1").build()).string("reason", ""),
+                "a uuid that is present and wrong is reported, not replaced by the name");
         assertEquals("missing_code",
                 push("c", request(steve.uuid(), "  ", null)).string("reason", ""));
         assertEquals("expired",
