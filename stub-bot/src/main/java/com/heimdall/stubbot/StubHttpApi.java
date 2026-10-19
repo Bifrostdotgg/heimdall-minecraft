@@ -104,6 +104,16 @@ final class StubHttpApi {
     /** The body of the most recent {@code connection-attempt} request, or {@code null}. */
     private volatile JsonObject lastConnectionAttemptRequest;
 
+    /**
+     * Codes waiting to be entered in Discord, keyed by lower-cased uuid, each {@code {code,
+     * expiresAt}}. What {@code POST pending-link-code} reports. The real bot fills this when a
+     * player starts linking from Discord; here a test fills it.
+     */
+    private final Map<String, String[]> pendingLinkCodes = new ConcurrentHashMap<>();
+
+    /** The body of the most recent {@code pending-link-code} request, or {@code null}. */
+    private volatile JsonObject lastPendingLinkCodeRequest;
+
     StubHttpApi(StubBotConfig config, FixtureStore fixtures) {
         this.config = config;
         this.fixtures = fixtures;
@@ -172,6 +182,19 @@ final class StubHttpApi {
 
     JsonObject lastConnectionAttemptRequest() {
         JsonObject last = lastConnectionAttemptRequest;
+        return last == null ? null : last.deepCopy();
+    }
+
+    void pendLinkCode(String uuid, String code, String expiresAt) {
+        pendingLinkCodes.put(uuid.toLowerCase(Locale.ROOT), new String[] {code, expiresAt});
+    }
+
+    void clearPendingLinkCode(String uuid) {
+        pendingLinkCodes.remove(uuid.toLowerCase(Locale.ROOT));
+    }
+
+    JsonObject lastPendingLinkCodeRequest() {
+        JsonObject last = lastPendingLinkCodeRequest;
         return last == null ? null : last.deepCopy();
     }
 
@@ -244,6 +267,7 @@ final class StubHttpApi {
                     }
                 }
                 case "POST request-link-code" -> handleRequestLinkCode(exchange, guildId, body);
+                case "POST pending-link-code" -> handlePendingLinkCode(exchange, guildId, body);
                 case "POST role-sync/snapshot" -> {
                     if (roleSyncSnapshotRoute) {
                         handleRoleSyncSnapshot(exchange, guildId, body);
@@ -656,6 +680,40 @@ final class StubHttpApi {
             data.addProperty("code", authCode(fixture, uuid));
         }
 
+        sendEnvelope(exchange, 200, data);
+    }
+
+    /**
+     * {@code POST /pending-link-code} - the code a link started in Discord is waiting on.
+     *
+     * <p>Same body and the same validation order as {@code request-link-code}, but read-only: it
+     * reports what {@link #pendLinkCode} put there and never mints anything, which is the bot's
+     * promise that makes asking on every join safe. {@code {pending: false}} when nothing is waiting.
+     */
+    private void handlePendingLinkCode(HttpExchange exchange, String guildId, String body)
+            throws IOException {
+        JsonObject request = parseObject(body);
+        String username = optString(request, "username");
+        String uuid = optString(request, "uuid");
+
+        if (isBlank(username) || isBlank(uuid)) {
+            sendError(exchange, 400, "MISSING_FIELDS", "username and uuid are required");
+            return;
+        }
+        if (!guildIsConfigured(exchange, guildId)) {
+            return;
+        }
+        lastPendingLinkCodeRequest = request;
+
+        String[] pending = pendingLinkCodes.get(uuid.toLowerCase(Locale.ROOT));
+        JsonObject data = new JsonObject();
+        if (pending == null) {
+            data.addProperty("pending", false);
+        } else {
+            data.addProperty("pending", true);
+            data.addProperty("code", pending[0]);
+            addNullable(data, "expiresAt", pending[1]);
+        }
         sendEnvelope(exchange, 200, data);
     }
 

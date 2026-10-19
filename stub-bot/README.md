@@ -152,6 +152,7 @@ Successful responses use the envelope `{"success": true, "data": {…}}`; errors
 | `POST` | `…/connection-attempt` | The login gate. Called on every join. |
 | `GET` | `…/whitelist/sync` | Full whitelist for the pre-warm cache. ETag + `304`. |
 | `POST` | `…/request-link-code` | `/linkdiscord` in game → a 6-digit code. |
+| `POST` | `…/pending-link-code` | The code a link started in Discord is waiting on, shown on join. Never mints. |
 | `POST` | `…/role-sync/snapshot` | The `roleSync` block on its own, for a server whose whitelist module is off. |
 | `GET` | `…/offense-types` | Offense types with escalation tiers. `data` is an **array**. |
 | `POST` | `…/offend` | Record an offense, resolve the escalation tier. |
@@ -238,6 +239,14 @@ Golden ETags (asserted in `WhitelistEtagTest`, computed independently in PowerSh
 
 The real bot mints a random code; the stub derives a stable one from the UUID (or uses the fixture's
 `authCode`) so a test can assert the exact value.
+
+### `POST …/pending-link-code`
+
+`{"username", "uuid", "isBedrock"?, "bedrockGamertag"?, "bedrockXuid"?}` → `{"pending": false}`, or
+`{"pending": true, "code", "expiresAt"}` once a test has called `bot.pendLinkCode(uuid, code,
+expiresAt)` (the state a link started from Discord leaves the real bot in). Read-only, like the
+bot's: it reports and never mints. `bot.clearPendingLinkCode(uuid)` empties it again, and
+`bot.lastPendingLinkCodeRequest()` returns the last body.
 
 ### `POST …/role-sync/snapshot`
 
@@ -489,8 +498,8 @@ rather than an error. Reproduce it with `STUB_BOT_UNREGISTERED_SERVERS`.
 
 #### Which capabilities are accepted
 
-Exact major match against a fixed table — `whitelist`, `rolesync`, `console`, `health`, `modules`,
-`config`, all at major 1:
+Exact major match against a fixed table — `whitelist`, `rolesync`, `console`, `health`, `status`,
+`bridge`, `modules`, `config` and `linkprompt`, all at major 1:
 
 | Declared | Accepted | Why |
 | --- | --- | --- |
