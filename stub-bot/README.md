@@ -426,7 +426,7 @@ Plugin → bot:
 | `trace.report` / `trace.annotation` | trace payloads | **Real bot-side sinks**, not test noise: the bot's `onClientMessage` listener persists them to Mongo via `traceIngest.ts`. The stub has no database, so it forwards them to its `WsMessageListener` like any other unsolicited message. |
 | `ping` | `{}` | v3 only: answered with `pong` echoing the id. A v2 connection gets **silence**. Never a liveness signal. |
 | `player_join` / `player_leave` / anything else | — | Forwarded to the `WsMessageListener`. |
-| `player_list` / `command_result` / `probe_result` / `update_result` / `show_link_code_result` | — | Correlated by id. |
+| `player_list` / `command_result` / `probe_result` / `update_result` / `show_link_code_result` | - | Correlated by id. |
 
 > **A client `ping` is answered only for a v3 connection, and never credits liveness.** Both halves
 > matter. A v2 connection has no declared capabilities, so its ping falls through to id-correlation
@@ -499,7 +499,7 @@ rather than an error. Reproduce it with `STUB_BOT_UNREGISTERED_SERVERS`.
 
 #### Which capabilities are accepted
 
-Exact major match against a fixed table — `whitelist`, `rolesync`, `console`, `health`, `status`,
+Exact major match against a fixed table: `whitelist`, `rolesync`, `console`, `health`, `status`,
 `bridge`, `modules`, `config` and `linkprompt`, all at major 1:
 
 | Declared | Accepted | Why |
