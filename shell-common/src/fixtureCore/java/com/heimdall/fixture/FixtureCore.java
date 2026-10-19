@@ -6,6 +6,8 @@ import com.heimdall.shell.contract.CommandBinding;
 import com.heimdall.shell.contract.CommandTarget;
 import com.heimdall.shell.contract.HeimdallCore;
 import com.heimdall.shell.contract.LoginGate;
+import com.heimdall.shell.contract.PunishmentBackend;
+import com.heimdall.shell.contract.PunishmentRecord;
 import com.heimdall.shell.contract.ShellContext;
 import com.heimdall.shell.contract.ShellContract;
 import com.heimdall.shell.contract.TunnelBackend;
@@ -17,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -24,7 +27,8 @@ import java.util.concurrent.CompletableFuture;
  * classloader, exactly as a production core is.
  *
  * <p>Each fixture jar carries the same class and a different {@code heimdall-fixture.properties},
- * which picks a behaviour: {@code good} binds a command, a tunnel backend and a login gate, tracks
+ * which picks a behaviour: {@code good} binds a command, a tunnel backend, a punishment backend
+ * (which reports {@link #MUTED} muted, with the core's version as the id) and a login gate, tracks
  * one registration and hands a counter over on a swap; {@code failing} binds the same and then
  * throws from {@code start}; {@code contradicts} declares a contract its manifest does not;
  * {@code leaky} also leaves an object on the platform's registry behind the shell's back, the way
@@ -37,6 +41,9 @@ import java.util.concurrent.CompletableFuture;
  * {@code registry} ({@code List<Object>}) stands in for the server's own registrations.
  */
 public final class FixtureCore implements HeimdallCore {
+
+    /** The one player every fixture core reports muted. */
+    public static final UUID MUTED = UUID.fromString("00000000-0000-0000-0000-00000000beef");
 
     private final Properties settings = loadSettings();
     private final List<Registration> mine = new ArrayList<Registration>();
@@ -94,6 +101,7 @@ public final class FixtureCore implements HeimdallCore {
                 .target(new Target(version))
                 .build()));
         mine.add(shell.bindTunnel(new Backend(version)));
+        mine.add(shell.bindPunishments(new Punishments(version)));
         mine.add(shell.bindLoginGate(new LoginGate() {
             @Override
             public void decide(Object event) {
@@ -151,6 +159,28 @@ public final class FixtureCore implements HeimdallCore {
         @Override
         public List<String> complete(Object sender, String alias, String[] args) {
             return Collections.singletonList(version);
+        }
+    }
+
+    private static final class Punishments implements PunishmentBackend {
+
+        private final String version;
+
+        Punishments(String version) {
+            this.version = version;
+        }
+
+        @Override
+        public boolean isAvailable() {
+            return true;
+        }
+
+        @Override
+        public PunishmentRecord active(UUID player, String type) {
+            if (!MUTED.equals(player) || !"mute".equals(type)) {
+                return null;
+            }
+            return PunishmentRecord.builder(type, player).id(version).reason("fixture").build();
         }
     }
 

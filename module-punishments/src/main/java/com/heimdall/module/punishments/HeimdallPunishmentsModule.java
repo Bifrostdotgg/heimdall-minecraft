@@ -724,6 +724,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         ModuleContext ctx = this.context;
         if (ctx == null) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
+        if ("import".equals(type)) {
+            runImportCommand(source, ctx);
+            return;
+        }
         if (isLookup(type)) {
             lookup(source, type, args);
             return;
@@ -1244,9 +1248,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 if (p == null || mirror == null) return;
                 boolean echo = isOwnEcho(payload.string("opId", ""));
                 PunishmentSettings settings = PunishmentSettings.from(context.config());
+                boolean announced = echo
+                        || liteBansAnnounced(payload.string("source", ""), settings);
                 if ("kick".equals(p.type)) {
                     applyLive(p.targetUuid, p, settings);
-                    if (!echo) announce(announcementFor(p, settings));
+                    if (!announced) announce(announcementFor(p, settings));
                     return;
                 }
                 String key = keyFor(p);
@@ -1255,9 +1261,34 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 mirror.record(key, p);
                 refreshRevokeCandidacy(revokeFamily(p.type), p.targetUuid, p.targetName);
                 applyLive(p.targetUuid, p, settings);
-                if (!echo) announce(announcementFor(p, settings));
+                if (!announced) announce(announcementFor(p, settings));
             }
         };
+    }
+
+    /**
+     * Whether LiteBans has already announced the punishment a frame describes, so a Heimdall line
+     * would be the same news twice.
+     *
+     * <p>{@code source} is the punishment's own source on a {@code punish.apply} frame, and the
+     * revoke's {@code revokeSource} on a {@code punish.revoke} frame. {@code hook} means the
+     * LiteBans event bridge reported it: LiteBans ran it and broadcast its own line before the
+     * bot ever heard of it. The bridge posts from the server that ran the command, the bot fans
+     * the frame out to the others, and the proxy in front announced it again, so one mute on a
+     * backend produced two chat lines (reported 2026-10-16). Any other source is something
+     * LiteBans never saw (the dashboard, Discord, {@code /offend}, a native command elsewhere),
+     * so Heimdall's line is the only one there is.
+     *
+     * <p>An absent source is an older bot, which never sent one, and then nothing on the frame
+     * tells a LiteBans punishment from a dashboard one. It falls back to the mode. In replace
+     * mode Heimdall is the punishment system and announces. In hook and offenses-only mode
+     * nearly every frame is a LiteBans punishment already announced, so it stays quiet. The cost
+     * is that a dashboard punishment sent by an older bot in those two modes goes unannounced.
+     */
+    static boolean liteBansAnnounced(String source, PunishmentSettings settings) {
+        String s = source == null ? "" : source.trim();
+        if (s.isEmpty()) return !settings.replaceMode();
+        return "hook".equalsIgnoreCase(s);
     }
 
     /**
@@ -1341,9 +1372,47 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             public void onMessage(Envelope envelope) {
                 ModuleContext ctx = HeimdallPunishmentsModule.this.context;
                 if (ctx == null) return;
-                LiteBansSupport.importNow(ctx);
+                // Hands off at once: this is the tunnel's thread, and the import reads whole tables.
+                if (!startImport(ctx, consoleProgress(ctx))) {
+                    ctx.logger().warn("punishment import requested while one is already running; ignored");
+                }
             }
         };
+    }
+
+    private boolean startImport(ModuleContext ctx, PunishmentImporters.Progress progress) {
+        return PunishmentImporters.start(ctx, lastIps, progress);
+    }
+
+    private static PunishmentImporters.Progress consoleProgress(final ModuleContext ctx) {
+        return new PunishmentImporters.Progress() {
+            @Override
+            public void line(String message) {
+                ctx.logger().info(message);
+            }
+        };
+    }
+
+    /**
+     * {@code /hd import}: the dashboard's Run import, from the game or the console.
+     *
+     * <p>Allowed in every mode. Importing is how a server moves off LiteBans, so it has to work
+     * while LiteBans is still the one enforcing. Lines go to whoever ran it and to the console.
+     */
+    private void runImportCommand(final CommandSource source, ModuleContext ctx) {
+        final ModuleContext context = ctx;
+        PunishmentImporters.Progress progress = new PunishmentImporters.Progress() {
+            @Override
+            public void line(String message) {
+                context.logger().info(message);
+                source.sendMessage(Msg.legacy("§7[import] §f" + message));
+            }
+        };
+        if (!startImport(ctx, progress)) {
+            source.sendMessage(Msg.legacy("§eAn import is already running on this server."));
+            return;
+        }
+        source.sendMessage(Msg.legacy("§aImport started. Progress follows here and in the console."));
     }
 
     /**
@@ -1482,6 +1551,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         revokeFamily(lifted.type), lifted.targetUuid, lifted.targetName);
                 if (!announceableRevoke(payload.string("revokeCause", ""))) return;
                 PunishmentSettings settings = PunishmentSettings.from(context.config());
+                // revokeSource is who lifted it. Not "source", which a newer bot also sends on
+                // this frame and which names where the ROW came from: a dashboard lift of a
+                // LiteBans row is Heimdall's to announce, because LiteBans never broadcast it.
+                if (liteBansAnnounced(payload.string("revokeSource", ""), settings)) return;
                 // Hidden is read off the row being lifted, never off a flag, so a revoke frame
                 // about a hidden row is announced to node holders and to nobody else.
                 announce(PunishmentAnnouncement.revoked(settings.announceRevoke, lifted.type,
@@ -2180,22 +2253,33 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     public boolean isFrozen(UUID uuid) {
-        if (uuid == null || mirror == null) return false;
-        ActivePunishment freeze = mirror.get("freeze:" + uuid);
-        return freeze != null && !freeze.expired(System.currentTimeMillis());
+        return activeFor("freeze", uuid) != null;
     }
 
     public boolean isMuted(UUID uuid) {
-        if (uuid == null || mirror == null) return false;
-        ActivePunishment mute = mirror.get("mute:" + uuid);
-        return mute != null && !mute.expired(System.currentTimeMillis());
+        return activeFor("mute", uuid) != null;
     }
 
     /** Whether the active mute on this player is a hidden one. False when there is no mute. */
     public boolean isMuteHidden(UUID uuid) {
-        if (uuid == null || mirror == null) return false;
-        ActivePunishment mute = mirror.get("mute:" + uuid);
-        return mute != null && !mute.expired(System.currentTimeMillis()) && mute.hidden;
+        ActivePunishment mute = activeFor("mute", uuid);
+        return mute != null && mute.hidden;
+    }
+
+    /**
+     * The active, unexpired punishment of a UUID-keyed {@code type} ({@code ban}, {@code mute},
+     * {@code freeze}, {@code warn}) on {@code uuid}, or {@code null}; also {@code null} while the
+     * module is disabled.
+     *
+     * <p>A read of the in-memory mirror and nothing else, so it is safe from any thread, chat
+     * threads included. The public {@code HeimdallPunishments} API answers through this. The row
+     * returned is the mirror's own: read it, never change it.
+     */
+    public ActivePunishment activeFor(String type, UUID uuid) {
+        MirrorStore<ActivePunishment> current = mirror;
+        if (uuid == null || type == null || current == null) return null;
+        ActivePunishment found = current.get(type + ":" + uuid);
+        return found == null || found.expired(System.currentTimeMillis()) ? null : found;
     }
 
     public void notifyStaff(String line) {

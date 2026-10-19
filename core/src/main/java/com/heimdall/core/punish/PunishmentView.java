@@ -190,7 +190,21 @@ public final class PunishmentView {
                 .put("date_start", PunishmentText.stamp(issuedAtMillis))
                 .put("date_end", expiresAtMillis == null
                         ? "" : PunishmentText.stamp(expiresAtMillis.longValue()))
-                .put("appeal_url", appealUrl);
+                .put("appeal_url", appealLink(appealUrl, id));
+    }
+
+    /**
+     * The appeal link for this punishment: the guild's link with {@code ref=<id>} added, so the
+     * appeal arrives already pointing at this punishment's case. Only an id the bot assigned
+     * (24 hex characters) is added; a row still waiting to sync has a {@code local-} id the bot
+     * has never seen, and gets the plain link. So does a link that already names a ref, or carries
+     * a fragment the query would have to go in front of.
+     */
+    static String appealLink(String url, String id) {
+        if (url == null || url.isEmpty()) return "";
+        if (id == null || !id.matches("[0-9a-fA-F]{24}")) return url;
+        if (url.contains("#") || url.matches(".*[?&]ref=.*")) return url;
+        return url + (url.contains("?") ? "&" : "?") + "ref=" + id.toLowerCase(java.util.Locale.ROOT);
     }
 
     /** The mutable writer. Every field is optional; an absent one renders as empty. */

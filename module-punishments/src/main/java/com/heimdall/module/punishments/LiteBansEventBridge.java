@@ -143,11 +143,11 @@ final class LiteBansEventBridge {
     }
 
     /**
-     * The revoke payload for one LiteBans removal, or {@code null} when there is nothing to send.
-     *
-     * <p>{@code null} too for the removal our own lift caused ({@link LiteBansRevokeLift}). The bot
-     * already revoked the row it was about, and a loose type-and-uuid revoke would sweep any other
-     * row of that type on the player, hidden ones too.
+     * The revoke payload for one removed LiteBans entry, or {@code null} when there is nothing to
+     * send: a type the bot does not mirror, or the removal our own lift caused
+     * ({@link LiteBansRevokeLift}). The bot already revoked the row that lift was about, and a
+     * loose type-and-uuid revoke would sweep any other row of that type on the player, hidden ones
+     * too. Split out of {@link #postRevoke} for the same reason as {@link #issueBody}.
      */
     static Payload revokeBody(Entry entry, String salt) {
         String type = mapType(entry);
@@ -155,6 +155,10 @@ final class LiteBansEventBridge {
         if (LiteBansRevokeLift.isOwnEcho(type, dashedUuid(entry.getUuid()))) return null;
         Payload.Builder body = Payload.builder()
                 .put("type", type)
+                // Tells the bot LiteBans lifted this and has announced it, so the revoke it fans
+                // out is not announced a second time. See
+                // HeimdallPunishmentsModule#liteBansAnnounced.
+                .put("source", "hook")
                 .put("opId", UUID.randomUUID().toString())
                 .put("issuedAt", System.currentTimeMillis())
                 .put("revokedBy", entry.getExecutorName() == null ? "" : entry.getExecutorName());

@@ -64,6 +64,8 @@ final class LiteBansSupport {
         LiteBansRevokeLift.ActiveCheck check = activeCheck;
         if (check == null || context == null || frame == null) return;
         if (!PunishmentSettings.from(context.config()).hookMode()) return;
+        // LiteBans lifted this one itself and the bridge reported it: nothing left to lift there.
+        if ("hook".equals(frame.string("revokeSource", ""))) return;
         LiteBansRevokeLift.Request request = LiteBansRevokeLift.requestFor(
                 frame.string("type", ""),
                 frame.string("targetUuid", ""),
@@ -93,7 +95,4 @@ final class LiteBansSupport {
         }
     }
 
-    static void importNow(final ModuleContext context) {
-        PunishmentImporters.importAll(context);
-    }
 }

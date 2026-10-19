@@ -115,6 +115,9 @@ final class BukkitBootstrap {
     /** The tunnel backend handed to the shell's permanent {@code HeimdallTunnel}. */
     private Registration spi = Registration.NONE;
 
+    /** This generation's backend for the shell's public {@code HeimdallPunishments}. */
+    private Registration punishmentSpi = Registration.NONE;
+
     /** The {@code /hd} and {@code /hwl} registrations, unbound on disable. */
     private Registration adminCommands = Registration.NONE;
 
@@ -185,7 +188,7 @@ final class BukkitBootstrap {
                 .role(role)
                 .pluginVersion(BuildConstants.VERSION)
                 .core(shell.core().toString(), shell.shellVersion());
-        HeimdallModules.registerAll(runtime, admin);
+        punishmentSpi = HeimdallModules.registerAll(runtime, admin, shell);
 
         BukkitUpdateInstaller installer = new BukkitUpdateInstaller(logger, ownJar, dataFolder);
         UpdateWiring.Installed update = UpdateWiring.install(
@@ -263,6 +266,14 @@ final class BukkitBootstrap {
             }
         });
         spi = Registration.NONE;
+
+        guarded("unbinding the punishments SPI", new Runnable() {
+            @Override
+            public void run() {
+                punishmentSpi.close();
+            }
+        });
+        punishmentSpi = Registration.NONE;
 
         guarded("unregistering listeners and timers", new Runnable() {
             @Override

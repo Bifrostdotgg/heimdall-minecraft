@@ -1,5 +1,7 @@
 package com.heimdall.shell.bungee;
 
+import com.heimdall.api.HeimdallPunishments;
+import com.heimdall.api.HeimdallPunishmentsProvider;
 import com.heimdall.api.HeimdallTunnel;
 import com.heimdall.api.HeimdallTunnelProvider;
 import com.heimdall.core.util.Registration;
@@ -165,6 +167,17 @@ public final class HeimdallBungeePlugin extends Plugin {
                 @Override
                 public void run() {
                     HeimdallTunnelProvider.uninstall(tunnel);
+                }
+            });
+        }
+
+        @Override
+        public Registration publishPunishments(final HeimdallPunishments punishments) {
+            HeimdallPunishmentsProvider.install(punishments);
+            return Registration.once(new Runnable() {
+                @Override
+                public void run() {
+                    HeimdallPunishmentsProvider.uninstall(punishments);
                 }
             });
         }

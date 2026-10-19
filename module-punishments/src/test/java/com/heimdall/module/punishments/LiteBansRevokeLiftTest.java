@@ -276,6 +276,25 @@ class LiteBansRevokeLiftTest {
     }
 
     @Test
+    @DisplayName("a revoke LiteBans itself made is not lifted there a second time")
+    void liteBansOwnRevokeIsNotLiftedAgain() throws Exception {
+        try (PunishmentsHarness harness = hookMode()) {
+            LiteBansSupport.activeCheckForTest((family, uuid) -> true);
+            harness.tunnel.push("punish.revoke", Payload.builder()
+                    .put("type", "ban")
+                    .put("targetUuid", UUID_STRING)
+                    .put("revokeCause", "manual")
+                    .put("source", "hook")
+                    .put("revokeSource", "hook")
+                    .build());
+
+            Thread.sleep(200);
+            assertEquals(Collections.emptyList(), harness.platform.dispatchedCommands(),
+                    "LiteBans ran this unban, and on a shared database the lookup can still race it");
+        }
+    }
+
+    @Test
     @DisplayName("in replace mode, a revoke frame leaves LiteBans alone")
     void replaceModeLeavesLiteBansAlone() throws Exception {
         try (PunishmentsHarness harness = new PunishmentsHarness(dir, ServerRole.STANDALONE)

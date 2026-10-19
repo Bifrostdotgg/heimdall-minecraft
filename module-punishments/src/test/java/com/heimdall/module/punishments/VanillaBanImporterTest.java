@@ -44,6 +44,10 @@ class VanillaBanImporterTest {
             if ("ipban".equals(row.type)) {
                 sawIp = true;
                 assertEquals(PunishmentIp.hash("203.0.113.9", "salt"), row.ipDigest);
+                assertEquals("vanilla:ip:" + row.ipDigest, row.importProviderId,
+                        "the id is stored by the bot, so it is built from the digest");
+                assertTrue(!row.importProviderId.contains("203.0.113.9"),
+                        "and never carries the address: " + row.importProviderId);
             }
         }
         assertTrue(sawBan && sawIp);

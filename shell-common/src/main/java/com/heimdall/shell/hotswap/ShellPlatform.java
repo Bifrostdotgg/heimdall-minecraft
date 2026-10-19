@@ -1,5 +1,6 @@
 package com.heimdall.shell.hotswap;
 
+import com.heimdall.api.HeimdallPunishments;
 import com.heimdall.api.HeimdallTunnel;
 import com.heimdall.core.util.Registration;
 import java.io.File;
@@ -53,6 +54,15 @@ public interface ShellPlatform {
      * @return a handle that withdraws it again at disable
      */
     Registration publishTunnel(HeimdallTunnel tunnel);
+
+    /**
+     * Publishes the shell's permanent punishment queries where other plugins look for them, once,
+     * at enable: {@code HeimdallPunishmentsProvider} everywhere, and the {@code ServicesManager} on
+     * the Bukkit family.
+     *
+     * @return a handle that withdraws them again at disable
+     */
+    Registration publishPunishments(HeimdallPunishments punishments);
 
     /**
      * Removes whatever the platform still holds that belongs to a core that has stopped: listeners

@@ -42,6 +42,10 @@ class ShellHostTest {
     @TempDir(cleanup = CleanupMode.NEVER)
     Path data;
 
+    /** {@code com.heimdall.fixture.FixtureCore.MUTED}, which this classpath cannot name. */
+    private static final java.util.UUID FIXTURE_MUTED =
+            java.util.UUID.fromString("00000000-0000-0000-0000-00000000beef");
+
     private FixturePlatform platform;
     private ShellHost host;
 
@@ -127,6 +131,10 @@ class ShellHostTest {
         assertSame(LoginGateHolder.State.RUNNING, host.loginGate().state());
         assertNotNull(host.loginGate().current());
         assertNotNull(platform.published, "the public tunnel is published once, at boot");
+        assertSame(host.punishments(), platform.publishedPunishments,
+                "the public punishment queries are published once, at boot");
+        assertTrue(host.punishments().isAvailable());
+        assertTrue(host.punishments().isMuted(FIXTURE_MUTED), "the punishments forward to the core");
         assertTrue(host.currentGeneration().loaded.loader() instanceof URLClassLoader);
         assertTrue(host.currentGeneration().loaded.loader() != ShellHostTest.class.getClassLoader());
     }
@@ -147,6 +155,8 @@ class ShellHostTest {
         assertTrue(stopped > 0, "the old core did not stop for a swap: " + journal);
         assertTrue(started > stopped, "the handoff did not cross the swap: " + journal);
         assertEquals("1.0.0-beta", host.tunnel().version());
+        assertEquals("1.0.0-beta", host.punishments().activePunishment(FIXTURE_MUTED, "mute").id(),
+                "the same public object answers from the new core after a swap");
         assertFalse(host.isSwapping());
         assertSame(LoginGateHolder.State.RUNNING, host.loginGate().state());
         assertTrue(old.loader() != host.currentGeneration().loaded.loader());
@@ -222,6 +232,8 @@ class ShellHostTest {
         assertTrue(platform.log.errors().get(platform.log.errors().size() - 1)
                 .contains("logins are refused"), platform.log.lines().toString());
         assertFalse(host.tunnel().isConnected());
+        assertFalse(host.punishments().isAvailable(), "no core answers 'not available'");
+        assertFalse(host.punishments().isMuted(FIXTURE_MUTED), "no core answers 'not muted'");
 
         Relay relay = host.relays().find("fixture");
         if (relay != null) {
@@ -264,10 +276,11 @@ class ShellHostTest {
     void contractMismatchIsRefused() throws Exception {
         bootWith("alpha");
 
-        SwapOutcome outcome = host.swap(jar("contract2"), SwapListener.NONE);
+        SwapOutcome outcome = host.swap(jar("nextcontract"), SwapListener.NONE);
 
         assertSame(SwapOutcome.Kind.REFUSED, outcome.kind());
-        assertTrue(outcome.message().contains("contract 2"), outcome.message());
+        assertTrue(outcome.message().contains("contract " + (ShellContract.VERSION + 1)),
+                outcome.message());
         assertEquals("1.0.0-alpha", host.runningCore().version());
         assertEquals(1, platform.journal().size(), "the running core was touched");
     }
@@ -294,7 +307,8 @@ class ShellHostTest {
         assertTrue(beta.swappable(), beta.toString());
 
         StagedCore restartOnly = staged(
-                Fixtures.release(data, "contract2", "1.0.0-contract2", 2, null));
+                Fixtures.release(data, "nextcontract", "1.0.0-nextcontract",
+                        ShellContract.VERSION + 1, null));
         assertFalse(restartOnly.swappable());
         assertTrue(restartOnly.problem().contains("needs a restart"), restartOnly.problem());
 

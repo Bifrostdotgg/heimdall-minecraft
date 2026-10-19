@@ -6,6 +6,7 @@ import com.heimdall.shell.contract.CommandBinding;
 import com.heimdall.shell.contract.CoreIdentity;
 import com.heimdall.shell.contract.Handoff;
 import com.heimdall.shell.contract.LoginGate;
+import com.heimdall.shell.contract.PunishmentBackend;
 import com.heimdall.shell.contract.Registrations;
 import com.heimdall.shell.contract.ShellContext;
 import com.heimdall.shell.contract.ShellContract;
@@ -137,6 +138,14 @@ class GenerationContext implements ShellContext {
             return Registration.NONE;
         }
         return tracked.add(host.bindTunnel(backend));
+    }
+
+    @Override
+    public Registration bindPunishments(PunishmentBackend backend) {
+        if (backend == null || tracked.isClosed()) {
+            return Registration.NONE;
+        }
+        return tracked.add(host.bindPunishments(backend));
     }
 
     @Override

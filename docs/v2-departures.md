@@ -2763,6 +2763,55 @@ reload, the backend anchor and the login hook on an injected clock, teardown).
 - **Chat is not touched.** A vanished player who talks in public chat is visible to everyone in game
   anyway, and the chat half has its own settings.
 
+### D89 - other plugins can ask whether a player is muted, banned or frozen
+
+**New in 3.1.**
+
+**Before:** the public SPI was the tunnel and nothing else. A plugin with its own way for a player
+to talk (Third Place's `/speak` bubbles) could not ask whether that player was muted, so a muted
+player could talk through it. The only route in was reflection on
+`HeimdallPunishmentsModule.INSTANCE`, which since D87 lives in a per-generation child classloader:
+reachable, but a reference into a core that a hot swap retires.
+**Now:** `com.heimdall.api.HeimdallPunishments`, found through `HeimdallPunishmentsProvider.get()`
+on every platform and also through the Bukkit `ServicesManager`.
+
+#### The surface
+
+- `isAvailable()`, `isMuted(UUID)`, `isMuteHidden(UUID)`, `isBanned(UUID)`, `isFrozen(UUID)`.
+- `activePunishment(UUID, String type)` for `ban`, `mute` or `freeze`, returning a
+  `HeimdallPunishment` snapshot: id, type, player, name, reason, issued and expiry times in epoch
+  milliseconds (`0` for unknown and permanent), issuer, hidden, silent.
+
+Every answer is a read of the in-memory mirror the login, chat and command gates already use, so
+each call is safe and cheap from a chat thread. None reaches the bot or the disk.
+
+#### Shaped like the tunnel, for the same reason
+
+The object other plugins hold is the shell's (`ShellPunishments`), published once at shell enable
+and never replaced, and it forwards to whichever `PunishmentBackend` the running core bound through
+`ShellContext.bindPunishments`. The core's backend (`PunishmentSpiService` in `:platform-common`)
+wraps the punishments module and is bound from `HeimdallModules.registerAll`, the one place that
+holds the module and sees the contract. Between cores, with no core, with the module switched off,
+or when a backend throws, every query answers "not punished" and nothing throws. A plugin that has
+to fail closed checks `isAvailable()` itself.
+
+#### Contract 2
+
+`ShellContext` gained a method, so `ShellContract.VERSION` is 2. A contract-1 shell (3.0.0-rc.16)
+cannot serve a contract-2 core, so the first release with this API is staged for the next restart
+rather than swapped in live, which is the shell's existing behaviour for a contract change.
+
+#### Not added
+
+- **Punishment events** (issued, revoked). A mirror row reaches a server by five routes (bot push,
+  full sync, local issue, LiteBans hook, import), so an event that fires once per real punishment
+  needs its own design. Polling the boolean is cheap enough for now.
+- **Link and whitelist state.** The whitelist mirror is a cache with sliding windows: a miss
+  means "ask the bot", not "not whitelisted", so a memory-only answer would be wrong for anyone it
+  has not seen lately. Link state lives with the bot. Either would need a call that can block on the
+  network, which a chat-thread API must not do.
+- **IP, subnet and country bans.** They match a connection, not a UUID.
+
 ---
 
 ## Structure

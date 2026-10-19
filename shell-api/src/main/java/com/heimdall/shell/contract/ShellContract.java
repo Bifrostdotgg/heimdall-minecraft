@@ -28,8 +28,15 @@ public final class ShellContract {
      * its {@code expectedSha256} parameter without a bump, because no released tag contained the
      * shell yet, so no installed shell could meet a core built against the old signature
      * (departure D87). Once a shell has shipped, that exception is gone.
+     *
+     * <ul>
+     *   <li>1: the first shell, 3.0.0-rc.16.
+     *   <li>2: {@link ShellContext#bindPunishments} and the public {@code HeimdallPunishments}
+     *       (departure D89). A contract-2 core calls a method a contract-1 shell does not have, so
+     *       the first release carrying it is installed for the next restart, not swapped in live.
+     * </ul>
      */
-    public static final int VERSION = 1;
+    public static final int VERSION = 2;
 
     /**
      * How long a swap a core requests through {@link ShellContext#swapTo} is held back before the
