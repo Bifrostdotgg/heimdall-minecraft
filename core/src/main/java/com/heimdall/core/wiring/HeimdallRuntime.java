@@ -23,6 +23,8 @@ import com.heimdall.core.remoteconfig.ModuleConfig;
 import com.heimdall.core.remoteconfig.RemoteConfig;
 import com.heimdall.core.session.PlayerSessionEvents;
 import com.heimdall.core.text.Msg;
+import com.heimdall.core.tunnel.Capabilities;
+import com.heimdall.core.tunnel.CapabilitySource;
 import com.heimdall.core.tunnel.HealthSnapshotSource;
 import com.heimdall.core.tunnel.IdentitySource;
 import com.heimdall.core.tunnel.ServerIdentity;
@@ -187,6 +189,12 @@ public final class HeimdallRuntime implements AutoCloseable {
      */
     private final String commandLabel;
 
+    /**
+     * What {@code identify} declares: the modules' capabilities plus core's own. Read by the tunnel
+     * on every connect, and by {@link #declaredCapabilities()}.
+     */
+    private final DeclaredCapabilities capabilities;
+
     /** Everything {@link #start()} registered, closed in reverse on the way out. */
     private final List<Registration> registrations = new ArrayList<Registration>();
 
@@ -284,8 +292,9 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         // Set after the manager exists: the dependency genuinely runs both ways — the manager hands
         // each module a bus backed by the client, and the client asks the manager what to declare.
-        // See CapabilitySource.
-        tunnel.setCapabilitySource(modules);
+        // See CapabilitySource. Wrapped so core's own capabilities ride along with the modules'.
+        this.capabilities = new DeclaredCapabilities(modules);
+        tunnel.setCapabilitySource(capabilities);
 
         // Decided here so a status command asked before start() gets an answer rather than null.
         // Deliberately without the side effects: nothing is written and nothing is logged until
@@ -403,6 +412,12 @@ public final class HeimdallRuntime implements AutoCloseable {
         link.restoreCooldowns(handoff.get(LinkDiscordCommand.HANDOFF_KEY));
         linkCommand = link;
         registrations.add(platform.commands().register(link.spec()));
+        // The pending link code, shown on join and when the bot pushes it: the other half of
+        // linking, for a server where nothing kicks a player to show them their code. Here for the
+        // same reasons as the command above, and before the not-configured return like the
+        // dashboard handlers, so /hd setup needs no restart for it. See LinkPromptWiring.
+        registrations.add(LinkPromptWiring.install(logger, platform, api, tunnel, playerSessions,
+                executors.io(), executors.scheduler()));
         // Applies bootstrap.yml's local-disable set AND does the first reconcile against it, so a
         // module an operator switched off locally is never even started, whatever the cached or
         // pushed config says.
@@ -1268,6 +1283,14 @@ public final class HeimdallRuntime implements AutoCloseable {
     }
 
     /**
+     * Everything {@code identify} declares right now: the registered modules' capabilities and
+     * core's own ({@link Capabilities#LINK_PROMPT}).
+     */
+    public Set<String> declaredCapabilities() {
+        return capabilities.capabilities();
+    }
+
+    /**
      * The API, as everything outside core sees it. Never {@code null}, in any state.
      *
      * <p>Deliberately not the raw {@link ApiClient}: a caller that held one of those would be
@@ -1335,6 +1358,35 @@ public final class HeimdallRuntime implements AutoCloseable {
                             .put(EXTRA_KEY, digest)
                             .build())
                     .build();
+        }
+    }
+
+    /**
+     * The modules' capabilities, plus the ones core declares whatever modules are registered.
+     *
+     * <p>{@link ModuleManager} is the source for everything a module claims, and it stays the only
+     * one: this adds to its answer rather than replacing it. Core's own entries are capabilities of
+     * the build that no module owns and no toggle switches off, which is the same reason the things
+     * behind them are wired from {@link #start()} rather than from a module. Read on the socket's
+     * reading thread, so it is a set union and nothing more.
+     */
+    private static final class DeclaredCapabilities implements CapabilitySource {
+
+        /** Declared by core on every server. */
+        private static final Set<String> CORE = Collections.unmodifiableSet(
+                new LinkedHashSet<String>(Collections.singletonList(Capabilities.LINK_PROMPT)));
+
+        private final CapabilitySource modules;
+
+        DeclaredCapabilities(CapabilitySource modules) {
+            this.modules = modules;
+        }
+
+        @Override
+        public Set<String> capabilities() {
+            Set<String> declared = new LinkedHashSet<String>(modules.capabilities());
+            declared.addAll(CORE);
+            return Collections.unmodifiableSet(declared);
         }
     }
 

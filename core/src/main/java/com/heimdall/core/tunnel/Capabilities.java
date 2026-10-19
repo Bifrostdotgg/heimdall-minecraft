@@ -86,6 +86,17 @@ public final class Capabilities {
      */
     public static final String PUNISHMENTS = "punishments@1";
 
+    /**
+     * Link-code prompts: this client answers a {@code show_link_code} request by presenting the code
+     * to a player who is online here, and replies {@code show_link_code_result}.
+     *
+     * <p>Not a module, and declared by core on every server whatever modules are on: linking is a
+     * property of having a bot to talk to (departure D71's category), and a link-only server with
+     * the whitelist off is the one that needs this most. The bot sends the request only to a client
+     * that declared this, so an older client is simply never asked. Departure D90.
+     */
+    public static final String LINK_PROMPT = "linkprompt@1";
+
     /** The module framework itself: this client can enable and disable modules at runtime. */
     public static final String MODULES = "modules@1";
 

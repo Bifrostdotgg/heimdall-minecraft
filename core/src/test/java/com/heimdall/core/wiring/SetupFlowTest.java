@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.google.gson.JsonObject;
 import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
@@ -22,12 +23,15 @@ import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.testing.Await;
 import com.heimdall.core.testing.FakePlatform;
+import com.heimdall.core.testing.FakePlayer;
 import com.heimdall.core.tunnel.Capabilities;
+import com.heimdall.stubbot.ConnectedServer;
 import com.heimdall.stubbot.StubBot;
 import com.heimdall.stubbot.StubBotConfig;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -255,6 +259,55 @@ class SetupFlowTest {
                     "the tunnel must connect without a restart");
             Await.until("the client to agree it is connected",
                     () -> runtime.tunnel().isConnected(), 10_000L);
+
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("the tunnel declares linkprompt@1 with no module for it, and answers show_link_code")
+        void linkPromptsOverTheRealTunnel() throws Exception {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
+            FakePlayer steve = platform.join(FakePlayer.named("Steve"));
+            HeimdallRuntime runtime = HeimdallRuntime.builder(logger, platform)
+                    .bootstrapStore(store)
+                    .build();
+            // No whitelist module, nothing at all: the link-only server this exists for.
+            runtime.start();
+
+            bot.issueClaimCode("ABCD2345", "Survival");
+            ClaimResult claimed = claim("ABCD2345");
+            runtime.applySetup(runtime.bootstrap().toBuilder()
+                    .endpoint(bot.baseUrl())
+                    .tokenId(claimed.tokenId())
+                    .token(claimed.token())
+                    .serverId(claimed.serverId())
+                    .guildId(claimed.guildId())
+                    .build());
+
+            // From the stub's side, so it is about what identify actually carried rather than about
+            // what the runtime believes it declared.
+            ConnectedServer server =
+                    bot.ws().awaitIdentify(claimed.guildId(), claimed.serverId(), 20_000L);
+            assertNotNull(server, "the tunnel must connect without a restart");
+            assertTrue(server.capabilities().contains(Capabilities.LINK_PROMPT),
+                    "declared by core, not by a module: " + server.capabilities());
+            assertTrue(server.capabilities().contains(Capabilities.HEALTH),
+                    "and the modules' own capabilities are still there beside it");
+            Await.until("the handshake to finish", () -> runtime.tunnel().isConnected(), 10_000L);
+
+            JsonObject request = new JsonObject();
+            request.addProperty("uuid", steve.uuid().toString());
+            request.addProperty("username", "Steve");
+            request.addProperty("code", "135790");
+            request.addProperty("expiresAt", Instant.now().plusSeconds(300).toString());
+            JsonObject reply = bot.ws()
+                    .request(claimed.guildId(), claimed.serverId(), "show_link_code", request, 10_000L)
+                    .get(15, TimeUnit.SECONDS);
+
+            assertTrue(reply.get("shown").getAsBoolean(), reply.toString());
+            Await.until("the code in chat", () -> steve.messageText().size() == 2, 10_000L);
+            assertTrue(steve.messageText().get(0).contains("135790"));
 
             runtime.close();
         }
