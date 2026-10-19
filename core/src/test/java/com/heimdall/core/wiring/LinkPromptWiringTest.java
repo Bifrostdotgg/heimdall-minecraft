@@ -215,12 +215,12 @@ class LinkPromptWiringTest {
         FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
         final FakePlayer steve = platform.join(FakePlayer.named("Steve"));
         FakePlayer alex = platform.join(FakePlayer.named("Alex"));
-        bot.pendLinkCode(steve.uuid().toString(), "246810", inFiveMinutes(), "Wild (@lerndmina)");
+        bot.pendLinkCode(steve.uuid().toString(), "246810", inFiveMinutes(), "@lerndmina (Wild)");
         install(platform, api(true), new LinkPrompter(logger, platform, System::currentTimeMillis), 20L);
 
         sessions.join(steve, System.currentTimeMillis());
         await("the code in chat", () -> steve.messageText().size() == 4);
-        assertEquals("Requested by Wild (@lerndmina) in Discord.", steve.messageText().get(2));
+        assertEquals("Requested by @lerndmina (Wild) in Discord.", steve.messageText().get(2));
         assertEquals(LinkCodePrompt.WARNING, steve.messageText().get(3));
 
         Payload reply = push("r-1", Payload.builder().put("uuid", alex.uuid().toString())

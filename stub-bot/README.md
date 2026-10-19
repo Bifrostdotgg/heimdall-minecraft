@@ -246,7 +246,7 @@ The real bot mints a random code; the stub derives a stable one from the UUID (o
 `{"pending": true, "code", "expiresAt", "requestedBy"?}` once a test has called `bot.pendLinkCode(uuid,
 code, expiresAt)` (the state a link started from Discord leaves the real bot in).
 `bot.pendLinkCode(uuid, code, expiresAt, requestedBy)` adds `requestedBy`, the Discord display name
-and username of whoever started the link (e.g. `"Wild (@lerndmina)"`), which the plugin shows with
+and username of whoever started the link (e.g. `"@lerndmina (Wild)"`), which the plugin shows with
 the code; without it the key is left out. Read-only, like the
 bot's: it reports and never mints. `bot.clearPendingLinkCode(uuid)` empties it again, and
 `bot.lastPendingLinkCodeRequest()` returns the last body.

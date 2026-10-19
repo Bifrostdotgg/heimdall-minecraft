@@ -90,12 +90,12 @@ class LinkCodePromptTest {
     @Test
     @DisplayName("who asked, when the bot says, goes before the warning")
     void requestedByLine() {
-        LinkCodePrompt prompt = LinkCodePrompt.of("123456", null, "Wild (@lerndmina)");
+        LinkCodePrompt prompt = LinkCodePrompt.of("123456", null, "@lerndmina (Wild)");
 
         List<Component> lines = prompt.chatLines(NOON);
 
         assertEquals(4, lines.size());
-        assertEquals("Requested by Wild (@lerndmina) in Discord.", TestText.plain(lines.get(2)));
+        assertEquals("Requested by @lerndmina (Wild) in Discord.", TestText.plain(lines.get(2)));
         assertEquals(LinkCodePrompt.WARNING, TestText.plain(lines.get(3)));
         assertEquals("", LinkCodePrompt.of("123456", null, "   ").requestedByText(),
                 "a blank requester is no requester");
@@ -114,6 +114,27 @@ class LinkCodePromptTest {
         }
         assertEquals(LinkCodePrompt.MAX_REQUESTED_BY,
                 LinkCodePrompt.of("1", null, huge.toString()).requestedBy().length());
+    }
+
+    @Test
+    @DisplayName("tag characters go too, though each is two chars")
+    void supplementaryFormatCharactersAreStripped() {
+        // U+E0041 TAG LATIN CAPITAL LETTER A, a format character outside the BMP.
+        String tag = new String(Character.toChars(0xE0041));
+        assertEquals("Wild", LinkCodePrompt.of("1", null, "Wi" + tag + "ld" + tag).requestedBy());
+    }
+
+    @Test
+    @DisplayName("a name shaped like a domain is not a link in chat")
+    void requesterLineCannotLink() {
+        // Both proxies and Bukkit's fallback send legacy text, which links any word shaped like a
+        // domain. The dialog's text never links, so it keeps the name as it is.
+        LinkCodePrompt prompt = LinkCodePrompt.of("123456", null, "@mal (free-rank.gg)");
+
+        String line = TestText.plain(prompt.chatLines(NOON).get(2));
+
+        assertEquals("Requested by @mal (free-rank\u2024gg) in Discord.", line);
+        assertEquals("Requested by @mal (free-rank.gg) in Discord.", prompt.requestedByText());
     }
 
     @Test

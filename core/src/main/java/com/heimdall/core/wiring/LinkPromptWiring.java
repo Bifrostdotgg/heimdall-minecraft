@@ -190,12 +190,6 @@ public final class LinkPromptWiring {
     }
 
     /**
-     * Asks the bot whether a joining player has a code waiting, and shows it if so.
-     *
-     * <p>The player is looked up again once the answer arrives, rather than trusting the handle the
-     * join carried: a player who left during the delay or the request is simply not shown anything.
-     */
-    /**
      * The proxy's join check, timed from the player's first backend connection, not the login.
      *
      * <p>A proxy's login fires before the player is on any server. A backend join slowed by a
@@ -241,6 +235,12 @@ public final class LinkPromptWiring {
         }
     }
 
+    /**
+     * Asks the bot whether a joining player has a code waiting, and shows it if so.
+     *
+     * <p>The player is looked up again once the answer arrives, rather than trusting the handle the
+     * join carried: a player who left during the delay or the request is simply not shown anything.
+     */
     static final class JoinPrompt implements PlayerSessionListener {
 
         private final HeimdallLogger logger;

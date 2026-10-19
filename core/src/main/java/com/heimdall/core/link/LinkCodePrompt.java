@@ -93,7 +93,7 @@ public final class LinkCodePrompt {
     /**
      * The same, with who started the link in Discord.
      *
-     * @param requestedBy the bot's {@code requestedBy}, e.g. {@code "Wild (@lerndmina)"}, or
+     * @param requestedBy the bot's {@code requestedBy}, e.g. {@code "@lerndmina (Wild)"}, or
      *     {@code null}. A Discord display name is anybody's to choose, so it is cleaned: section
      *     signs, control characters and format characters (bidi overrides, zero-width) go (it is rendered through legacy text on some paths, where a
      *     {@code §} would restyle what follows), whitespace runs collapse, and it is cut to
@@ -117,7 +117,7 @@ public final class LinkCodePrompt {
         return requestedBy;
     }
 
-    /** {@code "Requested by Wild (@lerndmina) in Discord."}, or empty when nobody is named. */
+    /** {@code "Requested by @lerndmina (Wild) in Discord."}, or empty when nobody is named. */
     public String requestedByText() {
         return requestedBy.isEmpty() ? "" : "Requested by " + requestedBy + " in Discord.";
     }
@@ -179,7 +179,8 @@ public final class LinkCodePrompt {
         lines.add(Component.text(
                 expiry.isEmpty() ? INSTRUCTION : INSTRUCTION + " " + expiry, NamedTextColor.GRAY));
         if (!requestedBy.isEmpty()) {
-            lines.add(Component.text(requestedByText(), NamedTextColor.WHITE));
+            lines.add(Component.text(
+                    "Requested by " + unlinkable(requestedBy) + " in Discord.", NamedTextColor.WHITE));
         }
         lines.add(Component.text(WARNING, NamedTextColor.RED));
         return Collections.unmodifiableList(lines);
@@ -192,8 +193,12 @@ public final class LinkCodePrompt {
         }
         StringBuilder out = new StringBuilder(Math.min(raw.length(), MAX_REQUESTED_BY));
         boolean space = false;
-        for (int i = 0; i < raw.length(); i++) {
-            char c = raw.charAt(i);
+        int kept = 0;
+        // By code point, not by char: the tag characters (U+E0000 to U+E007F) are format
+        // characters too, and as surrogate pairs each half reads as a plain SURROGATE.
+        for (int i = 0; i < raw.length() && kept < MAX_REQUESTED_BY; ) {
+            int c = raw.codePointAt(i);
+            i += Character.charCount(c);
             // Format characters include the bidi overrides and zero-width joiners a name could use
             // to disguise itself.
             if (c == '\u00A7' || Character.getType(c) == Character.FORMAT
@@ -206,14 +211,26 @@ public final class LinkCodePrompt {
             }
             if (space) {
                 out.append(' ');
+                kept++;
                 space = false;
             }
-            out.append(c);
+            out.appendCodePoint(c);
+            kept++;
         }
-        String cleaned = out.toString();
-        return cleaned.length() > MAX_REQUESTED_BY
-                ? cleaned.substring(0, MAX_REQUESTED_BY).trim()
-                : cleaned;
+        return out.toString().trim();
+    }
+
+    /**
+     * The requester line for chat, with every {@code .} swapped for a one-dot leader
+     * ({@code U+2024}), which looks the same.
+     *
+     * <p>Both proxies send chat as legacy text (D44, D76), and so does Bukkit's fallback; on those
+     * paths a word shaped like a domain becomes a clickable link. A display name is anybody's to
+     * choose, so "free-rank.gg" beside a link code would be a link the warning sits under. Only the
+     * chat line needs this: the dialog's text never links.
+     */
+    static String unlinkable(String text) {
+        return text.replace('.', '\u2024');
     }
 
     /**

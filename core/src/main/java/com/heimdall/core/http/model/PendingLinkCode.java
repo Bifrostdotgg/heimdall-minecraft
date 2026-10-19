@@ -49,7 +49,7 @@ public final class PendingLinkCode {
      * A code, with who started the link in Discord.
      *
      * @param requestedBy the Discord display name and username the bot reports, e.g.
-     *     {@code "Wild (@lerndmina)"}, or {@code null} when it did not say
+     *     {@code "@lerndmina (Wild)"}, or {@code null} when it did not say
      */
     public static PendingLinkCode of(String code, String expiresAt, String requestedBy) {
         if (Strings.isBlank(code)) {

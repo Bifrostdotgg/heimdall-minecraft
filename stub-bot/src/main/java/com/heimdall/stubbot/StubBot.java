@@ -214,7 +214,7 @@ public final class StubBot implements AutoCloseable {
 
     /**
      * The same, with who started the link in Discord, reported as {@code requestedBy} (the real bot
-     * sends the display name and username, e.g. {@code "Wild (@lerndmina)"}). {@code null} leaves
+     * sends the display name and username, e.g. {@code "@lerndmina (Wild)"}). {@code null} leaves
      * the key out, which is what a bot that does not send it answers.
      */
     public void pendLinkCode(String uuid, String code, String expiresAt, String requestedBy) {

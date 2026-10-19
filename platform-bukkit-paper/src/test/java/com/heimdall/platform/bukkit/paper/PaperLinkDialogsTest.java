@@ -106,7 +106,7 @@ class PaperLinkDialogsTest {
         Player steve = player(772);
 
         assertTrue(dialogs.show(steve,
-                LinkCodePrompt.of("123456", "2026-10-19T12:05:00Z", "Wild (@lerndmina)"), NOON));
+                LinkCodePrompt.of("123456", "2026-10-19T12:05:00Z", "@lerndmina (Wild)"), NOON));
 
         verify(steve).showDialog(server.dialog);
         assertEquals(LinkCodePrompt.TITLE, TestText.plain(server.title));
@@ -119,7 +119,7 @@ class PaperLinkDialogsTest {
         assertTrue(isBold(code), "the code is the thing to read; it is bold: " + code);
         assertEquals(LinkCodePrompt.INSTRUCTION, TestText.plain(server.body.get(1)));
         assertEquals("This code expires in about 5 minutes.", TestText.plain(server.body.get(2)));
-        assertEquals("Requested by Wild (@lerndmina) in Discord.", TestText.plain(server.body.get(3)));
+        assertEquals("Requested by @lerndmina (Wild) in Discord.", TestText.plain(server.body.get(3)));
         assertEquals(LinkCodePrompt.WARNING, TestText.plain(server.body.get(4)));
 
         verify(server.base).canCloseWithEscape(true);

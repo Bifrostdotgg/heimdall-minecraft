@@ -149,7 +149,8 @@ final class ApiResponses {
                     .discordDisplayName(string(data, "discordDisplayName"))
                     .build();
         }
-        return LinkCodeResult.code(string(data, "code"));
+        return LinkCodeResult.code(
+                string(data, "code"), string(data, "expiresAt"), string(data, "requestedBy"));
     }
 
     /**

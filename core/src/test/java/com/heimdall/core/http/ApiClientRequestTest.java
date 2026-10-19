@@ -185,8 +185,8 @@ class ApiClientRequestTest {
             assertNull(answer.requestedBy(), "absent when the bot does not say");
 
             server.respond(200, "{\"success\":true,\"data\":{\"pending\":true,\"code\":\"246810\","
-                    + "\"requestedBy\":\"Wild (@lerndmina)\"}}");
-            assertEquals("Wild (@lerndmina)",
+                    + "\"requestedBy\":\"@lerndmina (Wild)\"}}");
+            assertEquals("@lerndmina (Wild)",
                     await(client.pendingLinkCode("Steve", UUID)).requestedBy());
         }
 

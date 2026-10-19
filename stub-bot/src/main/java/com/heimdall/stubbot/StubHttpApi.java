@@ -680,6 +680,16 @@ final class StubHttpApi {
             addNullable(data, "discordDisplayName", fixture.linkedDiscordDisplayName());
             addNullable(data, "discordUsername", fixture.linkedDiscordUsername());
             addNullable(data, "discordId", fixture.linkedDiscordId());
+        } else if (pendingLinkCodes.containsKey(uuid.toLowerCase(Locale.ROOT))) {
+            // As the bot does: a link started in Discord and still waiting is answered with that
+            // request's own code, and names who started it.
+            String[] pending = pendingLinkCodes.get(uuid.toLowerCase(Locale.ROOT));
+            data.addProperty("alreadyLinked", false);
+            data.addProperty("code", pending[0]);
+            addNullable(data, "expiresAt", pending[1]);
+            if (pending[2] != null) {
+                data.addProperty("requestedBy", pending[2]);
+            }
         } else {
             data.addProperty("alreadyLinked", false);
             data.addProperty("code", authCode(fixture, uuid));

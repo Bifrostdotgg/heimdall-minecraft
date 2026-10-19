@@ -20,10 +20,15 @@ public final class LinkCodeResult {
     private final String discordId;
     private final String discordUsername;
     private final String discordDisplayName;
+    private final String expiresAt;
+    private final String requestedBy;
 
-    private LinkCodeResult(boolean alreadyLinked, String code, Builder builder) {
+    private LinkCodeResult(boolean alreadyLinked, String code, String expiresAt, String requestedBy,
+            Builder builder) {
         this.alreadyLinked = alreadyLinked;
         this.code = code;
+        this.expiresAt = expiresAt;
+        this.requestedBy = requestedBy;
         this.message = builder == null ? null : builder.message;
         this.discordId = builder == null ? null : builder.discordId;
         this.discordUsername = builder == null ? null : builder.discordUsername;
@@ -32,7 +37,23 @@ public final class LinkCodeResult {
 
     /** A newly minted six-digit code. */
     public static LinkCodeResult code(String code) {
-        return new LinkCodeResult(false, code, null);
+        return new LinkCodeResult(false, code, null, null, null);
+    }
+
+    /**
+     * A code, with its expiry and, when somebody started the link from Discord, who.
+     *
+     * <p>The bot answers with the code a Discord request is already waiting on rather than minting
+     * a new one, and names the requester then. That code is bound to the requester's Discord
+     * account, so the player has to be told who asked and warned never to read it out: it is the
+     * same code the in-game prompt shows with the same warning.
+     *
+     * @param expiresAt the bot's ISO-8601 expiry, or {@code null}
+     * @param requestedBy who started the link in Discord, or {@code null} for a code minted for
+     *     this player's own {@code /linkdiscord}
+     */
+    public static LinkCodeResult code(String code, String expiresAt, String requestedBy) {
+        return new LinkCodeResult(false, code, expiresAt, requestedBy, null);
     }
 
     /**
@@ -54,6 +75,18 @@ public final class LinkCodeResult {
     /** The six-digit code, or {@code null} when {@link #alreadyLinked()}. */
     public String code() {
         return code;
+    }
+
+    /** When the code expires, ISO-8601 as the bot sent it, or {@code null}. */
+    public String expiresAt() {
+        return expiresAt;
+    }
+
+    /**
+     * Who started the link in Discord, or {@code null} when the code was minted for this request.
+     */
+    public String requestedBy() {
+        return requestedBy;
     }
 
     /** The bot's phrasing of the already-linked message, or {@code null}. */
@@ -87,6 +120,8 @@ public final class LinkCodeResult {
         LinkCodeResult that = (LinkCodeResult) other;
         return alreadyLinked == that.alreadyLinked
                 && Objects.equals(code, that.code)
+                && Objects.equals(expiresAt, that.expiresAt)
+                && Objects.equals(requestedBy, that.requestedBy)
                 && Objects.equals(message, that.message)
                 && Objects.equals(discordId, that.discordId)
                 && Objects.equals(discordUsername, that.discordUsername)
@@ -95,15 +130,15 @@ public final class LinkCodeResult {
 
     @Override
     public int hashCode() {
-        return Objects.hash(Boolean.valueOf(alreadyLinked), code, message, discordId, discordUsername,
-                discordDisplayName);
+        return Objects.hash(Boolean.valueOf(alreadyLinked), code, expiresAt, requestedBy, message,
+                discordId, discordUsername, discordDisplayName);
     }
 
     @Override
     public String toString() {
         return alreadyLinked
                 ? "LinkCodeResult{alreadyLinked, discordId='" + discordId + "'}"
-                : "LinkCodeResult{code='" + code + "'}";
+                : "LinkCodeResult{code='" + code + "', requestedBy='" + requestedBy + "'}";
     }
 
     /** Mutable writer for the already-linked shape. */
@@ -138,7 +173,7 @@ public final class LinkCodeResult {
         }
 
         public LinkCodeResult build() {
-            return new LinkCodeResult(true, null, this);
+            return new LinkCodeResult(true, null, null, null, this);
         }
     }
 }

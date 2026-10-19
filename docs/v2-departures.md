@@ -2896,10 +2896,19 @@ hop would hold a `heimdall-io` thread on the main thread for every push.
 The attack: somebody starts a link in Discord naming a player who is online, then asks that player
 to "read me the code", which links the victim's Minecraft account to the attacker's Discord. Both
 `pending-link-code`'s `pending: true` answer and `show_link_code` may carry `requestedBy`, the
-Discord display name and username of whoever started the link (`"Wild (@lerndmina)"`), and the
+Discord display name and username of whoever started the link (`"@lerndmina (Wild)"`), and the
 warning line is always shown. A display name is anybody's to choose, so it is cleaned first:
-section signs, control characters and format characters (bidi overrides, zero-width) are
-removed, whitespace collapses, and it is cut to 100 characters.
+section signs, control characters and format characters (bidi overrides, zero-width, the tag
+characters outside the BMP) are removed, whitespace collapses, and it is cut to 100 code points.
+The handle leads because it is the part nobody can fake. In chat every `.` in the name becomes a
+one-dot leader (U+2024): both proxies and Bukkit's fallback send legacy text, which turns a word
+shaped like a domain into a clickable link. The dialog keeps the name as it is.
+
+`/linkdiscord` is the same route in. The bot answers `request-link-code` for a player with an
+unexpired Discord request by handing back that request's own code, so `request-link-code` carries
+`requestedBy` (and `expiresAt`) too when it does. The command then shows the prompt's chat lines,
+requester and warning included, not "Your Discord Link Code"; a code minted for the player's own
+request keeps its old lines and gains the warning.
 
 #### The dialog is reflective, not a Java 21 module
 
