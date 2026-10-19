@@ -212,6 +212,38 @@ class ApiClientRequestTest {
         }
 
         @Test
+        @DisplayName("pending-link-code is one attempt: a 5xx is not retried")
+        void pendingLinkCodeIsNotRetried() {
+            server.failFirst(1, 503).respond(200, "{\"success\":true,\"data\":{\"pending\":false}}");
+
+            assertThrows(ApiError.class, () -> await(client.pendingLinkCode("Steve", UUID)));
+            assertEquals(1, server.requestCount(),
+                    "a join check that retries holds a heimdall-io thread three times as long");
+        }
+
+        @Test
+        @DisplayName("pending-link-code gives up after 2 s even when the configured timeout is longer")
+        void pendingLinkCodeTimesOutShort() {
+            ApiClient patient = new ApiClient(logger, ApiSettings.builder()
+                    .baseUrl(server.baseUrl())
+                    .guildId(GUILD)
+                    .apiKey(SECRET)
+                    .serverId("survival")
+                    .timeoutMs(10_000)
+                    .retries(3)
+                    .build(), executors.io());
+            server.delay(3_500L);
+
+            long started = System.nanoTime();
+            assertThrows(UncheckedIOException.class,
+                    () -> await(patient.pendingLinkCode("Steve", UUID)));
+            long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+            assertTrue(tookMs < 3_400L, "bounded by the 2 s read timeout, took " + tookMs + " ms");
+            assertEquals(1, server.requestCount());
+        }
+
+        @Test
         @DisplayName("a blank serverIp defaults to localhost, as in v2")
         void serverIpDefaults() throws Exception {
             connect(ConnectionAttempt.builder("Steve", UUID).build());

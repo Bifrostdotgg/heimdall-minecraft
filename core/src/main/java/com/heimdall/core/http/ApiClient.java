@@ -57,8 +57,10 @@ import java.util.function.Supplier;
  * <table border="1">
  *   <caption>Which budget bounds which call</caption>
  *   <tr><th>Call</th><th>Wait at least</th></tr>
- *   <tr><td>{@link #connectionAttempt}, {@link #requestLinkCode}, {@link #pendingLinkCode},
+ *   <tr><td>{@link #connectionAttempt}, {@link #requestLinkCode},
  *       {@link #requestRoleSyncSnapshot}, {@link #offenseTypes}, {@link #offend}</td><td>{@link ApiSettings#joinTimeoutMs()}</td></tr>
+ *   <tr><td>{@link #pendingLinkCode}</td><td>one attempt of {@link #PENDING_LINK_CODE_TIMEOUT_MS}
+ *       (connect and read each)</td></tr>
  *   <tr><td>{@link #whitelistSync}</td><td>{@link ApiSettings#whitelistSyncJoinTimeoutMs()}</td></tr>
  *   <tr><td>{@link #latestRelease}</td><td>{@link ApiSettings#updateCheckJoinTimeoutMs()}</td></tr>
  * </table>
@@ -221,6 +223,15 @@ public final class ApiClient {
     }
 
     /**
+     * The connect and read timeout for {@link #pendingLinkCode}, each, in milliseconds.
+     *
+     * <p>Shorter than the login path's and never retried, because the join check that makes this
+     * call holds a {@code heimdall-io} thread while it waits and is worth less than anything else
+     * on that pool.
+     */
+    public static final int PENDING_LINK_CODE_TIMEOUT_MS = 2_000;
+
+    /**
      * {@code POST pending-link-code}: the code a link the player started in Discord is waiting on,
      * if there is one.
      *
@@ -241,15 +252,19 @@ public final class ApiClient {
         }
         return async(() -> {
             ApiSettings current = settings;
+            // One short attempt. This runs on heimdall-io for every join, beside connection
+            // attempts and show_link_code, and a prompt is a nicety: a slow bot must cost the pool
+            // one bounded wait per join, never a retry loop of full-length ones.
+            ApiSettings once = current.toBuilder().retries(1).build();
             JsonObject body = new JsonObject();
             // Verbatim, for the same reason as request-link-code (departure D8).
             body.addProperty("username", username.trim());
             body.addProperty("uuid", uuid.trim());
             addBedrockIdentity(body, uuid.trim());
             try {
-                return ApiResponses.pendingLinkCode(requests.execute(current,
+                return ApiResponses.pendingLinkCode(requests.execute(once,
                         HttpCall.post(guildPath(current, "pending-link-code"), body.toString(),
-                                current.timeoutMs())));
+                                Math.min(current.timeoutMs(), PENDING_LINK_CODE_TIMEOUT_MS))));
             } catch (ApiError refused) {
                 if (refused.httpStatus() == 404) {
                     return PendingLinkCode.none();
