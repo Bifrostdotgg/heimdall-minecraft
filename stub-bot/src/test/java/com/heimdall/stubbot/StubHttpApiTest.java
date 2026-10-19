@@ -340,6 +340,11 @@ class StubHttpApiTest {
         assertEquals("246810", data.get("code").getAsString());
         assertEquals("2026-10-19T12:05:00.000Z", data.get("expiresAt").getAsString());
         assertEquals("PendingCode", bot.lastPendingLinkCodeRequest().get("username").getAsString());
+        assertFalse(data.has("requestedBy"), "left out when the test did not name a requester");
+
+        bot.pendLinkCode(uuid, "246810", null, "Wild (@lerndmina)");
+        assertEquals("Wild (@lerndmina)", SignedClient.data(
+                client.post(PREFIX + "/pending-link-code", body)).get("requestedBy").getAsString());
 
         bot.clearPendingLinkCode(uuid);
         assertFalse(SignedClient.data(client.post(PREFIX + "/pending-link-code", body))

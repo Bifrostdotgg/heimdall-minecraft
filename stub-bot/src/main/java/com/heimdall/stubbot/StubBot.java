@@ -212,6 +212,15 @@ public final class StubBot implements AutoCloseable {
         http.pendLinkCode(uuid, code, expiresAt);
     }
 
+    /**
+     * The same, with who started the link in Discord, reported as {@code requestedBy} (the real bot
+     * sends the display name and username, e.g. {@code "Wild (@lerndmina)"}). {@code null} leaves
+     * the key out, which is what a bot that does not send it answers.
+     */
+    public void pendLinkCode(String uuid, String code, String expiresAt, String requestedBy) {
+        http.pendLinkCode(uuid, code, expiresAt, requestedBy);
+    }
+
     /** Clears what {@link #pendLinkCode} set, so the player has nothing pending again. */
     public void clearPendingLinkCode(String uuid) {
         http.clearPendingLinkCode(uuid);

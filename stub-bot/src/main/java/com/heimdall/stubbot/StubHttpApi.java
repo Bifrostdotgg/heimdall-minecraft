@@ -186,7 +186,12 @@ final class StubHttpApi {
     }
 
     void pendLinkCode(String uuid, String code, String expiresAt) {
-        pendingLinkCodes.put(uuid.toLowerCase(Locale.ROOT), new String[] {code, expiresAt});
+        pendLinkCode(uuid, code, expiresAt, null);
+    }
+
+    void pendLinkCode(String uuid, String code, String expiresAt, String requestedBy) {
+        pendingLinkCodes.put(uuid.toLowerCase(Locale.ROOT),
+                new String[] {code, expiresAt, requestedBy});
     }
 
     void clearPendingLinkCode(String uuid) {
@@ -713,6 +718,9 @@ final class StubHttpApi {
             data.addProperty("pending", true);
             data.addProperty("code", pending[0]);
             addNullable(data, "expiresAt", pending[1]);
+            if (pending[2] != null) {
+                data.addProperty("requestedBy", pending[2]);
+            }
         }
         sendEnvelope(exchange, 200, data);
     }

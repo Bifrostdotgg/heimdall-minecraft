@@ -243,8 +243,11 @@ The real bot mints a random code; the stub derives a stable one from the UUID (o
 ### `POST …/pending-link-code`
 
 `{"username", "uuid", "isBedrock"?, "bedrockGamertag"?, "bedrockXuid"?}` → `{"pending": false}`, or
-`{"pending": true, "code", "expiresAt"}` once a test has called `bot.pendLinkCode(uuid, code,
-expiresAt)` (the state a link started from Discord leaves the real bot in). Read-only, like the
+`{"pending": true, "code", "expiresAt", "requestedBy"?}` once a test has called `bot.pendLinkCode(uuid,
+code, expiresAt)` (the state a link started from Discord leaves the real bot in).
+`bot.pendLinkCode(uuid, code, expiresAt, requestedBy)` adds `requestedBy`, the Discord display name
+and username of whoever started the link (e.g. `"Wild (@lerndmina)"`), which the plugin shows with
+the code; without it the key is left out. Read-only, like the
 bot's: it reports and never mints. `bot.clearPendingLinkCode(uuid)` empties it again, and
 `bot.lastPendingLinkCodeRequest()` returns the last body.
 
@@ -408,7 +411,7 @@ Bot → plugin:
 | `get_players` | `{}` | Yes → `player_list`. |
 | `run_command` | `{command}` | Yes → `command_result`. |
 | `probe_player` | `{uuid, username}` | Yes → `probe_result`. |
-| `show_link_code` | `{uuid?, username?, code, expiresAt}` | Yes → `show_link_code_result`: `{shown: true}` (plus `alreadyShown: true` when the join check showed the same code moments before), or `{shown: false, reason}` with `not_online`, `invalid_uuid`, `missing_player`, `missing_code`, `expired` or `error`. Only sent to a server that declared `linkprompt@1`. The player is found by `uuid` when present; with `uuid` absent or blank, by `username`, exact and case-insensitive (a Floodgate name verbatim, prefix included). `invalid_uuid` means a uuid that is present and unparseable; `missing_player` means neither was sent. |
+| `show_link_code` | `{uuid?, username?, code, expiresAt, requestedBy?}` | Yes → `show_link_code_result`: `{shown: true}` (plus `alreadyShown: true` when the join check showed the same code moments before), or `{shown: false, reason}` with `not_online`, `invalid_uuid`, `missing_player`, `missing_code`, `expired` or `error`. Only sent to a server that declared `linkprompt@1`. The player is found by `uuid` when present; with `uuid` absent or blank, by `username`, exact and case-insensitive (a Floodgate name verbatim, prefix included). `invalid_uuid` means a uuid that is present and unparseable; `missing_player` means neither was sent. `requestedBy` (who started the link in Discord) is shown with the code when present. |
 | `update` | `{}` | Yes → `update_result`. |
 | `identify_ack` | `{protocolVersion, accepted, configVersion}` | v3 only; **fresh id — it does NOT echo the `identify` id**. |
 | `pong` | `{}` | v3 only; echoes the client `ping` id. Gives **no** liveness credit. |
