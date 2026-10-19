@@ -25,6 +25,10 @@ adventure = "4.13.1"
 # spigot-api and paper-api publish -SNAPSHOT only; there is no release to pin.
 spigot-api = "1.8.8-R0.1-SNAPSHOT"
 paper-api = "1.16.5-R0.1-SNAPSHOT"
+# TEST-ONLY. The first Paper with a dialog API (1.21.6's API has none of it). The dialog binding
+# is reflective and compiles against nothing newer than paper-api above; this is the real jar its
+# tests resolve every lookup against. Java 21 bytecode, which is why only test classpaths see it.
+paper-api-dialogs = "1.21.7-R0.1-SNAPSHOT"
 # velocity-api does publish releases, so 3.4.0 is pinned rather than
 # 3.4.0-SNAPSHOT. (It still pulls velocity-brigadier:1.0.0-SNAPSHOT
 # transitively, which upstream has never released — also compileOnly.)
@@ -100,6 +104,7 @@ adventure-text-minimessage = { module = "net.kyori:adventure-text-minimessage", 
 
 spigot-api = { module = "org.spigotmc:spigot-api", version.ref = "spigot-api" }
 paper-api = { module = "com.destroystokyo.paper:paper-api", version.ref = "paper-api" }
+paper-api-dialogs = { module = "io.papermc.paper:paper-api", version.ref = "paper-api-dialogs" }
 velocity-api = { module = "com.velocitypowered:velocity-api", version.ref = "velocity-api" }
 bungeecord-api = { module = "net.md-5:bungeecord-api", version.ref = "bungeecord-api" }
 
