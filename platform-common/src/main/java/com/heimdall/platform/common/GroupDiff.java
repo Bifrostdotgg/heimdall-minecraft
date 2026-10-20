@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -31,9 +32,13 @@ import java.util.Set;
  *       dashboard hand out permissions nobody agreed it could.
  * </ul>
  *
- * <p>Comparison is case-sensitive, matching LuckPerms itself: group names there are already
- * normalised to lower case at creation, so lowering them again here would only mask a caller
- * sending something LuckPerms would never have stored.
+ * <p><strong>Comparison ignores case.</strong> LuckPerms stores group names lower-cased, and the
+ * dashboard's mapping keeps whatever the operator typed. Comparing them case-sensitively, as this
+ * once did, meant a mapping typed {@code Zeal} never matched the held {@code zeal}: the rank was never
+ * removed, and every sync tried to grant it again. So all three lists are compared lower-cased
+ * ({@link Locale#ROOT}). A group to remove is named as the player holds it; a group to grant is
+ * named lower-cased, which is how LuckPerms will store it anyway, and named once however many
+ * spellings of it the target carried.
  *
  * <p>Immutable, and both lists preserve their input order so a log line reads the way an operator
  * expects.
@@ -63,18 +68,17 @@ public final class GroupDiff {
         if (managed == null || managed.isEmpty()) {
             return EMPTY;
         }
-        Set<String> managedSet = new HashSet<String>(managed);
-        Set<String> currentSet = current == null
-                ? Collections.<String>emptySet()
-                : new HashSet<String>(current);
-        Set<String> targetSet = target == null
-                ? Collections.<String>emptySet()
-                : new HashSet<String>(target);
+        Set<String> managedSet = lowered(managed);
+        Set<String> currentSet = lowered(current);
+        Set<String> targetSet = lowered(target);
 
         List<String> remove = new ArrayList<String>();
         if (current != null) {
+            Set<String> seen = new HashSet<String>();
             for (String group : current) {
-                if (managedSet.contains(group) && !targetSet.contains(group)) {
+                String key = key(group);
+                if (key != null && managedSet.contains(key) && !targetSet.contains(key)
+                        && seen.add(key)) {
                     remove.add(group);
                 }
             }
@@ -82,16 +86,38 @@ public final class GroupDiff {
 
         List<String> add = new ArrayList<String>();
         if (target != null) {
+            Set<String> seen = new HashSet<String>();
             for (String group : target) {
-                if (managedSet.contains(group) && !currentSet.contains(group)) {
-                    add.add(group);
+                String key = key(group);
+                if (key != null && managedSet.contains(key) && !currentSet.contains(key)
+                        && seen.add(key)) {
+                    add.add(key);
                 }
             }
         }
         return new GroupDiff(add, remove);
     }
 
-    /** Groups to grant, in the order the dashboard listed them. */
+    /** A group name as compared: lower-cased, or {@code null} for a null entry. */
+    private static String key(String group) {
+        return group == null ? null : group.toLowerCase(Locale.ROOT);
+    }
+
+    private static Set<String> lowered(Collection<String> groups) {
+        if (groups == null) {
+            return Collections.<String>emptySet();
+        }
+        Set<String> out = new HashSet<String>();
+        for (String group : groups) {
+            String key = key(group);
+            if (key != null) {
+                out.add(key);
+            }
+        }
+        return out;
+    }
+
+    /** Groups to grant, lower-cased, in the order the dashboard listed them. */
     public List<String> toAdd() {
         return toAdd;
     }

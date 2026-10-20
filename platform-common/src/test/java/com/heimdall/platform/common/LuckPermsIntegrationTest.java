@@ -2,8 +2,13 @@ package com.heimdall.platform.common;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.heimdall.core.log.RecordingLogger;
@@ -18,9 +23,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.event.EventBus;
@@ -29,14 +36,21 @@ import net.luckperms.api.event.node.NodeAddEvent;
 import net.luckperms.api.event.node.NodeClearEvent;
 import net.luckperms.api.event.node.NodeRemoveEvent;
 import net.luckperms.api.event.user.UserDataRecalculateEvent;
+import net.luckperms.api.context.ImmutableContextSet;
+import net.luckperms.api.model.data.NodeMap;
 import net.luckperms.api.model.group.Group;
 import net.luckperms.api.model.user.User;
+import net.luckperms.api.model.user.UserManager;
+import net.luckperms.api.node.Node;
+import net.luckperms.api.node.types.InheritanceNode;
+import net.luckperms.api.node.types.PermissionNode;
 import net.luckperms.api.query.QueryOptions;
 import net.luckperms.api.query.QueryOptionsRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * {@link LuckPermsIntegration} against the real LuckPerms API interfaces, mocked.
@@ -247,5 +261,90 @@ class LuckPermsIntegrationTest {
         when(event.isUser()).thenReturn(true);
         when(event.getTarget()).thenReturn(user);
         return event;
+    }
+
+    // -- forward removal ---------------------------------------------------------------------
+
+    /** Loads {@code user} for {@code setPlayerGroups} and saves it back. */
+    private NodeMap loadable(User user) {
+        UserManager users = mock(UserManager.class);
+        when(api.getUserManager()).thenReturn(users);
+        when(users.loadUser(user.getUniqueId())).thenReturn(CompletableFuture.completedFuture(user));
+        when(users.saveUser(user)).thenReturn(CompletableFuture.<Void>completedFuture(null));
+        NodeMap data = mock(NodeMap.class);
+        when(user.data()).thenReturn(data);
+        return data;
+    }
+
+    private static InheritanceNode parent(String group, boolean negated) {
+        InheritanceNode node = mock(InheritanceNode.class);
+        when(node.getGroupName()).thenReturn(group);
+        when(node.isNegated()).thenReturn(negated);
+        return node;
+    }
+
+    @Test
+    @DisplayName("a forward removal clears every node granting the group, temporary or contextual")
+    void removalClearsEveryGrantingNode() {
+        UUID uuid = UUID.randomUUID();
+        User user = user(uuid, "Pio", "default", "zeal");
+        NodeMap data = loadable(user);
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+
+        CompletableFuture<Boolean> done = bridge.setPlayerGroups(
+                uuid, Arrays.<String>asList(), Arrays.asList("zeal"));
+        drain();
+
+        assertTrue(done.join(), logger.records().toString());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Predicate<? super Node>> cleared =
+                ArgumentCaptor.forClass((Class<Predicate<? super Node>>) (Class<?>) Predicate.class);
+        verify(data, times(1)).clear(cleared.capture());
+        verify(data, never()).remove(any(Node.class));
+        verify(api.getUserManager()).saveUser(user);
+
+        Predicate<? super Node> matches = cleared.getValue();
+        InheritanceNode temporaryInContext = parent("zeal", false);
+        when(temporaryInContext.hasExpiry()).thenReturn(true);
+        when(temporaryInContext.getContexts()).thenReturn(mock(ImmutableContextSet.class));
+        assertTrue(matches.test(temporaryInContext), "addtemp with server=X is still the rank");
+        assertTrue(matches.test(parent("zeal", false)), "the permanent global node too");
+        assertTrue(matches.test(parent("Zeal", false)), "names compared ignoring case");
+        assertFalse(matches.test(parent("zeal", true)), "a negated node grants nothing; left alone");
+        assertFalse(matches.test(parent("default", false)), "another group is untouched");
+        assertFalse(matches.test(mock(PermissionNode.class)), "not an inheritance node");
+    }
+
+    @Test
+    @DisplayName("a managed group typed Zeal removes the held zeal and grants nothing")
+    void caseInsensitiveRemoval() {
+        UUID uuid = UUID.randomUUID();
+        User user = user(uuid, "Pio", "default", "zeal");
+        NodeMap data = loadable(user);
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+
+        bridge.setPlayerGroups(uuid, Arrays.<String>asList(), Arrays.asList("Zeal"));
+        drain();
+
+        verify(data, times(1)).clear(any(Predicate.class));
+        verify(data, never()).add(any(Node.class));
+    }
+
+    @Test
+    @DisplayName("a held group the target still wants, in any spelling, is not written at all")
+    void heldInAnotherSpellingIsNoChange() {
+        UUID uuid = UUID.randomUUID();
+        User user = user(uuid, "Pio", "default", "zeal");
+        NodeMap data = loadable(user);
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+
+        CompletableFuture<Boolean> done =
+                bridge.setPlayerGroups(uuid, Arrays.asList("Zeal"), Arrays.asList("Zeal"));
+        drain();
+
+        assertTrue(done.join());
+        verify(data, never()).clear(any(Predicate.class));
+        verify(data, never()).add(any(Node.class));
+        verify(api.getUserManager(), never()).saveUser(user);
     }
 }

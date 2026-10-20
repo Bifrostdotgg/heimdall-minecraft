@@ -14,6 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.event.EventBus;
@@ -200,7 +201,9 @@ final class LuckPermsIntegration implements LuckPermsBridge {
 
             List<String> removed = new ArrayList<String>();
             for (String group : diff.toRemove()) {
-                user.data().remove(InheritanceNode.builder(group).build());
+                // Every node that grants the group, not the one permanent global node: see
+                // grantsGroup for why removing only that left a temporary or contextual rank behind.
+                user.data().clear(grantsGroup(group));
                 removed.add(group);
             }
 
@@ -231,6 +234,28 @@ final class LuckPermsIntegration implements LuckPermsBridge {
             logger.error("role sync failed for " + playerUuid, e);
             return Boolean.FALSE;
         }
+    }
+
+    /**
+     * What a forward removal of {@code group} deletes: every inheritance node granting it, in any
+     * context and with any expiry.
+     *
+     * <p>Removing {@code InheritanceNode.builder(group).build()} matched only the permanent node with
+     * no context, so a rank given with {@code parent addtemp} or with {@code server=X} was logged as
+     * removed and stayed. The diff lists a group because the player holds it, so what has to go is
+     * whatever node makes them hold it. A negated node ({@code zeal=false}) is left alone: it grants
+     * nothing, and deleting it could only widen what the player inherits. The name is compared
+     * ignoring case, like {@link GroupDiff}.
+     */
+    static Predicate<Node> grantsGroup(final String group) {
+        return new Predicate<Node>() {
+            @Override
+            public boolean test(Node node) {
+                return node instanceof InheritanceNode
+                        && !node.isNegated()
+                        && group.equalsIgnoreCase(((InheritanceNode) node).getGroupName());
+            }
+        };
     }
 
     /**
