@@ -102,6 +102,12 @@ import java.util.function.BiConsumer;
  * <p>The frame carries the player's <em>full</em> current group list, not the intersection and not a
  * delta, so the bot can answer for mappings this server's settings have not caught up with yet.
  *
+ * <p>Its {@code at} is when that list was read from LuckPerms, not when the frame was sent. A
+ * debounced report goes out up to {@value #DEBOUNCE_MS}ms after its newest read, and the bot orders
+ * a player's frames by {@code at} and weighs them against its own pushes; stamping the send time
+ * would make a list look newer than it is, and could let it win over a Discord-side change made in
+ * between. A resync answer's {@code at} is when its read completed.
+ *
  * <h2>Offline players: real rank edits only</h2>
  *
  * <p>A change to a player who is not online on this server (a console edit, a store command run for
@@ -115,9 +121,9 @@ import java.util.function.BiConsumer;
  * instead, as this once did, left a removed rank's Discord role in place for as long as the player
  * stayed away.
  *
- * <p>An offline report carries the full group list, a fresh {@code at}, and the name LuckPerms has
- * stored for the user, because the bot needs a username; a user LuckPerms has no name for is not
- * reported. There is no record for an offline player and no comparison: a record per offline player
+ * <p>An offline report carries the full group list, its read time as {@code at}, and the name
+ * LuckPerms has stored for the user, because the bot needs a username; a user LuckPerms has no name
+ * for is not reported. There is no record for an offline player and no comparison: a record per offline player
  * would be a cache with no bound and no owner, and the bot comparing sets makes a redundant frame
  * harmless. A recalculation for an offline player whose report is already armed (an edit's own
  * recalculation, arriving separately) only refreshes the groups that report will carry.
@@ -155,7 +161,7 @@ import java.util.function.BiConsumer;
  * frame of its own) to a client that declared {@code rolesyncresync@1}, when it needs to hear a
  * player's ranks without waiting for them to change: chiefly right after a player links, because a
  * rank they already held was never news to anybody. The answer is an ordinary {@code rolesync.groups}
- * frame with the full current list and a fresh {@code at}, sent unconditionally (no comparison with
+ * frame with the full current list, read time as {@code at}, sent unconditionally (no comparison with
  * the record: the bot asked because it does not know), and then written as the record, exactly as
  * a reported change is. Only when the player is online here and LuckPerms is available; otherwise
  * the notification is ignored, because a frame from a server the player is not on could describe a
@@ -219,6 +225,8 @@ final class GroupChangeReporter {
      */
     private static final class Pending {
         volatile List<String> groups;
+        /** When {@link #groups} was read from LuckPerms: what the frame's {@code at} says. */
+        volatile long readAtMs;
         /** The online name while the player was here, otherwise the one LuckPerms stored. */
         volatile String username;
         volatile ScheduledFuture<?> timer;
@@ -568,6 +576,7 @@ final class GroupChangeReporter {
         final boolean here = online.isPresent();
         final String name = here ? online.get().name() : storedName;
         final boolean mayArm = here || cause == GroupsChangedListener.Cause.INHERITANCE_NODE;
+        final long readAtMs = System.currentTimeMillis();
         pending.compute(uuid, (key, armed) -> {
             if (armed == null) {
                 if (!mayArm) {
@@ -580,6 +589,8 @@ final class GroupChangeReporter {
                 }
             }
             armed.groups = currentGroups;
+            // The bridge calls back straight after its read, so this is when the list was true.
+            armed.readAtMs = readAtMs;
             // The online name wins over a stored one, which LuckPerms may have kept differently.
             if (!Strings.isBlank(name) && (here || Strings.isBlank(armed.username))) {
                 armed.username = name;
@@ -687,7 +698,7 @@ final class GroupChangeReporter {
             logger.debug(() -> "tunnel down; not reporting the rank change for " + uuid);
             return;
         }
-        sendGroups(uuid, name, groups);
+        sendGroups(uuid, name, groups, armed.readAtMs);
         if (here != null && quitting == null) {
             synchronized (records) {
                 if (generation == epoch && !closed) {
@@ -761,16 +772,17 @@ final class GroupChangeReporter {
                             + ": could not read their LuckPerms groups; ignoring it: " + failure);
                     return;
                 }
-                answerResync(uuid, player.name(), groups, epoch);
+                answerResync(uuid, player.name(), groups, System.currentTimeMillis(), epoch);
             }
         });
     }
 
-    private void answerResync(UUID uuid, String name, List<String> groups, long epoch) {
+    private void answerResync(
+            UUID uuid, String name, List<String> groups, long readAtMs, long epoch) {
         if (closed || !ctx.tunnel().isConnected() || !isOnline(uuid)) {
             return;
         }
-        sendGroups(uuid, name, groups);
+        sendGroups(uuid, name, groups, readAtMs);
         if (isSubscribed()) {
             Set<String> now = intersect(groups, watched());
             synchronized (records) {
@@ -782,8 +794,12 @@ final class GroupChangeReporter {
         logger.debug(() -> "answered rolesync.resync for " + name + " with " + groups);
     }
 
-    /** The one place a {@link #FRAME_TYPE} frame is built: the full list, and a fresh {@code at}. */
-    private void sendGroups(UUID uuid, String name, List<String> groups) {
+    /**
+     * The one place a {@link #FRAME_TYPE} frame is built: the full list, and {@code at}.
+     *
+     * @param readAtMs when {@code groups} was read from LuckPerms, which is what {@code at} carries
+     */
+    private void sendGroups(UUID uuid, String name, List<String> groups, long readAtMs) {
         // Marked before the send: a join call stamped after this point read its groups after this
         // frame's were read, so it is at least as new and is allowed to record.
         markFrame(uuid);
@@ -791,7 +807,7 @@ final class GroupChangeReporter {
                 .put("uuid", uuid.toString())
                 .put("username", name)
                 .putStrings("groups", groups)
-                .put("at", System.currentTimeMillis())
+                .put("at", readAtMs)
                 .build());
     }
 
