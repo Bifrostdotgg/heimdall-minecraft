@@ -78,6 +78,16 @@ import java.util.function.BiConsumer;
  * it. An unrecorded player is reported on their next change of any kind (see above), so the cost of
  * leaving one unrecorded is frames the bot may already agree with, never a frame withheld.
  *
+ * <p><strong>A delivery older than a frame does not overwrite it.</strong> A join call reads the
+ * groups, and its answer can arrive after a rank change was already reported in a frame. Recording
+ * the call's older list then would describe what the frame has since corrected, and the next change
+ * would be compared against the wrong record. So each call is stamped from a shared sequence
+ * ({@link com.heimdall.core.roles.RoleSyncSink#groupsRequestStarting}) before it reads the groups,
+ * each frame sent takes the next value for its player, and a delivery (or a parked one, when the
+ * join adopts it) whose stamp is older than its player's last frame is dropped. Those per-player
+ * frame marks are kept for {@value #PARKED_DELIVERY_TTL_MS}ms, far longer than any join call takes,
+ * and pruned as frames are sent, so they are bounded by the frames of the last two minutes.
+ *
  * <p>The record is intersected with the watched list <em>at the time it is written</em>, and both
  * sides are intersected with the current list at comparison, so a group added to the list after the
  * join (a new dashboard mapping the bot did not apply at join) is reported at the player's next
@@ -213,9 +223,22 @@ final class GroupChangeReporter {
     private static final class Parked {
         final Set<String> watched;
         final long atMs;
+        final long stamp;
 
-        Parked(Set<String> watched, long atMs) {
+        Parked(Set<String> watched, long atMs, long stamp) {
             this.watched = watched;
+            this.atMs = atMs;
+            this.stamp = stamp;
+        }
+    }
+
+    /** When a frame last went out for a player: its place in the sequence, and the wall clock. */
+    private static final class FrameMark {
+        final long seq;
+        final long atMs;
+
+        FrameMark(long seq, long atMs) {
+            this.seq = seq;
             this.atMs = atMs;
         }
     }
@@ -224,6 +247,9 @@ final class GroupChangeReporter {
     private final HeimdallLogger logger;
     private final long debounceMs;
 
+    /** Shared with the module's join-call stamps; see the class javadoc. */
+    private final java.util.concurrent.atomic.AtomicLong sequence;
+
     /** Guards {@link #subscription}: subscribe and unsubscribe must not interleave. */
     private final Object lock = new Object();
 
@@ -231,8 +257,9 @@ final class GroupChangeReporter {
     private Registration subscription;
 
     /**
-     * Guards {@link #reported}, {@link #parked} and {@link #generation} together, so a write that
-     * checks the generation cannot land after a clear it did not see.
+     * Guards {@link #reported}, {@link #parked}, {@link #lastFrame} and {@link #generation}
+     * together, so a write that checks the generation cannot land after a clear it did not see, and a
+     * delivery cannot be recorded between a frame's mark and its send.
      */
     private final Object records = new Object();
 
@@ -242,6 +269,9 @@ final class GroupChangeReporter {
     /** Deliveries waiting for their player's join. */
     private final Map<UUID, Parked> parked = new ConcurrentHashMap<UUID, Parked>();
 
+    /** Per player, the last frame sent. Guarded by {@link #records}; pruned by age. */
+    private final Map<UUID, FrameMark> lastFrame = new java.util.HashMap<UUID, FrameMark>();
+
     /** Bumped on every clear. A write carrying an older value is stale and discarded. */
     private long generation;
 
@@ -249,14 +279,16 @@ final class GroupChangeReporter {
 
     private volatile boolean closed;
 
-    GroupChangeReporter(ModuleContext ctx) {
-        this(ctx, DEBOUNCE_MS);
+    GroupChangeReporter(ModuleContext ctx, java.util.concurrent.atomic.AtomicLong sequence) {
+        this(ctx, sequence, DEBOUNCE_MS);
     }
 
     /** The window is injectable so a test can say "inside the window" without racing a clock. */
-    GroupChangeReporter(ModuleContext ctx, long debounceMs) {
+    GroupChangeReporter(
+            ModuleContext ctx, java.util.concurrent.atomic.AtomicLong sequence, long debounceMs) {
         this.ctx = ctx;
         this.logger = ctx.logger();
+        this.sequence = sequence;
         this.debounceMs = Math.max(0L, debounceMs);
     }
 
@@ -412,9 +444,12 @@ final class GroupChangeReporter {
     /**
      * A join-time call from this server reached the bot carrying {@code groups}; see
      * {@link com.heimdall.core.roles.RoleSyncSink#groupsDelivered}. Recorded now if the player is
-     * online, parked until their join if not.
+     * online, parked until their join if not, and dropped if a frame went out for the player after
+     * the call was stamped.
+     *
+     * @param stamp the call's stamp, or {@link com.heimdall.core.roles.RoleSyncSink#UNSTAMPED}
      */
-    void delivered(UUID uuid, List<String> groups) {
+    void delivered(final UUID uuid, List<String> groups, long stamp) {
         if (closed || !isSubscribed()) {
             // Not subscribed means nothing is watched and nothing is reported, so there is
             // nothing a record could change.
@@ -422,6 +457,11 @@ final class GroupChangeReporter {
         }
         Set<String> watched = intersect(groups, watched());
         synchronized (records) {
+            if (olderThanLastFrame(uuid, stamp)) {
+                logger.debug(() -> "a join call for " + uuid + " started before the last rank "
+                        + "report was sent; keeping that report's record");
+                return;
+            }
             // Read under the lock: a join that adopts parked deliveries takes the same lock, so a
             // delivery cannot be parked just after the join looked and then wait out its TTL.
             if (isOnline(uuid)) {
@@ -431,7 +471,7 @@ final class GroupChangeReporter {
             }
             long now = System.currentTimeMillis();
             pruneParked(now);
-            parked.put(uuid, new Parked(watched, now));
+            parked.put(uuid, new Parked(watched, now, stamp));
         }
     }
 
@@ -449,9 +489,30 @@ final class GroupChangeReporter {
         synchronized (records) {
             Parked waiting = parked.remove(uuid);
             if (waiting != null
-                    && System.currentTimeMillis() - waiting.atMs <= PARKED_DELIVERY_TTL_MS) {
+                    && System.currentTimeMillis() - waiting.atMs <= PARKED_DELIVERY_TTL_MS
+                    && !olderThanLastFrame(uuid, waiting.stamp)) {
                 reported.put(uuid, waiting.watched);
             }
+        }
+    }
+
+    /** Called with {@link #records} held. Whether a frame went out for {@code uuid} after {@code stamp}. */
+    private boolean olderThanLastFrame(UUID uuid, long stamp) {
+        FrameMark mark = lastFrame.get(uuid);
+        return mark != null && mark.seq > stamp;
+    }
+
+    /** Called just before a frame is sent: takes its place in the sequence, and prunes old marks. */
+    private void markFrame(UUID uuid) {
+        long now = System.currentTimeMillis();
+        synchronized (records) {
+            Iterator<FrameMark> it = lastFrame.values().iterator();
+            while (it.hasNext()) {
+                if (now - it.next().atMs > PARKED_DELIVERY_TTL_MS) {
+                    it.remove();
+                }
+            }
+            lastFrame.put(uuid, new FrameMark(sequence.incrementAndGet(), now));
         }
     }
 
@@ -701,6 +762,9 @@ final class GroupChangeReporter {
 
     /** The one place a {@link #FRAME_TYPE} frame is built: the full list, and a fresh {@code at}. */
     private void sendGroups(UUID uuid, String name, List<String> groups) {
+        // Marked before the send: a join call stamped after this point read its groups after this
+        // frame's were read, so it is at least as new and is allowed to record.
+        markFrame(uuid);
         ctx.tunnel().send(FRAME_TYPE, Payload.builder()
                 .put("uuid", uuid.toString())
                 .put("username", name)

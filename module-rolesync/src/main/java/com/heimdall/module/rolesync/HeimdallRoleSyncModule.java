@@ -136,6 +136,14 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
     private volatile GroupChangeReporter reporter;
 
     /**
+     * The stamps reverse role sync orders frames and join calls by. Owned here rather than by the
+     * reporter so they keep increasing across a disable and enable: a join call stamped by the
+     * previous cycle's reporter must not look newer than a frame the next one sent.
+     */
+    private final java.util.concurrent.atomic.AtomicLong sequence =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /**
      * Who already delivers a directive on login, and so makes the join-time request redundant.
      *
      * <p>Set by the wiring, like the whitelist module's {@code setRoleSyncSink}, and for the same
@@ -217,7 +225,7 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
 
         // Reverse role sync. Subscribes to LuckPerms only while the bot has asked for at least one
         // group; see GroupChangeReporter for why an unwatched server pays nothing.
-        GroupChangeReporter reporting = new GroupChangeReporter(context);
+        GroupChangeReporter reporting = new GroupChangeReporter(context, sequence);
         this.reporter = reporting;
         reporting.start();
     }
@@ -278,9 +286,29 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
      */
     @Override
     public void groupsDelivered(UUID uuid, java.util.List<String> currentGroups) {
+        groupsDelivered(uuid, currentGroups, RoleSyncSink.UNSTAMPED);
+    }
+
+    /**
+     * A stamp from the shared sequence, taken before a join call reads the groups it will carry.
+     * Taken whether or not the module is on, so a call that starts while it is off and lands after
+     * an enable still compares correctly.
+     */
+    @Override
+    public long groupsRequestStarting(UUID uuid) {
+        return sequence.incrementAndGet();
+    }
+
+    /**
+     * As {@link #groupsDelivered(UUID, java.util.List)}, but dropped when a {@code rolesync.groups}
+     * frame went out for the player after the request was stamped; see
+     * {@link RoleSyncSink#groupsRequestStarting}.
+     */
+    @Override
+    public void groupsDelivered(UUID uuid, java.util.List<String> currentGroups, long stamp) {
         GroupChangeReporter reporting = this.reporter;
         if (reporting != null && uuid != null && currentGroups != null) {
-            reporting.delivered(uuid, currentGroups);
+            reporting.delivered(uuid, currentGroups, stamp);
         }
     }
 

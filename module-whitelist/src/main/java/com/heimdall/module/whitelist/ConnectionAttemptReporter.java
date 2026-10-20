@@ -218,11 +218,14 @@ final class ConnectionAttemptReporter {
                 // the continuation builds a request and hands it to ApiClient, which does its own
                 // hop onto heimdall-io, and the conformance rules ban the executor-less *Async
                 // overloads rather than the synchronous stages.
+                // Stamped before the groups are read, so a rank change reported while this is in
+                // flight is not overwritten by this request's older list. See RoleSyncSink.
+                final long stamp = stampGroupsRequest(login);
                 return currentGroups(login)
                         .thenCompose(groups -> api.connectionAttempt(
                                 request(login, groups, currentlyWhitelisted))
                                 .thenApply(result -> {
-                                    deliverGroups(login, groups, result);
+                                    deliverGroups(login, groups, result, stamp);
                                     return result;
                                 }))
                         .whenComplete(new BiConsumer<ConnectionAttemptResult, Throwable>() {
@@ -294,6 +297,17 @@ final class ConnectionAttemptReporter {
         }
     }
 
+    /** The stamp {@link #deliverGroups} hands back; never throws at the login path. */
+    private long stampGroupsRequest(LoginAttempt login) {
+        try {
+            return roleSync.get().groupsRequestStarting(login.uuid());
+        } catch (RuntimeException broken) {
+            logger.debug(() -> "stamping the groups request for " + login.username()
+                    + " failed: " + broken);
+            return RoleSyncSink.UNSTAMPED;
+        }
+    }
+
     /**
      * Tells role sync which groups this login's request delivered to the bot, so reverse role sync
      * reports only what the bot does not already know. Only after a successful answer for an admitted
@@ -301,12 +315,12 @@ final class ConnectionAttemptReporter {
      * {@link RoleSyncSink#groupsDelivered}.
      */
     private void deliverGroups(
-            LoginAttempt login, List<String> groups, ConnectionAttemptResult result) {
+            LoginAttempt login, List<String> groups, ConnectionAttemptResult result, long stamp) {
         if (groups == null || result == null || !result.whitelisted()) {
             return;
         }
         try {
-            roleSync.get().groupsDelivered(login.uuid(), groups);
+            roleSync.get().groupsDelivered(login.uuid(), groups, stamp);
         } catch (RuntimeException broken) {
             logger.error("recording the groups sent for " + login.username() + " failed; their "
                     + "login is unaffected", broken);

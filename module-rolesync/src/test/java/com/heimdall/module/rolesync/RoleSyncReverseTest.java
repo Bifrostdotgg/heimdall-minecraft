@@ -378,6 +378,59 @@ class RoleSyncReverseTest {
     }
 
     @Test
+    @DisplayName("a join answer whose request started before the last frame does not overwrite its record")
+    void staleDeliveryIgnored() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        FakePlayer pio = joinedWithoutDelivery("Pio", "default");
+        // The join call stamps and reads {default}; zeal is granted and reported while it is in flight.
+        long stamp = harness.module.groupsRequestStarting(pio.uuid());
+        change(pio, "default", "zeal");
+        await(() -> frames().size() == 1, "the grant is reported: " + harness.logger.records());
+
+        // The slow answer lands carrying the list it read before the grant.
+        harness.module.groupsDelivered(pio.uuid(), Arrays.asList("default"), stamp);
+
+        change(pio, "default");
+        await(() -> frames().size() == 2, "the removal must still be reported: recording the stale "
+                + "{} would have compared {} with {} and hidden it: " + harness.logger.records());
+        assertEquals(Arrays.asList("default"), frames().get(1).payload().strings("groups"));
+    }
+
+    @Test
+    @DisplayName("a join answer whose request started after the last frame is recorded as usual")
+    void freshDeliveryRecorded() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        FakePlayer pio = joinedWithoutDelivery("Pio", "default");
+        change(pio, "default", "zeal");
+        await(() -> frames().size() == 1, "reported: " + harness.logger.records());
+
+        long stamp = harness.module.groupsRequestStarting(pio.uuid());
+        harness.module.groupsDelivered(pio.uuid(), Arrays.asList("default", "zeal"), stamp);
+
+        change(pio, "default", "zeal", "builder");
+        sleep(PAST_WINDOW_MS);
+        assertEquals(1, frames().size(), "the fresh delivery's {zeal} is the record");
+    }
+
+    @Test
+    @DisplayName("a parked join answer older than an offline frame is not adopted at the join")
+    void staleParkedDeliveryIgnored() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        java.util.UUID uuid = RoleSyncHarness.uuidOf("Pio");
+        // The login's call stamps and reads {default}; zeal is granted from the console meanwhile.
+        long stamp = harness.module.groupsRequestStarting(uuid);
+        harness.luckPerms.fireInheritanceChanged(uuid, "Pio", Arrays.asList("default", "zeal"));
+        await(() -> frames().size() == 1, "the offline grant is reported: "
+                + harness.logger.records());
+        harness.module.groupsDelivered(uuid, Arrays.asList("default"), stamp);
+        FakePlayer pio = joinedWithoutDelivery("Pio", "default", "zeal");
+
+        change(pio, "default");
+        await(() -> frames().size() == 2, "adopting the stale {} would have hidden this removal: "
+                + harness.logger.records());
+    }
+
+    @Test
     @DisplayName("a LuckPerms that answers NONE is not treated as subscribed, and the next join retries")
     void refusedSubscriptionIsRetried() {
         harness.luckPerms.refusingListeners(true);
