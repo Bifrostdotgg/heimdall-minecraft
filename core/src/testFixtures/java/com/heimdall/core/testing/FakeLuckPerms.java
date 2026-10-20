@@ -68,6 +68,7 @@ public final class FakeLuckPerms implements LuckPermsBridge {
             new CopyOnWriteArrayList<GroupsChangedListener>();
 
     private volatile boolean available = true;
+    private volatile Object instance = new Object();
     private volatile boolean refusingListeners;
     private volatile RuntimeException failure;
 
@@ -140,6 +141,21 @@ public final class FakeLuckPerms implements LuckPermsBridge {
             listener.onGroupsChanged(uuid, username, now, cause);
         }
         return this;
+    }
+
+    /**
+     * A LuckPerms hot reload: a new instance, and every listener subscribed to the old one's event
+     * bus silently gone, which is what the real reload does to them.
+     */
+    public FakeLuckPerms reloaded() {
+        instance = new Object();
+        groupListeners.clear();
+        return this;
+    }
+
+    @Override
+    public Object instanceToken() {
+        return available ? instance : null;
     }
 
     /** How many group-change listeners are subscribed: the leak assertion for a module toggle. */

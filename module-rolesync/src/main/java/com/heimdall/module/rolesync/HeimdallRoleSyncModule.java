@@ -6,6 +6,8 @@ import com.heimdall.core.http.model.RoleSyncDirective;
 import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.platform.LuckPermsBridge;
+import com.heimdall.core.remoteconfig.ModuleConfig;
+import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.roles.RoleSyncLoginSource;
 import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.tunnel.Capabilities;
@@ -79,9 +81,11 @@ import java.util.function.Supplier;
  * step</em>, and {@code LuckPermsBridge} needs a method for it. Until then, adding one would be
  * adding a cache-management API with no cache to manage.
  *
- * <h2>Settings: one, and it is the bot's</h2>
+ * <h2>Settings: the bot's, not the operator's</h2>
  *
- * <p>{@code enabled} is the manager's business. The only setting is {@code watchedGroups}, the
+ * <p>{@code enabled} is the manager's business. {@code mode} is read for one thing only: when it
+ * changes to {@code websocket}, a remembered "the bot drives LuckPerms over RCON" is forgotten (see
+ * {@link RoleSyncApplier#resumePushes}). The other setting is {@code watchedGroups}, the
  * LuckPerms groups the bot wants reported for reverse role sync (in-game rank to Discord role). It is
  * not an operator knob: the bot computes it from the dashboard's Minecraft-to-Discord mappings, and
  * {@link GroupChangeReporter} reads it through {@link ModuleContext#settings()} at the point of use
@@ -182,13 +186,25 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
 
     @Override
     public void enable(ModuleContext context) {
-        RoleSyncApplier started = new RoleSyncApplier(context);
+        final RoleSyncApplier started = new RoleSyncApplier(context);
         this.applier = started;
-        // The default overload dispatches on heimdall-io, which is where this handler wants to be:
-        // it must not run on the socket's reading thread, and it has no reason to be on the main
-        // server thread — LuckPermsBridge does its own hopping.
+        // On heimdall-io, which is where this handler wants to be: it must not run on the socket's
+        // reading thread, and it has no reason to be on the main server thread, since
+        // LuckPermsBridge does its own hopping. Through a serial lane rather than straight onto the
+        // pool, so frames are handled in the order they arrived; see RoleSyncPushHandler.
         context.tunnel().subscribe(RoleSyncPushHandler.MESSAGE_TYPE,
-                new RoleSyncPushHandler(context, started));
+                new RoleSyncPushHandler(context, started),
+                new SerialLane(context.executors().io(), context.logger()));
+        // The bot saying it no longer drives LuckPerms over RCON. Tracked, so a disable unwinds it.
+        context.onConfigChanged(new ModuleConfigListener() {
+            @Override
+            public void onModuleConfigChanged(
+                    String moduleId, ModuleConfig previous, ModuleConfig current) {
+                if (!isWebsocket(previous) && isWebsocket(current)) {
+                    started.resumePushes();
+                }
+            }
+        });
         // Tracked by the context like the subscription, so a disable unwinds it. Runs on
         // heimdall-io and only fires a request, so a join is never held up by the bot.
         final ModuleContext ctx = context;
@@ -310,6 +326,17 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
         if (reporting != null && uuid != null && currentGroups != null) {
             reporting.delivered(uuid, currentGroups, stamp);
         }
+    }
+
+    /** The setting the bot uses to say who drives LuckPerms: {@code websocket} (us) or RCON. */
+    static final String MODE = "mode";
+
+    private static boolean isWebsocket(ModuleConfig config) {
+        if (config == null) {
+            return false;
+        }
+        String mode = config.settings().string(MODE, null);
+        return mode != null && "websocket".equalsIgnoreCase(mode.trim());
     }
 
     /** The live applier, or {@code null} when the module is off. For tests. */

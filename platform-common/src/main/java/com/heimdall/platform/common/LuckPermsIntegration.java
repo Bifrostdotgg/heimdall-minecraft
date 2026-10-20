@@ -124,6 +124,31 @@ final class LuckPermsIntegration implements LuckPermsBridge {
     }
 
     /**
+     * The LuckPerms instance registered right now, read from the provider rather than the cached
+     * handle, and adopted as the cached handle when it differs: a hot reload replaced it, and the
+     * old one is dead. Used by {@link #onGroupsChanged} and {@link #instanceToken}, because a
+     * subscription made against the cached handle after a reload would be one on a dead event bus.
+     */
+    private LuckPerms current() {
+        LuckPerms live;
+        try {
+            live = LuckPermsProvider.get();
+        } catch (IllegalStateException notReady) {
+            return null;
+        }
+        if (luckPerms != live) {
+            luckPerms = live;
+        }
+        return live;
+    }
+
+    /** The registered LuckPerms instance itself; a reload replaces it. */
+    @Override
+    public Object instanceToken() {
+        return current();
+    }
+
+    /**
      * Fails, rather than answering an empty list, whenever the groups are not actually known: no
      * LuckPerms, no uuid, a user LuckPerms could not load, or a read that threw.
      *
@@ -303,14 +328,14 @@ final class LuckPermsIntegration implements LuckPermsBridge {
      * a user edited while offline is loaded only for the duration of the edit: a fresh lookup could
      * find nothing, or load a second copy from storage.
      *
-     * <p>Subscribed against the API instance resolved now. If LuckPerms is hot-reloaded underneath a
-     * running server the old event bus dies with it and this subscription goes quiet; that is the same
-     * edge {@link #luckPerms} documents for every other call, and it heals the next time the consuming
-     * module subscribes.
+     * <p>Subscribed against the API instance registered now, read fresh from the provider. If
+     * LuckPerms is hot-reloaded underneath a running server the old event bus dies with it and this
+     * subscription goes quiet; {@link #instanceToken} changes when that happens, and the consuming
+     * module subscribes again when it sees it change.
      */
     @Override
     public Registration onGroupsChanged(final GroupsChangedListener listener) {
-        final LuckPerms api = resolve();
+        final LuckPerms api = current();
         if (api == null || listener == null) {
             return Registration.NONE;
         }

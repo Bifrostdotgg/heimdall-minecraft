@@ -173,7 +173,12 @@ import java.util.function.BiConsumer;
  * <p>Silent. The module already says once that LuckPerms is missing, on the apply path (see
  * {@link RoleSyncApplier}). A subscription that comes back as {@link Registration#NONE} is treated as
  * no subscription at all, so the next player join or config change tries again; that is also how a
- * LuckPerms that started after this module is picked up. While subscribed, a retry costs a field read.
+ * LuckPerms that started after this module is picked up. While subscribed, a retry costs two field
+ * reads: the bridge's {@link LuckPermsBridge#instanceToken} is compared with the one subscribed
+ * against, and a LuckPerms hot reload, which silently kills every listener on the old instance's
+ * event bus, is answered by subscribing to the new one at the next join or config change. Checking
+ * only whether a subscription existed, as this once did, left reverse role sync deaf for the life of
+ * the process after a reload.
  *
  * <h2>Threading</h2>
  *
@@ -255,6 +260,10 @@ final class GroupChangeReporter {
 
     /** The live LuckPerms subscription, or {@code null} while nothing is watched or it failed. */
     private Registration subscription;
+
+    /** The bridge and the LuckPerms instance {@link #subscription} was made against. */
+    private LuckPermsBridge subscribedBridge;
+    private Object subscribedInstance;
 
     /**
      * Guards {@link #reported}, {@link #parked}, {@link #lastFrame} and {@link #generation}
@@ -371,13 +380,24 @@ final class GroupChangeReporter {
                 unsubscribe();
                 return;
             }
-            if (subscription != null) {
-                return;
-            }
             LuckPermsBridge bridge = bridge();
+            if (subscription != null) {
+                if (bridge == null || (bridge == subscribedBridge
+                        && bridge.instanceToken() == subscribedInstance)) {
+                    return;
+                }
+                // LuckPerms was reloaded (or the bridge replaced): the old event bus is dead and
+                // this subscription will never fire again. Records and armed reports stay; only
+                // the listener moves to the live instance.
+                logger.debug("LuckPerms was reloaded; subscribing to the new instance");
+                Registration stale = subscription;
+                subscription = null;
+                stale.close();
+            }
             if (bridge == null) {
                 return;
             }
+            Object instance = bridge.instanceToken();
             Registration made;
             try {
                 made = bridge.onGroupsChanged(new GroupsChangedListener() {
@@ -406,6 +426,8 @@ final class GroupChangeReporter {
                 return;
             }
             subscription = made;
+            subscribedBridge = bridge;
+            subscribedInstance = instance;
             logger.debug(() -> "reporting in-game rank changes for " + watched);
         }
     }

@@ -43,9 +43,12 @@ import java.util.UUID;
  * blocks and nothing here throws: {@link #onMessage} contains everything, because a handler that
  * throws costs the frame after it as well as its own.
  *
- * <p>Stateless and immutable; safe to be invoked concurrently for two frames, which the IO pool will
- * do. Ordering between frames is not guaranteed and is not needed — each carries a whole snapshot,
- * so the last one to be applied wins, which is the same answer wire order would have given.
+ * <p>Stateless and immutable. The module subscribes it through a {@link SerialLane}, so frames are
+ * handled one at a time in the order they arrived, and {@link RoleSyncApplier} then applies a
+ * player's snapshots one after another. Both are needed because each frame carries a whole snapshot
+ * and the last one applied wins: on the plain IO pool two frames for one player could be handled,
+ * and their LuckPerms writes finish, in either order, and the older snapshot would then be the one
+ * left standing.
  */
 final class RoleSyncPushHandler implements TunnelMessageHandler {
 

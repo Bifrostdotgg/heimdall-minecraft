@@ -101,4 +101,21 @@ public interface LuckPermsBridge {
      * @return a handle that unsubscribes; idempotent
      */
     Registration onGroupsChanged(GroupsChangedListener listener);
+
+    /**
+     * Identifies the LuckPerms instance live right now, so a subscriber can tell that LuckPerms was
+     * reloaded underneath it.
+     *
+     * <p>A subscription made through {@link #onGroupsChanged} is bound to the event bus of the
+     * instance that was live when it was made. A hot reload (PlugMan and the like) replaces the
+     * instance, the old bus dies with it, and the subscription goes quiet without any error. A
+     * subscriber compares this with the value it saw when it subscribed and subscribes again when
+     * they differ. Compared by identity; {@code null} while LuckPerms is not available.
+     *
+     * <p>The default is this bridge itself, which never changes: a bridge that cannot tell is never
+     * resubscribed, which is the behaviour before this existed.
+     */
+    default Object instanceToken() {
+        return this;
+    }
 }

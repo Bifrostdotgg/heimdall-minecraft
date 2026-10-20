@@ -60,6 +60,18 @@ import java.util.function.BiConsumer;
  * the server's scheduler may be past the point where closing its handle does anything, and a module
  * that was switched off two seconds ago must not still be writing groups.
  *
+ * <h2>One write at a time per player</h2>
+ *
+ * <p>Every snapshot for a player, pushed or from a join, is applied after the previous one for that
+ * player has finished. {@code setPlayerGroups} is a load-modify-save against LuckPerms storage that
+ * runs on the multi-thread {@code heimdall-io}, so two of them for one player running side by side
+ * could each read the user before the other saved, and the later save would silently drop the
+ * earlier change; worse, they could finish in the opposite order to the one they were asked in, and
+ * the older snapshot would win. A per-player chain of futures fixes both: the bot's most recent word
+ * is the one applied last. The chain holds one entry per player with a write outstanding and is
+ * emptied as writes finish. {@code role_sync} frames reach this class in wire order because the
+ * module dispatches them through a {@link SerialLane}.
+ *
  * <h2>Threading and ownership</h2>
  *
  * <p>Owned by {@link HeimdallRoleSyncModule}, one instance per enable, discarded on disable — so
@@ -121,8 +133,20 @@ final class RoleSyncApplier {
      * nothing has ever told us, and pushes are honoured in that state — refusing them would break
      * every server that has had a push before its first login, which is most of them after a
      * restart.
+     *
+     * <p>Forgotten again when the module's config switches its {@code mode} back to
+     * {@code websocket} ({@link #resumePushes}): the bot's own say-so that it no longer drives
+     * LuckPerms over RCON. Without that, a guild that went RCON and came back had every push ignored
+     * until a player happened to log in and carry an enabled directive.
      */
     private volatile Boolean lastKnownEnabled;
+
+    /**
+     * Per player, the write that the next one waits for. See the class javadoc; an entry is removed
+     * by the write that put it there, if nothing has queued behind it since.
+     */
+    private final ConcurrentHashMap<UUID, CompletableFuture<Void>> writes =
+            new ConcurrentHashMap<UUID, CompletableFuture<Void>>();
 
     private volatile boolean active = true;
 
@@ -231,6 +255,22 @@ final class RoleSyncApplier {
     }
 
     /**
+     * The config switched role sync's {@code mode} back to {@code websocket}: forget a remembered
+     * "the bot uses RCON", so pushes are honoured again. See {@link #lastKnownEnabled}.
+     */
+    void resumePushes() {
+        if (Boolean.FALSE.equals(lastKnownEnabled)) {
+            logger.debug(() -> "role sync's mode is websocket again; honouring pushes");
+        }
+        lastKnownEnabled = null;
+    }
+
+    /** Whether pushes are being ignored because the bot said it uses RCON. For tests. */
+    boolean ignoringPushes() {
+        return Boolean.FALSE.equals(lastKnownEnabled);
+    }
+
+    /**
      * Stops everything this applier still has outstanding.
      *
      * <p>Called from {@link HeimdallRoleSyncModule#disable()}. The module's tracked registrations
@@ -263,13 +303,49 @@ final class RoleSyncApplier {
      * write a change the server did not need and skip one it did.
      */
     private void apply(
+            final UUID uuid,
+            final String label,
+            final List<String> targetGroups,
+            final List<String> managedGroups,
+            final String source) {
+        final CompletableFuture<Void> mine = new CompletableFuture<Void>();
+        CompletableFuture<Void> before = writes.put(uuid, mine);
+        final Runnable start = new Runnable() {
+            @Override
+            public void run() {
+                write(uuid, label, targetGroups, managedGroups, source, mine);
+            }
+        };
+        if (before == null) {
+            start.run();
+            return;
+        }
+        // Runs inline if the previous write has already finished, otherwise on the thread that
+        // finishes it. Either way after it, which is the point.
+        before.whenComplete(new BiConsumer<Void, Throwable>() {
+            @Override
+            public void accept(Void ignored, Throwable alsoIgnored) {
+                start.run();
+            }
+        });
+    }
+
+    /** One write, in its player's turn. Completes {@code mine} on every path. */
+    private void write(
             UUID uuid,
             final String label,
             List<String> targetGroups,
             List<String> managedGroups,
-            final String source) {
+            final String source,
+            final CompletableFuture<Void> mine) {
+        final UUID player = uuid;
+        if (!active) {
+            finish(player, mine);
+            return;
+        }
         LuckPermsBridge bridge = luckPerms();
         if (bridge == null) {
+            finish(player, mine);
             return;
         }
         try {
@@ -278,11 +354,20 @@ final class RoleSyncApplier {
             if (applied == null) {
                 logger.warn("role sync (" + source + ") for " + label
                         + ": the LuckPerms bridge returned nothing; treating it as skipped");
+                finish(player, mine);
                 return;
             }
             applied.whenComplete(new BiConsumer<Boolean, Throwable>() {
                 @Override
                 public void accept(Boolean ok, Throwable failure) {
+                    try {
+                        report(ok, failure);
+                    } finally {
+                        finish(player, mine);
+                    }
+                }
+
+                private void report(Boolean ok, Throwable failure) {
                     if (failure != null) {
                         logger.error("role sync (" + source + ") for " + label
                                 + " failed inside LuckPerms; the player keeps the groups they had",
@@ -303,7 +388,19 @@ final class RoleSyncApplier {
             // one bad snapshot must not stop the next frame being handled.
             logger.error("role sync (" + source + ") for " + label
                     + " failed before it reached LuckPerms", e);
+            finish(player, mine);
         }
+    }
+
+    /** Lets the next write for this player start, and drops the entry if nothing is queued. */
+    private void finish(UUID uuid, CompletableFuture<Void> mine) {
+        writes.remove(uuid, mine);
+        mine.complete(null);
+    }
+
+    /** How many players have a write outstanding. For tests. */
+    int outstandingWrites() {
+        return writes.size();
     }
 
     /**
