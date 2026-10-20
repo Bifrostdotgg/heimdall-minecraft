@@ -21,6 +21,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -336,6 +338,79 @@ class AdminCommandTest {
             assertTrue(anyContains(lines, "last synced"),
                     "the age is the part that answers the question: 41 entries looks equally healthy "
                             + "whether the last successful pull was a minute or a week ago");
+        }
+    }
+
+    @Nested
+    @DisplayName("update")
+    class Update {
+
+        @Test
+        @DisplayName("runs its own check with no earlier one, and prints what it found")
+        void needsNoEarlierCheck() throws InterruptedException {
+            AnsweringUpdates updates = new AnsweringUpdates("Heimdall 3.0.0 is already the latest version.");
+            install(context().updates(updates));
+
+            List<String> lines = say("update");
+
+            assertFalse(anyContains(lines, "version first"),
+                    "update must not send the operator off to run a check by hand");
+            assertTrue(updates.called.await(5, TimeUnit.SECONDS), "updateNow was never reached");
+            assertTrue(eventuallyTold("already the latest version"), admin.messageText().toString());
+        }
+    }
+
+    /** Polls for a line the async half sends after {@code updateNow} returns. */
+    private boolean eventuallyTold(String text) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            if (admin.wasTold(text)) {
+                return true;
+            }
+            Thread.sleep(10L);
+        }
+        return false;
+    }
+
+    /** An updater that knows of no update until asked, and answers {@code updateNow} with a line. */
+    private static final class AnsweringUpdates implements UpdateAdmin {
+
+        final CountDownLatch called = new CountDownLatch(1);
+        private final String answer;
+
+        AnsweringUpdates(String answer) {
+            this.answer = answer;
+        }
+
+        @Override
+        public boolean isSupported() {
+            return true;
+        }
+
+        @Override
+        public String currentVersion() {
+            return "3.0.0";
+        }
+
+        @Override
+        public boolean checkNow() {
+            return false;
+        }
+
+        @Override
+        public String updateNow(Object audience) {
+            called.countDown();
+            return answer;
+        }
+
+        @Override
+        public boolean isUpdateAvailable() {
+            return false;
+        }
+
+        @Override
+        public String latestVersion() {
+            return "";
         }
     }
 
