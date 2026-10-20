@@ -51,9 +51,19 @@ class RoleSyncOrderAndStateTest {
         final List<List<String>> started = new CopyOnWriteArrayList<List<String>>();
         final List<CompletableFuture<Boolean>> writes =
                 new CopyOnWriteArrayList<CompletableFuture<Boolean>>();
+        /** Thrown by the next {@link #isAvailable} call, once, then cleared. */
+        volatile Throwable nextAvailabilityCheckThrows;
 
         @Override
         public boolean isAvailable() {
+            Throwable broken = nextAvailabilityCheckThrows;
+            if (broken != null) {
+                nextAvailabilityCheckThrows = null;
+                if (broken instanceof Error) {
+                    throw (Error) broken;
+                }
+                throw (RuntimeException) broken;
+            }
             return true;
         }
 
@@ -132,6 +142,64 @@ class RoleSyncOrderAndStateTest {
         assertEquals(2, bridge.started.size());
         bridge.writes.get(1).complete(Boolean.TRUE);
         assertEquals(0, harness.module.applier().outstandingWrites());
+    }
+
+    @Test
+    @DisplayName("a bridge whose availability check throws still releases that player's chain")
+    void availabilityThrowReleasesTheChain() {
+        HeldBridge bridge = new HeldBridge();
+        harness = new RoleSyncHarness(dataDirectory).withLuckPerms(bridge).enable();
+
+        bridge.nextAvailabilityCheckThrows = new IllegalStateException("LuckPerms half-loaded");
+        push("Steve", groups("vip"));
+        assertEquals(0, harness.module.applier().outstandingWrites(),
+                "the throw came before setPlayerGroups, and the chain entry must not outlive it");
+
+        push("Steve", groups("mvp"));
+        assertEquals(Arrays.asList(groups("mvp")), bridge.started,
+                "the next push for Steve is not stuck behind a write that never finished");
+        bridge.writes.get(0).complete(Boolean.TRUE);
+        assertEquals(0, harness.module.applier().outstandingWrites());
+    }
+
+    @Test
+    @DisplayName("an Error from the availability check propagates, but the chain is released first")
+    void availabilityErrorReleasesTheChain() {
+        HeldBridge bridge = new HeldBridge();
+        harness = new RoleSyncHarness(dataDirectory).withLuckPerms(bridge).enable();
+
+        bridge.nextAvailabilityCheckThrows = new NoClassDefFoundError("net/luckperms/api/LuckPerms");
+        org.junit.jupiter.api.Assertions.assertThrows(NoClassDefFoundError.class,
+                () -> push("Steve", groups("vip")),
+                "inline here; on the real dispatch path the serial lane catches it");
+        assertEquals(0, harness.module.applier().outstandingWrites());
+
+        push("Steve", groups("mvp"));
+        assertEquals(Arrays.asList(groups("mvp")), bridge.started);
+    }
+
+    @Test
+    @DisplayName("a task that throws an Error does not stall the serial lane")
+    void serialLaneSurvivesAnError() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            com.heimdall.core.log.RecordingLogger logged = new com.heimdall.core.log.RecordingLogger();
+            SerialLane lane = new SerialLane(pool, logged);
+            final CountDownLatch behind = new CountDownLatch(1);
+            final CountDownLatch later = new CountDownLatch(1);
+            lane.execute(() -> {
+                throw new StackOverflowError("a task's own failure");
+            });
+            lane.execute(behind::countDown);
+            assertTrue(behind.await(5, TimeUnit.SECONDS), "the task queued behind the Error ran");
+            // And a task submitted after the lane went idle starts a new drain: draining was reset.
+            lane.execute(later::countDown);
+            assertTrue(later.await(5, TimeUnit.SECONDS),
+                    "a lane left with draining=true would never run this");
+            assertTrue(logged.records().toString().contains("StackOverflowError"), "and it was logged");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test

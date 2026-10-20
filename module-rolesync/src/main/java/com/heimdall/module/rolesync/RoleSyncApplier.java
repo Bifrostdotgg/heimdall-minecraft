@@ -343,7 +343,13 @@ final class RoleSyncApplier {
         });
     }
 
-    /** One write, in its player's turn. Completes {@code mine} on every path. */
+    /**
+     * One write, in its player's turn. Completes {@code mine} on every path, including a throw from
+     * resolving the bridge or from {@code isAvailable()}: everything up to the hand-off to the
+     * bridge's future is inside one {@code try}, and the {@code finally} releases the chain unless
+     * that future has taken over the job. A write that left {@code mine} incomplete would hold every
+     * later snapshot for the player behind it forever.
+     */
     private void write(
             UUID uuid,
             final String label,
@@ -352,22 +358,20 @@ final class RoleSyncApplier {
             final String source,
             final CompletableFuture<Void> mine) {
         final UUID player = uuid;
-        if (!active) {
-            finish(player, mine);
-            return;
-        }
-        LuckPermsBridge bridge = luckPerms();
-        if (bridge == null) {
-            finish(player, mine);
-            return;
-        }
+        boolean handedOff = false;
         try {
+            if (!active) {
+                return;
+            }
+            LuckPermsBridge bridge = luckPerms();
+            if (bridge == null) {
+                return;
+            }
             CompletableFuture<Boolean> applied =
                     bridge.setPlayerGroups(uuid, targetGroups, managedGroups);
             if (applied == null) {
                 logger.warn("role sync (" + source + ") for " + label
                         + ": the LuckPerms bridge returned nothing; treating it as skipped");
-                finish(player, mine);
                 return;
             }
             applied.whenComplete(new BiConsumer<Boolean, Throwable>() {
@@ -395,13 +399,18 @@ final class RoleSyncApplier {
                     }
                 }
             });
+            handedOff = true;
         } catch (RuntimeException e) {
             // A bridge that throws rather than failing its future. Contained for the same reason
             // the future's failure is: this runs on heimdall-io under the tunnel's dispatcher, and
             // one bad snapshot must not stop the next frame being handled.
             logger.error("role sync (" + source + ") for " + label
                     + " failed before it reached LuckPerms", e);
-            finish(player, mine);
+        } finally {
+            // An Error still propagates, but not before the next write for this player is let go.
+            if (!handedOff) {
+                finish(player, mine);
+            }
         }
     }
 

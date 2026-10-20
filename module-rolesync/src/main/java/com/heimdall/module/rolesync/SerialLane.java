@@ -15,8 +15,13 @@ import java.util.concurrent.RejectedExecutionException;
  * frame and queues the LuckPerms write (see {@link RoleSyncApplier}), so one lane for every player
  * costs nothing that matters.
  *
- * <p>A task that throws is logged and does not stop the ones behind it. A rejection by the pool (it
- * is shutting down) drops what is queued and is rethrown to the caller, like any executor.
+ * <p>A task that throws is logged and does not stop the ones behind it, and that includes an
+ * {@link Error}. The lane is one drain loop guarded by {@link #draining}: a throwable that escaped
+ * it would end the loop with the flag still set, every later {@link #execute} would queue behind a
+ * drain that is never coming, and {@code role_sync} would be dead for the life of the module. A
+ * task's {@code StackOverflowError} or {@code NoClassDefFoundError} is that task's failure, not the
+ * lane's. A rejection by the pool (it is shutting down) drops what is queued and is rethrown to the
+ * caller, like any executor.
  */
 final class SerialLane implements Executor {
 
@@ -67,8 +72,14 @@ final class SerialLane implements Executor {
             }
             try {
                 next.run();
-            } catch (RuntimeException e) {
-                logger.warn("a queued role-sync task failed: " + e);
+            } catch (Throwable e) {
+                // Throwable, not RuntimeException: see the class javadoc. Logging it is all that
+                // can be done; rethrowing would only end this loop with draining still true.
+                try {
+                    logger.warn("a queued role-sync task failed: " + e);
+                } catch (Throwable alsoBroken) {
+                    // The loop must outlive a logger that cannot take the line either.
+                }
             }
         }
     }
