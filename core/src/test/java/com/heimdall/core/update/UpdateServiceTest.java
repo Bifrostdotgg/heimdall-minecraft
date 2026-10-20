@@ -203,7 +203,7 @@ class UpdateServiceTest {
         }
 
         @Test
-        @DisplayName("a failing source leaves nothing to install")
+        @DisplayName("a failing source leaves nothing to install, and says the check failed")
         void failingSource() {
             UpdateService service = serviceFor(FakeSource.failing(new IOException("bot is down")));
 
@@ -211,6 +211,53 @@ class UpdateServiceTest {
 
             assertFalse(outcome.installed());
             assertEquals(0, installer.calls.get());
+            assertTrue(outcome.message().contains("Could not check"), outcome.message());
+            assertTrue(outcome.message().contains("bot is down"), outcome.message());
+            assertFalse(outcome.message().contains("latest version"),
+                    "nothing is known about the latest version when the bot could not be asked");
+        }
+
+        @Test
+        @DisplayName("checks for itself, with no earlier check, and past the bot's cache")
+        void checksWithoutAnEarlierCheck() {
+            FakeSource source = new FakeSource(release("3.1.0"));
+            UpdateService service = serviceFor(source);
+            assertFalse(service.hasChecked());
+
+            InstallOutcome outcome = service.updateNow();
+
+            assertTrue(outcome.installed());
+            assertEquals("3.1.0", installer.installedVersion);
+            assertEquals(Collections.singletonList(Boolean.TRUE), source.freshFlags);
+        }
+
+        @Test
+        @DisplayName("a failed check does not install what an older check found")
+        void failedCheckIgnoresTheOlderAnswer() {
+            SwitchableSource source = new SwitchableSource(release("3.1.0"));
+            UpdateService service = serviceFor(source);
+            assertTrue(service.checkNow());
+            source.failWith(new IOException("bot is down"));
+
+            InstallOutcome outcome = service.updateNow();
+
+            assertFalse(outcome.installed());
+            assertEquals(0, installer.calls.get());
+            assertTrue(outcome.message().contains("Could not check"), outcome.message());
+            assertTrue(service.isUpdateAvailable(),
+                    "the older answer still stands for the notice and /hd version");
+        }
+
+        @Test
+        @DisplayName("no release from the bot installs nothing, and does not claim up to date")
+        void noReleaseReported() {
+            UpdateService service = serviceFor(new FakeSource(null));
+
+            InstallOutcome outcome = service.updateNow();
+
+            assertFalse(outcome.installed());
+            assertEquals(0, installer.calls.get());
+            assertFalse(outcome.message().contains("latest version"), outcome.message());
         }
     }
 
