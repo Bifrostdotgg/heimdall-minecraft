@@ -170,6 +170,10 @@ class LuckPermsIntegrationTest {
     private Registration subscribe() {
         LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
         assertNotNull(bridge);
+        return subscribe(bridge);
+    }
+
+    private Registration subscribe(LuckPermsIntegration bridge) {
         return bridge.onGroupsChanged(new GroupsChangedListener() {
             @Override
             public void onGroupsChanged(UUID uuid, List<String> currentGroups) {
@@ -420,5 +424,150 @@ class LuckPermsIntegrationTest {
         verify(data, never()).add(any(Node.class));
         verify(data, never()).clear(any(Predicate.class));
         verify(api.getUserManager(), never()).saveUser(user);
+    }
+
+    // -- our own writes' node events -----------------------------------------------------------
+
+    private static NodeClearEvent clearedOf(User user, Node... nodes) {
+        NodeClearEvent event = mock(NodeClearEvent.class);
+        when(event.getNodes()).thenReturn(new LinkedHashSet<Node>(Arrays.asList(nodes)));
+        when(event.isUser()).thenReturn(true);
+        when(event.getTarget()).thenReturn(user);
+        return event;
+    }
+
+    private static NodeAddEvent addedOf(User user, Node node) {
+        NodeAddEvent event = mock(NodeAddEvent.class);
+        when(event.getNode()).thenReturn(node);
+        when(event.isUser()).thenReturn(true);
+        when(event.getTarget()).thenReturn(user);
+        return event;
+    }
+
+    @Test
+    @DisplayName("the clear a forward removal fires is tagged as our own write; a later edit is not")
+    void ownRemovalIsTagged() {
+        UUID uuid = UUID.randomUUID();
+        User user = user(uuid, "Pio", "default", "zeal");
+        NodeMap data = loadable(user);
+        InheritanceNode zeal = parent("zeal", false);
+        when(data.toCollection()).thenReturn(Arrays.<Node>asList(zeal));
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+        subscribe(bridge);
+
+        bridge.setPlayerGroups(uuid, Arrays.<String>asList(), Arrays.asList("zeal"));
+        drain();
+        assertEquals(1, bridge.ownWritesOutstanding(), "expected before the write");
+
+        // LuckPerms posts it on its own thread, after the write returned.
+        handlers.get(NodeClearEvent.class).accept(clearedOf(user, zeal));
+        drain();
+        assertEquals(1, calls.size());
+        assertEquals(GroupsChangedListener.Cause.ROLE_SYNC_WRITE, calls.get(0).cause,
+                "the push coming back is not an edit: an offline report would echo it");
+        assertEquals(0, bridge.ownWritesOutstanding(), "consumed");
+
+        // The same change made by somebody else, later, is an edit again.
+        handlers.get(NodeClearEvent.class).accept(clearedOf(user, zeal));
+        drain();
+        assertEquals(GroupsChangedListener.Cause.INHERITANCE_NODE, calls.get(1).cause);
+    }
+
+    @Test
+    @DisplayName("a removal of something not held expects no event, so it cannot swallow a later edit")
+    void nothingToClearExpectsNothing() {
+        UUID uuid = UUID.randomUUID();
+        // The read says zeal is held (inherited through another group), but no node of the user's
+        // own grants it: the clear removes nothing and LuckPerms fires no event for it.
+        User user = user(uuid, "Pio", "default", "zeal");
+        loadable(user);
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+        subscribe(bridge);
+
+        bridge.setPlayerGroups(uuid, Arrays.<String>asList(), Arrays.asList("zeal"));
+        drain();
+        assertEquals(0, bridge.ownWritesOutstanding());
+    }
+
+    @Test
+    @DisplayName("the add a forward grant fires is tagged as our own write; a no-op add expects nothing")
+    void ownAddIsTagged() {
+        UUID uuid = UUID.randomUUID();
+        User user = user(uuid, "Pio", "default");
+        NodeMap data = loadable(user);
+        net.luckperms.api.node.NodeBuilderRegistry builders =
+                mock(net.luckperms.api.node.NodeBuilderRegistry.class);
+        when(api.getNodeBuilderRegistry()).thenReturn(builders);
+        InheritanceNode.Builder builder = mock(InheritanceNode.Builder.class);
+        when(builders.forInheritance()).thenReturn(builder);
+        when(builder.group(any(String.class))).thenReturn(builder);
+        InheritanceNode zeal = parent("zeal", false);
+        when(builder.build()).thenReturn(zeal);
+        net.luckperms.api.model.group.GroupManager groups =
+                mock(net.luckperms.api.model.group.GroupManager.class);
+        when(api.getGroupManager()).thenReturn(groups);
+        when(groups.isLoaded("zeal")).thenReturn(true);
+        when(data.add(zeal)).thenReturn(net.luckperms.api.model.data.DataMutateResult.SUCCESS);
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+        subscribe(bridge);
+
+        CompletableFuture<Boolean> done =
+                bridge.setPlayerGroups(uuid, Arrays.asList("zeal"), Arrays.asList("zeal"));
+        drain();
+        assertTrue(done.join(), logger.records().toString());
+        verify(data).add(zeal);
+        assertEquals(1, bridge.ownWritesOutstanding());
+
+        handlers.get(NodeAddEvent.class).accept(addedOf(user, zeal));
+        drain();
+        assertEquals(GroupsChangedListener.Cause.ROLE_SYNC_WRITE, calls.get(0).cause);
+
+        // LuckPerms saying it already had the node: nothing changed, nothing will be fired.
+        when(data.add(zeal)).thenReturn(net.luckperms.api.model.data.DataMutateResult.FAIL_ALREADY_HAS);
+        bridge.setPlayerGroups(uuid, Arrays.asList("zeal"), Arrays.asList("zeal"));
+        drain();
+        assertEquals(0, bridge.ownWritesOutstanding(), "withdrawn");
+    }
+
+    @Test
+    @DisplayName("our write's event coalesced with a real edit of the same user is still the edit")
+    void editOutranksOwnWrite() {
+        UUID uuid = UUID.randomUUID();
+        User user = user(uuid, "Pio", "default", "zeal");
+        NodeMap data = loadable(user);
+        InheritanceNode zeal = parent("zeal", false);
+        when(data.toCollection()).thenReturn(Arrays.<Node>asList(zeal));
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+        subscribe(bridge);
+        bridge.setPlayerGroups(uuid, Arrays.<String>asList(), Arrays.asList("zeal"));
+        drain();
+
+        handlers.get(NodeClearEvent.class).accept(clearedOf(user, zeal));
+        handlers.get(NodeAddEvent.class).accept(addedOf(user, parent("mvp", false)));
+        handlers.get(UserDataRecalculateEvent.class).accept(recalculated(user));
+        drain();
+        assertEquals(1, calls.size(), "one read");
+        assertEquals(GroupsChangedListener.Cause.INHERITANCE_NODE, calls.get(0).cause);
+    }
+
+    @Test
+    @DisplayName("with nobody subscribed, a write records no expectation at all")
+    void noListenerNoExpectation() {
+        UUID uuid = UUID.randomUUID();
+        User user = user(uuid, "Pio", "default", "zeal");
+        NodeMap data = loadable(user);
+        InheritanceNode zeal = parent("zeal", false);
+        when(data.toCollection()).thenReturn(Arrays.<Node>asList(zeal));
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+
+        bridge.setPlayerGroups(uuid, Arrays.<String>asList(), Arrays.asList("zeal"));
+        drain();
+        assertEquals(0, bridge.ownWritesOutstanding());
+
+        Registration registration = subscribe(bridge);
+        registration.close();
+        bridge.setPlayerGroups(uuid, Arrays.<String>asList(), Arrays.asList("zeal"));
+        drain();
+        assertEquals(0, bridge.ownWritesOutstanding(), "and none after the subscription closed");
     }
 }

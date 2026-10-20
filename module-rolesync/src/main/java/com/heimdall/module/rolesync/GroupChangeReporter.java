@@ -121,6 +121,13 @@ import java.util.function.BiConsumer;
  * instead, as this once did, left a removed rank's Discord role in place for as long as the player
  * stayed away.
  *
+ * <p>A node event caused by this plugin's own forward write ({@code role_sync} or a join snapshot
+ * applied through {@link LuckPermsBridge#setPlayerGroups}) arrives as
+ * {@link GroupsChangedListener.Cause#ROLE_SYNC_WRITE} and is not an edit either: it is the bot's own
+ * push coming back. Taken as one, every server that applied a push for an offline player answered it
+ * with a frame. For an online player it arms a report as any callback does, and the bot's set
+ * comparison makes that echo a no-op.
+ *
  * <p>An offline report carries the full group list, its read time as {@code at}, and the name
  * LuckPerms has stored for the user, because the bot needs a username; a user LuckPerms has no name
  * for is not reported. There is no record for an offline player and no comparison: a record per offline player
@@ -575,6 +582,7 @@ final class GroupChangeReporter {
         Optional<PlayerHandle> online = ctx.platform().players().byUuid(uuid);
         final boolean here = online.isPresent();
         final String name = here ? online.get().name() : storedName;
+        // Not ROLE_SYNC_WRITE for somebody offline: that is the bot's own push, applied here.
         final boolean mayArm = here || cause == GroupsChangedListener.Cause.INHERITANCE_NODE;
         final long readAtMs = System.currentTimeMillis();
         pending.compute(uuid, (key, armed) -> {

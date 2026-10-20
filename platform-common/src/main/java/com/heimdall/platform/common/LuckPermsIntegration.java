@@ -7,12 +7,17 @@ import com.heimdall.core.util.Registration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.luckperms.api.LuckPerms;
@@ -24,6 +29,7 @@ import net.luckperms.api.event.node.NodeClearEvent;
 import net.luckperms.api.event.node.NodeMutateEvent;
 import net.luckperms.api.event.node.NodeRemoveEvent;
 import net.luckperms.api.event.user.UserDataRecalculateEvent;
+import net.luckperms.api.model.data.DataMutateResult;
 import net.luckperms.api.model.group.Group;
 import net.luckperms.api.model.user.User;
 import net.luckperms.api.node.Node;
@@ -82,6 +88,15 @@ final class LuckPermsIntegration implements LuckPermsBridge {
 
     /** So "LuckPerms integration enabled" is said once, not once per lookup. */
     private volatile boolean announced;
+
+    /** The node events {@link #setPlayerGroups} is about to cause; see {@link OwnWrites}. */
+    private final OwnWrites ownWrites = new OwnWrites();
+
+    /**
+     * How many {@link #onGroupsChanged} subscriptions are open. Expectations are only recorded while
+     * one is, because with nobody listening there is no event to match them against.
+     */
+    private final AtomicInteger listening = new AtomicInteger();
 
     private LuckPermsIntegration(HeimdallLogger logger, Executor executor) {
         this.logger = logger;
@@ -230,7 +245,18 @@ final class LuckPermsIntegration implements LuckPermsBridge {
             for (String group : diff.toRemove()) {
                 // Every node that grants the group, not the one permanent global node: see
                 // grantsGroup for why removing only that left a temporary or contextual rank behind.
-                user.data().clear(grantsGroup(group));
+                Predicate<Node> granting = grantsGroup(group);
+                // Expected before the write, because LuckPerms posts the event on its own thread
+                // and it can arrive before clear() returns. Only when a node will really go:
+                // LuckPerms fires nothing for a clear that removes nothing.
+                OwnWrites.Expected echo = holdsAny(user, granting)
+                        ? expectOwnWrite(playerUuid, group, false) : null;
+                try {
+                    user.data().clear(granting);
+                } catch (RuntimeException e) {
+                    ownWrites.withdraw(playerUuid, echo);
+                    throw e;
+                }
                 removed.add(group);
             }
 
@@ -243,7 +269,18 @@ final class LuckPermsIntegration implements LuckPermsBridge {
                             + "to " + playerUuid);
                     continue;
                 }
-                user.data().add(InheritanceNode.builder(group).build());
+                OwnWrites.Expected echo = expectOwnWrite(playerUuid, group, true);
+                DataMutateResult result;
+                try {
+                    result = user.data().add(InheritanceNode.builder(group).build());
+                } catch (RuntimeException e) {
+                    ownWrites.withdraw(playerUuid, echo);
+                    throw e;
+                }
+                if (result != null && !result.wasSuccessful()) {
+                    // Already there in exactly that form: no change, so no event will come.
+                    ownWrites.withdraw(playerUuid, echo);
+                }
                 added.add(group);
             }
 
@@ -310,6 +347,10 @@ final class LuckPermsIntegration implements LuckPermsBridge {
      *       is passed on as {@link GroupsChangedListener.Cause#RECALCULATION} and the node events as
      *       {@link GroupsChangedListener.Cause#INHERITANCE_NODE}: only the latter says somebody
      *       edited a rank, which is what decides whether an offline player is reported.
+     *   <li>A node event this bridge caused itself, by applying a forward snapshot in
+     *       {@link #setPlayerGroups}, is passed on as
+     *       {@link GroupsChangedListener.Cause#ROLE_SYNC_WRITE} instead. It is the bot's own push
+     *       coming back, not news; see {@link OwnWrites} for how it is recognised.
      * </ul>
      *
      * <h2>Threads</h2>
@@ -349,7 +390,7 @@ final class LuckPermsIntegration implements LuckPermsBridge {
                 @Override
                 public void accept(NodeAddEvent event) {
                     if (event.getNode() instanceof InheritanceNode) {
-                        onUserMutated(event, reads);
+                        onUserMutated(event, Collections.singletonList(event.getNode()), true, reads);
                     }
                 }
             }));
@@ -357,7 +398,8 @@ final class LuckPermsIntegration implements LuckPermsBridge {
                 @Override
                 public void accept(NodeRemoveEvent event) {
                     if (event.getNode() instanceof InheritanceNode) {
-                        onUserMutated(event, reads);
+                        onUserMutated(
+                                event, Collections.singletonList(event.getNode()), false, reads);
                     }
                 }
             }));
@@ -365,7 +407,7 @@ final class LuckPermsIntegration implements LuckPermsBridge {
                 @Override
                 public void accept(NodeClearEvent event) {
                     if (anyInheritance(event.getNodes())) {
-                        onUserMutated(event, reads);
+                        onUserMutated(event, event.getNodes(), false, reads);
                     }
                 }
             }));
@@ -382,18 +424,206 @@ final class LuckPermsIntegration implements LuckPermsBridge {
             logger.warn("could not subscribe to LuckPerms group changes: " + e.getMessage());
             return Registration.NONE;
         }
+        listening.incrementAndGet();
         return Registration.once(new Runnable() {
             @Override
             public void run() {
+                listening.decrementAndGet();
                 closeAll(subscriptions);
             }
         });
     }
 
-    private static void onUserMutated(NodeMutateEvent event, GroupReads reads) {
-        if (event.isUser() && event.getTarget() instanceof User) {
-            reads.request((User) event.getTarget(), GroupsChangedListener.Cause.INHERITANCE_NODE);
+    /**
+     * A user's inheritance node was added, removed or cleared. Tagged as this bridge's own write
+     * when it is one {@link #setPlayerGroups} said it was about to make, otherwise as an edit.
+     */
+    private void onUserMutated(
+            NodeMutateEvent event, Collection<? extends Node> nodes, boolean added, GroupReads reads) {
+        if (!event.isUser() || !(event.getTarget() instanceof User)) {
+            return;
         }
+        User user = (User) event.getTarget();
+        GroupsChangedListener.Cause cause;
+        try {
+            cause = ownWrites.consume(user.getUniqueId(), inheritedNames(nodes), added)
+                    ? GroupsChangedListener.Cause.ROLE_SYNC_WRITE
+                    : GroupsChangedListener.Cause.INHERITANCE_NODE;
+        } catch (RuntimeException e) {
+            // Never thrown back into LuckPerms' dispatch. Unsure counts as an edit: reporting a
+            // write of ours costs a redundant frame, missing an edit costs a stale Discord role.
+            cause = GroupsChangedListener.Cause.INHERITANCE_NODE;
+        }
+        reads.request(user, cause);
+    }
+
+    /** Called before a write: records the event it will cause, if anybody is listening for one. */
+    private OwnWrites.Expected expectOwnWrite(UUID uuid, String group, boolean added) {
+        return listening.get() > 0 ? ownWrites.expect(uuid, group, added) : null;
+    }
+
+    private static boolean holdsAny(User user, Predicate<Node> test) {
+        Collection<Node> nodes = user.data().toCollection();
+        if (nodes == null) {
+            return false;
+        }
+        for (Node node : nodes) {
+            if (test.test(node)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<String> inheritedNames(Collection<? extends Node> nodes) {
+        List<String> names = new ArrayList<String>();
+        if (nodes != null) {
+            for (Node node : nodes) {
+                if (node instanceof InheritanceNode) {
+                    String name = ((InheritanceNode) node).getGroupName();
+                    if (name != null) {
+                        names.add(name.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+        }
+        return names;
+    }
+
+    /** How long the event of our own write is waited for before the expectation is dropped. */
+    static final long OWN_WRITE_TTL_MS = 10_000L;
+
+    /**
+     * The node events this bridge's own forward writes are about to cause, so they can be told apart
+     * from somebody else's edit when they arrive.
+     *
+     * <p>Why it matters: {@code data().clear} and {@code data().add} in {@link #setPlayerGroups} fire
+     * the same {@link NodeClearEvent} and {@link NodeAddEvent} a {@code /lp user X parent ...} does.
+     * Passed on as {@link GroupsChangedListener.Cause#INHERITANCE_NODE}, reverse role sync took each
+     * one as a rank edit and reported it even for an offline player, so every server that applied a
+     * push for an offline player sent the bot a {@code rolesync.groups} frame describing the push it
+     * had just sent.
+     *
+     * <p>Why not a flag held "while writing": LuckPerms posts node events on its own async executor,
+     * so the event of a write can arrive after the write, and the save, have returned. So the write
+     * says what it expects (a removal of group {@code g} for this user, or an addition of it)
+     * <em>before</em> it mutates, and the first matching event consumes the expectation. Only for a
+     * change that will really happen: a clear only when a granting node is there, and an add is
+     * withdrawn when LuckPerms says the node was already present. LuckPerms fires nothing for a no-op,
+     * and an expectation left waiting could later swallow a real edit.
+     *
+     * <p>Matched on the user, the direction and the group name (lower-cased): a removal or clear
+     * whose inheritance nodes are all for the expected group, or an add of it. A real edit of the
+     * same rank on the same user in the moment between our write and its event is the only thing
+     * that can be taken for ours, and an expectation lives at most {@value #OWN_WRITE_TTL_MS}ms, so
+     * an event that never comes cannot hide an edit for longer than that. Bounded by the writes of
+     * that window, pruned whenever one is added.
+     */
+    static final class OwnWrites {
+
+        static final class Expected {
+            final String group;
+            final boolean added;
+            final long expiresAtMs;
+
+            Expected(String group, boolean added, long expiresAtMs) {
+                this.group = group;
+                this.added = added;
+                this.expiresAtMs = expiresAtMs;
+            }
+        }
+
+        private final Map<UUID, List<Expected>> expected = new HashMap<UUID, List<Expected>>();
+
+        synchronized Expected expect(UUID uuid, String group, boolean added) {
+            long now = System.currentTimeMillis();
+            prune(now);
+            Expected next = new Expected(
+                    group.toLowerCase(Locale.ROOT), added, now + OWN_WRITE_TTL_MS);
+            List<Expected> forUser = expected.get(uuid);
+            if (forUser == null) {
+                forUser = new ArrayList<Expected>();
+                expected.put(uuid, forUser);
+            }
+            forUser.add(next);
+            return next;
+        }
+
+        /** A write that changed nothing, or failed: no event is coming for it. */
+        synchronized void withdraw(UUID uuid, Expected which) {
+            if (which == null) {
+                return;
+            }
+            List<Expected> forUser = expected.get(uuid);
+            if (forUser != null && forUser.remove(which) && forUser.isEmpty()) {
+                expected.remove(uuid);
+            }
+        }
+
+        /** Whether this event is one we were expecting; consumes the expectation if so. */
+        synchronized boolean consume(UUID uuid, List<String> groups, boolean added) {
+            if (uuid == null || groups.isEmpty()) {
+                return false;
+            }
+            List<Expected> forUser = expected.get(uuid);
+            if (forUser == null) {
+                return false;
+            }
+            long now = System.currentTimeMillis();
+            boolean matched = false;
+            Iterator<Expected> it = forUser.iterator();
+            while (it.hasNext()) {
+                Expected candidate = it.next();
+                if (candidate.expiresAtMs < now) {
+                    it.remove();
+                } else if (!matched && candidate.added == added && allAre(groups, candidate.group)) {
+                    it.remove();
+                    matched = true;
+                }
+            }
+            if (forUser.isEmpty()) {
+                expected.remove(uuid);
+            }
+            return matched;
+        }
+
+        synchronized int size() {
+            int n = 0;
+            for (List<Expected> forUser : expected.values()) {
+                n += forUser.size();
+            }
+            return n;
+        }
+
+        private void prune(long now) {
+            Iterator<List<Expected>> users = expected.values().iterator();
+            while (users.hasNext()) {
+                List<Expected> forUser = users.next();
+                Iterator<Expected> it = forUser.iterator();
+                while (it.hasNext()) {
+                    if (it.next().expiresAtMs < now) {
+                        it.remove();
+                    }
+                }
+                if (forUser.isEmpty()) {
+                    users.remove();
+                }
+            }
+        }
+
+        private static boolean allAre(List<String> groups, String group) {
+            for (String name : groups) {
+                if (!group.equals(name)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /** How many expected echoes of our own writes are outstanding. For tests. */
+    int ownWritesOutstanding() {
+        return ownWrites.size();
     }
 
     /**
@@ -416,7 +646,8 @@ final class LuckPermsIntegration implements LuckPermsBridge {
      * the recalculation it causes is one read reported as a node event. Reverse role sync reports an
      * offline player only on a node event, because LuckPerms recalculates every user it loads, so
      * letting the recalculation overwrite the cause would drop exactly the offline edits it is meant
-     * to report.
+     * to report. Somebody's edit outranks this bridge's own write, which outranks a recalculation:
+     * a real edit coalesced with one of ours is still an edit.
      */
     final class GroupReads {
 
@@ -508,11 +739,15 @@ final class LuckPermsIntegration implements LuckPermsBridge {
         }
 
         Queued merge(User newer, GroupsChangedListener.Cause also) {
-            boolean node = cause == GroupsChangedListener.Cause.INHERITANCE_NODE
-                    || also == GroupsChangedListener.Cause.INHERITANCE_NODE;
-            return new Queued(newer, node
-                    ? GroupsChangedListener.Cause.INHERITANCE_NODE
-                    : GroupsChangedListener.Cause.RECALCULATION);
+            return new Queued(newer, rank(also) > rank(cause) ? also : cause);
+        }
+
+        /** An edit over our own write over a recalculation; see {@link GroupReads}. */
+        private static int rank(GroupsChangedListener.Cause cause) {
+            if (cause == GroupsChangedListener.Cause.INHERITANCE_NODE) {
+                return 2;
+            }
+            return cause == GroupsChangedListener.Cause.ROLE_SYNC_WRITE ? 1 : 0;
         }
     }
 

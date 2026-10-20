@@ -133,6 +133,15 @@ public final class FakeLuckPerms implements LuckPermsBridge {
         return fire(uuid, username, groups, GroupsChangedListener.Cause.INHERITANCE_NODE);
     }
 
+    /**
+     * As {@link #fireInheritanceChanged}, but as the node event of Heimdall's own forward write,
+     * which the real bridge recognises and tags
+     * {@link GroupsChangedListener.Cause#ROLE_SYNC_WRITE}: a push being applied, not an edit.
+     */
+    public FakeLuckPerms fireOwnWrite(UUID uuid, String username, List<String> groups) {
+        return fire(uuid, username, groups, GroupsChangedListener.Cause.ROLE_SYNC_WRITE);
+    }
+
     private FakeLuckPerms fire(
             UUID uuid, String username, List<String> groups, GroupsChangedListener.Cause cause) {
         List<String> now = Collections.unmodifiableList(new ArrayList<String>(groups));

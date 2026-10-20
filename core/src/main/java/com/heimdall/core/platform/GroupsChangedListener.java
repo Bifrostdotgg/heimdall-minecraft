@@ -49,6 +49,18 @@ public interface GroupsChangedListener {
          */
         INHERITANCE_NODE,
 
+        /**
+         * An inheritance node changed because Heimdall's own forward role sync wrote it
+         * ({@link LuckPermsBridge#setPlayerGroups}): the node event of a {@code role_sync} push or
+         * a join snapshot being applied, recognised by the bridge as the change it just made.
+         *
+         * <p>Kept apart from {@link #INHERITANCE_NODE} because it is not news to the bot: the bot
+         * sent the snapshot. Reporting it for an offline player would echo every push back as a
+         * {@code rolesync.groups} frame from every server that applied it. A bridge that cannot
+         * tell its own writes apart reports them as {@link #INHERITANCE_NODE}.
+         */
+        ROLE_SYNC_WRITE,
+
         /** LuckPerms recalculated the user's data, for any reason, including simply loading them. */
         RECALCULATION
     }
@@ -65,9 +77,11 @@ public interface GroupsChangedListener {
      * invokes; the default drops the extra arguments, so a listener that only cares about the list
      * implements the two-argument form and nothing else.
      *
-     * <p>When several events for one user are coalesced into one call, {@code cause} is
-     * {@link Cause#INHERITANCE_NODE} if any of them was a node event: a recalculation queued
-     * behind a real edit must not hide the edit.
+     * <p>When several events for one user are coalesced into one call, {@code cause} is the
+     * strongest of theirs: {@link Cause#INHERITANCE_NODE} if any of them was somebody's edit, else
+     * {@link Cause#ROLE_SYNC_WRITE} if any was Heimdall's own write, else
+     * {@link Cause#RECALCULATION}. A recalculation queued behind a real edit must not hide the
+     * edit, and neither may Heimdall's write landing beside one.
      *
      * @param username the name LuckPerms has stored for the user, or {@code null} if it has none
      * @param cause what triggered the call; see {@link Cause}

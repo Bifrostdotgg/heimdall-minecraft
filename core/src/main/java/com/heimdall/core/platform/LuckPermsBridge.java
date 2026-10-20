@@ -86,8 +86,9 @@ public interface LuckPermsBridge {
      * <p>The live report is the fast path, not the guaranteed one. Anything it misses (an expiry, a
      * change made on another server of a network sharing storage) is reconciled from the
      * {@code currentGroups} the join-time calls carry. Each call says whether it came from a node
-     * event or a bare recalculation ({@link GroupsChangedListener.Cause}), because LuckPerms
-     * recalculates every user it loads and only a node event says a rank was edited.
+     * event, a node event caused by this bridge's own {@link #setPlayerGroups}, or a bare
+     * recalculation ({@link GroupsChangedListener.Cause}), because LuckPerms recalculates every user
+     * it loads, and only a node event somebody else caused says a rank was edited.
      *
      * <p>Abstract rather than a default returning {@link Registration#NONE}, on purpose. A bridge
      * that silently never reports would make reverse sync look configured and do nothing, which is

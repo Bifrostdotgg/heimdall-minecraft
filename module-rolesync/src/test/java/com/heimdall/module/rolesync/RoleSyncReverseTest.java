@@ -245,6 +245,36 @@ class RoleSyncReverseTest {
     }
 
     @Test
+    @DisplayName("a push applied for an offline player is not echoed back as a frame")
+    void offlineOwnWriteNotReported() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        java.util.UUID pio = RoleSyncHarness.uuidOf("Pio");
+        // A role_sync push for offline Pio took zeal away here: the bot's own word, applied.
+        harness.pushRoleSync(RoleSyncHarness.frame(pio.toString(), "Pio",
+                Arrays.<String>asList(), Arrays.asList("zeal")));
+        assertEquals(1, harness.syncs().size(), "the push itself was applied");
+        harness.luckPerms.fireOwnWrite(pio, "Pio", Arrays.asList("default"));
+
+        sleep(PAST_WINDOW_MS);
+        assertEquals(0, frames().size(), "every server that applied the push would have answered it");
+
+        // Somebody else's edit is still reported.
+        harness.luckPerms.fireInheritanceChanged(pio, "Pio", Arrays.asList("default", "zeal"));
+        await(() -> frames().size() == 1, "a real offline edit: " + harness.logger.records());
+    }
+
+    @Test
+    @DisplayName("a push applied for an online player arms an ordinary report, as before")
+    void onlineOwnWriteStillCompared() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        FakePlayer pio = joined("Pio", "default", "zeal");
+        harness.luckPerms.fireOwnWrite(pio.uuid(), "Pio", Arrays.asList("default"));
+
+        await(() -> frames().size() == 1, "online behaviour is unchanged: " + harness.logger.records());
+        assertEquals(Arrays.asList("default"), frames().get(0).payload().strings("groups"));
+    }
+
+    @Test
     @DisplayName("an offline edit and its own recalculation are one frame carrying the newest list")
     void offlineEditAndRecalculationCoalesce() {
         harness.configure(RoleSyncHarness.watching("zeal", "mvp"));

@@ -99,9 +99,15 @@ import java.util.function.Supplier;
  * <p>{@link GroupChangeReporter} is enabled and disabled with the module rather than being a module
  * of its own. Both directions are "role sync" to the dashboard, share the module the bot negotiates
  * (plus {@code rolesyncresync@1}, a build capability saying this client answers
- * {@code rolesync.resync}), and need LuckPerms for the same reason; a separate toggle would be a second switch that
- * has to agree with the first. It never writes to LuckPerms, and the forward path never reads what it
- * reports, so the two cannot feed each other.
+ * {@code rolesync.resync}), and need LuckPerms for the same reason; a separate toggle would be a second
+ * switch that has to agree with the first. It never writes to LuckPerms, and the forward path never
+ * reads what it reports. The forward path's writes do fire LuckPerms node events, though, and those
+ * reach the reporter. The bridge tags them as its own
+ * ({@link com.heimdall.core.platform.GroupsChangedListener.Cause#ROLE_SYNC_WRITE}), and the reporter
+ * never starts a report for an offline player on one, so a push is not echoed back from every
+ * server that applied it. For an online player the write arms an ordinary report, which tells the
+ * bot what it has just pushed; the bot compares sets, so that frame changes nothing. That is the
+ * extent of the feedback: a frame the bot treats as a no-op, never a write.
  *
  * <h2>Threading and ownership</h2>
  *
