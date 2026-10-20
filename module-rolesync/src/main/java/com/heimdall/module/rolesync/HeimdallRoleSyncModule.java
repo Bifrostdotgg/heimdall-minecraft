@@ -9,7 +9,9 @@ import com.heimdall.core.platform.LuckPermsBridge;
 import com.heimdall.core.roles.RoleSyncLoginSource;
 import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.tunnel.Capabilities;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -91,8 +93,9 @@ import java.util.function.Supplier;
  * <h2>Reverse role sync lives here too</h2>
  *
  * <p>{@link GroupChangeReporter} is enabled and disabled with the module rather than being a module
- * of its own. Both directions are "role sync" to the dashboard, share the one capability the bot
- * negotiates, and need LuckPerms for the same reason; a separate toggle would be a second switch that
+ * of its own. Both directions are "role sync" to the dashboard, share the module the bot negotiates
+ * (plus {@code rolesyncresync@1}, a build capability saying this client answers
+ * {@code rolesync.resync}), and need LuckPerms for the same reason; a separate toggle would be a second switch that
  * has to agree with the first. It never writes to LuckPerms, and the forward path never reads what it
  * reports, so the two cannot feed each other.
  *
@@ -156,7 +159,11 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
 
     @Override
     public Set<String> capabilities() {
-        return Collections.singleton(Capabilities.ROLE_SYNC);
+        // Both, always. ROLE_SYNC_RESYNC is a build capability, not a module: it tells the bot this
+        // client answers rolesync.resync (see GroupChangeReporter), and that is true of this build
+        // whether or not LuckPerms is installed; without it the notification is simply ignored.
+        return Collections.unmodifiableSet(new LinkedHashSet<String>(Arrays.asList(
+                Capabilities.ROLE_SYNC, Capabilities.ROLE_SYNC_RESYNC)));
     }
 
     @Override

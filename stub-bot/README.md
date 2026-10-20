@@ -407,6 +407,7 @@ Bot → plugin:
 | --- | --- | --- |
 | `ping` | `{}` | Reply `pong` with the same id. **This is the only keepalive that exists.** |
 | `role_sync` | `{uuid, username, targetGroups, managedGroups, groupsAdded, groupsRemoved}` | No — broadcast to every server in the guild. |
+| `rolesync.resync` | `{uuid, username?}` | **No - a notification**, and only to a server that accepted `rolesyncresync@1`. A server with the player online and LuckPerms answers with a `rolesync.groups` frame carrying the full current list, unconditionally; any other server ignores it. |
 | `whitelist_changed` | `{}` | **No — a notification.** Broadcast to the guild when the whitelist changes, so the plugin can re-sync its mirror instead of waiting out its poll interval. Carries a fresh id (v2's client dropped id-less frames) but nothing correlates on it, and no reply is expected. |
 | `get_players` | `{}` | Yes → `player_list`. |
 | `run_command` | `{command}` | Yes → `command_result`. |
@@ -503,7 +504,7 @@ rather than an error. Reproduce it with `STUB_BOT_UNREGISTERED_SERVERS`.
 #### Which capabilities are accepted
 
 Exact major match against a fixed table: `whitelist`, `rolesync`, `console`, `health`, `status`,
-`bridge`, `modules`, `config` and `linkprompt`, all at major 1:
+`bridge`, `modules`, `config`, `linkprompt` and `rolesyncresync`, all at major 1:
 
 | Declared | Accepted | Why |
 | --- | --- | --- |
@@ -563,6 +564,7 @@ On `StubBot.ws()`:
 - `connected(guildId)` / `connected(guildId, serverId)` → `ConnectedServer` (identify payload,
   capabilities, last health, console lines, acked config version)
 - `sendRoleSync(…)`, `broadcast(guildId, type, payload)` → number of sockets reached
+- `sendRoleSyncResync(guildId, uuid, username)` → number of `rolesyncresync@1` sockets reached
 - `getPlayers(…)`, `runCommand(…)`, `probePlayer(…)`, `triggerUpdate(…)` → `CompletableFuture`
 - `pushConfig(guildId, serverId)`, `configVersion()`
 - `setMessageListener(…)` — every envelope the stub did not handle itself

@@ -1,5 +1,6 @@
 package com.heimdall.module.rolesync;
 
+import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.module.ModuleContext;
@@ -11,6 +12,7 @@ import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.tunnel.ProtocolMode;
 import com.heimdall.core.tunnel.ProtocolModeListener;
+import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
 import com.heimdall.core.util.Strings;
 import java.util.Collections;
@@ -22,10 +24,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 
 /**
  * Reverse role sync: tells the bot when a player's in-game rank changes, so it can grant or remove
@@ -135,6 +139,19 @@ import java.util.concurrent.TimeUnit;
  * {@code WhitelistChangeNudge} records: the context's tracking bag is unbounded and only emptied on
  * disable, and this would add an entry per rank change for the life of the module.
  *
+ * <h2>Resync on request</h2>
+ *
+ * <p>The bot sends {@code rolesync.resync} ({@code {uuid, username?}}, a notification with no reply
+ * frame of its own) to a client that declared {@code rolesyncresync@1}, when it needs to hear a
+ * player's ranks without waiting for them to change: chiefly right after a player links, because a
+ * rank they already held was never news to anybody. The answer is an ordinary {@code rolesync.groups}
+ * frame with the full current list and a fresh {@code at}, sent unconditionally (no comparison with
+ * the record: the bot asked because it does not know), and then written as the record, exactly as
+ * a reported change is. Only when the player is online here and LuckPerms is available; otherwise
+ * the notification is ignored, because a frame from a server the player is not on could describe a
+ * LuckPerms that is not theirs. Answered whatever is watched, since the bot is the one that knows
+ * which mappings it wants.
+ *
  * <h2>Fire and forget</h2>
  *
  * <p>Sent with {@code TunnelBus.send}: no outbox and no retry. When the tunnel is down at the moment
@@ -152,7 +169,8 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>{@link #start} and {@link #close} run on the module manager's thread. The LuckPerms callback
  * arrives on {@code heimdall-io} (the bridge hops there), config and mode changes on the socket's
- * reading thread, joins and quits on {@code heimdall-io}, deliveries on whichever thread completed the
+ * reading thread, joins, quits and {@code rolesync.resync} on {@code heimdall-io} (a resync's answer
+ * on whichever thread completed the LuckPerms read), deliveries on whichever thread completed the
  * join call. Subscribing and unsubscribing are serialised on {@link #lock}; record writes and clears
  * on {@link #records}; the debounce's hand-off between a callback and the firing timer is one atomic
  * {@code compute}/{@code remove} per player.
@@ -161,6 +179,12 @@ final class GroupChangeReporter {
 
     /** The frame type the bot handles. Plugin to bot, a notification: nothing comes back. */
     static final String FRAME_TYPE = "rolesync.groups";
+
+    /**
+     * The frame type the bot sends to ask for a player's groups now. Bot to plugin, a notification:
+     * the answer is a {@link #FRAME_TYPE} frame, never a reply.
+     */
+    static final String RESYNC_FRAME_TYPE = "rolesync.resync";
 
     /** The setting the bot fills from the dashboard's Minecraft-to-Discord mappings. */
     static final String WATCHED_GROUPS = "watchedGroups";
@@ -264,6 +288,19 @@ final class GroupChangeReporter {
                 // Also the retry for a LuckPerms that started late or refused a listener.
                 refresh();
                 adoptParked(player.uuid());
+            }
+        });
+        // Tracked by the context, so the manager unwinds it. Dispatched on heimdall-io.
+        ctx.tunnel().subscribe(RESYNC_FRAME_TYPE, new TunnelMessageHandler() {
+            @Override
+            public void onMessage(Envelope envelope) {
+                try {
+                    Payload payload = envelope.payload();
+                    resync(payload.string("uuid", null), payload.string("username", null));
+                } catch (RuntimeException e) {
+                    logger.warn("rolesync.resync could not be handled; the tunnel is unaffected: "
+                            + e);
+                }
             }
         });
         ctx.onPlayerQuit(new PlayerSessionListener() {
@@ -567,12 +604,7 @@ final class GroupChangeReporter {
             logger.debug(() -> "tunnel down; not reporting the rank change for " + uuid);
             return;
         }
-        ctx.tunnel().send(FRAME_TYPE, Payload.builder()
-                .put("uuid", uuid.toString())
-                .put("username", name)
-                .putStrings("groups", groups)
-                .put("at", System.currentTimeMillis())
-                .build());
+        sendGroups(uuid, name, groups);
         if (here != null && quitting == null) {
             synchronized (records) {
                 if (generation == epoch && !closed) {
@@ -583,6 +615,98 @@ final class GroupChangeReporter {
         final String where = here == null ? " (offline)" : "";
         logger.debug(() -> "reported rank change for " + name + where + ": watched "
                 + (was == null ? "unknown" : was.toString()) + " -> " + now);
+    }
+
+    /**
+     * The bot's {@code rolesync.resync}, on {@code heimdall-io}: read the player's groups now and send
+     * them without comparing. See the class javadoc.
+     *
+     * @param rawUuid the player, as the frame carried it
+     * @param username used only when the uuid is missing or unparseable, against online players
+     */
+    void resync(String rawUuid, String username) {
+        if (closed) {
+            return;
+        }
+        UUID parsed = null;
+        if (!Strings.isBlank(rawUuid)) {
+            try {
+                parsed = UUID.fromString(rawUuid.trim());
+            } catch (IllegalArgumentException malformed) {
+                parsed = null;
+            }
+        }
+        Optional<PlayerHandle> online = parsed != null
+                ? ctx.platform().players().byUuid(parsed)
+                : Strings.isBlank(username)
+                        ? Optional.<PlayerHandle>empty()
+                        : ctx.platform().players().byName(username);
+        if (!online.isPresent()) {
+            // The common case on a network: the bot asks every capable server, and the player is
+            // on one of them at most.
+            logger.debug(() -> "rolesync.resync for " + rawUuid + " (" + username
+                    + "): not online here; ignoring it");
+            return;
+        }
+        final PlayerHandle player = online.get();
+        final UUID uuid = player.uuid();
+        LuckPermsBridge bridge = bridge();
+        if (bridge == null || uuid == null) {
+            logger.debug(() -> "rolesync.resync for " + player.name()
+                    + ": LuckPerms is not available here; ignoring it");
+            return;
+        }
+        // Captured before the read, like a report's: a clear while it is in flight wins.
+        final long epoch = generation();
+        CompletableFuture<List<String>> read;
+        try {
+            read = bridge.getPlayerGroups(uuid);
+        } catch (RuntimeException refused) {
+            logger.debug(() -> "rolesync.resync for " + player.name()
+                    + ": the LuckPerms read was refused: " + refused);
+            return;
+        }
+        if (read == null) {
+            return;
+        }
+        read.whenComplete(new BiConsumer<List<String>, Throwable>() {
+            @Override
+            public void accept(List<String> groups, Throwable failure) {
+                if (failure != null || groups == null) {
+                    // Unknown is not empty: sending [] would read as every mapped rank gone.
+                    logger.debug(() -> "rolesync.resync for " + player.name()
+                            + ": could not read their LuckPerms groups; ignoring it: " + failure);
+                    return;
+                }
+                answerResync(uuid, player.name(), groups, epoch);
+            }
+        });
+    }
+
+    private void answerResync(UUID uuid, String name, List<String> groups, long epoch) {
+        if (closed || !ctx.tunnel().isConnected() || !isOnline(uuid)) {
+            return;
+        }
+        sendGroups(uuid, name, groups);
+        if (isSubscribed()) {
+            Set<String> now = intersect(groups, watched());
+            synchronized (records) {
+                if (generation == epoch && !closed && isOnline(uuid)) {
+                    reported.put(uuid, now);
+                }
+            }
+        }
+        logger.debug(() -> "answered rolesync.resync for " + name + " with " + groups);
+    }
+
+    /** The one place a {@link #FRAME_TYPE} frame is built: the full list, and a fresh {@code at}. */
+    private void sendGroups(UUID uuid, String name, List<String> groups) {
+        ctx.tunnel().send(FRAME_TYPE, Payload.builder()
+                .put("uuid", uuid.toString())
+                .put("username", name)
+                .putStrings("groups", groups)
+                .put("at", System.currentTimeMillis())
+                .build());
     }
 
     private boolean isSubscribed() {
