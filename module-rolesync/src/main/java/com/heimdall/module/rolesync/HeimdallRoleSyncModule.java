@@ -83,9 +83,11 @@ import java.util.function.Supplier;
  *
  * <h2>Settings: the bot's, not the operator's</h2>
  *
- * <p>{@code enabled} is the manager's business. {@code mode} is read for one thing only: when it
- * changes to {@code websocket}, a remembered "the bot drives LuckPerms over RCON" is forgotten (see
- * {@link RoleSyncApplier#resumePushes}). The other setting is {@code watchedGroups}, the
+ * <p>{@code enabled} is the manager's business. {@code mode} is read for one thing only, who drives
+ * LuckPerms: when it changes to {@code websocket}, a remembered "the bot drives LuckPerms over RCON"
+ * is forgotten (see {@link RoleSyncApplier#resumePushes}), and when it changes to {@code rcon}, or the
+ * module is enabled with it set to {@code rcon}, that is remembered at once
+ * ({@link RoleSyncApplier#pausePushes}). The other setting is {@code watchedGroups}, the
  * LuckPerms groups the bot wants reported for reverse role sync (in-game rank to Discord role). It is
  * not an operator knob: the bot computes it from the dashboard's Minecraft-to-Discord mappings, and
  * {@link GroupChangeReporter} reads it through {@link ModuleContext#settings()} at the point of use
@@ -192,8 +194,13 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
 
     @Override
     public void enable(ModuleContext context) {
-        final RoleSyncApplier started = new RoleSyncApplier(context);
+        final RoleSyncApplier started = new RoleSyncApplier(context, sequence);
         this.applier = started;
+        if (isRcon(context.settings())) {
+            // Enabled straight into RCON mode: the bot has said who drives LuckPerms, so a push
+            // that arrives before the first login's directive must not be obeyed either.
+            started.pausePushes();
+        }
         // On heimdall-io, which is where this handler wants to be: it must not run on the socket's
         // reading thread, and it has no reason to be on the main server thread, since
         // LuckPermsBridge does its own hopping. Through a serial lane rather than straight onto the
@@ -201,13 +208,16 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
         context.tunnel().subscribe(RoleSyncPushHandler.MESSAGE_TYPE,
                 new RoleSyncPushHandler(context, started),
                 new SerialLane(context.executors().io(), context.logger()));
-        // The bot saying it no longer drives LuckPerms over RCON. Tracked, so a disable unwinds it.
+        // The bot saying who drives LuckPerms: no longer RCON, or RCON now. Tracked, so a disable
+        // unwinds it.
         context.onConfigChanged(new ModuleConfigListener() {
             @Override
             public void onModuleConfigChanged(
                     String moduleId, ModuleConfig previous, ModuleConfig current) {
                 if (!isWebsocket(previous) && isWebsocket(current)) {
                     started.resumePushes();
+                } else if (!isRcon(previous) && isRcon(current)) {
+                    started.pausePushes();
                 }
             }
         });
@@ -292,11 +302,22 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
      */
     @Override
     public void applyOnJoin(UUID uuid, String username, RoleSyncDirective directive) {
+        applyOnJoin(uuid, username, directive, RoleSyncSink.UNSTAMPED);
+    }
+
+    /**
+     * As {@link #applyOnJoin(UUID, String, RoleSyncDirective)}, for an answer whose request was
+     * stamped by {@link #groupsRequestStarting}: dropped when a push for the player was applied
+     * after the request started, and not taken as word on who drives LuckPerms when the config
+     * switched mode after it started. See {@link RoleSyncApplier#applyOnJoin}.
+     */
+    @Override
+    public void applyOnJoin(UUID uuid, String username, RoleSyncDirective directive, long stamp) {
         RoleSyncApplier running = this.applier;
         if (running == null) {
             return;
         }
-        running.applyOnJoin(uuid, username, directive);
+        running.applyOnJoin(uuid, username, directive, stamp);
     }
 
     /**
@@ -338,11 +359,20 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
     static final String MODE = "mode";
 
     private static boolean isWebsocket(ModuleConfig config) {
-        if (config == null) {
-            return false;
-        }
-        String mode = config.settings().string(MODE, null);
-        return mode != null && "websocket".equalsIgnoreCase(mode.trim());
+        return config != null && isMode(config.settings(), "websocket");
+    }
+
+    private static boolean isRcon(ModuleConfig config) {
+        return config != null && isRcon(config.settings());
+    }
+
+    private static boolean isRcon(com.heimdall.core.json.Payload settings) {
+        return isMode(settings, "rcon");
+    }
+
+    private static boolean isMode(com.heimdall.core.json.Payload settings, String wanted) {
+        String mode = settings == null ? null : settings.string(MODE, null);
+        return mode != null && wanted.equalsIgnoreCase(mode.trim());
     }
 
     /** The live applier, or {@code null} when the module is off. For tests. */

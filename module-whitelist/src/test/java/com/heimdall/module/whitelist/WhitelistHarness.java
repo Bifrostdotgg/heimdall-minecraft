@@ -236,6 +236,20 @@ final class WhitelistHarness implements AutoCloseable {
             applied.add(username + ":" + describe(directive));
         }
 
+        private final List<Long> appliedStamps = new CopyOnWriteArrayList<Long>();
+
+        @Override
+        public void applyOnJoin(
+                UUID playerUuid, String username, RoleSyncDirective directive, long stamp) {
+            appliedStamps.add(stamp);
+            applyOnJoin(playerUuid, username, directive);
+        }
+
+        /** The request stamp each applied directive carried, oldest first. */
+        List<Long> appliedStamps() {
+            return Collections.unmodifiableList(new ArrayList<Long>(appliedStamps));
+        }
+
         private final List<String> delivered = new CopyOnWriteArrayList<String>();
 
         private final java.util.concurrent.atomic.AtomicLong stamps =

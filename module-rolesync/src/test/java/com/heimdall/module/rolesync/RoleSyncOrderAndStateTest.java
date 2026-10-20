@@ -257,6 +257,51 @@ class RoleSyncOrderAndStateTest {
     }
 
     @Test
+    @DisplayName("a disabled answer requested before the switch to websocket does not undo the reset")
+    void staleDisabledAnswerIgnored() {
+        harness = new RoleSyncHarness(dataDirectory);
+        UUID steve = RoleSyncHarness.uuidOf("Steve");
+        harness.configure(mode("rcon"));
+        assertTrue(harness.module.applier().ignoringPushes(),
+                "enabled straight into rcon: the bot said so, before any login");
+
+        long asked = harness.module.groupsRequestStarting(steve);
+        harness.configure(mode("websocket"));
+        // The bot answered while it still drove LuckPerms over RCON.
+        harness.module.applyOnJoin(steve, "Steve", RoleSyncDirective.disabled(), asked);
+        assertFalse(harness.module.applier().ignoringPushes(),
+                "the answer is older than the switch, so it does not put the flag back");
+        push("Steve", groups("vip"));
+        assertEquals(1, harness.syncs().size());
+
+        // One requested after the switch is the bot's current word, and is remembered.
+        long fresh = harness.module.groupsRequestStarting(steve);
+        harness.module.applyOnJoin(steve, "Steve", RoleSyncDirective.disabled(), fresh);
+        assertTrue(harness.module.applier().ignoringPushes());
+    }
+
+    @Test
+    @DisplayName("the config switching to rcon sets the flag, and an older enabled answer cannot clear it")
+    void rconSwitchSetsTheFlag() {
+        harness = new RoleSyncHarness(dataDirectory).deferring();
+        UUID steve = RoleSyncHarness.uuidOf("Steve");
+        harness.configure(mode("websocket"));
+        assertFalse(harness.module.applier().ignoringPushes());
+
+        long asked = harness.module.groupsRequestStarting(steve);
+        harness.configure(mode("rcon"));
+        assertTrue(harness.module.applier().ignoringPushes(), "without waiting for a login");
+        push("Steve", groups("vip"));
+        assertTrue(harness.syncs().isEmpty());
+
+        harness.module.applyOnJoin(steve, "Steve",
+                RoleSyncDirective.enabled(groups("vip"), groups("vip", "mvp")), asked);
+        assertTrue(harness.module.applier().ignoringPushes());
+        harness.platform.runDeferred();
+        assertTrue(harness.syncs().isEmpty(), "and its groups are not written over the bot's RCON");
+    }
+
+    @Test
     @DisplayName("an unrelated config change while already websocket does not override a newer directive")
     void stayingOnWebsocketKeepsTheFlag() {
         harness = new RoleSyncHarness(dataDirectory);

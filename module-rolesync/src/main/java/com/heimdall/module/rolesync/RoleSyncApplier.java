@@ -13,6 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 
 /**
@@ -137,9 +138,43 @@ final class RoleSyncApplier {
      * <p>Forgotten again when the module's config switches its {@code mode} back to
      * {@code websocket} ({@link #resumePushes}): the bot's own say-so that it no longer drives
      * LuckPerms over RCON. Without that, a guild that went RCON and came back had every push ignored
-     * until a player happened to log in and carry an enabled directive.
+     * until a player happened to log in and carry an enabled directive. Set when it switches to
+     * {@code rcon} ({@link #pausePushes}), for the same reason the other way round.
+     *
+     * <p>A join answer is taken as word on this only when its request started after the last such
+     * switch ({@link #modeSwitchedAt}). The bot computes the answer when asked, so one requested
+     * before a switch to websocket can still say "disabled" and would quietly undo the reset, and
+     * one requested before a switch to RCON can still say "enabled" and would undo that.
      */
     private volatile Boolean lastKnownEnabled;
+
+    /**
+     * Where in {@link #sequence} the config last switched {@code mode}; {@code 0} if it never has.
+     * A join directive stamped before it says nothing about who drives LuckPerms now.
+     */
+    private volatile long modeSwitchedAt;
+
+    /**
+     * The module's sequence. Join requests are stamped from it when they start
+     * ({@link com.heimdall.core.roles.RoleSyncSink#groupsRequestStarting}), and pushes and mode
+     * switches take the next value when they are applied, so "did this request start before that"
+     * is one comparison.
+     */
+    private final AtomicLong sequence;
+
+    /** How long a push's mark is kept: far longer than any join call takes. */
+    static final long PUSH_MARK_TTL_MS = 120_000L;
+
+    /**
+     * Per player, the last push applied to them: its place in {@link #sequence}, and when.
+     *
+     * <p>A join answer whose request started before that push is dropped. Cancelling a pending join
+     * sync when a push is applied covers an answer that arrived first; this covers one that arrives
+     * after the push. The bot answered it from what it knew when asked, which is older than the
+     * push, and applying it would put the older snapshot back. Pruned by age as pushes are applied,
+     * so it is bounded by the pushes of the last {@value #PUSH_MARK_TTL_MS}ms.
+     */
+    private final ConcurrentHashMap<UUID, long[]> lastPush = new ConcurrentHashMap<UUID, long[]>();
 
     /**
      * Per player, the write that the next one waits for. See the class javadoc; an entry is removed
@@ -150,9 +185,10 @@ final class RoleSyncApplier {
 
     private volatile boolean active = true;
 
-    RoleSyncApplier(ModuleContext context) {
+    RoleSyncApplier(ModuleContext context, AtomicLong sequence) {
         this.context = context;
         this.logger = context.logger();
+        this.sequence = sequence;
     }
 
     /**
@@ -166,9 +202,19 @@ final class RoleSyncApplier {
      *
      * @param uuid the joining player; {@code null} is a no-op with a warning
      * @param username used only for log lines
+     * <p>The request's stamp is weighed against what has happened since the bot was asked. A push
+     * applied to the player after the request started is newer than this answer's groups, so the
+     * answer is dropped (see {@link #lastPush}). A mode switch in the config after it started is
+     * newer than what the answer says about who drives LuckPerms, so that part is not remembered,
+     * and an enabled answer is then applied only if the switch was not to RCON.
+     *
+     * @param uuid the joining player; {@code null} is a no-op with a warning
+     * @param username used only for log lines
      * @param directive the block the bot sent, or {@link RoleSyncDirective#absent()}
+     * @param stamp when the request started, from {@link #sequence}; or
+     *     {@link com.heimdall.core.roles.RoleSyncSink#UNSTAMPED}, which is newer than anything
      */
-    void applyOnJoin(final UUID uuid, String username, RoleSyncDirective directive) {
+    void applyOnJoin(final UUID uuid, String username, RoleSyncDirective directive, long stamp) {
         if (!active) {
             return;
         }
@@ -181,12 +227,25 @@ final class RoleSyncApplier {
             logger.debug(() -> "no role-sync snapshot for " + label + " yet; leaving groups alone");
             return;
         }
-        // Recorded before the early return, so a disabled directive is remembered rather than
-        // merely obeyed once. See lastKnownEnabled.
-        lastKnownEnabled = Boolean.valueOf(directive.isEnabled());
+        if (stamp < modeSwitchedAt) {
+            // Asked before the config switched mode: what the bot said then about who drives
+            // LuckPerms is older than the switch. See lastKnownEnabled.
+            logger.debug(() -> "the role-sync answer for " + label + " was requested before the"
+                    + " config last switched mode; not taking its word on who drives LuckPerms");
+        } else {
+            // Recorded before the early return, so a disabled directive is remembered rather than
+            // merely obeyed once. See lastKnownEnabled.
+            lastKnownEnabled = Boolean.valueOf(directive.isEnabled());
+        }
         if (!directive.isEnabled()) {
             logger.debug(() -> "role sync is disabled for " + label
                     + "; the bot owns LuckPerms for this guild, leaving groups alone");
+            return;
+        }
+        if (Boolean.FALSE.equals(lastKnownEnabled)) {
+            // Only reachable for an enabled answer requested before a switch to RCON.
+            logger.debug(() -> "ignoring the role-sync answer for " + label
+                    + ": the config has since said the bot drives LuckPerms over RCON");
             return;
         }
         final List<String> target = directive.targetGroups();
@@ -195,6 +254,11 @@ final class RoleSyncApplier {
             logger.debug(() -> "role sync for " + label
                     + " named no managed groups; changing nothing (an empty managed list is not"
                     + " 'manage everything')");
+            return;
+        }
+        if (pushedSince(uuid, stamp)) {
+            logger.debug(() -> "dropping the role-sync answer for " + label + ": a push for them"
+                    + " was applied after it was requested, and the push is the newer word");
             return;
         }
 
@@ -218,7 +282,30 @@ final class RoleSyncApplier {
         if (!active) {
             // Lost the race with disable(): the task was scheduled after shutdown() drained the set.
             task.cancel();
+        } else if (pushedSince(uuid, stamp)) {
+            // Lost the race with a push: it was marked after the check above and looked for a
+            // pending sync before this one was put there, so nothing cancelled it. A push marks
+            // before it looks, so one of the two sides always sees the other.
+            task.cancel();
         }
+    }
+
+    /** Whether a push for {@code uuid} was applied after a request stamped {@code stamp} started. */
+    private boolean pushedSince(UUID uuid, long stamp) {
+        long[] mark = lastPush.get(uuid);
+        return mark != null && mark[0] > stamp;
+    }
+
+    /** Called when a push is accepted: takes its place in the sequence, and prunes old marks. */
+    private void markPush(UUID uuid) {
+        long now = System.currentTimeMillis();
+        java.util.Iterator<long[]> it = lastPush.values().iterator();
+        while (it.hasNext()) {
+            if (now - it.next()[1] > PUSH_MARK_TTL_MS) {
+                it.remove();
+            }
+        }
+        lastPush.put(uuid, new long[] {sequence.incrementAndGet(), now});
     }
 
     /**
@@ -257,7 +344,10 @@ final class RoleSyncApplier {
         // The push is newer than a join snapshot still waiting out its two seconds: the bot sent it
         // after answering the join. Left to run, the join sync would land after the push and revert
         // it to the older answer. Cancelled only when the push is applied, so a push this applier
-        // refuses (above) does not also cost the player the join's sync.
+        // refuses (above) does not also cost the player the join's sync. Marked first, then looked
+        // for: a join answer requested before this point and arriving after it is dropped by the
+        // mark, and the order is what lets applyOnJoin close the race between the two.
+        markPush(uuid);
         PendingJoinSync waiting = pending.get(uuid);
         if (waiting != null) {
             logger.debug(() -> "a push for " + label
@@ -275,7 +365,19 @@ final class RoleSyncApplier {
         if (Boolean.FALSE.equals(lastKnownEnabled)) {
             logger.debug(() -> "role sync's mode is websocket again; honouring pushes");
         }
+        modeSwitchedAt = sequence.incrementAndGet();
         lastKnownEnabled = null;
+    }
+
+    /**
+     * The config switched role sync's {@code mode} to {@code rcon}, or the module was enabled with
+     * it there: the bot drives LuckPerms itself, so pushes are ignored from now on, without waiting
+     * for a login to carry a disabled directive. See {@link #lastKnownEnabled}.
+     */
+    void pausePushes() {
+        logger.debug(() -> "role sync's mode is rcon; ignoring pushes, the bot drives LuckPerms");
+        modeSwitchedAt = sequence.incrementAndGet();
+        lastKnownEnabled = Boolean.FALSE;
     }
 
     /** Whether pushes are being ignored because the bot said it uses RCON. For tests. */

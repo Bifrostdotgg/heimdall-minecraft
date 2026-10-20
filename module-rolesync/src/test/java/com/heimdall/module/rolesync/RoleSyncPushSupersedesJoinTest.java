@@ -58,6 +58,36 @@ class RoleSyncPushSupersedesJoinTest {
     }
 
     @Test
+    @DisplayName("a join answer requested before a push and arriving after it does not revert it")
+    void answerArrivingAfterThePushIsDropped() {
+        harness = new RoleSyncHarness(dataDirectory).deferring().enable();
+        UUID steve = RoleSyncHarness.uuidOf("Steve");
+        // The join call starts, and the bot is asked while Steve still has the Discord role.
+        long asked = harness.module.groupsRequestStarting(steve);
+
+        // Before its answer lands, Discord takes the role away and the bot pushes.
+        harness.pushRoleSync(RoleSyncHarness.frame(
+                steve.toString(), "Steve", Collections.<String>emptyList(), groups("vip")));
+        assertEquals(1, harness.syncs().size());
+
+        // Then the answer, computed from what the bot knew when asked: vip.
+        harness.module.applyOnJoin(steve, "Steve",
+                RoleSyncDirective.enabled(groups("vip"), groups("vip")), asked);
+        assertEquals(0, harness.module.applier().pendingCount(),
+                "there was nothing pending for the push to cancel; the stamp is what drops it");
+        harness.platform.runDeferred();
+        assertEquals(1, harness.syncs().size(), "vip would be back: " + harness.syncs());
+
+        // A join requested after the push is the bot's newer word and is applied as usual.
+        long later = harness.module.groupsRequestStarting(steve);
+        harness.module.applyOnJoin(steve, "Steve",
+                RoleSyncDirective.enabled(groups("vip"), groups("vip")), later);
+        harness.platform.runDeferred();
+        assertEquals(2, harness.syncs().size());
+        assertEquals(groups("vip"), harness.luckPerms.lastSync().targetGroups());
+    }
+
+    @Test
     @DisplayName("a push for somebody else leaves the join sync alone")
     void otherPlayersJoinSyncSurvives() {
         harness = new RoleSyncHarness(dataDirectory).deferring().enable();

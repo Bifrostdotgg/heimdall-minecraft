@@ -65,6 +65,23 @@ public interface RoleSyncSink {
     void applyOnJoin(UUID playerUuid, String username, RoleSyncDirective directive);
 
     /**
+     * {@link #applyOnJoin(UUID, String, RoleSyncDirective)} for an answer to a request stamped by
+     * {@link #groupsRequestStarting}, the same stamp the call's {@link #groupsDelivered} carries.
+     *
+     * <p>The stamp says when the bot was asked, which decides whether the answer is still the bot's
+     * latest word: a {@code role_sync} push applied after the request started is newer than what the
+     * answer says about that player's groups, and a mode switch in the config after it started is
+     * newer than what the answer says about who drives LuckPerms. The default ignores the stamp.
+     *
+     * @param requestStamp what {@link #groupsRequestStarting} returned for this request, or
+     *     {@link #UNSTAMPED}
+     */
+    default void applyOnJoin(
+            UUID playerUuid, String username, RoleSyncDirective directive, long requestStamp) {
+        applyOnJoin(playerUuid, username, directive);
+    }
+
+    /**
      * Says that a join-time call from <em>this</em> server reached the bot, successfully, carrying
      * these {@code currentGroups}.
      *

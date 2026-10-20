@@ -158,8 +158,9 @@ final class JoinSnapshotRequester implements PlayerSessionListener {
                 if (delivered != null) {
                     sink.groupsDelivered(uuid, delivered, stamp);
                 }
+                // With the request's stamp: a push applied since it started is newer than this.
                 sink.applyOnJoin(uuid, username,
-                        directive == null ? RoleSyncDirective.absent() : directive);
+                        directive == null ? RoleSyncDirective.absent() : directive, stamp);
             }
         });
     }

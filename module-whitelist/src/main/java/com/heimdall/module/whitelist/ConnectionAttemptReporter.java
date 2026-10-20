@@ -232,7 +232,7 @@ final class ConnectionAttemptReporter {
                     @Override
                     public void accept(ConnectionAttemptResult result, Throwable failure) {
                         if (failure == null && result != null) {
-                            applyRoleSync(login, result);
+                            applyRoleSync(login, result, stamp);
                         }
                     }
                 });
@@ -246,13 +246,16 @@ final class ConnectionAttemptReporter {
      * <p>Only for a player the bot vouched for, which is v2's rule: a denied login has no groups to
      * settle, and a pending one is not on the server. The three states of the directive are the
      * sink's to interpret — see departure D2 for why they are not two.
+     *
+     * <p>With the request's stamp, so the sink can tell a push it applied after this request
+     * started from one this answer already accounts for; see {@link RoleSyncSink}.
      */
-    private void applyRoleSync(LoginAttempt login, ConnectionAttemptResult result) {
+    private void applyRoleSync(LoginAttempt login, ConnectionAttemptResult result, long stamp) {
         if (!result.whitelisted()) {
             return;
         }
         try {
-            roleSync.get().applyOnJoin(login.uuid(), login.username(), result.roleSync());
+            roleSync.get().applyOnJoin(login.uuid(), login.username(), result.roleSync(), stamp);
         } catch (RuntimeException broken) {
             // Contained here rather than left to the caller: on the blocking path this runs inside
             // the future the login is waiting on, and a role-sync bug must not turn into a refused

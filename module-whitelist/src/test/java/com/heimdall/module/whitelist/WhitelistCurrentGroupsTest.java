@@ -89,6 +89,8 @@ class WhitelistCurrentGroupsTest {
             assertEquals(Collections.singletonList(1L), h.roleSync.deliveredStamps(),
                     "the delivery carries back the stamp taken when the request started, so role "
                             + "sync can tell it from a frame sent while it was in flight");
+            assertEquals(Collections.singletonList(1L), h.roleSync.appliedStamps(),
+                    "and so does the directive, so a push applied while it was in flight wins");
         }
     }
 
