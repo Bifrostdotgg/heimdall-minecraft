@@ -2,21 +2,23 @@ package com.heimdall.core.admin;
 
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.text.Msg;
-import com.heimdall.core.util.Strings;
+import com.heimdall.core.update.InstallOutcome;
 import java.util.List;
 
 /**
- * {@code /hd version} and {@code /hd update} — the self-updater's two verbs, unchanged from v2.
+ * {@code /hd version} and {@code /hd update}: the self-updater's two verbs, as in v2 except that
+ * {@code update} now does its own check (departure D91).
  *
  * <p>Two rather than one, and the split is v2's: {@code version} asks the bot what the newest
  * release is and reports; {@code update} downloads and installs it. Keeping "tell me" separate from
  * "do it" is what stops a command that prints a version number from also replacing a jar, which is
  * the kind of surprise nobody wants from a server console.
  *
- * <p>{@code update} refuses unless a check has already found something newer, again as v2 did. That
- * is not caution for its own sake: the installer's whole job is to put a file where the server will
- * pick it up on restart, and doing that on the strength of no information at all is how a server
- * ends up staged with the version it already has.
+ * <p>{@code update} does its own check first, against the bot with its release cache skipped, and
+ * installs only when that check finds something newer. v2 instead refused unless an earlier check
+ * had already found an update, which left the operator to run {@code version} first whenever the
+ * periodic check was off or a release had landed since it last ran. Installing on no information
+ * is still never done: a check that fails installs nothing and says so.
  *
  * <p>Neither verb applies anything to the running process. Both platforms' strategies — Paper's
  * {@code plugins/update/} folder, Velocity's in-place jar swap — take effect on the next start, and
@@ -129,7 +131,8 @@ final class UpdateSubcommands {
 
         @Override
         public String description() {
-            return "install the newest release, live when it can be, otherwise on restart";
+            return "check for a newer release and install it, live when it can be, otherwise on "
+                    + "restart";
         }
 
         @Override
@@ -139,15 +142,9 @@ final class UpdateSubcommands {
                 source.sendMessage(Msg.legacy("§eThis build has no self-updater."));
                 return;
             }
-            if (!updates.isUpdateAvailable()) {
-                source.sendMessage(Msg.legacy("§eNo update is known to be available. Run §f/"
-                        + context.label()
-                        + " version§e first — this only installs something a check has found."));
-                return;
-            }
-            String latest = updates.latestVersion();
-            source.sendMessage(Msg.legacy("§7Downloading Heimdall §f"
-                    + (Strings.isBlank(latest) ? "update" : latest) + "§7…"));
+            // No gate on an earlier check: updateNow checks the bot itself, fresh, and installs
+            // only if that check finds something newer than what is running.
+            source.sendMessage(Msg.legacy("§7Checking for a newer version of Heimdall…"));
             context.async(new Runnable() {
                 @Override
                 public void run() {
@@ -155,8 +152,11 @@ final class UpdateSubcommands {
                     // says whether it was accepted. The shell holds a requested swap back long
                     // enough for this reply to go out first, then reports the outcome to the same
                     // sender (departure D87).
-                    String said = updates.updateNow(source.nativeSender());
-                    source.sendMessage(Msg.legacy("§a" + said));
+                    InstallOutcome outcome = updates.updateNow(source.nativeSender());
+                    // Green only when something was installed: "already the latest version" and a
+                    // check that could not reach the bot are not successes to an operator.
+                    source.sendMessage(Msg.legacy((outcome.installed() ? "§a" : "§e")
+                            + outcome.message()));
                 }
             });
         }

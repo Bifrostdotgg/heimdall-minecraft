@@ -51,7 +51,8 @@ public final class UpdateSettings {
      * Whether an admin joining the server is told about a pending update. Default true.
      *
      * <p>Separate from {@link #checkEnabled()} on purpose: a fleet operator who patches on their own
-     * schedule wants the check (so {@code /hd update} works on demand) without the join spam.
+     * schedule wants the check (so the console banner and {@code /hd status} know about a release)
+     * without the join spam.
      */
     public boolean notifyAdmins() {
         return settings.bool("notifyAdmins", true);

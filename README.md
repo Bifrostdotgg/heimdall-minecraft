@@ -110,7 +110,9 @@ and every few hours. When a newer version is available:
 - A warning is logged to the server console.
 - Admins (`heimdall.admin`) are notified as they join (if `updatesNotifyAdmins` is on).
 - Run `/hd version` (`/hdp version` on Velocity) to see the installed vs. latest version on demand.
-- Run `/hd update` (`/hdp update` on Velocity) to download the latest JAR:
+- Run `/hd update` (`/hdp update` on Velocity) to install the latest JAR. It checks the bot for
+  the newest release itself, so there is no need to run `/hd version` first, and it does nothing
+  if you are already on the latest version. Otherwise it downloads the new JAR:
   - **Paper**: it is placed in `plugins/update/` and applied automatically on the
     next server restart.
   - **Velocity and BungeeCord**: the running JAR is replaced in place and picked up on the next
@@ -399,7 +401,7 @@ to the same tree and prints a one-time-per-start warning telling you to switch.
   have one. It can only reach a Minecraft case, and a hidden case only if you hold
   `heimdall.punishments.hidden`. Players only, since a note is signed by the account that wrote it
 - `/hd version` - show the installed version and check for a newer one
-- `/hd update` - download the newest release; applied on the next restart
+- `/hd update` - check for a newer release and install it; live when it can be, otherwise on the next restart
 - `/hd debug on|off` - toggle debug logging, persisted to `bootstrap.yml`
 
 **Permission Required**: `heimdall.admin` (defaults to OP)

@@ -2930,6 +2930,27 @@ stand-in for the service-loaded server half. Those tests run unshaded, where a l
 one under `com.heimdall.libs.kyori`. What no test here shows is a real server sending the
 dialog or a real client drawing it.
 
+### D91 - `/hd update` checks for itself instead of needing `/hd version` first
+
+**v2:** `/hwl update` refused unless an earlier check had already found something newer, and told
+the operator to run `/hwl version` first.
+**v3 before this change:** the same gate on `/hd update`, even though the service behind it already
+re-checked the bot before installing.
+**v3:** `/hd update` (`/hdp update`) always checks the bot first, past its release cache, and then
+either installs what it found or says the server is already on the latest version. No earlier
+check is needed or consulted.
+
+The gate made the operator do the check by hand whenever the in-memory answer was missing or stale:
+with `updatesCheckEnabled` off, or when a release was published after the last periodic check
+(twelve hours apart by default). The command then refused to install a release that existed.
+
+**A failed check installs nothing.** If the bot cannot be asked, or answers with no release,
+`/hd update` and the dashboard's update button say so and install nothing. Before this, a failed
+check fell back to whatever an older check had found, and with no older answer it reported
+*"already the latest version"*, which was not known. `checkNow()`, the periodic tick and the join
+notice still keep the previous answer through a failed check, because there a stale answer
+only informs; here it would decide what gets installed.
+
 ---
 
 ## Structure

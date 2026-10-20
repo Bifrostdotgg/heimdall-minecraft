@@ -41,8 +41,9 @@ import java.util.function.Supplier;
  * succeeded — live on one immutable {@link Published} object in a single volatile field. Concurrent
  * checks then race to <em>replace</em> it, which is fine: both answers were true when they were
  * computed, and whichever lands last is the more recent. No reader can observe a mixture. Reads
- * that need more than one fact ({@link #joinNotice}, {@link #updateNow()}) take one snapshot into a
- * local and use that, rather than reading the field twice.
+ * that need more than one fact ({@link #joinNotice}) take one snapshot into a local and use that,
+ * rather than reading the field twice. {@link #updateNow()} does not read the field at all: it acts
+ * on the answer its own check returned, so a concurrent periodic tick cannot change its decision.
  *
  * <h2>Threading and ownership</h2>
  *
@@ -166,32 +167,47 @@ public final class UpdateService {
 
     private boolean check(boolean fresh) {
         try {
-            PluginRelease release = releases.latestRelease(fresh)
-                    .get(releases.joinTimeoutMs(), TimeUnit.MILLISECONDS);
-            if (release == null || Strings.isBlank(release.version())) {
-                logger.debug("no release information returned by the bot");
-                return false;
-            }
-            boolean available = Versions.isNewer(release.version(), currentVersion);
-            published = new Published(release, available, true);
-            if (available) {
-                announce(release);
-            } else {
-                logger.info("Heimdall is up to date (" + currentVersion + ").");
-            }
-            return available;
+            Published answer = fetch(fresh);
+            return answer != null && answer.available;
         } catch (Exception failed) {
             // Everything, including a timeout and an interrupt. The previous answer stands: a bot
             // that is briefly down must not make a server forget an update it already knows about.
-            //
-            // Thread.interrupted() clears the flag rather than restoring it, matching
-            // WhitelistMirrorService.syncNow(). This runs on a shared pool thread, and leaving it
-            // interrupted would make the *next* unrelated task on that thread fail at its first
-            // blocking call, arbitrarily far from here.
-            Thread.interrupted();
-            logger.debug("update check failed: " + rootMessage(failed));
+            checkFailed(failed);
             return false;
         }
+    }
+
+    /**
+     * One check: asks for the latest release, publishes the answer, and returns it.
+     *
+     * @return this check's answer, or {@code null} when the bot reported no release
+     * @throws Exception when the bot could not be asked; nothing is published then
+     */
+    private Published fetch(boolean fresh) throws Exception {
+        PluginRelease release = releases.latestRelease(fresh)
+                .get(releases.joinTimeoutMs(), TimeUnit.MILLISECONDS);
+        if (release == null || Strings.isBlank(release.version())) {
+            logger.debug("no release information returned by the bot");
+            return null;
+        }
+        boolean available = Versions.isNewer(release.version(), currentVersion);
+        Published answer = new Published(release, available, true);
+        published = answer;
+        if (available) {
+            announce(release);
+        } else {
+            logger.info("Heimdall is up to date (" + currentVersion + ").");
+        }
+        return answer;
+    }
+
+    private void checkFailed(Exception failed) {
+        // Thread.interrupted() clears the flag rather than restoring it, matching
+        // WhitelistMirrorService.syncNow(). This runs on a shared pool thread, and leaving it
+        // interrupted would make the *next* unrelated task on that thread fail at its first
+        // blocking call, arbitrarily far from here.
+        Thread.interrupted();
+        logger.debug("update check failed: " + rootMessage(failed));
     }
 
     /**
@@ -219,13 +235,30 @@ public final class UpdateService {
      * <p>The swap is returned as {@linkplain InstallOutcome#pendingSwap() pending}, never started
      * here: the caller requests it with {@link InstallOutcome#startSwap(Object)}, which says
      * whether it was accepted, and reports that.
+     *
+     * <h2>Only on this call's own check</h2>
+     *
+     * <p>The decision rests on the check made here and nothing earlier, so nobody has to run
+     * {@code /hd version} first. A check that fails installs nothing and says so, rather than
+     * falling back to what an older check found or claiming the server is up to date: neither is
+     * known when the bot could not be asked.
      */
     public InstallOutcome updateNow() {
         // Always by hand (a command or a dashboard request), so past the bot's cache: installing
         // "the latest" must mean the release that was just published, not the one an hour ago.
-        checkNowFresh();
-        Published current = published;
-        if (!current.available || current.release == null) {
+        Published current;
+        try {
+            current = fetch(true);
+        } catch (Exception failed) {
+            checkFailed(failed);
+            return InstallOutcome.failed("Could not check for a newer version of Heimdall, so "
+                    + "nothing was installed: " + rootMessage(failed));
+        }
+        if (current == null) {
+            return InstallOutcome.failed("The bot did not report a published release, so nothing "
+                    + "was installed.");
+        }
+        if (!current.available) {
             return InstallOutcome.upToDate("Heimdall " + currentVersion + " is already the latest version.");
         }
         if (installer == null || downloader == null) {

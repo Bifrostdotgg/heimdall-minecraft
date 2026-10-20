@@ -1,5 +1,7 @@
 package com.heimdall.core.admin;
 
+import com.heimdall.core.update.InstallOutcome;
+
 /**
  * The self-updater's operator surface: {@code /hd version} and {@code /hd update}.
  *
@@ -40,8 +42,8 @@ public interface UpdateAdmin {
         }
 
         @Override
-        public String updateNow(Object audience) {
-            return "this build has no self-updater";
+        public InstallOutcome updateNow(Object audience) {
+            return InstallOutcome.failed("This build has no self-updater.");
         }
 
         @Override
@@ -77,9 +79,10 @@ public interface UpdateAdmin {
      *
      * @param audience the platform sender a live swap's outcome is reported to, or {@code null}
      *
-     * @return one operator-facing sentence saying what happened, including the restart it needs
+     * @return what happened, with one operator-facing sentence including the restart it needs;
+     *     {@link InstallOutcome#installed()} says whether anything was installed
      */
-    String updateNow(Object audience);
+    InstallOutcome updateNow(Object audience);
 
     /** Whether the last successful check found something newer. */
     boolean isUpdateAvailable();
