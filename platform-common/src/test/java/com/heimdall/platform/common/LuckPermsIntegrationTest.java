@@ -73,6 +73,8 @@ class LuckPermsIntegrationTest {
     };
     private final Map<Class<?>, Consumer<Object>> handlers = new HashMap<Class<?>, Consumer<Object>>();
     private LuckPerms api;
+    /** What {@code QueryOptions.nonContextual()} resolves to through the mocked registry. */
+    private QueryOptions nonContextual;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -87,7 +89,8 @@ class LuckPermsIntegrationTest {
             return mock(EventSubscription.class);
         });
         QueryOptionsRegistry registry = mock(QueryOptionsRegistry.class);
-        when(registry.defaultNonContextualOptions()).thenReturn(mock(QueryOptions.class));
+        nonContextual = mock(QueryOptions.class);
+        when(registry.defaultNonContextualOptions()).thenReturn(nonContextual);
         when(api.getQueryOptionsRegistry()).thenReturn(registry);
         provider("register", api);
     }
@@ -345,6 +348,77 @@ class LuckPermsIntegrationTest {
         assertTrue(done.join());
         verify(data, never()).clear(any(Predicate.class));
         verify(data, never()).add(any(Node.class));
+        verify(api.getUserManager(), never()).saveUser(user);
+    }
+
+    // -- what the forward diff counts as held ------------------------------------------------
+
+    private static List<Group> groupList(String... names) {
+        List<Group> out = new ArrayList<Group>();
+        for (String name : names) {
+            Group g = mock(Group.class);
+            when(g.getName()).thenReturn(name);
+            out.add(g);
+        }
+        return out;
+    }
+
+    /**
+     * Pio on survival, holding {@code zeal} only as {@code server=lobby}: this server's contextual
+     * query does not see it, the non-contextual one does. Stubbed per query, not with
+     * {@code any()}, so the test fails if the diff goes back to the contextual read.
+     */
+    private User heldOnlyInLobby(UUID uuid) {
+        User user = mock(User.class);
+        when(user.getUniqueId()).thenReturn(uuid);
+        when(user.getUsername()).thenReturn("Pio");
+        QueryOptions survival = mock(QueryOptions.class);
+        when(user.getQueryOptions()).thenReturn(survival);
+        List<Group> contextual = groupList("default");
+        List<Group> owned = groupList("default", "zeal");
+        when(user.getInheritedGroups(survival)).thenReturn(contextual);
+        when(user.getInheritedGroups(nonContextual)).thenReturn(owned);
+        return user;
+    }
+
+    @Test
+    @DisplayName("a push applied on survival removes a zeal held only as server=lobby")
+    void removalSeesAGroupHeldInAnotherContext() {
+        UUID uuid = UUID.randomUUID();
+        User user = heldOnlyInLobby(uuid);
+        NodeMap data = loadable(user);
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+
+        CompletableFuture<Boolean> done =
+                bridge.setPlayerGroups(uuid, Arrays.<String>asList(), Arrays.asList("zeal"));
+        drain();
+
+        assertTrue(done.join(), logger.records().toString());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Predicate<? super Node>> cleared =
+                ArgumentCaptor.forClass((Class<Predicate<? super Node>>) (Class<?>) Predicate.class);
+        verify(data, times(1)).clear(cleared.capture());
+        InheritanceNode lobby = parent("zeal", false);
+        when(lobby.getContexts()).thenReturn(mock(ImmutableContextSet.class));
+        assertTrue(cleared.getValue().test(lobby), "cleared in every context, lobby's included");
+        verify(api.getUserManager()).saveUser(user);
+    }
+
+    @Test
+    @DisplayName("a target naming zeal held only as server=lobby adds no global node beside it")
+    void heldInAnotherContextIsNotReAdded() {
+        UUID uuid = UUID.randomUUID();
+        User user = heldOnlyInLobby(uuid);
+        NodeMap data = loadable(user);
+        LuckPermsIntegration bridge = LuckPermsIntegration.tryCreate(logger, manual);
+
+        CompletableFuture<Boolean> done =
+                bridge.setPlayerGroups(uuid, Arrays.asList("zeal"), Arrays.asList("zeal"));
+        drain();
+
+        assertTrue(done.join(), logger.records().toString());
+        verify(data, never()).add(any(Node.class));
+        verify(data, never()).clear(any(Predicate.class));
         verify(api.getUserManager(), never()).saveUser(user);
     }
 }

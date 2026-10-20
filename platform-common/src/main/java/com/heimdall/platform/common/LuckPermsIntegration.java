@@ -218,7 +218,9 @@ final class LuckPermsIntegration implements LuckPermsBridge {
                 return Boolean.FALSE;
             }
 
-            GroupDiff diff = GroupDiff.compute(groupsOf(user), targetGroups, managedGroups);
+            // What the player owns in any context, the same read reverse role sync reports: see
+            // ownedGroupsOf for why a contextual read left a server=lobby rank behind on survival.
+            GroupDiff diff = GroupDiff.compute(ownedGroupsOf(user), targetGroups, managedGroups);
             if (diff.isEmpty()) {
                 logger.debug(() -> "no managed group changes needed for " + playerUuid);
                 return Boolean.TRUE;
@@ -557,31 +559,8 @@ final class LuckPermsIntegration implements LuckPermsBridge {
     }
 
     /**
-     * The groups a user holds, <em>including</em> ones inherited through another group.
-     *
-     * <p>{@code getInheritedGroups} rather than the directly-held nodes. That is v2's behaviour and
-     * is kept deliberately: non-departure <strong>N7</strong> in {@code docs/v2-departures.md} is
-     * about this exact line, and it records the two consequences. An inherited managed group is
-     * never *added* — correct, since granting it would change nothing. The same group, when the
-     * dashboard drops it from the target set, <em>is</em> listed for removal, and removing the
-     * direct node does nothing because the player still inherits it, so the sync logs a removal that
-     * did not take effect.
-     *
-     * <p>N7 also says not to "fix" this without the bot side in the room: diffing against
-     * directly-held nodes changes which groups get written on every sync for every server that uses
-     * group inheritance, which is most of them.
-     */
-    private static List<String> groupsOf(User user) {
-        List<String> names = new ArrayList<String>();
-        for (Group group : user.getInheritedGroups(user.getQueryOptions())) {
-            names.add(group.getName());
-        }
-        return names;
-    }
-
-    /**
      * The groups a user <em>owns</em>, in any context: what reverse role sync and the join-time
-     * {@code currentGroups} report.
+     * {@code currentGroups} report, and what the forward diff in {@link #setPlayerGroups} reads.
      *
      * <p>{@link QueryOptions#nonContextual()} rather than the user's own query options. "Does this
      * player have the VIP rank" is a question about ownership, and the contextual answer depends on
@@ -590,9 +569,25 @@ final class LuckPermsIntegration implements LuckPermsBridge {
      * the Discord role away. The non-contextual query counts parent nodes whatever their context,
      * and still resolves groups inherited through other groups.
      *
-     * <p>Deliberately <strong>not</strong> used by {@link #setPlayerGroups}'s diff, which stays on
-     * {@link #groupsOf}: departure N7 records that changing what the forward diff reads changes which
-     * groups are written on every sync, and that is not a change to make as a side effect.
+     * <p>The forward diff reads the same thing, because the two disagreeing was a bug in both
+     * directions. With {@code zeal} held as {@code server=lobby} and a push dropping it applied on
+     * survival, a contextual diff did not see zeal as held, so it was never listed for removal and
+     * stayed; survival's reverse frames then kept reporting it, and the bot kept being told about a
+     * rank it had just removed. Read non-contextually, a managed group held in any context is held:
+     * a removal clears it in every context ({@link #grantsGroup}), and a target that names it does
+     * not add a second, global node beside the contextual one. Negated nodes are left alone, as
+     * {@link #grantsGroup} says.
+     *
+     * <p>Still {@code getInheritedGroups}, not the directly-held nodes, which is v2's behaviour and
+     * what non-departure <strong>N7</strong> in {@code docs/v2-departures.md} is about. Its two
+     * consequences stand: an inherited managed group is never <em>added</em> (correct, since
+     * granting it would change nothing), and the same group, when the dashboard drops it from the
+     * target set, <em>is</em> listed for removal, which does nothing because the player still
+     * inherits it, so the sync logs a removal that did not take effect. N7 also says not to "fix"
+     * that without the bot side in the room: diffing against directly-held nodes changes which groups
+     * get written on every sync for every server that uses group inheritance. Counting every context
+     * is a narrower change: it only differs from the contextual read for a parent granted in a
+     * context this server is not in.
      */
     static List<String> ownedGroupsOf(User user) {
         List<String> names = new ArrayList<String>();

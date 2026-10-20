@@ -3186,7 +3186,7 @@ change with a real blast radius and no reported complaint behind it.
 room: what the dashboard means by "this player has this group" is the actual question, and the
 plugin's diff is downstream of the answer.
 
-**Update (reverse role sync):** join-time `currentGroups` is now the non-contextual ownership read (`LuckPermsIntegration.ownedGroupsOf`), while the forward diff above still reads contextual groups; so in the bot's RCON mode a parent held only in a server context counts as held everywhere, and a role loss removes only the global node. That is an unusual setup, documented here rather than handled.
+**Update (reverse role sync):** join-time `currentGroups`, the `rolesync.groups` frames and the forward diff above all read the non-contextual ownership query (`LuckPermsIntegration.ownedGroupsOf`): a parent held in any server context counts as held. A forward removal clears every node granting the group, in any context or expiry, and a target naming a group held only in another context adds no global node beside it. Inherited groups are still counted, so the two consequences above are unchanged. The forward diff once read contextual groups, which left a `server=lobby` rank in place when a push dropping it was applied on another server, while that server's reverse frames kept reporting it.
 
 ### N8 — v2's `cleanupUser` is not ported yet
 
