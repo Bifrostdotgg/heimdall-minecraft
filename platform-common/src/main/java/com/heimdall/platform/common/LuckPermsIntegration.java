@@ -254,7 +254,10 @@ final class LuckPermsIntegration implements LuckPermsBridge {
      *       verified against LuckPerms itself, and the join-time {@code currentGroups} is what is
      *       relied on for those. It also fires for plenty that changes no group, which is why the
      *       listener gets the full list and decides for itself whether anything moved (see
-     *       {@link GroupsChangedListener}).
+     *       {@link GroupsChangedListener}). It fires every time LuckPerms loads a user as well, so it
+     *       is passed on as {@link GroupsChangedListener.Cause#RECALCULATION} and the node events as
+     *       {@link GroupsChangedListener.Cause#INHERITANCE_NODE}: only the latter says somebody
+     *       edited a rank, which is what decides whether an offline player is reported.
      * </ul>
      *
      * <h2>Threads</h2>
@@ -318,7 +321,7 @@ final class LuckPermsIntegration implements LuckPermsBridge {
                     new Consumer<UserDataRecalculateEvent>() {
                         @Override
                         public void accept(UserDataRecalculateEvent event) {
-                            reads.request(event.getUser());
+                            reads.request(event.getUser(), GroupsChangedListener.Cause.RECALCULATION);
                         }
                     }));
         } catch (RuntimeException e) {
@@ -337,7 +340,7 @@ final class LuckPermsIntegration implements LuckPermsBridge {
 
     private static void onUserMutated(NodeMutateEvent event, GroupReads reads) {
         if (event.isUser() && event.getTarget() instanceof User) {
-            reads.request((User) event.getTarget());
+            reads.request((User) event.getTarget(), GroupsChangedListener.Cause.INHERITANCE_NODE);
         }
     }
 
@@ -356,12 +359,18 @@ final class LuckPermsIntegration implements LuckPermsBridge {
      * <p>The {@link SerialExecutor} underneath runs reads one at a time in queue order. With at most
      * one queued read per user, that is what guarantees the last call a listener sees for a user
      * carries a state no older than any earlier call's.
+     *
+     * <p>Coalescing keeps the strongest {@link GroupsChangedListener.Cause}: a node event followed by
+     * the recalculation it causes is one read reported as a node event. Reverse role sync reports an
+     * offline player only on a node event, because LuckPerms recalculates every user it loads, so
+     * letting the recalculation overwrite the cause would drop exactly the offline edits it is meant
+     * to report.
      */
     final class GroupReads {
 
         private final Executor serial;
         private final GroupsChangedListener listener;
-        private final ConcurrentHashMap<UUID, User> queued = new ConcurrentHashMap<UUID, User>();
+        private final ConcurrentHashMap<UUID, Queued> queued = new ConcurrentHashMap<UUID, Queued>();
 
         GroupReads(Executor serial, GroupsChangedListener listener) {
             this.serial = serial;
@@ -373,12 +382,20 @@ final class LuckPermsIntegration implements LuckPermsBridge {
          * event thread, so it is cheap and never throws back into LuckPerms: an exception here would
          * be logged as a failure of LuckPerms' own event.
          */
-        void request(User user) {
+        void request(final User user, final GroupsChangedListener.Cause cause) {
             if (user == null) {
                 return;
             }
             final UUID uuid = user.getUniqueId();
-            if (queued.put(uuid, user) != null) {
+            final boolean[] fresh = new boolean[1];
+            queued.compute(uuid, (key, waiting) -> {
+                if (waiting == null) {
+                    fresh[0] = true;
+                    return new Queued(user, cause);
+                }
+                return waiting.merge(user, cause);
+            });
+            if (!fresh[0]) {
                 return;
             }
             try {
@@ -395,10 +412,11 @@ final class LuckPermsIntegration implements LuckPermsBridge {
         }
 
         private void read(final UUID uuid) {
-            User user = queued.remove(uuid);
-            if (user == null) {
+            Queued waiting = queued.remove(uuid);
+            if (waiting == null) {
                 return;
             }
+            User user = waiting.user;
             List<String> groups;
             try {
                 groups = ownedGroupsOf(user);
@@ -411,12 +429,38 @@ final class LuckPermsIntegration implements LuckPermsBridge {
                         + " after a change: " + reason);
                 return;
             }
+            String username;
             try {
-                listener.onGroupsChanged(uuid, Collections.unmodifiableList(groups));
+                username = user.getUsername();
+            } catch (RuntimeException e) {
+                username = null;
+            }
+            try {
+                listener.onGroupsChanged(
+                        uuid, username, Collections.unmodifiableList(groups), waiting.cause);
             } catch (RuntimeException e) {
                 logger.warn("a LuckPerms group-change listener failed for " + uuid + ": "
                         + e.getMessage());
             }
+        }
+    }
+
+    /** One user's queued read: the newest {@link User} seen, and the strongest cause behind it. */
+    private static final class Queued {
+        final User user;
+        final GroupsChangedListener.Cause cause;
+
+        Queued(User user, GroupsChangedListener.Cause cause) {
+            this.user = user;
+            this.cause = cause;
+        }
+
+        Queued merge(User newer, GroupsChangedListener.Cause also) {
+            boolean node = cause == GroupsChangedListener.Cause.INHERITANCE_NODE
+                    || also == GroupsChangedListener.Cause.INHERITANCE_NODE;
+            return new Queued(newer, node
+                    ? GroupsChangedListener.Cause.INHERITANCE_NODE
+                    : GroupsChangedListener.Cause.RECALCULATION);
         }
     }
 

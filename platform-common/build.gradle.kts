@@ -41,6 +41,10 @@ dependencies {
     compileOnly(libs.log4j.core)
 
     testImplementation(testFixtures(project(":core")))
+    // The LuckPerms bridge is tested against the real API interfaces, mocked: what it removes and
+    // which events it reports are decisions about LuckPerms' own types, and a hand-rolled stand-in
+    // would let the test agree with itself about their shape.
+    testImplementation(libs.luckperms.api)
     // The capture path is the version-sensitive part (departure D45) and the smoke matrix only
     // reaches it transitively, so it is unit-tested against real LogEvents rather than a mock —
     // a hand-rolled LogEvent would let the test agree with itself about an API shape.

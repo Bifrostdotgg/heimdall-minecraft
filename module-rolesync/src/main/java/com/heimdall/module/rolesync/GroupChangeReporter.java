@@ -12,6 +12,7 @@ import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.tunnel.ProtocolMode;
 import com.heimdall.core.tunnel.ProtocolModeListener;
 import com.heimdall.core.util.Registration;
+import com.heimdall.core.util.Strings;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
@@ -51,11 +52,17 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Per online player, this keeps a record of the watched groups the bot is known to have been told
  * about. A change is reported when the player's current groups, intersected with the watched list,
- * differ from that record intersected with the watched list. A player with no record is compared
- * against the empty set, so any watched group they hold is reported. A watched group being
+ * differ from that record intersected with the watched list. A watched group being
  * <strong>removed</strong> counts as a difference exactly like one being added; that is how a refund
  * reaches Discord. (An expiry reaches it too if LuckPerms signals one while the player is online;
  * the API does not promise that it does, and the join-time reconcile is what covers it if not.)
+ *
+ * <p><strong>No record means unknown, not empty.</strong> A player with no record is reported on
+ * any LuckPerms change at all, without a comparison. This used to compare them against the empty
+ * set, and that hid removals: a player who joined holding a watched rank, with no record, and then
+ * lost it compared {@code {}} with {@code {}} and nothing was sent, so Discord kept the role. The
+ * bot compares sets, so a frame that tells it nothing new is a no-op on its side, and once one has
+ * been sent the record exists and later changes are compared as usual.
  *
  * <p><strong>A record exists only for what the bot was verifiably told.</strong> It is written when a
  * frame is sent, and when a join-time call from <em>this</em> server succeeded carrying
@@ -64,8 +71,8 @@ import java.util.concurrent.TimeUnit;
  * LuckPerms locally at join: when this server made no call (a backend that defers to its gatekeeper,
  * whose LuckPerms may be elsewhere), when the call failed, or when the bot was unusable, a local read
  * would describe what the bot has <em>not</em> seen and suppress the one report that would have told
- * it. Leaving the player unrecorded costs at worst one redundant frame, and the bot compares sets, so
- * that frame is a no-op on its side.
+ * it. An unrecorded player is reported on their next change of any kind (see above), so the cost of
+ * leaving one unrecorded is frames the bot may already agree with, never a frame withheld.
  *
  * <p>The record is intersected with the watched list <em>at the time it is written</em>, and both
  * sides are intersected with the current list at comparison, so a group added to the list after the
@@ -81,12 +88,25 @@ import java.util.concurrent.TimeUnit;
  * <p>The frame carries the player's <em>full</em> current group list, not the intersection and not a
  * delta, so the bot can answer for mappings this server's settings have not caught up with yet.
  *
- * <h2>Offline players are not reported</h2>
+ * <h2>Offline players: real rank edits only</h2>
  *
  * <p>A change to a player who is not online on this server (a console edit, a store command run for
- * an offline buyer) is ignored. The join-time call carries {@code currentGroups} and the bot reconciles
- * from it, so the change reaches Discord at their next login. Reporting offline changes would need a
- * record per offline player to compare against, a cache with no bound and no owner.
+ * an offline buyer) is reported too, but only when it was an actual edit: LuckPerms signalled an
+ * inheritance node being added, removed or cleared
+ * ({@link GroupsChangedListener.Cause#INHERITANCE_NODE}). A bare recalculation is never enough for
+ * an offline player, because LuckPerms recalculates every user it loads: a login still in progress,
+ * another plugin looking somebody up, a storage sync. Taking those as changes would send a frame for
+ * every user LuckPerms touches. With shared LuckPerms storage only the server that ran the edit fires
+ * the node event, so a network sends one frame for it, not one per server. Waiting for the next login
+ * instead, as this once did, left a removed rank's Discord role in place for as long as the player
+ * stayed away.
+ *
+ * <p>An offline report carries the full group list, a fresh {@code at}, and the name LuckPerms has
+ * stored for the user, because the bot needs a username; a user LuckPerms has no name for is not
+ * reported. There is no record for an offline player and no comparison: a record per offline player
+ * would be a cache with no bound and no owner, and the bot comparing sets makes a redundant frame
+ * harmless. A recalculation for an offline player whose report is already armed (an edit's own
+ * recalculation, arriving separately) only refreshes the groups that report will carry.
  *
  * <p>A delivery for a player not online yet (the blocking login path answers before the join) is
  * parked until their join moves it into the record, and dropped after
@@ -102,6 +122,12 @@ import java.util.concurrent.TimeUnit;
  * one frame. A fixed window from the first callback rather than one that restarts on every callback,
  * so a player whose groups change continuously still gets a report every half second rather than
  * never.
+ *
+ * <p><strong>A quit flushes, it does not cancel.</strong> A player who quits or is kicked inside the
+ * window has their armed report sent at once, under the name they had, compared against their record
+ * before it is dropped. Cancelling it, as this once did, lost the report for good: "remove the rank,
+ * then ban" took the rank away in game and left the Discord role, because the ban's kick landed inside
+ * the window and nothing would ever report the change again.
  *
  * <p>The timer lives on {@code heimdall-sched}, and the comparison and send are handed straight to
  * {@code heimdall-io}: the scheduler is single-threaded and shared with every poll the plugin runs.
@@ -145,9 +171,17 @@ final class GroupChangeReporter {
     /** How long a delivery waits for its player to join before it is dropped. */
     static final long PARKED_DELIVERY_TTL_MS = 120_000L;
 
-    /** One player's armed report: the newest groups seen, and the timer that will read them. */
+    /**
+     * One player's armed report: the newest groups seen, the name to send them under, and the timer
+     * that will read them.
+     *
+     * <p>Only armed while the player is online or by a real rank edit (see {@link #changed}), so
+     * whatever is armed is reportable whether or not the player is still here when it fires.
+     */
     private static final class Pending {
         volatile List<String> groups;
+        /** The online name while the player was here, otherwise the one LuckPerms stored. */
+        volatile String username;
         volatile ScheduledFuture<?> timer;
     }
 
@@ -235,6 +269,8 @@ final class GroupChangeReporter {
         ctx.onPlayerQuit(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                // Flushed before the record is dropped, so the report compares against it.
+                flush(player);
                 forget(player.uuid());
             }
         });
@@ -278,7 +314,14 @@ final class GroupChangeReporter {
                 made = bridge.onGroupsChanged(new GroupsChangedListener() {
                     @Override
                     public void onGroupsChanged(UUID uuid, List<String> currentGroups) {
-                        changed(uuid, currentGroups);
+                        changed(uuid, null, currentGroups,
+                                GroupsChangedListener.Cause.RECALCULATION);
+                    }
+
+                    @Override
+                    public void onGroupsChanged(UUID uuid, String username,
+                            List<String> currentGroups, GroupsChangedListener.Cause cause) {
+                        changed(uuid, username, currentGroups, cause);
                     }
                 });
             } catch (RuntimeException | LinkageError broken) {
@@ -336,8 +379,8 @@ final class GroupChangeReporter {
      */
     void delivered(UUID uuid, List<String> groups) {
         if (closed || !isSubscribed()) {
-            // Not subscribed means nothing is watched, and an absent record already compares as
-            // empty, so there is nothing a record could change.
+            // Not subscribed means nothing is watched and nothing is reported, so there is
+            // nothing a record could change.
             return;
         }
         Set<String> watched = intersect(groups, watched());
@@ -386,13 +429,30 @@ final class GroupChangeReporter {
         }
     }
 
-    /** The LuckPerms callback, on {@code heimdall-io}. Arms or feeds this player's debounce. */
-    void changed(final UUID uuid, final List<String> currentGroups) {
-        if (closed || uuid == null || currentGroups == null || !isOnline(uuid)) {
+    /**
+     * The LuckPerms callback, on {@code heimdall-io}. Arms or feeds this player's debounce.
+     *
+     * <p>An online player's report is armed by any callback, as it always was. An offline player's
+     * is armed only by a real rank edit ({@link GroupsChangedListener.Cause#INHERITANCE_NODE}); a
+     * bare recalculation for them only refreshes a report that is already armed. See the class
+     * javadoc for why a recalculation is not a change for somebody who is not here.
+     *
+     * @param storedName the name LuckPerms has stored for the user, or {@code null}
+     */
+    void changed(final UUID uuid, String storedName, final List<String> currentGroups,
+            GroupsChangedListener.Cause cause) {
+        if (closed || uuid == null || currentGroups == null) {
             return;
         }
+        Optional<PlayerHandle> online = ctx.platform().players().byUuid(uuid);
+        final boolean here = online.isPresent();
+        final String name = here ? online.get().name() : storedName;
+        final boolean mayArm = here || cause == GroupsChangedListener.Cause.INHERITANCE_NODE;
         pending.compute(uuid, (key, armed) -> {
             if (armed == null) {
+                if (!mayArm) {
+                    return null;
+                }
                 armed = new Pending();
                 armed.timer = schedule(key);
                 if (armed.timer == null) {
@@ -400,6 +460,10 @@ final class GroupChangeReporter {
                 }
             }
             armed.groups = currentGroups;
+            // The online name wins over a stored one, which LuckPerms may have kept differently.
+            if (!Strings.isBlank(name) && (here || Strings.isBlank(armed.username))) {
+                armed.username = name;
+            }
             return armed;
         });
     }
@@ -429,7 +493,40 @@ final class GroupChangeReporter {
     /** The debounce expiring, on {@code heimdall-io}: compare once, send at most one frame. */
     private void fire(UUID uuid) {
         Pending armed = pending.remove(uuid);
-        if (armed == null || closed) {
+        if (armed == null) {
+            return;
+        }
+        report(uuid, armed, null);
+    }
+
+    /**
+     * A quit, on {@code heimdall-io}: sends this player's armed report now rather than dropping it.
+     * The atomic {@code remove} means this and a timer firing at the same moment send it once.
+     */
+    private void flush(PlayerHandle player) {
+        UUID uuid = player.uuid();
+        if (uuid == null) {
+            return;
+        }
+        Pending armed = pending.remove(uuid);
+        if (armed == null) {
+            return;
+        }
+        ScheduledFuture<?> timer = armed.timer;
+        if (timer != null) {
+            timer.cancel(false);
+        }
+        report(uuid, armed, player);
+    }
+
+    /**
+     * Compares and sends one armed report.
+     *
+     * @param quitting the player whose quit is flushing this, or {@code null} when the timer fired;
+     *     a quitting player is still treated as online here, under the name they quit with
+     */
+    private void report(final UUID uuid, Pending armed, PlayerHandle quitting) {
+        if (closed) {
             return;
         }
         List<String> groups = armed.groups;
@@ -441,10 +538,28 @@ final class GroupChangeReporter {
         // the record this decision was based on is gone, and the write must not bring it back.
         long epoch = generation();
         final Set<String> now = intersect(groups, watched);
-        Set<String> before = reported.get(uuid);
-        final Set<String> was =
-                before == null ? Collections.<String>emptySet() : intersect(before, watched);
-        if (now.equals(was)) {
+        PlayerHandle here = quitting;
+        if (here == null) {
+            Optional<PlayerHandle> online = ctx.platform().players().byUuid(uuid);
+            here = online.isPresent() ? online.get() : null;
+        }
+        final String name;
+        final Set<String> was;
+        if (here != null) {
+            name = Strings.isBlank(here.name()) ? armed.username : here.name();
+            Set<String> before = reported.get(uuid);
+            // No record is unknown, not empty: send without comparing. See the class javadoc.
+            was = before == null ? null : intersect(before, watched);
+            if (was != null && now.equals(was)) {
+                return;
+            }
+        } else {
+            // Offline: only a real rank edit, or a report armed while they were here, gets this far.
+            name = armed.username;
+            was = null;
+        }
+        if (Strings.isBlank(name)) {
+            logger.debug(() -> "no name is known for " + uuid + "; not reporting their rank change");
             return;
         }
         if (!ctx.tunnel().isConnected()) {
@@ -452,23 +567,22 @@ final class GroupChangeReporter {
             logger.debug(() -> "tunnel down; not reporting the rank change for " + uuid);
             return;
         }
-        final Optional<PlayerHandle> online = ctx.platform().players().byUuid(uuid);
-        if (!online.isPresent()) {
-            return;
-        }
         ctx.tunnel().send(FRAME_TYPE, Payload.builder()
                 .put("uuid", uuid.toString())
-                .put("username", online.get().name())
+                .put("username", name)
                 .putStrings("groups", groups)
                 .put("at", System.currentTimeMillis())
                 .build());
-        synchronized (records) {
-            if (generation == epoch && !closed) {
-                reported.put(uuid, now);
+        if (here != null && quitting == null) {
+            synchronized (records) {
+                if (generation == epoch && !closed) {
+                    reported.put(uuid, now);
+                }
             }
         }
-        logger.debug(() -> "reported rank change for " + online.get().name() + ": watched " + was
-                + " -> " + now);
+        final String where = here == null ? " (offline)" : "";
+        logger.debug(() -> "reported rank change for " + name + where + ": watched "
+                + (was == null ? "unknown" : was.toString()) + " -> " + now);
     }
 
     private boolean isSubscribed() {

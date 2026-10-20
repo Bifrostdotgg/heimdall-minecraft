@@ -33,9 +33,47 @@ import java.util.UUID;
 public interface GroupsChangedListener {
 
     /**
+     * What made LuckPerms say the groups may have changed.
+     *
+     * <p>Carried because the two are not equally trustworthy as a signal for a player who is not
+     * online. LuckPerms recalculates a user's data every time it loads one, which includes a login
+     * that is still in progress, a lookup by another plugin and a storage sync, so a recalculation
+     * for an offline user says nothing about whether anybody edited their ranks. A node event does:
+     * somebody added, removed or cleared an inheritance node on that user, on this server.
+     */
+    enum Cause {
+
+        /**
+         * An inheritance node was added to, removed from or cleared on the user: a real rank edit,
+         * on this server. With shared LuckPerms storage only the server that made the edit fires it.
+         */
+        INHERITANCE_NODE,
+
+        /** LuckPerms recalculated the user's data, for any reason, including simply loading them. */
+        RECALCULATION
+    }
+
+    /**
      * @param uuid the user whose groups may have changed; online or not
      * @param currentGroups every group the user currently inherits, including through other groups,
      *     in the same form {@link LuckPermsBridge#getPlayerGroups} reports; never {@code null}
      */
     void onGroupsChanged(UUID uuid, List<String> currentGroups);
+
+    /**
+     * The same call with what LuckPerms knows about the event. This is the overload a bridge
+     * invokes; the default drops the extra arguments, so a listener that only cares about the list
+     * implements the two-argument form and nothing else.
+     *
+     * <p>When several events for one user are coalesced into one call, {@code cause} is
+     * {@link Cause#INHERITANCE_NODE} if any of them was a node event: a recalculation queued
+     * behind a real edit must not hide the edit.
+     *
+     * @param username the name LuckPerms has stored for the user, or {@code null} if it has none
+     * @param cause what triggered the call; see {@link Cause}
+     */
+    default void onGroupsChanged(
+            UUID uuid, String username, List<String> currentGroups, Cause cause) {
+        onGroupsChanged(uuid, currentGroups);
+    }
 }

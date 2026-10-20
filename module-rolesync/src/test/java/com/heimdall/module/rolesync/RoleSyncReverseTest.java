@@ -215,13 +215,124 @@ class RoleSyncReverseTest {
     }
 
     @Test
-    @DisplayName("a change for a player who is not online is left to their next join")
-    void offlinePlayerIgnored() {
+    @DisplayName("a bare recalculation for a player who is not online is not reported")
+    void offlineRecalculationIgnored() {
         harness.configure(RoleSyncHarness.watching("vip"));
+        // LuckPerms recalculates every user it loads, so this says nothing about a rank edit.
         harness.luckPerms.fireGroupsChanged(RoleSyncHarness.uuidOf("Offline"), Arrays.asList("vip"));
 
         sleep(PAST_WINDOW_MS);
         assertEquals(0, frames().size());
+    }
+
+    @Test
+    @DisplayName("a real rank edit for an offline player is reported with the full list and LuckPerms' name")
+    void offlineNodeChangeReported() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        java.util.UUID pio = RoleSyncHarness.uuidOf("Pio");
+
+        harness.luckPerms.fireInheritanceChanged(pio, "Pio", Arrays.asList("default"));
+
+        await(() -> frames().size() == 1, "an offline removal must reach the bot: "
+                + harness.logger.records());
+        Payload payload = frames().get(0).payload();
+        assertEquals(pio.toString(), payload.string("uuid", null));
+        assertEquals("Pio", payload.string("username", null), "the name LuckPerms stored");
+        assertEquals(Arrays.asList("default"), payload.strings("groups"));
+        assertTrue(payload.longValue("at", 0L) > 0L);
+        sleep(PAST_WINDOW_MS);
+        assertEquals(1, frames().size());
+    }
+
+    @Test
+    @DisplayName("an offline edit and its own recalculation are one frame carrying the newest list")
+    void offlineEditAndRecalculationCoalesce() {
+        harness.configure(RoleSyncHarness.watching("zeal", "mvp"));
+        java.util.UUID pio = RoleSyncHarness.uuidOf("Pio");
+
+        harness.luckPerms.fireInheritanceChanged(pio, "Pio", Arrays.asList("default"));
+        harness.luckPerms.fireGroupsChanged(pio, Arrays.asList("default", "mvp"));
+
+        await(() -> frames().size() == 1, "one frame: " + harness.logger.records());
+        sleep(PAST_WINDOW_MS);
+        assertEquals(1, frames().size());
+        assertEquals(Arrays.asList("default", "mvp"), frames().get(0).payload().strings("groups"),
+                "a recalculation refreshes an armed offline report rather than being dropped");
+    }
+
+    @Test
+    @DisplayName("an offline edit for a user LuckPerms has no name for is not reported")
+    void offlineNodeChangeWithoutNameSkipped() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+
+        harness.luckPerms.fireInheritanceChanged(
+                RoleSyncHarness.uuidOf("Nameless"), null, Arrays.asList("default"));
+
+        sleep(PAST_WINDOW_MS);
+        assertEquals(0, frames().size(), "the bot needs a username");
+    }
+
+    @Test
+    @DisplayName("no record is unknown, not empty: a removal from an unrecorded player is reported")
+    void removalWithNoRecordIsReported() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        // Pio joined holding zeal, and no call from this server told the bot.
+        FakePlayer pio = joinedWithoutDelivery("Pio", "default", "zeal");
+
+        change(pio, "default");
+
+        await(() -> frames().size() == 1, "comparing {} with {} used to hide this removal: "
+                + harness.logger.records());
+        assertEquals(Arrays.asList("default"), frames().get(0).payload().strings("groups"));
+    }
+
+    @Test
+    @DisplayName("an unrecorded player is reported on any change, then compared once recorded")
+    void unrecordedPlayerReportedOnceThenCompared() {
+        harness.configure(RoleSyncHarness.watching("vip"));
+        FakePlayer steve = joinedWithoutDelivery("Steve", "default");
+
+        change(steve, "default", "builder");
+        await(() -> frames().size() == 1, "no record, so any change sends: "
+                + harness.logger.records());
+
+        change(steve, "default", "builder", "member");
+        sleep(PAST_WINDOW_MS);
+        assertEquals(1, frames().size(), "the first frame wrote the record; nothing watched moved");
+    }
+
+    @Test
+    @DisplayName("a quit inside the debounce sends the armed report at once instead of dropping it")
+    void quitInsideTheWindowFlushes() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        FakePlayer pio = joined("Pio", "default", "zeal");
+
+        // "Remove the rank, then ban": the kick lands well inside the 500 ms window.
+        change(pio, "default");
+        harness.platform.leave(pio);
+        harness.sessions.quit(pio, 2L);
+
+        assertEquals(1, frames().size(), "flushed synchronously by the quit: "
+                + harness.logger.records());
+        Payload payload = frames().get(0).payload();
+        assertEquals("Pio", payload.string("username", null), "the name they quit with");
+        assertEquals(Arrays.asList("default"), payload.strings("groups"));
+        sleep(PAST_WINDOW_MS);
+        assertEquals(1, frames().size(), "the cancelled timer does not send it a second time");
+    }
+
+    @Test
+    @DisplayName("a quit with nothing armed sends nothing, and a flushed report still compares")
+    void quitFlushStillCompares() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        FakePlayer pio = joined("Pio", "default", "zeal");
+
+        change(pio, "default", "zeal", "builder");
+        harness.platform.leave(pio);
+        harness.sessions.quit(pio, 2L);
+
+        sleep(PAST_WINDOW_MS);
+        assertEquals(0, frames().size(), "zeal was delivered at join and is still held");
     }
 
     @Test

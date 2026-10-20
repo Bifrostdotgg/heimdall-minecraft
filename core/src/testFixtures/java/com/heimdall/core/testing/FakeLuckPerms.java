@@ -108,7 +108,8 @@ public final class FakeLuckPerms implements LuckPermsBridge {
     }
 
     /**
-     * Changes what a player holds and tells every {@link #onGroupsChanged} listener, inline.
+     * Changes what a player holds and tells every {@link #onGroupsChanged} listener, inline, as a
+     * {@link GroupsChangedListener.Cause#RECALCULATION}.
      *
      * <p>Both halves, because that is what LuckPerms does: the new state is what a later
      * {@link #getPlayerGroups} reads, and the listener is handed the whole list rather than a delta.
@@ -116,10 +117,27 @@ public final class FakeLuckPerms implements LuckPermsBridge {
      * LuckPerms' thread is {@code LuckPermsIntegration}'s to prove.
      */
     public FakeLuckPerms fireGroupsChanged(UUID uuid, List<String> groups) {
+        return fire(uuid, null, groups, GroupsChangedListener.Cause.RECALCULATION);
+    }
+
+    /**
+     * As {@link #fireGroupsChanged}, but as the node event an actual rank edit produces
+     * ({@code parent add}, {@code parent remove}, a store command), carrying the name LuckPerms has
+     * stored for the user. {@link #fireGroupsChanged} is the bare recalculation LuckPerms also fires
+     * on every user load, which says nothing about whether a rank was edited.
+     *
+     * @param username the stored name, or {@code null} for a user LuckPerms has no name for
+     */
+    public FakeLuckPerms fireInheritanceChanged(UUID uuid, String username, List<String> groups) {
+        return fire(uuid, username, groups, GroupsChangedListener.Cause.INHERITANCE_NODE);
+    }
+
+    private FakeLuckPerms fire(
+            UUID uuid, String username, List<String> groups, GroupsChangedListener.Cause cause) {
         List<String> now = Collections.unmodifiableList(new ArrayList<String>(groups));
         currentGroups.put(uuid, now);
         for (GroupsChangedListener listener : groupListeners) {
-            listener.onGroupsChanged(uuid, now);
+            listener.onGroupsChanged(uuid, username, now, cause);
         }
         return this;
     }
