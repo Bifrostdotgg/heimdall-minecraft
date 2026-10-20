@@ -24,6 +24,10 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * A {@code rolesync.groups} frame's {@code at} is when its list was read from LuckPerms, not when the
  * frame was sent: the bot orders a player's frames by it and weighs them against its own pushes.
+ *
+ * <p>The fake bridge here calls back inline, so the event and the read are one moment. The real
+ * bridge's coalesced, queued read (where they are not) is covered by {@code RoleSyncBridgeReadTimeTest}
+ * in {@code :platform-common}, the one project that can see both the module and the bridge.
  */
 class RoleSyncReadTimeTest {
 

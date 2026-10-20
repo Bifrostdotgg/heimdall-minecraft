@@ -2,9 +2,12 @@ package com.heimdall.module.rolesync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.heimdall.core.http.model.RoleSyncDirective;
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.testing.FakeLuckPerms;
 import com.heimdall.core.testing.FakePlayer;
 import com.heimdall.core.testing.RecordingTunnelBus;
 import java.nio.file.Path;
@@ -25,8 +28,11 @@ import org.junit.jupiter.api.io.TempDir;
  *   <li>Pio joins unlinked holding zeal, links, and the bot's {@code rolesync.resync} gets a frame
  *       that grants the role. Before, nothing told the bot about a rank he already had.
  *   <li>The tunnel reconnects, zeal is removed in game, and a frame removes the role. Before, the
- *       reconnect left him unrecorded and the removal compared {@code {}} with {@code {}}.
- *   <li>A rejoin sends nothing that would put zeal back.
+ *       reconnect left him unrecorded and the removal compared {@code {}} with {@code {}}. A join
+ *       call that started before the removal and answers after it does not overwrite the frame's
+ *       record (s4).
+ *   <li>A rejoin, through a stamped join call and its applied directive, does not put zeal back,
+ *       in game or in a frame.
  * </ol>
  */
 class RoleSyncPioSequenceTest {
@@ -91,6 +97,9 @@ class RoleSyncPioSequenceTest {
         harness.bus.disconnected();
         harness.bus.reconnected();
 
+        // A join-time call starts while he still holds zeal (a server switch on the network, say).
+        long inFlight = harness.module.groupsRequestStarting(pio.uuid());
+
         // zeal is removed in game.
         harness.luckPerms.fireInheritanceChanged(pio.uuid(), "pio", Arrays.asList("default"));
         await(() -> frames().size() == 2, "the removal is reported: " + harness.logger.records());
@@ -98,12 +107,32 @@ class RoleSyncPioSequenceTest {
         assertEquals(Arrays.asList("default"), removal.strings("groups"));
         assertEquals("Pio", removal.string("username", null), "the online name wins");
 
-        // He rejoins, holding no zeal; the join call tells the bot so.
+        // s4: the in-flight call's answer lands after the frame, carrying the list it read before
+        // the removal. It must not become the record: the frame told the bot {default} since.
+        harness.module.groupsDelivered(pio.uuid(), Arrays.asList("default", "zeal"), inFlight);
+        harness.luckPerms.fireGroupsChanged(pio.uuid(), Arrays.asList("default"));
+        sleep(PAST_WINDOW_MS);
+        assertEquals(2, frames().size(),
+                "recorded as {zeal}, an unchanged {default} would be sent again as a removal");
+
+        // He rejoins, holding no zeal. The join call is stamped when it starts, carries {default},
+        // and the bot's answer (s7: an in-game removal of a both rank wins at join) drops zeal.
         harness.platform.leave(pio);
         harness.sessions.quit(pio, 2L);
         FakePlayer back = harness.online("Pio");
+        harness.luckPerms.holding(back.uuid(), "default");
+        long asked = harness.module.groupsRequestStarting(back.uuid());
         harness.sessions.join(back, 3L);
-        harness.module.groupsDelivered(back.uuid(), Arrays.asList("default"));
+        harness.module.groupsDelivered(back.uuid(), Arrays.asList("default"), asked);
+        harness.module.applyOnJoin(back.uuid(), "Pio",
+                RoleSyncDirective.enabled(Arrays.<String>asList(), Arrays.asList("zeal")), asked);
+
+        FakeLuckPerms.Sync rejoin = harness.luckPerms.lastSync();
+        assertNotNull(rejoin, "the join answer was applied: " + harness.logger.records());
+        assertEquals(back.uuid(), rejoin.uuid());
+        assertFalse(rejoin.targetGroups().contains("zeal"), "the rejoin does not re-add zeal");
+        assertEquals(Arrays.asList("zeal"), rejoin.managedGroups());
+
         harness.luckPerms.fireGroupsChanged(back.uuid(), Arrays.asList("default", "builder"));
 
         sleep(PAST_WINDOW_MS);
