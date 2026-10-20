@@ -86,7 +86,11 @@ import java.util.function.BiConsumer;
  * each frame sent takes the next value for its player, and a delivery (or a parked one, when the
  * join adopts it) whose stamp is older than its player's last frame is dropped. Those per-player
  * frame marks are kept for {@value #PARKED_DELIVERY_TTL_MS}ms, far longer than any join call takes,
- * and pruned as frames are sent, so they are bounded by the frames of the last two minutes.
+ * and pruned as frames are sent, so they are bounded by the frames of the last two minutes. The other
+ * way round holds too: a frame's own record is written after its send, and a delivery stamped after
+ * the frame's mark that was recorded in between is newer, so the frame's write leaves it alone (each
+ * record carries its stamp; see {@link #records}). And a write still in flight when its player quits
+ * is dropped rather than left behind for their next session ({@link #sessions}).
  *
  * <p>The record is intersected with the watched list <em>at the time it is written</em>, and both
  * sides are intersected with the current list at comparison, so a group added to the list after the
@@ -281,14 +285,41 @@ final class GroupChangeReporter {
     private Object subscribedInstance;
 
     /**
-     * Guards {@link #reported}, {@link #parked}, {@link #lastFrame} and {@link #generation}
-     * together, so a write that checks the generation cannot land after a clear it did not see, and a
-     * delivery cannot be recorded between a frame's mark and its send.
+     * Guards {@link #reported}, {@link #parked}, {@link #lastFrame}, {@link #sessions} and
+     * {@link #generation} together, so a write that checks the generation cannot land after a clear
+     * it did not see.
+     *
+     * <p>A frame's mark and its record write are <em>not</em> one critical section: the send sits
+     * between them, and a delivery can be recorded in that gap. So each record carries the stamp it
+     * was written under, and a write never replaces a record with a newer stamp. A frame's write
+     * uses its mark, so a join call that started after the mark and was recorded before the frame's
+     * write keeps its record; one that started before the mark is dropped on arrival.
      */
     private final Object records = new Object();
 
+    /** One player's record: the watched groups the bot was told about, and the stamp behind it. */
+    private static final class Recorded {
+        final Set<String> watched;
+        /** The frame's mark, or the delivery's request stamp; see {@link #records}. */
+        final long stamp;
+
+        Recorded(Set<String> watched, long stamp) {
+            this.watched = watched;
+            this.stamp = stamp;
+        }
+    }
+
     /** Per online player: the watched groups the bot is known to have been told about. */
-    private final Map<UUID, Set<String>> reported = new ConcurrentHashMap<UUID, Set<String>>();
+    private final Map<UUID, Recorded> reported = new ConcurrentHashMap<UUID, Recorded>();
+
+    /**
+     * Per online player, a token for their current session, made when a record write first needs one
+     * and dropped by {@link #forget} on quit. A report or resync answer takes it before its send and
+     * records only if it is still the same token: one in flight when its player quit would otherwise
+     * write after {@link #forget} and leave a record that carries into their next session, where it
+     * would hide their first change. Guarded by {@link #records}; bounded by the players online.
+     */
+    private final Map<UUID, Object> sessions = new java.util.HashMap<UUID, Object>();
 
     /** Deliveries waiting for their player's join. */
     private final Map<UUID, Parked> parked = new ConcurrentHashMap<UUID, Parked>();
@@ -502,7 +533,7 @@ final class GroupChangeReporter {
             // Read under the lock: a join that adopts parked deliveries takes the same lock, so a
             // delivery cannot be parked just after the join looked and then wait out its TTL.
             if (isOnline(uuid)) {
-                reported.put(uuid, watched);
+                record(uuid, watched, stamp);
                 parked.remove(uuid);
                 return;
             }
@@ -528,9 +559,36 @@ final class GroupChangeReporter {
             if (waiting != null
                     && System.currentTimeMillis() - waiting.atMs <= PARKED_DELIVERY_TTL_MS
                     && !olderThanLastFrame(uuid, waiting.stamp)) {
-                reported.put(uuid, waiting.watched);
+                record(uuid, waiting.watched, waiting.stamp);
             }
         }
+    }
+
+    /**
+     * Called with {@link #records} held. Writes a record unless the one there has a newer stamp.
+     * An unstamped delivery takes the next value in the sequence: it is as new as now, and a
+     * {@link com.heimdall.core.roles.RoleSyncSink#UNSTAMPED} record would outrank every later frame.
+     */
+    private void record(UUID uuid, Set<String> watched, long stamp) {
+        long at = stamp == com.heimdall.core.roles.RoleSyncSink.UNSTAMPED
+                ? sequence.incrementAndGet() : stamp;
+        Recorded current = reported.get(uuid);
+        if (current != null && current.stamp > at) {
+            logger.debug(() -> "a newer record for " + uuid + " was written while this one was"
+                    + " in flight; keeping it");
+            return;
+        }
+        reported.put(uuid, new Recorded(watched, at));
+    }
+
+    /** Called with {@link #records} held. This player's session token; see {@link #sessions}. */
+    private Object session(UUID uuid) {
+        Object token = sessions.get(uuid);
+        if (token == null) {
+            token = new Object();
+            sessions.put(uuid, token);
+        }
+        return token;
     }
 
     /** Called with {@link #records} held. Whether a frame went out for {@code uuid} after {@code stamp}. */
@@ -539,8 +597,12 @@ final class GroupChangeReporter {
         return mark != null && mark.seq > stamp;
     }
 
-    /** Called just before a frame is sent: takes its place in the sequence, and prunes old marks. */
-    private void markFrame(UUID uuid) {
+    /**
+     * Called just before a frame is sent: takes its place in the sequence, and prunes old marks.
+     *
+     * @return the mark, which the frame's record write is stamped with
+     */
+    private long markFrame(UUID uuid) {
         long now = System.currentTimeMillis();
         synchronized (records) {
             Iterator<FrameMark> it = lastFrame.values().iterator();
@@ -549,14 +611,21 @@ final class GroupChangeReporter {
                     it.remove();
                 }
             }
-            lastFrame.put(uuid, new FrameMark(sequence.incrementAndGet(), now));
+            long seq = sequence.incrementAndGet();
+            lastFrame.put(uuid, new FrameMark(seq, now));
+            return seq;
         }
     }
 
+    /**
+     * A quit: drops the player's record, and their session token with it, so a report or resync
+     * answer still in flight for them cannot write one back afterwards. See {@link #sessions}.
+     */
     private void forget(UUID uuid) {
         synchronized (records) {
             reported.remove(uuid);
             parked.remove(uuid);
+            sessions.remove(uuid);
         }
         Pending armed = pending.remove(uuid);
         if (armed != null && armed.timer != null) {
@@ -684,11 +753,18 @@ final class GroupChangeReporter {
         }
         final String name;
         final Set<String> was;
+        // Taken before the send, and checked again at the write: a quit in between drops it.
+        Object session = null;
+        if (here != null && quitting == null) {
+            synchronized (records) {
+                session = session(uuid);
+            }
+        }
         if (here != null) {
             name = Strings.isBlank(here.name()) ? armed.username : here.name();
-            Set<String> before = reported.get(uuid);
+            Recorded before = reported.get(uuid);
             // No record is unknown, not empty: send without comparing. See the class javadoc.
-            was = before == null ? null : intersect(before, watched);
+            was = before == null ? null : intersect(before.watched, watched);
             if (was != null && now.equals(was)) {
                 return;
             }
@@ -706,11 +782,13 @@ final class GroupChangeReporter {
             logger.debug(() -> "tunnel down; not reporting the rank change for " + uuid);
             return;
         }
-        sendGroups(uuid, name, groups, armed.readAtMs);
-        if (here != null && quitting == null) {
+        long mark = sendGroups(uuid, name, groups, armed.readAtMs);
+        if (session != null) {
             synchronized (records) {
-                if (generation == epoch && !closed) {
-                    reported.put(uuid, now);
+                // Not after a clear (generation), not after this player's quit (session), and not
+                // over a delivery recorded since the mark (record compares stamps).
+                if (generation == epoch && !closed && sessions.get(uuid) == session) {
+                    record(uuid, now, mark);
                 }
             }
         }
@@ -758,8 +836,13 @@ final class GroupChangeReporter {
                     + ": LuckPerms is not available here; ignoring it");
             return;
         }
-        // Captured before the read, like a report's: a clear while it is in flight wins.
-        final long epoch = generation();
+        // Captured before the read, like a report's: a clear or a quit while it is in flight wins.
+        final long epoch;
+        final Object session;
+        synchronized (records) {
+            epoch = generation;
+            session = session(uuid);
+        }
         CompletableFuture<List<String>> read;
         try {
             read = bridge.getPlayerGroups(uuid);
@@ -780,22 +863,24 @@ final class GroupChangeReporter {
                             + ": could not read their LuckPerms groups; ignoring it: " + failure);
                     return;
                 }
-                answerResync(uuid, player.name(), groups, System.currentTimeMillis(), epoch);
+                answerResync(uuid, player.name(), groups, System.currentTimeMillis(), epoch,
+                        session);
             }
         });
     }
 
-    private void answerResync(
-            UUID uuid, String name, List<String> groups, long readAtMs, long epoch) {
+    private void answerResync(UUID uuid, String name, List<String> groups, long readAtMs,
+            long epoch, Object session) {
         if (closed || !ctx.tunnel().isConnected() || !isOnline(uuid)) {
             return;
         }
-        sendGroups(uuid, name, groups, readAtMs);
+        long mark = sendGroups(uuid, name, groups, readAtMs);
         if (isSubscribed()) {
             Set<String> now = intersect(groups, watched());
             synchronized (records) {
-                if (generation == epoch && !closed && isOnline(uuid)) {
-                    reported.put(uuid, now);
+                if (generation == epoch && !closed && sessions.get(uuid) == session
+                        && isOnline(uuid)) {
+                    record(uuid, now, mark);
                 }
             }
         }
@@ -806,17 +891,20 @@ final class GroupChangeReporter {
      * The one place a {@link #FRAME_TYPE} frame is built: the full list, and {@code at}.
      *
      * @param readAtMs when {@code groups} was read from LuckPerms, which is what {@code at} carries
+     * @return the frame's mark, for its record write
      */
-    private void sendGroups(UUID uuid, String name, List<String> groups, long readAtMs) {
+    private long sendGroups(UUID uuid, String name, List<String> groups, long readAtMs) {
         // Marked before the send: a join call stamped after this point read its groups after this
-        // frame's were read, so it is at least as new and is allowed to record.
-        markFrame(uuid);
+        // frame's were read, so it is at least as new and is allowed to record, before or after
+        // the frame's own record write.
+        long mark = markFrame(uuid);
         ctx.tunnel().send(FRAME_TYPE, Payload.builder()
                 .put("uuid", uuid.toString())
                 .put("username", name)
                 .putStrings("groups", groups)
                 .put("at", readAtMs)
                 .build());
+        return mark;
     }
 
     private boolean isSubscribed() {

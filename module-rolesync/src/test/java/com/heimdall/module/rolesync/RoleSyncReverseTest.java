@@ -245,6 +245,47 @@ class RoleSyncReverseTest {
     }
 
     @Test
+    @DisplayName("a delivery recorded between a frame's send and its record write keeps its record")
+    void newerDeliveryDuringTheSendWins() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        final FakePlayer pio = joined("Pio", "default", "zeal");
+        // zeal is removed; the report goes out after the window. While it is being sent, zeal is
+        // given back and a join call that started after the frame's mark delivers {default, zeal}.
+        harness.bus.duringNextSend(sent -> {
+            long asked = harness.module.groupsRequestStarting(pio.uuid());
+            harness.module.groupsDelivered(pio.uuid(), Arrays.asList("default", "zeal"), asked);
+        });
+        change(pio, "default");
+        await(() -> frames().size() == 1, "the removal: " + harness.logger.records());
+        sleep(100L);
+
+        // The record must be the delivery's {zeal}, not the frame's {}: a recalculation that
+        // still shows zeal is no news. Recorded as {}, it would be sent as a re-grant.
+        change(pio, "default", "zeal");
+        sleep(PAST_WINDOW_MS);
+        assertEquals(1, frames().size(), harness.logger.records().toString());
+    }
+
+    @Test
+    @DisplayName("a report in flight when its player quits leaves no record for their next session")
+    void quitDuringTheSendLeavesNoRecord() {
+        harness.configure(RoleSyncHarness.watching("zeal"));
+        final FakePlayer pio = joined("Pio", "default", "zeal");
+        // The timer's report is being sent when Pio quits. The platform still lists him, as it can
+        // while a quit is dispatched, so only the session check can tell.
+        harness.bus.duringNextSend(sent -> harness.sessions.quit(pio, 2L));
+        change(pio, "default");
+        await(() -> frames().size() == 1, "the removal: " + harness.logger.records());
+        sleep(100L);
+
+        // Back without a delivery: he is unrecorded, so any change is reported unconditionally.
+        // A stale {} left by the in-flight write would make this one compare equal and vanish.
+        harness.sessions.join(pio, 3L);
+        change(pio, "default");
+        await(() -> frames().size() == 2, "unrecorded after the quit: " + harness.logger.records());
+    }
+
+    @Test
     @DisplayName("a push applied for an offline player is not echoed back as a frame")
     void offlineOwnWriteNotReported() {
         harness.configure(RoleSyncHarness.watching("zeal"));
