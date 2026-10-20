@@ -227,6 +227,9 @@ final class RoleSyncApplier {
      * <p>No defer here, and that is v2's behaviour rather than an omission: a push arrives for a
      * player who is already on the server (or not on it at all), so there is no join to wait for.
      *
+     * <p>It does cancel a deferred join sync still waiting for the same player: the push is the
+     * bot's newer word, and the join sync firing after it would put the older snapshot back.
+     *
      * @param uuid the player, already resolved by {@link RoleSyncPushHandler}
      * @param label what to call them in the log
      */
@@ -250,6 +253,16 @@ final class RoleSyncApplier {
             logger.debug(() -> "pushed role sync for " + label
                     + " named no managed groups; changing nothing");
             return;
+        }
+        // The push is newer than a join snapshot still waiting out its two seconds: the bot sent it
+        // after answering the join. Left to run, the join sync would land after the push and revert
+        // it to the older answer. Cancelled only when the push is applied, so a push this applier
+        // refuses (above) does not also cost the player the join's sync.
+        PendingJoinSync waiting = pending.get(uuid);
+        if (waiting != null) {
+            logger.debug(() -> "a push for " + label
+                    + " supersedes their deferred join sync; cancelling it");
+            waiting.cancel();
         }
         apply(uuid, label, targetGroups, managedGroups, "push");
     }
