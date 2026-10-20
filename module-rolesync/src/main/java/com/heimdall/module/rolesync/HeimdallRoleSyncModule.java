@@ -6,10 +6,14 @@ import com.heimdall.core.http.model.RoleSyncDirective;
 import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
 import com.heimdall.core.platform.LuckPermsBridge;
+import com.heimdall.core.remoteconfig.ModuleConfig;
+import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.roles.RoleSyncLoginSource;
 import com.heimdall.core.roles.RoleSyncSink;
 import com.heimdall.core.tunnel.Capabilities;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -77,9 +81,13 @@ import java.util.function.Supplier;
  * step</em>, and {@code LuckPermsBridge} needs a method for it. Until then, adding one would be
  * adding a cache-management API with no cache to manage.
  *
- * <h2>Settings: one, and it is the bot's</h2>
+ * <h2>Settings: the bot's, not the operator's</h2>
  *
- * <p>{@code enabled} is the manager's business. The only setting is {@code watchedGroups}, the
+ * <p>{@code enabled} is the manager's business. {@code mode} is read for one thing only, who drives
+ * LuckPerms: when it changes to {@code websocket}, a remembered "the bot drives LuckPerms over RCON"
+ * is forgotten (see {@link RoleSyncApplier#resumePushes}), and when it changes to {@code rcon}, or the
+ * module is enabled with it set to {@code rcon}, that is remembered at once
+ * ({@link RoleSyncApplier#pausePushes}). The other setting is {@code watchedGroups}, the
  * LuckPerms groups the bot wants reported for reverse role sync (in-game rank to Discord role). It is
  * not an operator knob: the bot computes it from the dashboard's Minecraft-to-Discord mappings, and
  * {@link GroupChangeReporter} reads it through {@link ModuleContext#settings()} at the point of use
@@ -91,10 +99,17 @@ import java.util.function.Supplier;
  * <h2>Reverse role sync lives here too</h2>
  *
  * <p>{@link GroupChangeReporter} is enabled and disabled with the module rather than being a module
- * of its own. Both directions are "role sync" to the dashboard, share the one capability the bot
- * negotiates, and need LuckPerms for the same reason; a separate toggle would be a second switch that
- * has to agree with the first. It never writes to LuckPerms, and the forward path never reads what it
- * reports, so the two cannot feed each other.
+ * of its own. Both directions are "role sync" to the dashboard, share the module the bot negotiates
+ * (plus {@code rolesyncresync@1}, a build capability saying this client answers
+ * {@code rolesync.resync}), and need LuckPerms for the same reason; a separate toggle would be a second
+ * switch that has to agree with the first. It never writes to LuckPerms, and the forward path never
+ * reads what it reports. The forward path's writes do fire LuckPerms node events, though, and those
+ * reach the reporter. The bridge tags them as its own
+ * ({@link com.heimdall.core.platform.GroupsChangedListener.Cause#ROLE_SYNC_WRITE}), and the reporter
+ * never starts a report for an offline player on one, so a push is not echoed back from every
+ * server that applied it. For an online player the write arms an ordinary report, which tells the
+ * bot what it has just pushed; the bot compares sets, so that frame changes nothing. That is the
+ * extent of the feedback: a frame the bot treats as a no-op, never a write.
  *
  * <h2>Threading and ownership</h2>
  *
@@ -133,6 +148,14 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
     private volatile GroupChangeReporter reporter;
 
     /**
+     * The stamps reverse role sync orders frames and join calls by. Owned here rather than by the
+     * reporter so they keep increasing across a disable and enable: a join call stamped by the
+     * previous cycle's reporter must not look newer than a frame the next one sent.
+     */
+    private final java.util.concurrent.atomic.AtomicLong sequence =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /**
      * Who already delivers a directive on login, and so makes the join-time request redundant.
      *
      * <p>Set by the wiring, like the whitelist module's {@code setRoleSyncSink}, and for the same
@@ -156,7 +179,11 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
 
     @Override
     public Set<String> capabilities() {
-        return Collections.singleton(Capabilities.ROLE_SYNC);
+        // Both, always. ROLE_SYNC_RESYNC is a build capability, not a module: it tells the bot this
+        // client answers rolesync.resync (see GroupChangeReporter), and that is true of this build
+        // whether or not LuckPerms is installed; without it the notification is simply ignored.
+        return Collections.unmodifiableSet(new LinkedHashSet<String>(Arrays.asList(
+                Capabilities.ROLE_SYNC, Capabilities.ROLE_SYNC_RESYNC)));
     }
 
     @Override
@@ -167,13 +194,33 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
 
     @Override
     public void enable(ModuleContext context) {
-        RoleSyncApplier started = new RoleSyncApplier(context);
+        final RoleSyncApplier started = new RoleSyncApplier(context, sequence);
         this.applier = started;
-        // The default overload dispatches on heimdall-io, which is where this handler wants to be:
-        // it must not run on the socket's reading thread, and it has no reason to be on the main
-        // server thread — LuckPermsBridge does its own hopping.
+        if (isRcon(context.settings())) {
+            // Enabled straight into RCON mode: the bot has said who drives LuckPerms, so a push
+            // that arrives before the first login's directive must not be obeyed either.
+            started.pausePushes();
+        }
+        // On heimdall-io, which is where this handler wants to be: it must not run on the socket's
+        // reading thread, and it has no reason to be on the main server thread, since
+        // LuckPermsBridge does its own hopping. Through a serial lane rather than straight onto the
+        // pool, so frames are handled in the order they arrived; see RoleSyncPushHandler.
         context.tunnel().subscribe(RoleSyncPushHandler.MESSAGE_TYPE,
-                new RoleSyncPushHandler(context, started));
+                new RoleSyncPushHandler(context, started),
+                new SerialLane(context.executors().io(), context.logger()));
+        // The bot saying who drives LuckPerms: no longer RCON, or RCON now. Tracked, so a disable
+        // unwinds it.
+        context.onConfigChanged(new ModuleConfigListener() {
+            @Override
+            public void onModuleConfigChanged(
+                    String moduleId, ModuleConfig previous, ModuleConfig current) {
+                if (!isWebsocket(previous) && isWebsocket(current)) {
+                    started.resumePushes();
+                } else if (!isRcon(previous) && isRcon(current)) {
+                    started.pausePushes();
+                }
+            }
+        });
         // Tracked by the context like the subscription, so a disable unwinds it. Runs on
         // heimdall-io and only fires a request, so a join is never held up by the bot.
         final ModuleContext ctx = context;
@@ -210,7 +257,7 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
 
         // Reverse role sync. Subscribes to LuckPerms only while the bot has asked for at least one
         // group; see GroupChangeReporter for why an unwatched server pays nothing.
-        GroupChangeReporter reporting = new GroupChangeReporter(context);
+        GroupChangeReporter reporting = new GroupChangeReporter(context, sequence);
         this.reporter = reporting;
         reporting.start();
     }
@@ -255,11 +302,22 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
      */
     @Override
     public void applyOnJoin(UUID uuid, String username, RoleSyncDirective directive) {
+        applyOnJoin(uuid, username, directive, RoleSyncSink.UNSTAMPED);
+    }
+
+    /**
+     * As {@link #applyOnJoin(UUID, String, RoleSyncDirective)}, for an answer whose request was
+     * stamped by {@link #groupsRequestStarting}: dropped when a push for the player was applied
+     * after the request started, and not taken as word on who drives LuckPerms when the config
+     * switched mode after it started. See {@link RoleSyncApplier#applyOnJoin}.
+     */
+    @Override
+    public void applyOnJoin(UUID uuid, String username, RoleSyncDirective directive, long stamp) {
         RoleSyncApplier running = this.applier;
         if (running == null) {
             return;
         }
-        running.applyOnJoin(uuid, username, directive);
+        running.applyOnJoin(uuid, username, directive, stamp);
     }
 
     /**
@@ -271,10 +329,50 @@ public final class HeimdallRoleSyncModule implements HeimdallModule, RoleSyncSin
      */
     @Override
     public void groupsDelivered(UUID uuid, java.util.List<String> currentGroups) {
+        groupsDelivered(uuid, currentGroups, RoleSyncSink.UNSTAMPED);
+    }
+
+    /**
+     * A stamp from the shared sequence, taken before a join call reads the groups it will carry.
+     * Taken whether or not the module is on, so a call that starts while it is off and lands after
+     * an enable still compares correctly.
+     */
+    @Override
+    public long groupsRequestStarting(UUID uuid) {
+        return sequence.incrementAndGet();
+    }
+
+    /**
+     * As {@link #groupsDelivered(UUID, java.util.List)}, but dropped when a {@code rolesync.groups}
+     * frame went out for the player after the request was stamped; see
+     * {@link RoleSyncSink#groupsRequestStarting}.
+     */
+    @Override
+    public void groupsDelivered(UUID uuid, java.util.List<String> currentGroups, long stamp) {
         GroupChangeReporter reporting = this.reporter;
         if (reporting != null && uuid != null && currentGroups != null) {
-            reporting.delivered(uuid, currentGroups);
+            reporting.delivered(uuid, currentGroups, stamp);
         }
+    }
+
+    /** The setting the bot uses to say who drives LuckPerms: {@code websocket} (us) or RCON. */
+    static final String MODE = "mode";
+
+    private static boolean isWebsocket(ModuleConfig config) {
+        return config != null && isMode(config.settings(), "websocket");
+    }
+
+    private static boolean isRcon(ModuleConfig config) {
+        return config != null && isRcon(config.settings());
+    }
+
+    private static boolean isRcon(com.heimdall.core.json.Payload settings) {
+        return isMode(settings, "rcon");
+    }
+
+    private static boolean isMode(com.heimdall.core.json.Payload settings, String wanted) {
+        String mode = settings == null ? null : settings.string(MODE, null);
+        return mode != null && wanted.equalsIgnoreCase(mode.trim());
     }
 
     /** The live applier, or {@code null} when the module is off. For tests. */

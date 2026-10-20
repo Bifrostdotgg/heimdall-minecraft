@@ -236,11 +236,46 @@ final class WhitelistHarness implements AutoCloseable {
             applied.add(username + ":" + describe(directive));
         }
 
+        private final List<Long> appliedStamps = new CopyOnWriteArrayList<Long>();
+
+        @Override
+        public void applyOnJoin(
+                UUID playerUuid, String username, RoleSyncDirective directive, long stamp) {
+            appliedStamps.add(stamp);
+            applyOnJoin(playerUuid, username, directive);
+        }
+
+        /** The request stamp each applied directive carried, oldest first. */
+        List<Long> appliedStamps() {
+            return Collections.unmodifiableList(new ArrayList<Long>(appliedStamps));
+        }
+
         private final List<String> delivered = new CopyOnWriteArrayList<String>();
+
+        private final java.util.concurrent.atomic.AtomicLong stamps =
+                new java.util.concurrent.atomic.AtomicLong();
+        private final List<Long> deliveredStamps = new CopyOnWriteArrayList<Long>();
 
         @Override
         public void groupsDelivered(UUID playerUuid, List<String> currentGroups) {
             delivered.add(playerUuid + ":" + currentGroups);
+        }
+
+        /** Stamps 1, 2, 3, ... in the order requests start. */
+        @Override
+        public long groupsRequestStarting(UUID playerUuid) {
+            return stamps.incrementAndGet();
+        }
+
+        @Override
+        public void groupsDelivered(UUID playerUuid, List<String> currentGroups, long stamp) {
+            deliveredStamps.add(stamp);
+            groupsDelivered(playerUuid, currentGroups);
+        }
+
+        /** The stamp each delivery carried back, oldest first. */
+        List<Long> deliveredStamps() {
+            return Collections.unmodifiableList(new ArrayList<Long>(deliveredStamps));
         }
 
         List<String> applied() {

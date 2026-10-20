@@ -84,8 +84,11 @@ public interface LuckPermsBridge {
      * user inherits), but the API does not promise it, so nothing here depends on it.
      *
      * <p>The live report is the fast path, not the guaranteed one. Anything it misses (an expiry, a
-     * change to a player who is not loaded or not online) is reconciled from the {@code currentGroups}
-     * the join-time calls carry.
+     * change made on another server of a network sharing storage) is reconciled from the
+     * {@code currentGroups} the join-time calls carry. Each call says whether it came from a node
+     * event, a node event caused by this bridge's own {@link #setPlayerGroups}, or a bare
+     * recalculation ({@link GroupsChangedListener.Cause}), because LuckPerms recalculates every user
+     * it loads, and only a node event somebody else caused says a rank was edited.
      *
      * <p>Abstract rather than a default returning {@link Registration#NONE}, on purpose. A bridge
      * that silently never reports would make reverse sync look configured and do nothing, which is
@@ -99,4 +102,33 @@ public interface LuckPermsBridge {
      * @return a handle that unsubscribes; idempotent
      */
     Registration onGroupsChanged(GroupsChangedListener listener);
+
+    /**
+     * Identifies the LuckPerms instance this bridge can reach right now, so a subscriber can tell
+     * that it was replaced underneath it.
+     *
+     * <p>A subscription made through {@link #onGroupsChanged} is bound to the event bus of the
+     * instance that was live when it was made. If the instance is replaced, the old bus dies with it
+     * and the subscription goes quiet without any error. A subscriber compares this with the value
+     * it saw when it subscribed, and closes the old registration and subscribes again when they
+     * differ. Compared by identity; {@code null} while LuckPerms is not available.
+     *
+     * <p><strong>What this does not cover: a PlugMan-style reload of LuckPerms itself.</strong> On
+     * Bukkit, Heimdall's classes were linked against the LuckPerms API classes of the plugin
+     * classloader LuckPerms had when Heimdall first touched them, {@code LuckPermsProvider} included.
+     * A reloaded LuckPerms gets a new classloader with its own copy of those classes and registers
+     * itself in its own {@code LuckPermsProvider}, while the old one, the one Heimdall can see, was
+     * emptied when the old instance shut down. So after such a reload this answers {@code null}, the
+     * bridge reports LuckPerms unavailable, and role sync stays off until Heimdall is reloaded as well
+     * or the server restarts. Nothing here tries to reach across classloaders to the new instance:
+     * the result would be a second, unsupported way of linking against LuckPerms, built for one
+     * kind of plugin reload. What the comparison does catch is any replacement
+     * visible through the provider Heimdall is linked against, at the cost of two field reads.
+     *
+     * <p>The default is this bridge itself, which never changes: a bridge that cannot tell is never
+     * resubscribed, which is the behaviour before this existed.
+     */
+    default Object instanceToken() {
+        return this;
+    }
 }

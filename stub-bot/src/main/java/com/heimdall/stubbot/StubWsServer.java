@@ -751,6 +751,52 @@ public final class StubWsServer extends WebSocketServer {
     }
 
     /**
+     * Sends {@code rolesync.resync} to every server in the guild that accepted
+     * {@code rolesyncresync@1}, and to no other: the bot's capability-filtered notify, not
+     * {@link #broadcast}.
+     *
+     * <p>A <strong>notification</strong>: {@code {uuid, username?}}, a fresh id, and no reply frame.
+     * A server that has the player online and LuckPerms answers with an ordinary
+     * {@code rolesync.groups} frame, which lands in {@link ConnectedServer#roleSyncGroupReports()}.
+     *
+     * @param username optional; left out when {@code null}
+     * @return how many sockets it reached
+     */
+    public int sendRoleSyncResync(String guildId, String uuid, String username) {
+        Map<String, ConnectedServer> guildMap = connections.get(guildId);
+        if (guildMap == null) {
+            return 0;
+        }
+        JsonObject payload = new JsonObject();
+        payload.addProperty("uuid", uuid);
+        if (username != null) {
+            payload.addProperty("username", username);
+        }
+        String id = newId();
+        int delivered = 0;
+        for (ConnectedServer server : guildMap.values()) {
+            if (server.socket().isOpen() && acceptsResync(server)) {
+                send(server.socket(), id, "rolesync.resync", payload);
+                delivered++;
+            }
+        }
+        return delivered;
+    }
+
+    private static boolean acceptsResync(ConnectedServer server) {
+        List<String> accepted = server.acceptedCapabilities();
+        if (accepted == null) {
+            return false;
+        }
+        for (String capability : accepted) {
+            if ("rolesyncresync".equals(CapabilityNegotiation.moduleId(capability))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Sends {@code whitelist_changed} to every connected server in the guild.
      *
      * <p>A <strong>notification</strong>: an empty payload, and no reply is expected or waited for.

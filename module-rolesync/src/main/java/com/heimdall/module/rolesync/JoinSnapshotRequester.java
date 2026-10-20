@@ -135,6 +135,8 @@ final class JoinSnapshotRequester implements PlayerSessionListener {
         // the bot now knows. Null when the key was left out: nothing was delivered then.
         final java.util.concurrent.atomic.AtomicReference<List<String>> sent =
                 new java.util.concurrent.atomic.AtomicReference<List<String>>();
+        // Stamped before the groups are read: see RoleSyncSink#groupsRequestStarting.
+        final long stamp = sink.groupsRequestStarting(uuid);
         try {
             request = currentGroups(bridge, uuid, username).thenCompose(groups -> {
                 sent.set(groups);
@@ -154,10 +156,11 @@ final class JoinSnapshotRequester implements PlayerSessionListener {
                 reportedFailures.clear();
                 List<String> delivered = sent.get();
                 if (delivered != null) {
-                    sink.groupsDelivered(uuid, delivered);
+                    sink.groupsDelivered(uuid, delivered, stamp);
                 }
+                // With the request's stamp: a push applied since it started is newer than this.
                 sink.applyOnJoin(uuid, username,
-                        directive == null ? RoleSyncDirective.absent() : directive);
+                        directive == null ? RoleSyncDirective.absent() : directive, stamp);
             }
         });
     }

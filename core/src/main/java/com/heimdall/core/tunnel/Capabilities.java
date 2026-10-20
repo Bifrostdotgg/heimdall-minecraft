@@ -28,6 +28,19 @@ public final class Capabilities {
     /** Applying the bot's group snapshots to a player's permissions. */
     public static final String ROLE_SYNC = "rolesync@1";
 
+    /**
+     * Reverse role sync on request: this client answers a {@code rolesync.resync} notification
+     * ({@code {uuid, username?}}) by sending {@code rolesync.groups} with the player's full current
+     * group list, unconditionally, when the player is online here and LuckPerms is available, and
+     * ignores it otherwise. No reply frame of its own.
+     *
+     * <p>A build capability declared alongside {@link #ROLE_SYNC}, like {@link #CHAT_CHANNELS} is
+     * beside the bridge: not a module, no config of its own. The bot sends the notification after a
+     * player links, when it cannot otherwise know the in-game ranks a player already held, and only to
+     * a client that declared this, so an older client is simply never asked.
+     */
+    public static final String ROLE_SYNC_RESYNC = "rolesyncresync@1";
+
     /** Streaming console output to the dashboard and running commands from it. */
     public static final String CONSOLE = "console@1";
 

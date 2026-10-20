@@ -219,9 +219,27 @@ public final class RecordingTunnelBus implements TunnelBus {
         });
     }
 
+    private volatile java.util.function.Consumer<Sent> onSend;
+
+    /**
+     * Runs {@code hook} inside the next {@link #send}, on the sender's thread, after the frame is
+     * recorded, then forgets it. Lets a test put an event in the gap between a frame being sent and
+     * whatever its sender does next, without racing a clock.
+     */
+    public RecordingTunnelBus duringNextSend(java.util.function.Consumer<Sent> hook) {
+        this.onSend = hook;
+        return this;
+    }
+
     @Override
     public void send(String type, Payload payload) {
-        sent.add(new Sent("", type, payload));
+        Sent frame = new Sent("", type, payload);
+        sent.add(frame);
+        java.util.function.Consumer<Sent> hook = onSend;
+        if (hook != null) {
+            onSend = null;
+            hook.accept(frame);
+        }
     }
 
     @Override

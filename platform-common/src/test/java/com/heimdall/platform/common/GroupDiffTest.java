@@ -95,13 +95,24 @@ class GroupDiffTest {
     }
 
     @Test
-    @DisplayName("comparison is case-sensitive, matching LuckPerms' own storage")
-    void caseSensitive() {
-        // LuckPerms lower-cases group names when they are created, so "VIP" is a name it would
-        // never have stored. Folding case here would hide that rather than surface it.
-        GroupDiff diff = GroupDiff.compute(list("vip"), list("VIP"), list("vip", "VIP"));
-        assertEquals(list("VIP"), diff.toAdd());
-        assertEquals(list("vip"), diff.toRemove());
+    @DisplayName("comparison ignores case: a mapping typed Zeal manages the held zeal")
+    void caseInsensitive() {
+        // LuckPerms stores group names lower-cased; the dashboard keeps what the operator typed.
+        // Case-sensitively, Zeal never matched zeal: never removed, and re-granted on every sync.
+        assertEquals(list("zeal"),
+                GroupDiff.compute(list("default", "zeal"), list(), list("Zeal")).toRemove(),
+                "removed, and named as the player holds it");
+        assertTrue(GroupDiff.compute(list("zeal"), list("Zeal"), list("Zeal")).isEmpty(),
+                "already held, whatever the spelling: no grant on every sync");
+        assertEquals(list("zeal"), GroupDiff.compute(list(), list("Zeal"), list("zeal")).toAdd(),
+                "granted lower-cased, as LuckPerms will store it");
+    }
+
+    @Test
+    @DisplayName("two spellings of one group are one change, not two")
+    void spellingsCollapse() {
+        GroupDiff diff = GroupDiff.compute(list(), list("VIP", "vip"), list("vip", "VIP"));
+        assertEquals(list("vip"), diff.toAdd());
     }
 
     @Test

@@ -68,6 +68,7 @@ public final class FakeLuckPerms implements LuckPermsBridge {
             new CopyOnWriteArrayList<GroupsChangedListener>();
 
     private volatile boolean available = true;
+    private volatile Object instance = new Object();
     private volatile boolean refusingListeners;
     private volatile RuntimeException failure;
 
@@ -108,7 +109,8 @@ public final class FakeLuckPerms implements LuckPermsBridge {
     }
 
     /**
-     * Changes what a player holds and tells every {@link #onGroupsChanged} listener, inline.
+     * Changes what a player holds and tells every {@link #onGroupsChanged} listener, inline, as a
+     * {@link GroupsChangedListener.Cause#RECALCULATION}.
      *
      * <p>Both halves, because that is what LuckPerms does: the new state is what a later
      * {@link #getPlayerGroups} reads, and the listener is handed the whole list rather than a delta.
@@ -116,12 +118,63 @@ public final class FakeLuckPerms implements LuckPermsBridge {
      * LuckPerms' thread is {@code LuckPermsIntegration}'s to prove.
      */
     public FakeLuckPerms fireGroupsChanged(UUID uuid, List<String> groups) {
+        return fire(uuid, null, groups, GroupsChangedListener.Cause.RECALCULATION);
+    }
+
+    /**
+     * As {@link #fireGroupsChanged}, but as the node event an actual rank edit produces
+     * ({@code parent add}, {@code parent remove}, a store command), carrying the name LuckPerms has
+     * stored for the user. {@link #fireGroupsChanged} is the bare recalculation LuckPerms also fires
+     * on every user load, which says nothing about whether a rank was edited.
+     *
+     * @param username the stored name, or {@code null} for a user LuckPerms has no name for
+     */
+    public FakeLuckPerms fireInheritanceChanged(UUID uuid, String username, List<String> groups) {
+        return fire(uuid, username, groups, GroupsChangedListener.Cause.INHERITANCE_NODE);
+    }
+
+    /**
+     * As {@link #fireInheritanceChanged}, but as the node event of Heimdall's own forward write,
+     * which the real bridge recognises and tags
+     * {@link GroupsChangedListener.Cause#ROLE_SYNC_WRITE}: a push being applied, not an edit.
+     */
+    public FakeLuckPerms fireOwnWrite(UUID uuid, String username, List<String> groups) {
+        return fire(uuid, username, groups, GroupsChangedListener.Cause.ROLE_SYNC_WRITE);
+    }
+
+    private FakeLuckPerms fire(
+            UUID uuid, String username, List<String> groups, GroupsChangedListener.Cause cause) {
         List<String> now = Collections.unmodifiableList(new ArrayList<String>(groups));
         currentGroups.put(uuid, now);
         for (GroupsChangedListener listener : groupListeners) {
-            listener.onGroupsChanged(uuid, now);
+            listener.onGroupsChanged(uuid, username, now, cause);
         }
         return this;
+    }
+
+    /**
+     * The instance replaced underneath its subscribers, as the bridge sees it: a new instance token,
+     * and every listener subscribed to the old one's event bus silently gone. (A PlugMan-style reload
+     * of the real LuckPerms does not look like this from Heimdall: see
+     * {@link LuckPermsBridge#instanceToken}.)
+     */
+    public FakeLuckPerms reloaded() {
+        instance = new Object();
+        groupListeners.clear();
+        return this;
+    }
+
+    private final java.util.concurrent.atomic.AtomicInteger closedRegistrations =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** How many registrations from {@link #onGroupsChanged} have been closed. */
+    public int closedRegistrations() {
+        return closedRegistrations.get();
+    }
+
+    @Override
+    public Object instanceToken() {
+        return available ? instance : null;
     }
 
     /** How many group-change listeners are subscribed: the leak assertion for a module toggle. */
@@ -190,6 +243,7 @@ public final class FakeLuckPerms implements LuckPermsBridge {
         return Registration.once(new Runnable() {
             @Override
             public void run() {
+                closedRegistrations.incrementAndGet();
                 groupListeners.remove(listener);
             }
         });

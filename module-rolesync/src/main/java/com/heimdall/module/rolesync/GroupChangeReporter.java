@@ -1,5 +1,6 @@
 package com.heimdall.module.rolesync;
 
+import com.heimdall.core.json.Envelope;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.module.ModuleContext;
@@ -11,7 +12,9 @@ import com.heimdall.core.remoteconfig.ModuleConfigListener;
 import com.heimdall.core.session.PlayerSessionListener;
 import com.heimdall.core.tunnel.ProtocolMode;
 import com.heimdall.core.tunnel.ProtocolModeListener;
+import com.heimdall.core.tunnel.TunnelMessageHandler;
 import com.heimdall.core.util.Registration;
+import com.heimdall.core.util.Strings;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
@@ -21,10 +24,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 
 /**
  * Reverse role sync: tells the bot when a player's in-game rank changes, so it can grant or remove
@@ -51,11 +56,17 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Per online player, this keeps a record of the watched groups the bot is known to have been told
  * about. A change is reported when the player's current groups, intersected with the watched list,
- * differ from that record intersected with the watched list. A player with no record is compared
- * against the empty set, so any watched group they hold is reported. A watched group being
+ * differ from that record intersected with the watched list. A watched group being
  * <strong>removed</strong> counts as a difference exactly like one being added; that is how a refund
  * reaches Discord. (An expiry reaches it too if LuckPerms signals one while the player is online;
  * the API does not promise that it does, and the join-time reconcile is what covers it if not.)
+ *
+ * <p><strong>No record means unknown, not empty.</strong> A player with no record is reported on
+ * any LuckPerms change at all, without a comparison. This used to compare them against the empty
+ * set, and that hid removals: a player who joined holding a watched rank, with no record, and then
+ * lost it compared {@code {}} with {@code {}} and nothing was sent, so Discord kept the role. The
+ * bot compares sets, so a frame that tells it nothing new is a no-op on its side, and once one has
+ * been sent the record exists and later changes are compared as usual.
  *
  * <p><strong>A record exists only for what the bot was verifiably told.</strong> It is written when a
  * frame is sent, and when a join-time call from <em>this</em> server succeeded carrying
@@ -64,8 +75,22 @@ import java.util.concurrent.TimeUnit;
  * LuckPerms locally at join: when this server made no call (a backend that defers to its gatekeeper,
  * whose LuckPerms may be elsewhere), when the call failed, or when the bot was unusable, a local read
  * would describe what the bot has <em>not</em> seen and suppress the one report that would have told
- * it. Leaving the player unrecorded costs at worst one redundant frame, and the bot compares sets, so
- * that frame is a no-op on its side.
+ * it. An unrecorded player is reported on their next change of any kind (see above), so the cost of
+ * leaving one unrecorded is frames the bot may already agree with, never a frame withheld.
+ *
+ * <p><strong>A delivery older than a frame does not overwrite it.</strong> A join call reads the
+ * groups, and its answer can arrive after a rank change was already reported in a frame. Recording
+ * the call's older list then would describe what the frame has since corrected, and the next change
+ * would be compared against the wrong record. So each call is stamped from a shared sequence
+ * ({@link com.heimdall.core.roles.RoleSyncSink#groupsRequestStarting}) before it reads the groups,
+ * each frame sent takes the next value for its player, and a delivery (or a parked one, when the
+ * join adopts it) whose stamp is older than its player's last frame is dropped. Those per-player
+ * frame marks are kept for {@value #PARKED_DELIVERY_TTL_MS}ms, far longer than any join call takes,
+ * and pruned as frames are sent, so they are bounded by the frames of the last two minutes. The other
+ * way round holds too: a frame's own record is written after its send, and a delivery stamped after
+ * the frame's mark that was recorded in between is newer, so the frame's write leaves it alone (each
+ * record carries its stamp; see {@link #records}). And a write still in flight when its player quits
+ * is dropped rather than left behind for their next session ({@link #sessions}).
  *
  * <p>The record is intersected with the watched list <em>at the time it is written</em>, and both
  * sides are intersected with the current list at comparison, so a group added to the list after the
@@ -81,12 +106,38 @@ import java.util.concurrent.TimeUnit;
  * <p>The frame carries the player's <em>full</em> current group list, not the intersection and not a
  * delta, so the bot can answer for mappings this server's settings have not caught up with yet.
  *
- * <h2>Offline players are not reported</h2>
+ * <p>Its {@code at} is when that list was read from LuckPerms, not when the frame was sent. A
+ * debounced report goes out up to {@value #DEBOUNCE_MS}ms after its newest read, and the bot orders
+ * a player's frames by {@code at} and weighs them against its own pushes; stamping the send time
+ * would make a list look newer than it is, and could let it win over a Discord-side change made in
+ * between. A resync answer's {@code at} is when its read completed.
+ *
+ * <h2>Offline players: real rank edits only</h2>
  *
  * <p>A change to a player who is not online on this server (a console edit, a store command run for
- * an offline buyer) is ignored. The join-time call carries {@code currentGroups} and the bot reconciles
- * from it, so the change reaches Discord at their next login. Reporting offline changes would need a
- * record per offline player to compare against, a cache with no bound and no owner.
+ * an offline buyer) is reported too, but only when it was an actual edit: LuckPerms signalled an
+ * inheritance node being added, removed or cleared
+ * ({@link GroupsChangedListener.Cause#INHERITANCE_NODE}). A bare recalculation is never enough for
+ * an offline player, because LuckPerms recalculates every user it loads: a login still in progress,
+ * another plugin looking somebody up, a storage sync. Taking those as changes would send a frame for
+ * every user LuckPerms touches. With shared LuckPerms storage only the server that ran the edit fires
+ * the node event, so a network sends one frame for it, not one per server. Waiting for the next login
+ * instead, as this once did, left a removed rank's Discord role in place for as long as the player
+ * stayed away.
+ *
+ * <p>A node event caused by this plugin's own forward write ({@code role_sync} or a join snapshot
+ * applied through {@link LuckPermsBridge#setPlayerGroups}) arrives as
+ * {@link GroupsChangedListener.Cause#ROLE_SYNC_WRITE} and is not an edit either: it is the bot's own
+ * push coming back. Taken as one, every server that applied a push for an offline player answered it
+ * with a frame. For an online player it arms a report as any callback does, and the bot's set
+ * comparison makes that echo a no-op.
+ *
+ * <p>An offline report carries the full group list, its read time as {@code at}, and the name
+ * LuckPerms has stored for the user, because the bot needs a username; a user LuckPerms has no name
+ * for is not reported. There is no record for an offline player and no comparison: a record per offline player
+ * would be a cache with no bound and no owner, and the bot comparing sets makes a redundant frame
+ * harmless. A recalculation for an offline player whose report is already armed (an edit's own
+ * recalculation, arriving separately) only refreshes the groups that report will carry.
  *
  * <p>A delivery for a player not online yet (the blocking login path answers before the join) is
  * parked until their join moves it into the record, and dropped after
@@ -103,11 +154,30 @@ import java.util.concurrent.TimeUnit;
  * so a player whose groups change continuously still gets a report every half second rather than
  * never.
  *
+ * <p><strong>A quit flushes, it does not cancel.</strong> A player who quits or is kicked inside the
+ * window has their armed report sent at once, under the name they had, compared against their record
+ * before it is dropped. Cancelling it, as this once did, lost the report for good: "remove the rank,
+ * then ban" took the rank away in game and left the Discord role, because the ban's kick landed inside
+ * the window and nothing would ever report the change again.
+ *
  * <p>The timer lives on {@code heimdall-sched}, and the comparison and send are handed straight to
  * {@code heimdall-io}: the scheduler is single-threaded and shared with every poll the plugin runs.
  * The handles are owned here rather than registered through the context, for the reason
  * {@code WhitelistChangeNudge} records: the context's tracking bag is unbounded and only emptied on
  * disable, and this would add an entry per rank change for the life of the module.
+ *
+ * <h2>Resync on request</h2>
+ *
+ * <p>The bot sends {@code rolesync.resync} ({@code {uuid, username?}}, a notification with no reply
+ * frame of its own) to a client that declared {@code rolesyncresync@1}, when it needs to hear a
+ * player's ranks without waiting for them to change: chiefly right after a player links, because a
+ * rank they already held was never news to anybody. The answer is an ordinary {@code rolesync.groups}
+ * frame with the full current list, read time as {@code at}, sent unconditionally (no comparison with
+ * the record: the bot asked because it does not know), and then written as the record, exactly as
+ * a reported change is. Only when the player is online here and LuckPerms is available; otherwise
+ * the notification is ignored, because a frame from a server the player is not on could describe a
+ * LuckPerms that is not theirs. Answered whatever is watched, since the bot is the one that knows
+ * which mappings it wants.
  *
  * <h2>Fire and forget</h2>
  *
@@ -120,13 +190,22 @@ import java.util.concurrent.TimeUnit;
  * <p>Silent. The module already says once that LuckPerms is missing, on the apply path (see
  * {@link RoleSyncApplier}). A subscription that comes back as {@link Registration#NONE} is treated as
  * no subscription at all, so the next player join or config change tries again; that is also how a
- * LuckPerms that started after this module is picked up. While subscribed, a retry costs a field read.
+ * LuckPerms that started after this module is picked up. While subscribed, a retry costs two field
+ * reads: the bridge's {@link LuckPermsBridge#instanceToken} is compared with the one subscribed
+ * against, and when the bridge can see that the instance was replaced (which silently kills every
+ * listener on the old instance's event bus), the old registration is closed and a new one made at
+ * the next join or config change. Checking only whether a subscription existed, as this once did,
+ * would have stayed deaf for the life of the process. This does <em>not</em> make a PlugMan-style
+ * reload of LuckPerms work: Heimdall stays linked to the old plugin's API classes, so after one the
+ * bridge reports LuckPerms unavailable and nothing is subscribed until Heimdall is reloaded too or
+ * the server restarts. {@link LuckPermsBridge#instanceToken} has the detail.
  *
  * <h2>Threading</h2>
  *
  * <p>{@link #start} and {@link #close} run on the module manager's thread. The LuckPerms callback
  * arrives on {@code heimdall-io} (the bridge hops there), config and mode changes on the socket's
- * reading thread, joins and quits on {@code heimdall-io}, deliveries on whichever thread completed the
+ * reading thread, joins, quits and {@code rolesync.resync} on {@code heimdall-io} (a resync's answer
+ * on whichever thread completed the LuckPerms read), deliveries on whichever thread completed the
  * join call. Subscribing and unsubscribing are serialised on {@link #lock}; record writes and clears
  * on {@link #records}; the debounce's hand-off between a callback and the firing timer is one atomic
  * {@code compute}/{@code remove} per player.
@@ -135,6 +214,12 @@ final class GroupChangeReporter {
 
     /** The frame type the bot handles. Plugin to bot, a notification: nothing comes back. */
     static final String FRAME_TYPE = "rolesync.groups";
+
+    /**
+     * The frame type the bot sends to ask for a player's groups now. Bot to plugin, a notification:
+     * the answer is a {@link #FRAME_TYPE} frame, never a reply.
+     */
+    static final String RESYNC_FRAME_TYPE = "rolesync.resync";
 
     /** The setting the bot fills from the dashboard's Minecraft-to-Discord mappings. */
     static final String WATCHED_GROUPS = "watchedGroups";
@@ -145,9 +230,19 @@ final class GroupChangeReporter {
     /** How long a delivery waits for its player to join before it is dropped. */
     static final long PARKED_DELIVERY_TTL_MS = 120_000L;
 
-    /** One player's armed report: the newest groups seen, and the timer that will read them. */
+    /**
+     * One player's armed report: the newest groups seen, the name to send them under, and the timer
+     * that will read them.
+     *
+     * <p>Only armed while the player is online or by a real rank edit (see {@link #changed}), so
+     * whatever is armed is reportable whether or not the player is still here when it fires.
+     */
     private static final class Pending {
         volatile List<String> groups;
+        /** When {@link #groups} was read from LuckPerms: what the frame's {@code at} says. */
+        volatile long readAtMs;
+        /** The online name while the player was here, otherwise the one LuckPerms stored. */
+        volatile String username;
         volatile ScheduledFuture<?> timer;
     }
 
@@ -155,9 +250,22 @@ final class GroupChangeReporter {
     private static final class Parked {
         final Set<String> watched;
         final long atMs;
+        final long stamp;
 
-        Parked(Set<String> watched, long atMs) {
+        Parked(Set<String> watched, long atMs, long stamp) {
             this.watched = watched;
+            this.atMs = atMs;
+            this.stamp = stamp;
+        }
+    }
+
+    /** When a frame last went out for a player: its place in the sequence, and the wall clock. */
+    private static final class FrameMark {
+        final long seq;
+        final long atMs;
+
+        FrameMark(long seq, long atMs) {
+            this.seq = seq;
             this.atMs = atMs;
         }
     }
@@ -166,23 +274,61 @@ final class GroupChangeReporter {
     private final HeimdallLogger logger;
     private final long debounceMs;
 
+    /** Shared with the module's join-call stamps; see the class javadoc. */
+    private final java.util.concurrent.atomic.AtomicLong sequence;
+
     /** Guards {@link #subscription}: subscribe and unsubscribe must not interleave. */
     private final Object lock = new Object();
 
     /** The live LuckPerms subscription, or {@code null} while nothing is watched or it failed. */
     private Registration subscription;
 
+    /** The bridge and the LuckPerms instance {@link #subscription} was made against. */
+    private LuckPermsBridge subscribedBridge;
+    private Object subscribedInstance;
+
     /**
-     * Guards {@link #reported}, {@link #parked} and {@link #generation} together, so a write that
-     * checks the generation cannot land after a clear it did not see.
+     * Guards {@link #reported}, {@link #parked}, {@link #lastFrame}, {@link #sessions} and
+     * {@link #generation} together, so a write that checks the generation cannot land after a clear
+     * it did not see.
+     *
+     * <p>A frame's mark and its record write are <em>not</em> one critical section: the send sits
+     * between them, and a delivery can be recorded in that gap. So each record carries the stamp it
+     * was written under, and a write never replaces a record with a newer stamp. A frame's write
+     * uses its mark, so a join call that started after the mark and was recorded before the frame's
+     * write keeps its record; one that started before the mark is dropped on arrival.
      */
     private final Object records = new Object();
 
+    /** One player's record: the watched groups the bot was told about, and the stamp behind it. */
+    private static final class Recorded {
+        final Set<String> watched;
+        /** The frame's mark, or the delivery's request stamp; see {@link #records}. */
+        final long stamp;
+
+        Recorded(Set<String> watched, long stamp) {
+            this.watched = watched;
+            this.stamp = stamp;
+        }
+    }
+
     /** Per online player: the watched groups the bot is known to have been told about. */
-    private final Map<UUID, Set<String>> reported = new ConcurrentHashMap<UUID, Set<String>>();
+    private final Map<UUID, Recorded> reported = new ConcurrentHashMap<UUID, Recorded>();
+
+    /**
+     * Per online player, a token for their current session, made when a record write first needs one
+     * and dropped by {@link #forget} on quit. A report or resync answer takes it before its send and
+     * records only if it is still the same token: one in flight when its player quit would otherwise
+     * write after {@link #forget} and leave a record that carries into their next session, where it
+     * would hide their first change. Guarded by {@link #records}; bounded by the players online.
+     */
+    private final Map<UUID, Object> sessions = new java.util.HashMap<UUID, Object>();
 
     /** Deliveries waiting for their player's join. */
     private final Map<UUID, Parked> parked = new ConcurrentHashMap<UUID, Parked>();
+
+    /** Per player, the last frame sent. Guarded by {@link #records}; pruned by age. */
+    private final Map<UUID, FrameMark> lastFrame = new java.util.HashMap<UUID, FrameMark>();
 
     /** Bumped on every clear. A write carrying an older value is stale and discarded. */
     private long generation;
@@ -191,14 +337,16 @@ final class GroupChangeReporter {
 
     private volatile boolean closed;
 
-    GroupChangeReporter(ModuleContext ctx) {
-        this(ctx, DEBOUNCE_MS);
+    GroupChangeReporter(ModuleContext ctx, java.util.concurrent.atomic.AtomicLong sequence) {
+        this(ctx, sequence, DEBOUNCE_MS);
     }
 
     /** The window is injectable so a test can say "inside the window" without racing a clock. */
-    GroupChangeReporter(ModuleContext ctx, long debounceMs) {
+    GroupChangeReporter(
+            ModuleContext ctx, java.util.concurrent.atomic.AtomicLong sequence, long debounceMs) {
         this.ctx = ctx;
         this.logger = ctx.logger();
+        this.sequence = sequence;
         this.debounceMs = Math.max(0L, debounceMs);
     }
 
@@ -232,9 +380,24 @@ final class GroupChangeReporter {
                 adoptParked(player.uuid());
             }
         });
+        // Tracked by the context, so the manager unwinds it. Dispatched on heimdall-io.
+        ctx.tunnel().subscribe(RESYNC_FRAME_TYPE, new TunnelMessageHandler() {
+            @Override
+            public void onMessage(Envelope envelope) {
+                try {
+                    Payload payload = envelope.payload();
+                    resync(payload.string("uuid", null), payload.string("username", null));
+                } catch (RuntimeException e) {
+                    logger.warn("rolesync.resync could not be handled; the tunnel is unaffected: "
+                            + e);
+                }
+            }
+        });
         ctx.onPlayerQuit(new PlayerSessionListener() {
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
+                // Flushed before the record is dropped, so the report compares against it.
+                flush(player);
                 forget(player.uuid());
             }
         });
@@ -266,19 +429,37 @@ final class GroupChangeReporter {
                 unsubscribe();
                 return;
             }
-            if (subscription != null) {
-                return;
-            }
             LuckPermsBridge bridge = bridge();
+            if (subscription != null) {
+                if (bridge == null || (bridge == subscribedBridge
+                        && bridge.instanceToken() == subscribedInstance)) {
+                    return;
+                }
+                // The LuckPerms instance (or the bridge) was replaced: the old event bus is dead and
+                // this subscription will never fire again. Closed, so nothing stays registered on
+                // it; records and armed reports stay, and only the listener moves.
+                logger.debug("the LuckPerms instance changed; subscribing to the new one");
+                Registration stale = subscription;
+                subscription = null;
+                stale.close();
+            }
             if (bridge == null) {
                 return;
             }
+            Object instance = bridge.instanceToken();
             Registration made;
             try {
                 made = bridge.onGroupsChanged(new GroupsChangedListener() {
                     @Override
                     public void onGroupsChanged(UUID uuid, List<String> currentGroups) {
-                        changed(uuid, currentGroups);
+                        changed(uuid, null, currentGroups,
+                                GroupsChangedListener.Cause.RECALCULATION);
+                    }
+
+                    @Override
+                    public void onGroupsChanged(UUID uuid, String username,
+                            List<String> currentGroups, GroupsChangedListener.Cause cause) {
+                        changed(uuid, username, currentGroups, cause);
                     }
                 });
             } catch (RuntimeException | LinkageError broken) {
@@ -294,6 +475,8 @@ final class GroupChangeReporter {
                 return;
             }
             subscription = made;
+            subscribedBridge = bridge;
+            subscribedInstance = instance;
             logger.debug(() -> "reporting in-game rank changes for " + watched);
         }
     }
@@ -332,26 +515,34 @@ final class GroupChangeReporter {
     /**
      * A join-time call from this server reached the bot carrying {@code groups}; see
      * {@link com.heimdall.core.roles.RoleSyncSink#groupsDelivered}. Recorded now if the player is
-     * online, parked until their join if not.
+     * online, parked until their join if not, and dropped if a frame went out for the player after
+     * the call was stamped.
+     *
+     * @param stamp the call's stamp, or {@link com.heimdall.core.roles.RoleSyncSink#UNSTAMPED}
      */
-    void delivered(UUID uuid, List<String> groups) {
+    void delivered(final UUID uuid, List<String> groups, long stamp) {
         if (closed || !isSubscribed()) {
-            // Not subscribed means nothing is watched, and an absent record already compares as
-            // empty, so there is nothing a record could change.
+            // Not subscribed means nothing is watched and nothing is reported, so there is
+            // nothing a record could change.
             return;
         }
         Set<String> watched = intersect(groups, watched());
         synchronized (records) {
+            if (olderThanLastFrame(uuid, stamp)) {
+                logger.debug(() -> "a join call for " + uuid + " started before the last rank "
+                        + "report was sent; keeping that report's record");
+                return;
+            }
             // Read under the lock: a join that adopts parked deliveries takes the same lock, so a
             // delivery cannot be parked just after the join looked and then wait out its TTL.
             if (isOnline(uuid)) {
-                reported.put(uuid, watched);
+                record(uuid, watched, stamp);
                 parked.remove(uuid);
                 return;
             }
             long now = System.currentTimeMillis();
             pruneParked(now);
-            parked.put(uuid, new Parked(watched, now));
+            parked.put(uuid, new Parked(watched, now, stamp));
         }
     }
 
@@ -369,16 +560,75 @@ final class GroupChangeReporter {
         synchronized (records) {
             Parked waiting = parked.remove(uuid);
             if (waiting != null
-                    && System.currentTimeMillis() - waiting.atMs <= PARKED_DELIVERY_TTL_MS) {
-                reported.put(uuid, waiting.watched);
+                    && System.currentTimeMillis() - waiting.atMs <= PARKED_DELIVERY_TTL_MS
+                    && !olderThanLastFrame(uuid, waiting.stamp)) {
+                record(uuid, waiting.watched, waiting.stamp);
             }
         }
     }
 
+    /**
+     * Called with {@link #records} held. Writes a record unless the one there has a newer stamp.
+     * An unstamped delivery takes the next value in the sequence: it is as new as now, and a
+     * {@link com.heimdall.core.roles.RoleSyncSink#UNSTAMPED} record would outrank every later frame.
+     */
+    private void record(UUID uuid, Set<String> watched, long stamp) {
+        long at = stamp == com.heimdall.core.roles.RoleSyncSink.UNSTAMPED
+                ? sequence.incrementAndGet() : stamp;
+        Recorded current = reported.get(uuid);
+        if (current != null && current.stamp > at) {
+            logger.debug(() -> "a newer record for " + uuid + " was written while this one was"
+                    + " in flight; keeping it");
+            return;
+        }
+        reported.put(uuid, new Recorded(watched, at));
+    }
+
+    /** Called with {@link #records} held. This player's session token; see {@link #sessions}. */
+    private Object session(UUID uuid) {
+        Object token = sessions.get(uuid);
+        if (token == null) {
+            token = new Object();
+            sessions.put(uuid, token);
+        }
+        return token;
+    }
+
+    /** Called with {@link #records} held. Whether a frame went out for {@code uuid} after {@code stamp}. */
+    private boolean olderThanLastFrame(UUID uuid, long stamp) {
+        FrameMark mark = lastFrame.get(uuid);
+        return mark != null && mark.seq > stamp;
+    }
+
+    /**
+     * Called just before a frame is sent: takes its place in the sequence, and prunes old marks.
+     *
+     * @return the mark, which the frame's record write is stamped with
+     */
+    private long markFrame(UUID uuid) {
+        long now = System.currentTimeMillis();
+        synchronized (records) {
+            Iterator<FrameMark> it = lastFrame.values().iterator();
+            while (it.hasNext()) {
+                if (now - it.next().atMs > PARKED_DELIVERY_TTL_MS) {
+                    it.remove();
+                }
+            }
+            long seq = sequence.incrementAndGet();
+            lastFrame.put(uuid, new FrameMark(seq, now));
+            return seq;
+        }
+    }
+
+    /**
+     * A quit: drops the player's record, and their session token with it, so a report or resync
+     * answer still in flight for them cannot write one back afterwards. See {@link #sessions}.
+     */
     private void forget(UUID uuid) {
         synchronized (records) {
             reported.remove(uuid);
             parked.remove(uuid);
+            sessions.remove(uuid);
         }
         Pending armed = pending.remove(uuid);
         if (armed != null && armed.timer != null) {
@@ -386,13 +636,32 @@ final class GroupChangeReporter {
         }
     }
 
-    /** The LuckPerms callback, on {@code heimdall-io}. Arms or feeds this player's debounce. */
-    void changed(final UUID uuid, final List<String> currentGroups) {
-        if (closed || uuid == null || currentGroups == null || !isOnline(uuid)) {
+    /**
+     * The LuckPerms callback, on {@code heimdall-io}. Arms or feeds this player's debounce.
+     *
+     * <p>An online player's report is armed by any callback, as it always was. An offline player's
+     * is armed only by a real rank edit ({@link GroupsChangedListener.Cause#INHERITANCE_NODE}); a
+     * bare recalculation for them only refreshes a report that is already armed. See the class
+     * javadoc for why a recalculation is not a change for somebody who is not here.
+     *
+     * @param storedName the name LuckPerms has stored for the user, or {@code null}
+     */
+    void changed(final UUID uuid, String storedName, final List<String> currentGroups,
+            GroupsChangedListener.Cause cause) {
+        if (closed || uuid == null || currentGroups == null) {
             return;
         }
+        Optional<PlayerHandle> online = ctx.platform().players().byUuid(uuid);
+        final boolean here = online.isPresent();
+        final String name = here ? online.get().name() : storedName;
+        // Not ROLE_SYNC_WRITE for somebody offline: that is the bot's own push, applied here.
+        final boolean mayArm = here || cause == GroupsChangedListener.Cause.INHERITANCE_NODE;
+        final long readAtMs = System.currentTimeMillis();
         pending.compute(uuid, (key, armed) -> {
             if (armed == null) {
+                if (!mayArm) {
+                    return null;
+                }
                 armed = new Pending();
                 armed.timer = schedule(key);
                 if (armed.timer == null) {
@@ -400,6 +669,12 @@ final class GroupChangeReporter {
                 }
             }
             armed.groups = currentGroups;
+            // The bridge calls back straight after its read, so this is when the list was true.
+            armed.readAtMs = readAtMs;
+            // The online name wins over a stored one, which LuckPerms may have kept differently.
+            if (!Strings.isBlank(name) && (here || Strings.isBlank(armed.username))) {
+                armed.username = name;
+            }
             return armed;
         });
     }
@@ -429,7 +704,40 @@ final class GroupChangeReporter {
     /** The debounce expiring, on {@code heimdall-io}: compare once, send at most one frame. */
     private void fire(UUID uuid) {
         Pending armed = pending.remove(uuid);
-        if (armed == null || closed) {
+        if (armed == null) {
+            return;
+        }
+        report(uuid, armed, null);
+    }
+
+    /**
+     * A quit, on {@code heimdall-io}: sends this player's armed report now rather than dropping it.
+     * The atomic {@code remove} means this and a timer firing at the same moment send it once.
+     */
+    private void flush(PlayerHandle player) {
+        UUID uuid = player.uuid();
+        if (uuid == null) {
+            return;
+        }
+        Pending armed = pending.remove(uuid);
+        if (armed == null) {
+            return;
+        }
+        ScheduledFuture<?> timer = armed.timer;
+        if (timer != null) {
+            timer.cancel(false);
+        }
+        report(uuid, armed, player);
+    }
+
+    /**
+     * Compares and sends one armed report.
+     *
+     * @param quitting the player whose quit is flushing this, or {@code null} when the timer fired;
+     *     a quitting player is still treated as online here, under the name they quit with
+     */
+    private void report(final UUID uuid, Pending armed, PlayerHandle quitting) {
+        if (closed) {
             return;
         }
         List<String> groups = armed.groups;
@@ -441,10 +749,35 @@ final class GroupChangeReporter {
         // the record this decision was based on is gone, and the write must not bring it back.
         long epoch = generation();
         final Set<String> now = intersect(groups, watched);
-        Set<String> before = reported.get(uuid);
-        final Set<String> was =
-                before == null ? Collections.<String>emptySet() : intersect(before, watched);
-        if (now.equals(was)) {
+        PlayerHandle here = quitting;
+        if (here == null) {
+            Optional<PlayerHandle> online = ctx.platform().players().byUuid(uuid);
+            here = online.isPresent() ? online.get() : null;
+        }
+        final String name;
+        final Set<String> was;
+        // Taken before the send, and checked again at the write: a quit in between drops it.
+        Object session = null;
+        if (here != null && quitting == null) {
+            synchronized (records) {
+                session = session(uuid);
+            }
+        }
+        if (here != null) {
+            name = Strings.isBlank(here.name()) ? armed.username : here.name();
+            Recorded before = reported.get(uuid);
+            // No record is unknown, not empty: send without comparing. See the class javadoc.
+            was = before == null ? null : intersect(before.watched, watched);
+            if (was != null && now.equals(was)) {
+                return;
+            }
+        } else {
+            // Offline: only a real rank edit, or a report armed while they were here, gets this far.
+            name = armed.username;
+            was = null;
+        }
+        if (Strings.isBlank(name)) {
+            logger.debug(() -> "no name is known for " + uuid + "; not reporting their rank change");
             return;
         }
         if (!ctx.tunnel().isConnected()) {
@@ -452,23 +785,129 @@ final class GroupChangeReporter {
             logger.debug(() -> "tunnel down; not reporting the rank change for " + uuid);
             return;
         }
-        final Optional<PlayerHandle> online = ctx.platform().players().byUuid(uuid);
-        if (!online.isPresent()) {
-            return;
-        }
-        ctx.tunnel().send(FRAME_TYPE, Payload.builder()
-                .put("uuid", uuid.toString())
-                .put("username", online.get().name())
-                .putStrings("groups", groups)
-                .put("at", System.currentTimeMillis())
-                .build());
-        synchronized (records) {
-            if (generation == epoch && !closed) {
-                reported.put(uuid, now);
+        long mark = sendGroups(uuid, name, groups, armed.readAtMs);
+        if (session != null) {
+            synchronized (records) {
+                // Not after a clear (generation), not after this player's quit (session), and not
+                // over a delivery recorded since the mark (record compares stamps).
+                if (generation == epoch && !closed && sessions.get(uuid) == session) {
+                    record(uuid, now, mark);
+                }
             }
         }
-        logger.debug(() -> "reported rank change for " + online.get().name() + ": watched " + was
-                + " -> " + now);
+        final String where = here == null ? " (offline)" : "";
+        logger.debug(() -> "reported rank change for " + name + where + ": watched "
+                + (was == null ? "unknown" : was.toString()) + " -> " + now);
+    }
+
+    /**
+     * The bot's {@code rolesync.resync}, on {@code heimdall-io}: read the player's groups now and send
+     * them without comparing. See the class javadoc.
+     *
+     * @param rawUuid the player, as the frame carried it
+     * @param username used only when the uuid is missing or unparseable, against online players
+     */
+    void resync(String rawUuid, String username) {
+        if (closed) {
+            return;
+        }
+        UUID parsed = null;
+        if (!Strings.isBlank(rawUuid)) {
+            try {
+                parsed = UUID.fromString(rawUuid.trim());
+            } catch (IllegalArgumentException malformed) {
+                parsed = null;
+            }
+        }
+        Optional<PlayerHandle> online = parsed != null
+                ? ctx.platform().players().byUuid(parsed)
+                : Strings.isBlank(username)
+                        ? Optional.<PlayerHandle>empty()
+                        : ctx.platform().players().byName(username);
+        if (!online.isPresent()) {
+            // The common case on a network: the bot asks every capable server, and the player is
+            // on one of them at most.
+            logger.debug(() -> "rolesync.resync for " + rawUuid + " (" + username
+                    + "): not online here; ignoring it");
+            return;
+        }
+        final PlayerHandle player = online.get();
+        final UUID uuid = player.uuid();
+        LuckPermsBridge bridge = bridge();
+        if (bridge == null || uuid == null) {
+            logger.debug(() -> "rolesync.resync for " + player.name()
+                    + ": LuckPerms is not available here; ignoring it");
+            return;
+        }
+        // Captured before the read, like a report's: a clear or a quit while it is in flight wins.
+        final long epoch;
+        final Object session;
+        synchronized (records) {
+            epoch = generation;
+            session = session(uuid);
+        }
+        CompletableFuture<List<String>> read;
+        try {
+            read = bridge.getPlayerGroups(uuid);
+        } catch (RuntimeException refused) {
+            logger.debug(() -> "rolesync.resync for " + player.name()
+                    + ": the LuckPerms read was refused: " + refused);
+            return;
+        }
+        if (read == null) {
+            return;
+        }
+        read.whenComplete(new BiConsumer<List<String>, Throwable>() {
+            @Override
+            public void accept(List<String> groups, Throwable failure) {
+                if (failure != null || groups == null) {
+                    // Unknown is not empty: sending [] would read as every mapped rank gone.
+                    logger.debug(() -> "rolesync.resync for " + player.name()
+                            + ": could not read their LuckPerms groups; ignoring it: " + failure);
+                    return;
+                }
+                answerResync(uuid, player.name(), groups, System.currentTimeMillis(), epoch,
+                        session);
+            }
+        });
+    }
+
+    private void answerResync(UUID uuid, String name, List<String> groups, long readAtMs,
+            long epoch, Object session) {
+        if (closed || !ctx.tunnel().isConnected() || !isOnline(uuid)) {
+            return;
+        }
+        long mark = sendGroups(uuid, name, groups, readAtMs);
+        if (isSubscribed()) {
+            Set<String> now = intersect(groups, watched());
+            synchronized (records) {
+                if (generation == epoch && !closed && sessions.get(uuid) == session
+                        && isOnline(uuid)) {
+                    record(uuid, now, mark);
+                }
+            }
+        }
+        logger.debug(() -> "answered rolesync.resync for " + name + " with " + groups);
+    }
+
+    /**
+     * The one place a {@link #FRAME_TYPE} frame is built: the full list, and {@code at}.
+     *
+     * @param readAtMs when {@code groups} was read from LuckPerms, which is what {@code at} carries
+     * @return the frame's mark, for its record write
+     */
+    private long sendGroups(UUID uuid, String name, List<String> groups, long readAtMs) {
+        // Marked before the send: a join call stamped after this point read its groups after this
+        // frame's were read, so it is at least as new and is allowed to record, before or after
+        // the frame's own record write.
+        long mark = markFrame(uuid);
+        ctx.tunnel().send(FRAME_TYPE, Payload.builder()
+                .put("uuid", uuid.toString())
+                .put("username", name)
+                .putStrings("groups", groups)
+                .put("at", readAtMs)
+                .build());
+        return mark;
     }
 
     private boolean isSubscribed() {

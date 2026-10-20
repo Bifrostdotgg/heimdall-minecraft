@@ -36,6 +36,12 @@ import java.util.UUID;
  */
 public interface RoleSyncSink {
 
+    /**
+     * The stamp of a delivery whose request was never stamped: treated as newer than anything, so
+     * it is recorded exactly as an unstamped delivery always was.
+     */
+    long UNSTAMPED = Long.MAX_VALUE;
+
     /** Applies nothing. What a whitelist module runs against when role sync is not available. */
     RoleSyncSink NONE = new RoleSyncSink() {
         @Override
@@ -59,6 +65,23 @@ public interface RoleSyncSink {
     void applyOnJoin(UUID playerUuid, String username, RoleSyncDirective directive);
 
     /**
+     * {@link #applyOnJoin(UUID, String, RoleSyncDirective)} for an answer to a request stamped by
+     * {@link #groupsRequestStarting}, the same stamp the call's {@link #groupsDelivered} carries.
+     *
+     * <p>The stamp says when the bot was asked, which decides whether the answer is still the bot's
+     * latest word: a {@code role_sync} push applied after the request started is newer than what the
+     * answer says about that player's groups, and a mode switch in the config after it started is
+     * newer than what the answer says about who drives LuckPerms. The default ignores the stamp.
+     *
+     * @param requestStamp what {@link #groupsRequestStarting} returned for this request, or
+     *     {@link #UNSTAMPED}
+     */
+    default void applyOnJoin(
+            UUID playerUuid, String username, RoleSyncDirective directive, long requestStamp) {
+        applyOnJoin(playerUuid, username, directive);
+    }
+
+    /**
      * Says that a join-time call from <em>this</em> server reached the bot, successfully, carrying
      * these {@code currentGroups}.
      *
@@ -75,4 +98,32 @@ public interface RoleSyncSink {
      * @param currentGroups exactly the list the request carried; never {@code null}
      */
     void groupsDelivered(UUID playerUuid, List<String> currentGroups);
+
+    /**
+     * Says that a join-time call carrying {@code currentGroups} is about to read them, and returns
+     * a stamp to hand back with {@link #groupsDelivered(UUID, List, long)} when it succeeds.
+     *
+     * <p>Taken before the groups are read, because what it guards against is an answer that took
+     * longer than a live report: a request reads the groups, a rank changes and is reported to the
+     * bot in a frame, and then the request's answer arrives. Recording the request's older list on
+     * its success would overwrite what the frame told the bot, and the next change would be
+     * compared against the wrong thing. The stamp lets the implementation see that a frame went out
+     * for the player after the request started, and keep that frame's record.
+     *
+     * <p>The default stamps nothing ({@link #UNSTAMPED}). Must not block: it is called on the
+     * login path.
+     */
+    default long groupsRequestStarting(UUID playerUuid) {
+        return UNSTAMPED;
+    }
+
+    /**
+     * {@link #groupsDelivered(UUID, List)} for a request stamped by
+     * {@link #groupsRequestStarting}. The default ignores the stamp.
+     *
+     * @param requestStamp what {@link #groupsRequestStarting} returned for this request
+     */
+    default void groupsDelivered(UUID playerUuid, List<String> currentGroups, long requestStamp) {
+        groupsDelivered(playerUuid, currentGroups);
+    }
 }

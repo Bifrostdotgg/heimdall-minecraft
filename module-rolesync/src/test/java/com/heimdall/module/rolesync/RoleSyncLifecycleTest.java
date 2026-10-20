@@ -11,7 +11,6 @@ import com.heimdall.core.module.ModuleState;
 import com.heimdall.core.tunnel.Capabilities;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -53,7 +52,10 @@ class RoleSyncLifecycleTest {
     @DisplayName("it identifies as 'rolesync' and claims the role-sync capability")
     void identity() {
         assertEquals("rolesync", harness.module.id());
-        assertEquals(Collections.singleton(Capabilities.ROLE_SYNC), harness.module.capabilities());
+        assertEquals(new java.util.LinkedHashSet<String>(java.util.Arrays.asList(
+                        Capabilities.ROLE_SYNC, Capabilities.ROLE_SYNC_RESYNC)),
+                harness.module.capabilities(),
+                "rolesyncresync@1 is a build capability declared beside the module's own");
     }
 
     @Test

@@ -46,7 +46,8 @@ final class CapabilityNegotiation {
      * plugin advertises {@code status@1} on the health module, the bot accepts it, and no config
      * document has a {@code status} key. {@code linkprompt} is core's, declared on every server
      * whatever modules are on: it tells the bot this client answers {@code show_link_code}, and it
-     * has no config either.
+     * has no config either. {@code rolesyncresync} is the rolesync module's build capability, the
+     * same shape as {@code status}: it says the client answers {@code rolesync.resync}.
      */
     private static final Map<String, Integer> SUPPORTED_MAJORS;
 
@@ -57,7 +58,8 @@ final class CapabilityNegotiation {
 
     /** Negotiated and acked, but never a key in a config document. */
     static final List<String> META_CAPABILITY_IDS =
-            Collections.unmodifiableList(java.util.Arrays.asList("modules", "config", "linkprompt"));
+            Collections.unmodifiableList(java.util.Arrays.asList(
+                    "modules", "config", "linkprompt", "rolesyncresync"));
 
     static {
         Map<String, Integer> majors = new java.util.LinkedHashMap<String, Integer>();
@@ -70,6 +72,7 @@ final class CapabilityNegotiation {
         majors.put("modules", 1);
         majors.put("config", 1);
         majors.put("linkprompt", 1);
+        majors.put("rolesyncresync", 1);
         SUPPORTED_MAJORS = Collections.unmodifiableMap(majors);
     }
 
