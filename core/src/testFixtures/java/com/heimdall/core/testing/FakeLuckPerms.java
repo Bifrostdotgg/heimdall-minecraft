@@ -153,13 +153,23 @@ public final class FakeLuckPerms implements LuckPermsBridge {
     }
 
     /**
-     * A LuckPerms hot reload: a new instance, and every listener subscribed to the old one's event
-     * bus silently gone, which is what the real reload does to them.
+     * The instance replaced underneath its subscribers, as the bridge sees it: a new instance token,
+     * and every listener subscribed to the old one's event bus silently gone. (A PlugMan-style reload
+     * of the real LuckPerms does not look like this from Heimdall: see
+     * {@link LuckPermsBridge#instanceToken}.)
      */
     public FakeLuckPerms reloaded() {
         instance = new Object();
         groupListeners.clear();
         return this;
+    }
+
+    private final java.util.concurrent.atomic.AtomicInteger closedRegistrations =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    /** How many registrations from {@link #onGroupsChanged} have been closed. */
+    public int closedRegistrations() {
+        return closedRegistrations.get();
     }
 
     @Override
@@ -233,6 +243,7 @@ public final class FakeLuckPerms implements LuckPermsBridge {
         return Registration.once(new Runnable() {
             @Override
             public void run() {
+                closedRegistrations.incrementAndGet();
                 groupListeners.remove(listener);
             }
         });

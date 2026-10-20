@@ -327,10 +327,13 @@ class RoleSyncOrderAndStateTest {
 
         harness.luckPerms.reloaded();
         assertEquals(0, harness.luckPerms.groupListenerCount(), "the old event bus died with it");
+        assertEquals(0, harness.luckPerms.closedRegistrations());
 
         FakePlayer steve = harness.online("Steve");
         harness.luckPerms.holding(steve.uuid(), "default");
         harness.sessions.join(steve, 1L);
+        assertEquals(1, harness.luckPerms.closedRegistrations(),
+                "the registration on the old instance was closed, not just abandoned");
         assertEquals(1, harness.luckPerms.groupListenerCount(),
                 "refresh used to stop at 'subscription != null' and never look again");
 

@@ -73,11 +73,13 @@ final class LuckPermsIntegration implements LuckPermsBridge {
      * permanent failure on a server where LuckPerms simply started second, and role sync is dead for
      * the life of the process. That is why it is retried while null.
      *
-     * <p>The positive case is the mirror image and was the surviving gap. LuckPerms can be replaced
-     * under a running server — a hot reload through PlugMan or the like — and the handle held here
-     * then points at a shut-down instance while {@link #isAvailable()} keeps answering {@code true}.
-     * Every call would fail, forever, and nothing in the plugin would ever look again. So a failed
-     * call clears it: the next call re-resolves and picks up whatever instance is live now.
+     * <p>The positive case is the mirror image. If the provider this class can see starts answering
+     * with a different instance, the handle held here points at a shut-down one while
+     * {@link #isAvailable()} keeps answering {@code true}, and every call would fail forever. So a
+     * failed call clears it, and the next call re-resolves against whatever the provider holds now.
+     * That is not a promise to survive a PlugMan-style reload of LuckPerms itself: see
+     * {@link LuckPermsBridge#instanceToken} for why, in that case, the provider this class can see
+     * ends up empty and the bridge reports LuckPerms as unavailable.
      *
      * <p>Clearing on <em>any</em> failure rather than trying to recognise a dead API is deliberate.
      * {@code LuckPermsProvider.get()} is a field read against a live singleton, so a needless
@@ -140,9 +142,10 @@ final class LuckPermsIntegration implements LuckPermsBridge {
 
     /**
      * The LuckPerms instance registered right now, read from the provider rather than the cached
-     * handle, and adopted as the cached handle when it differs: a hot reload replaced it, and the
-     * old one is dead. Used by {@link #onGroupsChanged} and {@link #instanceToken}, because a
-     * subscription made against the cached handle after a reload would be one on a dead event bus.
+     * handle, and adopted as the cached handle when it differs, since the old one is then dead. Used
+     * by {@link #onGroupsChanged} and {@link #instanceToken}, because a subscription made against a
+     * dead handle would be one on a dead event bus. What this can and cannot follow is set out on
+     * {@link LuckPermsBridge#instanceToken}.
      */
     private LuckPerms current() {
         LuckPerms live;
@@ -157,7 +160,7 @@ final class LuckPermsIntegration implements LuckPermsBridge {
         return live;
     }
 
-    /** The registered LuckPerms instance itself; a reload replaces it. */
+    /** The LuckPerms instance the provider this class can see holds now; see the interface. */
     @Override
     public Object instanceToken() {
         return current();
@@ -371,10 +374,11 @@ final class LuckPermsIntegration implements LuckPermsBridge {
      * a user edited while offline is loaded only for the duration of the edit: a fresh lookup could
      * find nothing, or load a second copy from storage.
      *
-     * <p>Subscribed against the API instance registered now, read fresh from the provider. If
-     * LuckPerms is hot-reloaded underneath a running server the old event bus dies with it and this
-     * subscription goes quiet; {@link #instanceToken} changes when that happens, and the consuming
-     * module subscribes again when it sees it change.
+     * <p>Subscribed against the API instance registered now, read fresh from the provider. If that
+     * instance is replaced, its event bus dies with it and this subscription goes quiet;
+     * {@link #instanceToken} changes when that happens, and the consuming module closes this
+     * registration and subscribes again when it sees it change. A PlugMan-style reload of
+     * LuckPerms is the case it cannot follow: see {@link LuckPermsBridge#instanceToken}.
      */
     @Override
     public Registration onGroupsChanged(final GroupsChangedListener listener) {

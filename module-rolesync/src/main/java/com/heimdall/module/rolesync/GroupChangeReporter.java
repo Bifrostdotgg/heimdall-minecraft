@@ -192,10 +192,13 @@ import java.util.function.BiConsumer;
  * no subscription at all, so the next player join or config change tries again; that is also how a
  * LuckPerms that started after this module is picked up. While subscribed, a retry costs two field
  * reads: the bridge's {@link LuckPermsBridge#instanceToken} is compared with the one subscribed
- * against, and a LuckPerms hot reload, which silently kills every listener on the old instance's
- * event bus, is answered by subscribing to the new one at the next join or config change. Checking
- * only whether a subscription existed, as this once did, left reverse role sync deaf for the life of
- * the process after a reload.
+ * against, and when the bridge can see that the instance was replaced (which silently kills every
+ * listener on the old instance's event bus), the old registration is closed and a new one made at
+ * the next join or config change. Checking only whether a subscription existed, as this once did,
+ * would have stayed deaf for the life of the process. This does <em>not</em> make a PlugMan-style
+ * reload of LuckPerms work: Heimdall stays linked to the old plugin's API classes, so after one the
+ * bridge reports LuckPerms unavailable and nothing is subscribed until Heimdall is reloaded too or
+ * the server restarts. {@link LuckPermsBridge#instanceToken} has the detail.
  *
  * <h2>Threading</h2>
  *
@@ -432,10 +435,10 @@ final class GroupChangeReporter {
                         && bridge.instanceToken() == subscribedInstance)) {
                     return;
                 }
-                // LuckPerms was reloaded (or the bridge replaced): the old event bus is dead and
-                // this subscription will never fire again. Records and armed reports stay; only
-                // the listener moves to the live instance.
-                logger.debug("LuckPerms was reloaded; subscribing to the new instance");
+                // The LuckPerms instance (or the bridge) was replaced: the old event bus is dead and
+                // this subscription will never fire again. Closed, so nothing stays registered on
+                // it; records and armed reports stay, and only the listener moves.
+                logger.debug("the LuckPerms instance changed; subscribing to the new one");
                 Registration stale = subscription;
                 subscription = null;
                 stale.close();
