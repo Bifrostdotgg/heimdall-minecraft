@@ -14,6 +14,7 @@ import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.testing.FakeCommandSource;
 import com.heimdall.core.testing.FakePlatform;
 import com.heimdall.core.testing.RecordingCommands;
+import com.heimdall.core.update.InstallOutcome;
 import com.heimdall.core.util.Registration;
 import com.heimdall.core.wiring.HeimdallRuntime;
 import java.nio.file.Path;
@@ -398,9 +399,9 @@ class AdminCommandTest {
         }
 
         @Override
-        public String updateNow(Object audience) {
+        public InstallOutcome updateNow(Object audience) {
             called.countDown();
-            return answer;
+            return InstallOutcome.upToDate(answer);
         }
 
         @Override

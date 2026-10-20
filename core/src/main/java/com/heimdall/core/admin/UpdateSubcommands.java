@@ -2,10 +2,12 @@ package com.heimdall.core.admin;
 
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.text.Msg;
+import com.heimdall.core.update.InstallOutcome;
 import java.util.List;
 
 /**
- * {@code /hd version} and {@code /hd update} — the self-updater's two verbs, unchanged from v2.
+ * {@code /hd version} and {@code /hd update}: the self-updater's two verbs, as in v2 except that
+ * {@code update} now does its own check (departure D91).
  *
  * <p>Two rather than one, and the split is v2's: {@code version} asks the bot what the newest
  * release is and reports; {@code update} downloads and installs it. Keeping "tell me" separate from
@@ -150,8 +152,11 @@ final class UpdateSubcommands {
                     // says whether it was accepted. The shell holds a requested swap back long
                     // enough for this reply to go out first, then reports the outcome to the same
                     // sender (departure D87).
-                    String said = updates.updateNow(source.nativeSender());
-                    source.sendMessage(Msg.legacy("§a" + said));
+                    InstallOutcome outcome = updates.updateNow(source.nativeSender());
+                    // Green only when something was installed: "already the latest version" and a
+                    // check that could not reach the bot are not successes to an operator.
+                    source.sendMessage(Msg.legacy((outcome.installed() ? "§a" : "§e")
+                            + outcome.message()));
                 }
             });
         }

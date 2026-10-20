@@ -378,9 +378,8 @@ public final class UpdateWiring {
         }
 
         @Override
-        public String updateNow(Object audience) {
-            InstallOutcome outcome = service.updateNow().startSwap(audience);
-            return outcome.message();
+        public InstallOutcome updateNow(Object audience) {
+            return service.updateNow().startSwap(audience);
         }
 
         @Override

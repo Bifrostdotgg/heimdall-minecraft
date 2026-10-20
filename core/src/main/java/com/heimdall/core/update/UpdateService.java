@@ -41,8 +41,9 @@ import java.util.function.Supplier;
  * succeeded — live on one immutable {@link Published} object in a single volatile field. Concurrent
  * checks then race to <em>replace</em> it, which is fine: both answers were true when they were
  * computed, and whichever lands last is the more recent. No reader can observe a mixture. Reads
- * that need more than one fact ({@link #joinNotice}, {@link #updateNow()}) take one snapshot into a
- * local and use that, rather than reading the field twice.
+ * that need more than one fact ({@link #joinNotice}) take one snapshot into a local and use that,
+ * rather than reading the field twice. {@link #updateNow()} does not read the field at all: it acts
+ * on the answer its own check returned, so a concurrent periodic tick cannot change its decision.
  *
  * <h2>Threading and ownership</h2>
  *
