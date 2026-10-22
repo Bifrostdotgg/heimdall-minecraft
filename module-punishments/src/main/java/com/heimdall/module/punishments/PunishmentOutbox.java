@@ -112,6 +112,26 @@ final class PunishmentOutbox {
         return false;
     }
 
+    /**
+     * Removes and returns the entry with this op id, as it is now rather than as a snapshot had
+     * it, or null when there is none. The flush takes an uploaded issue with this, so a mark
+     * made while the upload was in flight is seen rather than dropped with the entry.
+     */
+    synchronized Entry take(String opId) {
+        if (opId == null) {
+            return null;
+        }
+        for (Iterator<Entry> it = entries.iterator(); it.hasNext(); ) {
+            Entry entry = it.next();
+            if (opId.equals(entry.opId)) {
+                it.remove();
+                save();
+                return entry;
+            }
+        }
+        return null;
+    }
+
     synchronized List<Entry> snapshot() {
         List<Entry> copy = new ArrayList<Entry>(entries);
         Collections.sort(copy, ORDER);

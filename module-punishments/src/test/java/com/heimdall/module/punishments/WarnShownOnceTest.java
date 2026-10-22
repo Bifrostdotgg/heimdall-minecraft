@@ -128,17 +128,55 @@ class WarnShownOnceTest {
     }
 
     @Test
-    @DisplayName("a backend behind a proxy never shows a warn: the proxy does")
-    void enforcerNeverShowsWarns() {
+    @DisplayName("a backend behind a Heimdall proxy never shows a warn: the proxy does")
+    void enforcerLeavesWarnsToAHeimdallProxy() {
         try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.ENFORCER)
                 .enableReplace()) {
             FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
 
-            harness.tunnel.push("punish.apply", warnFrame(steve, "64b0000000000000000000a2"));
+            harness.tunnel.push("punish.apply", warnFrame(steve, "64b0000000000000000000a2")
+                    .toBuilder().put("proxyShowsWarns", true).build());
             harness.sessions.join(steve, System.currentTimeMillis());
 
             assertTrue(steve.messages().isEmpty(), "nothing shown here: " + steve.messageText());
             assertTrue(queued(harness, HeimdallPunishmentsModule.OP_DELIVERED).isEmpty());
+        }
+    }
+
+    @Test
+    @DisplayName("a backend whose proxy does not run Heimdall shows warns itself")
+    void enforcerWithoutAHeimdallProxyShowsWarns() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.ENFORCER)
+                .enableReplace()) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+
+            // Proxy forwarding is on, so this server resolves ENFORCER, but the bot says no
+            // Heimdall proxy is connected; and an older bot, which says nothing, means the same.
+            harness.tunnel.push("punish.apply", warnFrame(steve, "64b0000000000000000000a8")
+                    .toBuilder().put("proxyShowsWarns", false).build());
+
+            assertFalse(steve.messages().isEmpty(), "shown here, since nothing else will");
+            assertEquals(1, queued(harness, HeimdallPunishmentsModule.OP_DELIVERED).size());
+        }
+    }
+
+    @Test
+    @DisplayName("LiteBans showing its own warn leaves a Heimdall warn still to be shown")
+    void hookWarnKeepsTheHeimdallWarn() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            FakePlayer steve = FakePlayer.named("Steve");
+            harness.tunnel.push("punish.apply", warnFrame(steve, "64b0000000000000000000a9"));
+
+            harness.tunnel.push("punish.apply", warnFrame(steve, "64b0000000000000000000aa")
+                    .toBuilder()
+                    .put("source", "hook")
+                    .put("deliveredAt", "2026-10-22T12:00:00.000Z")
+                    .build());
+
+            ActivePunishment held = harness.module.mirrorForTest().get("warn:" + steve.uuid());
+            assertNotNull(held, "the dashboard warn is still held");
+            assertEquals("64b0000000000000000000a9", held.id);
         }
     }
 

@@ -121,6 +121,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private volatile GeoCountryLookup geo;
     private volatile long lastFullSyncAt;
     /**
+     * Whether the bot last said a Heimdall proxy that shows warns is connected. Only a backend
+     * reads it: false (the bot has not said, or is older than the field) leaves it showing warns
+     * itself, as it always did.
+     */
+    private volatile boolean proxyShowsWarns;
+    /**
      * Operation ids this server issued itself, newest last, capped at {@value #ECHO_MEMORY}.
      *
      * <p>The bot excludes the issuing server from its {@code punish.apply} fanout, but it can only
@@ -1263,17 +1269,23 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
 
     /**
      * Whether this server is the one that shows a player their warns: the proxy, or a server with
-     * no proxy in front of it.
+     * no proxy in front of it, or a backend whose proxy does not run Heimdall.
      *
      * <p>A warn is news, shown once. On a network every server holds the same warn in its mirror,
      * and each one used to show it at every join, so a player saw it once from the proxy and again
      * from every backend they switched to, at every login, forever. The proxy sees every player on
      * the network, so it is the one place that can show it once.
+     *
+     * <p>A backend cannot tell from its own config whether its proxy runs Heimdall: proxy
+     * forwarding is on either way, so it resolves {@code ENFORCER} in both cases. The bot sees
+     * every connection and says ({@code proxyShowsWarns} on a warn frame and on the sync), and a
+     * backend with no such proxy shows warns itself.
      */
     private boolean showsWarns() {
         ModuleContext ctx = this.context;
         if (ctx == null) return false;
         ServerRole role = ctx.platform().role();
+        if (role == ServerRole.ENFORCER) return !proxyShowsWarns;
         return role == ServerRole.GATEKEEPER || role == ServerRole.STANDALONE;
     }
 
@@ -1352,10 +1364,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 String key = keyFor(p);
                 if (key == null) return;
                 names.remember(p.targetName);
+                if ("warn".equals(p.type) && payload.has("proxyShowsWarns")) {
+                    proxyShowsWarns = payload.bool("proxyShowsWarns", false);
+                }
                 if ("warn".equals(p.type) && !payload.string("deliveredAt", "").isEmpty()) {
-                    // Already shown, by LiteBans or by another server, which also closed the
-                    // player's older warns: this server has nothing left to show.
-                    mirror.evict(key);
+                    if ("hook".equalsIgnoreCase(payload.string("source", ""))) {
+                        // LiteBans showed its own warn. That says nothing about a Heimdall warn
+                        // this server still holds for the player, which stays to be shown.
+                        ActivePunishment held = mirror.get(key);
+                        if (held != null && sameId(held.id, p.id)) mirror.evict(key);
+                    } else {
+                        // Shown by another server, which also closed the player's older warns:
+                        // this server has nothing left to show.
+                        mirror.evict(key);
+                    }
                     if (!announced) announce(announcementFor(p, settings));
                     return;
                 }
@@ -1847,9 +1869,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 if ("issue".equals(entry.op)) {
                     Payload result = ctx.api().issuePunishment(entry.payload)
                             .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
+                    // Taken before the id is remembered: a warn shown while this upload was in
+                    // flight was marked on the queued copy, and the bot has the unmarked one.
+                    PunishmentOutbox.Entry taken = box.take(entry.opId);
                     rememberIssuedId(entry.payload, result);
-                    box.remove(entry.opId);
-                    uploaded = true;
+                    if (taken != null && taken.payload.bool("delivered", false)
+                            && !entry.payload.bool("delivered", false)) {
+                        String id = issuedIdOf(result);
+                        if (!id.isEmpty()) {
+                            enqueue(OP_DELIVERED, OP_DELIVERED + "-" + id, System.currentTimeMillis(),
+                                    Payload.builder().put("id", id).build());
+                            flushAgain.set(true);
+                        }
+                    }
+                    if (!isHookWrite(entry)) uploaded = true;
                 } else if ("revoke".equals(entry.op)) {
                     Payload result = ctx.api().revokePunishment(entry.payload)
                             .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
@@ -1858,7 +1891,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         continue;
                     }
                     box.remove(entry.opId);
-                    uploaded = true;
+                    if (!isHookWrite(entry)) uploaded = true;
                 } else if (OP_DELIVERED.equals(entry.op)) {
                     ctx.api().markWarnDelivered(entry.payload.string("id", ""))
                             .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
@@ -1906,6 +1939,15 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     /**
+     * A write the LiteBans hook queued. It changes nothing this server enforces from its mirror
+     * (LiteBans enforces it, or the bot's fan-out brings it back), so it does not need the full
+     * sync a native write does, which on a busy server would be one per LiteBans action.
+     */
+    private static boolean isHookWrite(PunishmentOutbox.Entry entry) {
+        return "hook".equalsIgnoreCase(entry.payload.string("source", ""));
+    }
+
+    /**
      * Drop only when the bot says that selector is already gone. HMAC 401, 400, 403 and 5xx hold
      * the row so a later successful flush can still send it, and so a following ETag GET cannot
      * resurrect a local unban.
@@ -1950,9 +1992,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
 
     private void rememberIssuedId(Payload request, Payload result) {
         if (mirror == null || result == null) return;
-        String id = result.string("id", "");
-        if (id.isEmpty()) id = result.string("_id", "");
+        String id = issuedIdOf(result);
         if (id.isEmpty()) return;
+        // A warn the LiteBans hook mirrored is LiteBans' own. Naming the warn this server holds
+        // after it would have the next showing acknowledge the wrong row.
+        if ("warn".equals(request.string("type", ""))
+                && "hook".equalsIgnoreCase(request.string("source", ""))) {
+            return;
+        }
         ActivePunishment local = new ActivePunishment();
         local.id = id;
         local.type = request.string("type", result.string("type", ""));
@@ -1970,6 +2017,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             existing.id = id;
             mirror.record(key, existing);
         }
+    }
+
+    private static String issuedIdOf(Payload result) {
+        if (result == null) return "";
+        String id = result.string("id", "");
+        return id.isEmpty() ? result.string("_id", "") : id;
     }
 
     private void sync(boolean force) {
@@ -2002,6 +2055,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                     authoritative.put(key, p);
                 }
                 store.reconcile(authoritative);
+                proxyShowsWarns = data.bool("proxyShowsWarns", false);
                 String hash = data.string("hash", "");
                 if (!hash.isEmpty()) {
                     store.setLastEtag(hash);
@@ -2395,8 +2449,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             if ("issue".equals(entry.op)) {
                 ActivePunishment local = fromPayload(entry.payload);
                 if (local == null || "kick".equals(local.type)) continue;
-                // A warn already shown here is not one to show again.
-                if ("warn".equals(local.type) && entry.payload.bool("delivered", false)) continue;
+                // A warn already shown here is not one to show again, and one the LiteBans hook
+                // queued is LiteBans' to show.
+                if ("warn".equals(local.type) && (entry.payload.bool("delivered", false)
+                        || "hook".equalsIgnoreCase(entry.payload.string("source", "")))) {
+                    continue;
+                }
                 String key = keyFor(local);
                 if (key != null) {
                     store.record(key, local);
