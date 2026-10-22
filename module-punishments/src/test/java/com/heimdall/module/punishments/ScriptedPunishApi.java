@@ -108,6 +108,20 @@ final class ScriptedPunishApi implements AutoCloseable {
         return found;
     }
 
+    /**
+     * The last hit whose path ends with {@code suffix} and whose body contains {@code fragment}, or
+     * null. Reports are sent without waiting on each other, so the last to arrive need not be the
+     * last sent.
+     */
+    Hit lastSuffixWithBody(String suffix, String fragment) {
+        Hit found = null;
+        for (int i = 0; i < hits.size(); i++) {
+            Hit hit = hits.get(i);
+            if (hit.path.endsWith(suffix) && hit.body != null && hit.body.contains(fragment)) found = hit;
+        }
+        return found;
+    }
+
     /** The last GET whose path contains {@code fragment}, or null. */
     Hit lastGetContaining(String fragment) {
         Hit found = null;

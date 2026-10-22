@@ -2,6 +2,7 @@ package com.heimdall.module.punishments;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.config.ServerRole;
@@ -70,8 +71,11 @@ class ImportPreviewTest {
             assertTrue(console.wasTold("would be imported"), console.messageText().toString());
             assertTrue(console.wasTold("Nothing was written"), console.messageText().toString());
 
-            waitFor(() -> bot.countSuffix("/punishments/import/report") >= 3);
-            Payload report = Payload.parse(bot.lastSuffix("/punishments/import/report").body);
+            String done = "\"status\":\"done\"";
+            waitFor(() -> bot.lastSuffixWithBody("/punishments/import/report", done) != null);
+            ScriptedPunishApi.Hit finished = bot.lastSuffixWithBody("/punishments/import/report", done);
+            assertNotNull(finished, "the finished report arrived");
+            Payload report = Payload.parse(finished.body);
             assertTrue(report.bool("dryRun", false), report.toJson());
             assertEquals(body.string("runId", ""), report.string("runId", ""),
                     "the batches and the report name the same run");
