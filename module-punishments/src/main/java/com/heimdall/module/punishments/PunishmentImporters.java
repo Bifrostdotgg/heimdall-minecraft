@@ -212,6 +212,17 @@ final class PunishmentImporters {
                                         + "rows already in are skipped."));
                 return;
             }
+            if (dryRun && (counts == null || !counts.bool("dryRun", false))) {
+                // The run started against a bot that previews, and this answer is not a preview's:
+                // the bot was redeployed or rolled back mid-run, or the guild moved instance. Such a
+                // bot ignores the flag and imports, so stop before it is sent any more.
+                logger.warn("punishment import preview stopped at batch " + (batch + 1)
+                        + ": the bot did not answer it as a preview");
+                run.fail("the bot did not answer batch " + (batch + 1) + " of " + run.batches
+                        + " as a preview, so it may have been imported for real. Nothing after it"
+                        + " was sent. Check the bot's version, then preview or import again.");
+                return;
+            }
             run.add(counts);
             run.batchesDone = batch + 1;
             progress.line("Batch " + run.batchesDone + "/" + run.batches + ": " + run.imported

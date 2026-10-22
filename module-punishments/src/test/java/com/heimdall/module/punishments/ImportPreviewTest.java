@@ -31,6 +31,10 @@ class ImportPreviewTest {
     private static final String COUNTS = "{\"success\":true,\"data\":{\"imported\":1,\"skippedBy\":{},"
             + "\"enforced\":{\"ban\":1},\"reconciled\":{\"lifted_to_match\":2}}}";
 
+    /** What a bot that previews answers a preview batch with. */
+    private static final String PREVIEW_COUNTS = COUNTS.replace("\"imported\":1,",
+            "\"imported\":1,\"dryRun\":true,");
+
     /** A server root with one vanilla ban, and the plugin's data folder two levels under it. */
     private Path serverWithOneBan() throws Exception {
         Files.write(root.resolve("banned-players.json"), (
@@ -53,7 +57,7 @@ class ImportPreviewTest {
     @DisplayName("a preview sends every batch with dryRun and its run id, and reports itself as one")
     void previewMarksEveryBatchAndTheReport() throws Exception {
         Path data = serverWithOneBan();
-        try (ScriptedPunishApi bot = new ScriptedPunishApi().importResponds(COUNTS);
+        try (ScriptedPunishApi bot = new ScriptedPunishApi().importResponds(PREVIEW_COUNTS);
                 PunishmentsHarness harness = PunishmentsHarness
                         .withApi(data, ServerRole.STANDALONE, bot.baseUrl())
                         .enableReplace()) {
@@ -81,6 +85,31 @@ class ImportPreviewTest {
                     "the batches and the report name the same run");
             assertEquals(1L, report.child("enforced").longValue("ban", 0L), report.toJson());
             assertEquals(2L, report.child("reconciled").longValue("lifted_to_match", 0L));
+        }
+    }
+
+    @Test
+    @DisplayName("a preview stops at the first batch the bot does not answer as a preview")
+    void previewStopsWhenTheBotStopsPreviewing() throws Exception {
+        Path data = serverWithOneBan();
+        // A bot that negotiated the preview, then came back as an older build mid-run: it takes
+        // the batch as a real import and says nothing about a preview.
+        try (ScriptedPunishApi bot = new ScriptedPunishApi().importResponds(COUNTS);
+                PunishmentsHarness harness = PunishmentsHarness
+                        .withApi(data, ServerRole.STANDALONE, bot.baseUrl())
+                        .enableReplace()) {
+            harness.tunnel.accepting(Capabilities.PUNISHMENTS, Capabilities.PUNISH_PREVIEW);
+            FakeCommandSource console = FakeCommandSource.console();
+
+            harness.module.onStaffCommand(console, "import", Arrays.asList("--dry-run"));
+            waitFor(() -> console.wasTold("Preview failed"));
+
+            assertTrue(console.wasTold("did not answer batch 1 of 1 as a preview"),
+                    console.messageText().toString());
+            assertFalse(console.wasTold("Preview finished"), console.messageText().toString());
+            String failed = "\"status\":\"failed\"";
+            waitFor(() -> bot.lastSuffixWithBody("/punishments/import/report", failed) != null);
+            assertNotNull(bot.lastSuffixWithBody("/punishments/import/report", failed));
         }
     }
 
@@ -126,7 +155,7 @@ class ImportPreviewTest {
     @DisplayName("the bot asking for a preview over the tunnel starts one")
     void tunnelPreview() throws Exception {
         Path data = serverWithOneBan();
-        try (ScriptedPunishApi bot = new ScriptedPunishApi().importResponds(COUNTS);
+        try (ScriptedPunishApi bot = new ScriptedPunishApi().importResponds(PREVIEW_COUNTS);
                 PunishmentsHarness harness = PunishmentsHarness
                         .withApi(data, ServerRole.STANDALONE, bot.baseUrl())
                         .enableReplace()) {
