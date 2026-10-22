@@ -200,6 +200,13 @@ final class ScriptedPunishApi implements AutoCloseable {
             send(exchange, 200, importBody);
             return;
         }
+        // A bot that runs imports takes their reports too. Without this the first report is
+        // refused with a 404, and the plugin stops reporting, as it should for a bot that old.
+        if ("POST".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/import/report")
+                && importBody != null) {
+            send(exchange, 200, "{\"success\":true,\"data\":{}}");
+            return;
+        }
         if ("POST".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/revoke")) {
             send(exchange, revokeStatus, revokeBody);
             return;
