@@ -243,6 +243,18 @@ public final class HeimdallApi {
         return gated(() -> client.importPunishmentRows(rows).thenApply(HeimdallApi::asPayload));
     }
 
+    /** A batch of a run, as a preview when {@code dryRun}. See {@link ApiClient#importPunishmentRows(java.util.List, boolean, String)}. */
+    public CompletableFuture<Payload> importPunishmentRows(final java.util.List<PunishmentImportRow> rows,
+            final boolean dryRun, final String runId) {
+        return gated(() -> client.importPunishmentRows(rows, dryRun, runId)
+                .thenApply(HeimdallApi::asPayload));
+    }
+
+    /** This server showed the player a warn. See {@link ApiClient#markWarnDelivered}. */
+    public CompletableFuture<Payload> markWarnDelivered(final String id) {
+        return gated(() -> client.markWarnDelivered(id).thenApply(HeimdallApi::asPayload));
+    }
+
     /** Where an import run stands, for the dashboard. See {@link ApiClient#reportPunishmentImport}. */
     public CompletableFuture<Payload> reportPunishmentImport(final Payload body) {
         return gated(() -> client.reportPunishmentImport(body).thenApply(HeimdallApi::asPayload));

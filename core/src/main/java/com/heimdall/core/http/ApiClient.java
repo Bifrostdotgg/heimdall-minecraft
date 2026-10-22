@@ -473,6 +473,18 @@ public final class ApiClient {
     }
 
     public CompletableFuture<JsonObject> importPunishmentRows(java.util.List<PunishmentImportRow> rows) {
+        return importPunishmentRows(rows, false, null);
+    }
+
+    /**
+     * {@code POST punishments/import}, as a preview when {@code dryRun} is set: the bot runs the
+     * same matching and writes nothing. {@code runId} names the run every batch belongs to, which
+     * is how a preview's counts across batches come out as the counts a real run would produce. A
+     * bot older than the preview ignores both fields, so only send {@code dryRun} to a bot that
+     * asked for a preview ({@code punish.import} with {@code dryRun}).
+     */
+    public CompletableFuture<JsonObject> importPunishmentRows(java.util.List<PunishmentImportRow> rows,
+            boolean dryRun, String runId) {
         JsonArray array = new JsonArray();
         if (rows != null) {
             for (PunishmentImportRow row : rows) {
@@ -502,7 +514,25 @@ public final class ApiClient {
         }
         JsonObject body = new JsonObject();
         body.add("rows", array);
+        if (dryRun) body.addProperty("dryRun", true);
+        if (Strings.isNotBlank(runId)) body.addProperty("runId", runId);
         return importPunishments(body);
+    }
+
+    /**
+     * {@code POST punishments/{id}/delivered}: this server showed the player that warn. The bot
+     * marks it, and the player's older warns, as delivered, tells the other servers, and leaves them
+     * out of the next sync. Always 200 on a bot that has the route; an older bot answers 404.
+     */
+    public CompletableFuture<JsonObject> markWarnDelivered(String id) {
+        if (Strings.isBlank(id)) throw new IllegalArgumentException("id is required");
+        return async(() -> {
+            ApiSettings current = settings;
+            RawResponse response = requests.execute(current,
+                    HttpCall.post(guildPath(current, "punishments/" + encodePath(id) + "/delivered"),
+                            "{}", current.timeoutMs()));
+            return Envelopes.unwrapObject(response.status(), response.body());
+        });
     }
 
     public CompletableFuture<RawResponse> listPunishments(
