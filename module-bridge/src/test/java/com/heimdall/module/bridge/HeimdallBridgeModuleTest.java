@@ -262,6 +262,18 @@ class HeimdallBridgeModuleTest {
             return this;
         }
 
+        private volatile String provider;
+
+        FakeChannels provider(String value) {
+            this.provider = value;
+            return this;
+        }
+
+        @Override
+        public String provider() {
+            return provider;
+        }
+
         /**
          * Answers members whatever the state says, which the interface forbids. Exists to prove the
          * bridge applies its own ACTIVE gate rather than trusting the integration to.
@@ -1582,6 +1594,42 @@ class HeimdallBridgeModuleTest {
             assertEquals(1, sent.size());
             assertEquals("active", sent.get(0).string("state", ""));
             assertEquals(Arrays.asList("global", "staff"), sent.get(0).strings("channels"));
+        }
+
+        @Test
+        @DisplayName("the chat plugin is named when one is in play, and absent when none is")
+        void providerNamed() {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels =
+                    new FakeChannels().channel("global").channel("staff").provider("zelchat");
+            platform.withChatChannels(channels);
+            enable();
+            module.flush();
+
+            assertEquals("zelchat", inventories().get(0).string("provider", ""));
+
+            tunnel.clearSent();
+            channels.state(ChatChannels.State.NONE);
+            pollOnce();
+
+            assertEquals("none", inventories().get(0).string("state", ""));
+            assertFalse(inventories().get(0).has("provider"),
+                    "'none' has no plugin to name, whatever the integration says");
+        }
+
+        @Test
+        @DisplayName("a different chat plugin alone is a change worth reporting")
+        void providerChangeResends() {
+            setUp(ServerRole.STANDALONE, null);
+            FakeChannels channels = new FakeChannels().channel("staff").provider("chatcontrol");
+            platform.withChatChannels(channels);
+            enableAndSettle();
+
+            channels.provider("zelchat");
+            pollOnce();
+
+            assertEquals(1, inventories().size());
+            assertEquals("zelchat", inventories().get(0).string("provider", ""));
         }
 
         @Test

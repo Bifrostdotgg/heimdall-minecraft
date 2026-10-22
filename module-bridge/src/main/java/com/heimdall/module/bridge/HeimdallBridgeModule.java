@@ -36,6 +36,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -608,6 +609,9 @@ public final class HeimdallBridgeModule implements HeimdallModule {
 
     /** The names that went with {@link #reportedState}. Guarded by {@link #inventoryLock}. */
     private List<String> reportedNames = Collections.emptyList();
+
+    /** The chat plugin that went with {@link #reportedState}. Guarded by {@link #inventoryLock}. */
+    private String reportedProvider;
 
     /** Flushes since the last inventory poll. Only {@code heimdall-sched} touches it. */
     private int flushesSinceInventoryPoll;
@@ -2059,16 +2063,20 @@ public final class HeimdallBridgeModule implements HeimdallModule {
                 state = ChatChannels.State.BROKEN;
             }
         }
+        // Which plugin, only while one is in play: "none" has no provider to name.
+        String provider = state == ChatChannels.State.NONE ? null : providerOf(channels);
 
         synchronized (inventoryLock) {
             if (forgetRequested.getAndSet(false)) {
                 reportedState = null;
                 reportedNames = Collections.emptyList();
+                reportedProvider = null;
             }
             if (stamp < sentStamp) {
                 return;
             }
-            if (!force && state == reportedState && names.equals(reportedNames)) {
+            if (!force && state == reportedState && names.equals(reportedNames)
+                    && Objects.equals(provider, reportedProvider)) {
                 // A newer read confirmed what the bot already has. Recording its stamp is what
                 // stops an older read still in flight (one that saw a state since reverted) from
                 // being sent after it: X, then a slow read of Y, then X again must leave the bot on X.
@@ -2078,14 +2086,21 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             if (!bus.isConnected()) {
                 reportedState = null;
                 reportedNames = Collections.emptyList();
+                reportedProvider = null;
                 return;
             }
-            bus.send(FRAME_CHANNELS, Payload.builder()
+            Payload.Builder frame = Payload.builder()
                     .put("state", state.wireName())
-                    .putStrings("channels", names)
-                    .build());
+                    .putStrings("channels", names);
+            if (provider != null) {
+                // Optional on the wire: a bot that predates it ignores it, and reads its absence as
+                // ChatControl, the only plugin earlier builds spoke for.
+                frame.put("provider", provider);
+            }
+            bus.send(FRAME_CHANNELS, frame.build());
             reportedState = state;
             reportedNames = names;
+            reportedProvider = provider;
             sentStamp = stamp;
         }
         final ChatChannels.State sent = state;
@@ -2116,6 +2131,15 @@ public final class HeimdallBridgeModule implements HeimdallModule {
             return channels == null ? BROKEN_CHANNELS : channels;
         } catch (RuntimeException failed) {
             return BROKEN_CHANNELS;
+        }
+    }
+
+    /** {@link ChatChannels#provider()}, with a throw treated as "cannot say". */
+    private static String providerOf(ChatChannels channels) {
+        try {
+            return channels.provider();
+        } catch (RuntimeException failed) {
+            return null;
         }
     }
 
