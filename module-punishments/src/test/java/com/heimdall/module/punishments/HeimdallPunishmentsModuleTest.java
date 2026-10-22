@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
@@ -294,6 +295,28 @@ class HeimdallPunishmentsModuleTest {
             harness.module.replayPendingWrites();
             assertNull(harness.module.mirrorForTest().get("ban:" + STEVE),
                     "unacked revoke must win over a stale snapshot");
+        }
+    }
+
+    @Test
+    @DisplayName("a queued issue replayed after a stale pull keeps its stand-in id")
+    void replayedIssueKeepsItsStandInId() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE).enableReplace()) {
+            harness.platform.join(new FakePlayer(STEVE, "Steve"));
+            harness.module.onStaffCommand(FakeCommandSource.console(), "ban", Arrays.asList("Steve", "griefing"));
+            List<PunishmentOutbox.Entry> queued = harness.module.outboxForTest().snapshot();
+            assertEquals(1, queued.size());
+
+            // A snapshot from before the bot heard of it drops the row, and the replay puts it
+            // back from the queued body, which carries no id of its own.
+            harness.module.mirrorForTest().reconcile(new LinkedHashMap<String, ActivePunishment>());
+            assertNull(harness.module.mirrorForTest().get("ban:" + STEVE));
+            harness.module.replayPendingWrites();
+
+            ActivePunishment replayed = harness.module.mirrorForTest().get("ban:" + STEVE);
+            assertNotNull(replayed);
+            assertEquals(HeimdallPunishmentsModule.LOCAL_ID_PREFIX + queued.get(0).opId, replayed.id,
+                    "the upload's answer renames only its own stand-in");
         }
     }
 

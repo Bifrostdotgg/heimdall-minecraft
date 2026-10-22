@@ -2019,13 +2019,13 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String key = keyFor(local);
         if (key == null) return;
         ActivePunishment existing = mirror.get(key);
-        // Only the row this upload was standing in for: its local id, or none at all (a replay
-        // after a restart rebuilds it without one). Anything else at the key arrived from the
-        // bot since, a newer punishment with its own id, and renaming it would have its next
-        // acknowledgement name this row instead.
+        // Only the row this upload was standing in for: its local id, which a replay after a
+        // restart gives it too. Anything else at the key arrived from the bot since, a newer
+        // punishment with its own id, and renaming it would have its next acknowledgement name
+        // this row instead.
         String opId = request.string("opId", "");
-        boolean standIn = existing != null && (existing.id == null || existing.id.isEmpty()
-                || (!opId.isEmpty() && existing.id.equals(LOCAL_ID_PREFIX + opId)));
+        boolean standIn = existing != null && existing.id != null && !opId.isEmpty()
+                && existing.id.equals(LOCAL_ID_PREFIX + opId);
         if (standIn) {
             existing.id = id;
             mirror.record(key, existing);
@@ -2470,6 +2470,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         || "hook".equalsIgnoreCase(entry.payload.string("source", "")))) {
                     continue;
                 }
+                // The queued body has no id of its own until the bot answers. Give it the same
+                // stand-in a fresh issue gets, so its upload's answer renames it and a warn shown
+                // before then is acknowledged against this queued write, not against "".
+                if (local.id == null || local.id.isEmpty()) local.id = LOCAL_ID_PREFIX + entry.opId;
                 String key = keyFor(local);
                 if (key != null) {
                     store.record(key, local);
