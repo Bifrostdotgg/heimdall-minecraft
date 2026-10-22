@@ -63,6 +63,13 @@ import org.bukkit.plugin.EventExecutor;
  *       logged once rather than per line.
  * </ul>
  *
+ * <h2>ZelChat</h2>
+ *
+ * <p>Everything in this listener that says ChatControl holds for ZelChat as well, through the same
+ * {@link ChannelHook}, with one difference: while its hook is live, ZelChat's own post-dispatch
+ * event relays every line, public chat included, tagged {@code global} or {@code staff}, so this
+ * listener relays none ({@link ZelChatChannels}). Departure D92.
+ *
  * <h2>Where ChatControl finishes: Spigot and Paper differ</h2>
  *
  * <p>On Spigot ChatControl works in this same legacy event, so the untagged relay runs at this
@@ -123,7 +130,7 @@ final class BukkitChatListener implements Listener {
     private final HeimdallLogger logger;
     private final ChatPipeline pipeline;
     private final BukkitMessenger messenger;
-    private final ChatControlChannels chatControl;
+    private final ChannelHook channelPlugin;
     private final ModernChat modern;
     private final IntSupplier onlineCount;
 
@@ -161,13 +168,13 @@ final class BukkitChatListener implements Listener {
             HeimdallLogger logger,
             ChatPipeline pipeline,
             BukkitMessenger messenger,
-            ChatControlChannels chatControl,
+            ChannelHook channelPlugin,
             ModernChat modern,
             IntSupplier onlineCount) {
         this.logger = logger;
         this.pipeline = pipeline;
         this.messenger = messenger;
-        this.chatControl = chatControl;
+        this.channelPlugin = channelPlugin;
         this.modern = modern;
         this.onlineCount = onlineCount;
         this.modernState = modern == null
@@ -296,20 +303,21 @@ final class BukkitChatListener implements Listener {
             return;
         }
         try {
-            ChatControlChannels.UntaggedRelay decision = chatControl.untaggedRelay(sender);
-            if (decision == ChatControlChannels.UntaggedRelay.BROKEN) {
+            ChannelHook.UntaggedRelay decision = channelPlugin.untaggedRelay(sender);
+            if (decision == ChannelHook.UntaggedRelay.BROKEN) {
                 if (reportedBroken.compareAndSet(false, true)) {
                     // Once per boot. The integration logged the cause when it broke; this line says
                     // what that means for chat, without repeating it for every line anyone types.
-                    logger.severe("ChatControl is installed but its channel integration is not "
-                            + "working (" + chatControl.brokenReason() + "); in-game chat is not "
-                            + "being relayed to Discord on this server");
+                    logger.severe(channelPlugin.pluginName() + " is installed but its channel "
+                            + "integration is not working (" + channelPlugin.brokenReason()
+                            + "); in-game chat is not being relayed to Discord on this server");
                 }
                 return;
             }
-            if (decision != ChatControlChannels.UntaggedRelay.RELAY) {
-                // SKIP: ChatControl routes this player's line into a channel, and its post event
-                // relays it tagged. TRANSIENT: ChatControl threw answering for this line; drop it.
+            if (decision != ChannelHook.UntaggedRelay.RELAY) {
+                // SKIP: the chat plugin routes this player's line into a channel, and its post
+                // event relays it tagged. TRANSIENT: it threw (or is still starting) answering for
+                // this line; drop it.
                 return;
             }
             ChatMessage message =
@@ -446,7 +454,7 @@ final class BukkitChatListener implements Listener {
 
     /** Whether relay waits for a later handler: true exactly when ChatControl is installed. */
     private boolean deferRelay() {
-        return chatControl != null && chatControl.installed();
+        return channelPlugin != null && channelPlugin.installed();
     }
 
     /** One line in flight on one thread. */

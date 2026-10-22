@@ -8,9 +8,9 @@ import java.util.Optional;
 /**
  * A chat plugin's channels, as platform-free code is allowed to see them.
  *
- * <p>Today the only implementation that answers anything is ChatControl's, on the Bukkit family,
- * reached reflectively by {@code :platform-bukkit}. Everywhere else this is {@link #NONE}, which is
- * also what a Bukkit server without ChatControl gets. Departure D85.
+ * <p>Today the implementations that answer anything are ChatControl's and ZelChat's, on the Bukkit
+ * family, reached reflectively by {@code :platform-bukkit}. Everywhere else this is {@link #NONE},
+ * which is also what a Bukkit server without either gets. Departures D85 and D92.
  *
  * <h2>Why a relay needs to know</h2>
  *
@@ -19,7 +19,7 @@ import java.util.Optional;
  * Discord channel, and the inbound direction has the mirror problem: a Discord message meant for one
  * in-game channel must not be shown to everybody online. Both halves need the same three facts, and
  * this interface is those three facts and nothing else: whether channels are in play at all, what
- * they are called, and who is in one.
+ * they are called, and who is in one. {@link #provider()} only labels which plugin answered.
  *
  * <h2>Three states, because "broken" is not "none"</h2>
  *
@@ -87,6 +87,16 @@ public interface ChatChannels {
      *     channel" stay two different answers
      */
     Optional<Collection<PlayerHandle>> members(String channel);
+
+    /**
+     * Which chat plugin is answering, as the {@code bridge.channels} frame spells it
+     * ({@code chatcontrol}, {@code zelchat}). A wire contract. {@code null} when no plugin is, or
+     * when it cannot be said which one is; the bot reads an absent provider as ChatControl's, since
+     * builds before this one only ever spoke for ChatControl.
+     */
+    default String provider() {
+        return null;
+    }
 
     /** No channel plugin: one public room. What every platform without an integration returns. */
     ChatChannels NONE = new ChatChannels() {
