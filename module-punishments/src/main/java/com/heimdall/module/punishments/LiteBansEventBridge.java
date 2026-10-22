@@ -1,5 +1,6 @@
 package com.heimdall.module.punishments;
 
+import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.module.ModuleContext;
@@ -17,6 +18,12 @@ import litebans.api.Events;
  *
  * <p>Does not register {@code /ban}. Posts hashed issue/revoke rows to the bot. {@code --sender=}
  * is LiteBans' own flag and arrives here as {@link Entry#getExecutorName()}.
+ *
+ * <p><strong>Through the module's outbox, never straight to the bot.</strong> These used to be
+ * fire-and-forget calls, so a ban or a lift made in LiteBans while the bot was unreachable never
+ * reached Heimdall at all. A missed lift is the dangerous one: the Heimdall row stays active, and
+ * the day the guild moves to replace mode Heimdall bans the player again. The outbox is durable on
+ * disk and retried, which is what the plugin's own commands already relied on.
  */
 final class LiteBansEventBridge {
 
@@ -24,15 +31,19 @@ final class LiteBansEventBridge {
     }
 
     static Registration install(final ModuleContext context) {
+        return install(context, HeimdallPunishmentsModule.INSTANCE);
+    }
+
+    static Registration install(final ModuleContext context, final HeimdallPunishmentsModule module) {
         final Events.Listener listener = new Events.Listener() {
             @Override
             public void entryAdded(Entry entry) {
-                postIssue(context, entry);
+                postIssue(context, module, entry);
             }
 
             @Override
             public void entryRemoved(Entry entry) {
-                postRevoke(context, entry);
+                postRevoke(context, module, entry);
             }
         };
         Events.get().register(listener);
@@ -48,12 +59,32 @@ final class LiteBansEventBridge {
         });
     }
 
-    private static void postIssue(ModuleContext context, Entry entry) {
-        if (entry == null || !context.api().isUsable()) return;
+    private static void postIssue(ModuleContext context, HeimdallPunishmentsModule module, Entry entry) {
+        if (entry == null || !configured(context)) return;
         PunishmentSettings settings = PunishmentSettings.from(context.config());
         Payload body = issueBody(entry, settings.ipSalt, context.logger());
         if (body == null) return;
-        context.api().issuePunishment(body);
+        send(context, module, "issue", body);
+    }
+
+    /**
+     * A server with no bot configured has nowhere to send these, ever, so nothing is queued for
+     * one. A bot still being discovered, or unreachable, is exactly what the queue is for.
+     */
+    private static boolean configured(ModuleContext context) {
+        return context.api().availability() != HeimdallApi.Availability.NOT_CONFIGURED;
+    }
+
+    /** Queues one write in the module's outbox; straight to the bot only if the module has gone. */
+    private static void send(ModuleContext context, HeimdallPunishmentsModule module, String op,
+            Payload body) {
+        if (module != null && module.queueHookWrite(op, body)) return;
+        if (!context.api().isUsable()) return;
+        if ("issue".equals(op)) {
+            context.api().issuePunishment(body);
+        } else {
+            context.api().revokePunishment(body);
+        }
     }
 
     /**
@@ -134,12 +165,12 @@ final class LiteBansEventBridge {
         HeimdallPunishmentsModule.putDuration(body, seconds);
     }
 
-    private static void postRevoke(ModuleContext context, Entry entry) {
-        if (entry == null || !context.api().isUsable()) return;
+    private static void postRevoke(ModuleContext context, HeimdallPunishmentsModule module, Entry entry) {
+        if (entry == null || !configured(context)) return;
         PunishmentSettings settings = PunishmentSettings.from(context.config());
         Payload body = revokeBody(entry, settings.ipSalt);
         if (body == null) return;
-        context.api().revokePunishment(body);
+        send(context, module, "revoke", body);
     }
 
     /**

@@ -13,6 +13,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -77,8 +78,13 @@ final class LiteBansRevokeLift {
     /** How long a lift waits for its own echo. LiteBans removes and fires within a tick or two. */
     static final long ECHO_WINDOW_MS = 30_000L;
 
-    /** The id {@code LiteBansImporter} gives a row: the LiteBans table and its id. */
-    private static final Pattern LITEBANS_IMPORT_ID = Pattern.compile("^(ban|ipban|mute|warn|kick):\\d+$");
+    /**
+     * The id {@code LiteBansImporter} gives a row: {@code <table>:<id>}, or
+     * {@code <table>:<id>@<serverId>} when another server's LiteBans database had already used that
+     * id for a different punishment and the bot keyed this one by the server it came from.
+     */
+    private static final Pattern LITEBANS_IMPORT_ID =
+            Pattern.compile("^(ban|ipban|mute|warn|kick):\\d+(?:@([^@\\s]+))?$");
 
     /** Lifts dispatched and not yet echoed, by {@link #echoKey}, with when they were dispatched. */
     private static final Map<String, Long> AWAITING_ECHO = new ConcurrentHashMap<String, Long>();
@@ -143,7 +149,17 @@ final class LiteBansRevokeLift {
      */
     static Request requestFor(String type, String targetUuid, String revokeCause, String source,
             String importProviderId) {
-        if (!heldByLiteBans(source, importProviderId)) return null;
+        return requestFor(type, targetUuid, revokeCause, source, importProviderId, null);
+    }
+
+    /**
+     * @param ownServerId this server's id, so a row keyed to another server is left to that
+     *     server's LiteBans: the frame reaches every server, and only the one whose database the
+     *     row came from holds it. Null or empty when unknown, which lifts it here as before.
+     */
+    static Request requestFor(String type, String targetUuid, String revokeCause, String source,
+            String importProviderId, String ownServerId) {
+        if (!heldByLiteBans(source, importProviderId, ownServerId)) return null;
         String cause = revokeCause == null ? "" : revokeCause.trim().toLowerCase(Locale.ROOT);
         if (!"manual".equals(cause)) return null;
         Family family = Family.of(type);
@@ -159,9 +175,17 @@ final class LiteBansRevokeLift {
      * only {@code LiteBansImporter} writes a bare {@code <table>:<id>}.
      */
     static boolean heldByLiteBans(String source, String importProviderId) {
+        return heldByLiteBans(source, importProviderId, null);
+    }
+
+    static boolean heldByLiteBans(String source, String importProviderId, String ownServerId) {
         if ("hook".equals(source) || "command".equals(source)) return true;
-        return "import".equals(source) && importProviderId != null
-                && LITEBANS_IMPORT_ID.matcher(importProviderId).matches();
+        if (!"import".equals(source) || importProviderId == null) return false;
+        Matcher id = LITEBANS_IMPORT_ID.matcher(importProviderId);
+        if (!id.matches()) return false;
+        String keyedTo = id.group(2);
+        return keyedTo == null || ownServerId == null || ownServerId.isEmpty()
+                || keyedTo.equals(ownServerId);
     }
 
     /**

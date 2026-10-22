@@ -92,6 +92,25 @@ class LiteBansRevokeLiftTest {
     }
 
     @Test
+    @DisplayName("a row keyed to a server is lifted by that server's LiteBans, and no other's")
+    void serverKeyedRowsAreLiftedOnTheirOwnServer() {
+        assertNotNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "ban:42@survival", "survival"));
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "ban:42@survival", "creative"),
+                "another server's LiteBans database holds it; this one may hold a different ban");
+        assertNotNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "ban:42@survival", null),
+                "a server that does not know its own id lifts it, as it did every import row");
+        assertNotNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "ban:42", "creative"), "an id keyed to no server is lifted wherever LiteBans is");
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "ban:42@", "survival"));
+        assertNull(LiteBansRevokeLift.requestFor("ban", UUID_STRING, "manual", "import",
+                "ban:42@a@b", "a@b"));
+    }
+
+    @Test
     @DisplayName("an expiry or an override never lifts anything in LiteBans")
     void bookkeepingRevokesLiftNothing() {
         assertNull(req("ban", UUID_STRING, "expiry"),

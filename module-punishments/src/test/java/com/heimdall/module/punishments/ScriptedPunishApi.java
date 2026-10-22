@@ -52,6 +52,8 @@ final class ScriptedPunishApi implements AutoCloseable {
     private volatile String syncEtag = "\"etag-1\"";
     private volatile String playerBody = "{\"success\":true,\"data\":{\"punishments\":[]}}";
     private volatile String listBody = "{\"success\":true,\"data\":{\"punishments\":[]}}";
+    /** What {@code POST punishments/import} answers: one batch's counts. 404 until set. */
+    private volatile String importBody;
 
     ScriptedPunishApi() {
         try {
@@ -88,6 +90,12 @@ final class ScriptedPunishApi implements AutoCloseable {
     /** What {@code GET punishments} answers - the rows {@code /staffhistory} and /banlist read. */
     ScriptedPunishApi listResponds(String body) {
         this.listBody = body;
+        return this;
+    }
+
+    /** What {@code POST punishments/import} answers, so an import run gets past its first batch. */
+    ScriptedPunishApi importResponds(String body) {
+        this.importBody = body;
         return this;
     }
 
@@ -171,6 +179,11 @@ final class ScriptedPunishApi implements AutoCloseable {
         }
         if ("GET".equals(exchange.getRequestMethod()) && path.endsWith("/punishments")) {
             send(exchange, 200, listBody);
+            return;
+        }
+        if ("POST".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/import")
+                && importBody != null) {
+            send(exchange, 200, importBody);
             return;
         }
         if ("POST".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/revoke")) {

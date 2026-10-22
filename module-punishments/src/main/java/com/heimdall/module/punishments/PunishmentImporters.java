@@ -37,6 +37,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Runs on the IO executor, never on the tunnel or the main thread (it reads whole tables),
  * and never twice at once on one server.
+ *
+ * <h2>Previews</h2>
+ *
+ * <p>A preview reads and sends exactly what a real run does, with {@code dryRun} on every batch,
+ * and the bot runs the same matching and writes nothing. Nothing is written here either: address
+ * sightings from LiteBans' history are counted, not merged into the local IP store. Every batch
+ * carries the run id, which is how the bot keeps a preview's counts across batches equal to the
+ * counts the real run will produce.
  */
 final class PunishmentImporters {
 
@@ -63,6 +71,15 @@ final class PunishmentImporters {
      * @return {@code false} when a run is already in progress on this server
      */
     static boolean start(final ModuleContext context, final LastIpStore ips, final Progress progress) {
+        return start(context, ips, progress, false);
+    }
+
+    /**
+     * Starts a run, or a preview of one when {@code dryRun}. Only start a preview for a bot that
+     * accepted {@code punishpreview@1}: an older one ignores the flag and imports for real.
+     */
+    static boolean start(final ModuleContext context, final LastIpStore ips, final Progress progress,
+            final boolean dryRun) {
         if (!RUNNING.compareAndSet(false, true)) {
             return false;
         }
@@ -71,7 +88,7 @@ final class PunishmentImporters {
                 @Override
                 public void run() {
                     try {
-                        importAll(context, ips, progress);
+                        importAll(context, ips, progress, dryRun);
                     } catch (RuntimeException e) {
                         context.logger().error("punishment import failed", e);
                         progress.line("Import failed: " + e.getClass().getSimpleName()
@@ -89,8 +106,12 @@ final class PunishmentImporters {
     }
 
     static void importAll(ModuleContext context, LastIpStore ips, Progress progress) {
+        importAll(context, ips, progress, false);
+    }
+
+    static void importAll(ModuleContext context, LastIpStore ips, Progress progress, boolean dryRun) {
         HeimdallLogger logger = context.logger();
-        Run run = new Run(context, progress);
+        Run run = new Run(context, progress, dryRun);
         String salt = PunishmentSettings.from(context.config()).ipSalt;
         if (salt == null || salt.isEmpty()) {
             run.fail("the guild's IP salt has not reached this server yet. Wait for it to connect, "
@@ -102,11 +123,14 @@ final class PunishmentImporters {
         LiteBansImporter.SightingSink sink = null;
         final int[] sightings = new int[1];
         if (ips != null) {
-            final LastIpStore store = ips;
+            // A preview counts the sightings a real run would keep, and keeps none.
+            final LastIpStore store = dryRun ? null : ips;
             sink = new LiteBansImporter.SightingSink() {
                 @Override
                 public void accept(LiteBansImporter.Sighting sighting) {
-                    store.mergeHistorical(sighting.uuid, sighting.name, sighting.ip, sighting.seenAt);
+                    if (store != null) {
+                        store.mergeHistorical(sighting.uuid, sighting.name, sighting.ip, sighting.seenAt);
+                    }
                     sightings[0]++;
                 }
             };
@@ -118,7 +142,7 @@ final class PunishmentImporters {
                 heartbeat.heartbeat();
             }
         });
-        if (ips != null && sightings[0] > 0) {
+        if (ips != null && !dryRun && sightings[0] > 0) {
             ips.flush();
         }
         List<PunishmentImportRow> rows = new ArrayList<PunishmentImportRow>(liteBans.rows);
@@ -148,7 +172,8 @@ final class PunishmentImporters {
         if (liteBans.installed) {
             progress.line(liteBans.historyRead
                     ? "Read " + liteBans.historyRows + " LiteBans history rows"
-                            + (ips == null ? "" : ", " + sightings[0] + " address sightings kept on this server")
+                            + (ips == null ? "" : ", " + sightings[0] + " address sightings "
+                                    + (dryRun ? "a real run would keep on this server" : "kept on this server"))
                             + "."
                     : "LiteBans history could not be read; names will be filled in by Heimdall instead.");
         }
@@ -167,7 +192,9 @@ final class PunishmentImporters {
                     batch * BATCH_SIZE, Math.min(rows.size(), (batch + 1) * BATCH_SIZE));
             Payload counts;
             try {
-                counts = context.api().importPunishmentRows(slice)
+                counts = (dryRun
+                        ? context.api().importPunishmentRows(slice, true, run.id)
+                        : context.api().importPunishmentRows(slice))
                         .get(BATCH_WAIT_SECONDS, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -179,17 +206,38 @@ final class PunishmentImporters {
                 run.fail("batch " + (batch + 1) + " of " + run.batches + " failed ("
                         + cause.getClass().getSimpleName()
                         + (cause.getMessage() == null ? "" : ": " + cause.getMessage())
-                        + "). Batches before it are in; run the import again to carry on, "
-                        + "rows already in are skipped.");
+                        + (dryRun
+                                ? "). Nothing was written; run the preview again."
+                                : "). Batches before it are in; run the import again to carry on, "
+                                        + "rows already in are skipped."));
                 return;
             }
             run.add(counts);
             run.batchesDone = batch + 1;
             progress.line("Batch " + run.batchesDone + "/" + run.batches + ": " + run.imported
-                    + " imported so far, " + run.skipped() + " skipped.");
+                    + (dryRun ? " would be imported so far, " : " imported so far, ")
+                    + run.skipped() + (dryRun ? " would be skipped." : " skipped."));
             run.report("importing");
         }
         run.finish(null);
+    }
+
+    private static String describeCounts(Map<String, Long> counts) {
+        StringBuilder out = new StringBuilder();
+        for (Map.Entry<String, Long> entry : counts.entrySet()) {
+            if (entry.getValue().longValue() == 0L) continue;
+            if (out.length() > 0) out.append(", ");
+            out.append(entry.getKey()).append(' ').append(entry.getValue());
+        }
+        return out.length() == 0 ? "none" : out.toString();
+    }
+
+    private static Payload longs(Map<String, Long> counts) {
+        Payload.Builder out = Payload.builder();
+        for (Map.Entry<String, Long> entry : counts.entrySet()) {
+            out.put(entry.getKey(), entry.getValue().longValue());
+        }
+        return out.build();
     }
 
     /** Oldest first; undated rows last, because the bot dates them at arrival. Stable, so ties keep source order. */
@@ -247,6 +295,12 @@ final class PunishmentImporters {
         final long startedAt = System.currentTimeMillis();
         final Map<String, Integer> sources = new LinkedHashMap<String, Integer>();
         final Map<String, Long> skippedBy = new LinkedHashMap<String, Long>();
+        /** Bans, IP bans and mutes brought in that are still in force, by type. */
+        final Map<String, Long> enforced = new LinkedHashMap<String, Long>();
+        /** Where LiteBans and Heimdall disagreed: {@code lifted_to_match}, {@code heimdall_lifted}. */
+        final Map<String, Long> reconciled = new LinkedHashMap<String, Long>();
+        /** A preview: nothing is written, here or by the bot. */
+        final boolean dryRun;
         int found;
         int unusable;
         int serverScoped;
@@ -259,9 +313,10 @@ final class PunishmentImporters {
         volatile boolean reportsUnsupported;
         private long lastReportAt;
 
-        Run(ModuleContext context, Progress progress) {
+        Run(ModuleContext context, Progress progress, boolean dryRun) {
             this.context = context;
             this.progress = progress;
+            this.dryRun = dryRun;
         }
 
         long skipped() {
@@ -273,28 +328,45 @@ final class PunishmentImporters {
         void add(Payload counts) {
             if (counts == null) return;
             imported += counts.longValue("imported", 0L);
-            Payload by = counts.child("skippedBy");
+            addAll(skippedBy, counts.child("skippedBy"));
+            addAll(enforced, counts.child("enforced"));
+            addAll(reconciled, counts.child("reconciled"));
+        }
+
+        private static void addAll(Map<String, Long> into, Payload by) {
             if (by == null) return;
-            for (String reason : by.keys()) {
-                Long previous = skippedBy.get(reason);
-                skippedBy.put(reason, Long.valueOf((previous == null ? 0L : previous.longValue())
-                        + by.longValue(reason, 0L)));
+            for (String key : by.keys()) {
+                Long previous = into.get(key);
+                into.put(key, Long.valueOf((previous == null ? 0L : previous.longValue())
+                        + by.longValue(key, 0L)));
             }
         }
 
         void finish(String note) {
-            StringBuilder line = new StringBuilder("Import finished: ")
-                    .append(imported).append(" imported");
+            StringBuilder line = new StringBuilder(dryRun ? "Preview finished: " : "Import finished: ")
+                    .append(imported).append(dryRun ? " would be imported" : " imported");
             for (Map.Entry<String, Long> reason : skippedBy.entrySet()) {
                 line.append(", ").append(reason.getValue()).append(' ').append(reason.getKey());
             }
             if (note != null) line.append(" (").append(note).append(')');
             progress.line(line.append('.').toString());
+            if (!enforced.isEmpty()) {
+                progress.line((dryRun ? "Would bring in " : "Brought in ") + describeCounts(enforced)
+                        + " still in force, which Heimdall enforces once it replaces LiteBans.");
+            }
+            if (!reconciled.isEmpty()) {
+                progress.line((dryRun ? "Would reconcile: " : "Reconciled: ") + describeCounts(reconciled)
+                        + " (lifted_to_match: lifted in LiteBans, so lifted in Heimdall; "
+                        + "heimdall_lifted: lifted in Heimdall and kept lifted).");
+            }
+            if (dryRun) {
+                progress.line("Nothing was written. Run the import without --dry-run to bring it in.");
+            }
             report("done");
         }
 
         void fail(String why) {
-            progress.line("Import failed: " + why);
+            progress.line((dryRun ? "Preview failed: " : "Import failed: ") + why);
             report("failed", why);
         }
 
@@ -330,7 +402,10 @@ final class PunishmentImporters {
                     .put("batches", batches)
                     .put("batchesDone", batchesDone)
                     .put("imported", imported)
-                    .put("skippedBy", counts.build());
+                    .put("skippedBy", counts.build())
+                    .put("enforced", longs(enforced))
+                    .put("reconciled", longs(reconciled));
+            if (dryRun) body.put("dryRun", true);
             if (historyNames >= 0) body.put("historyRows", historyNames);
             if (ipSightings >= 0) body.put("ipSightings", ipSightings);
             if ("done".equals(status) || "failed".equals(status)) {

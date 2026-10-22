@@ -87,6 +87,31 @@ final class PunishmentOutbox {
         }
     }
 
+    /**
+     * Marks a queued warn issue as already shown to its player, so it uploads with
+     * {@code delivered} and the bot never has it shown again. Returns whether an entry was found:
+     * not finding one means the issue has already gone up, which costs at most one more showing.
+     */
+    synchronized boolean markIssueDelivered(String opId) {
+        if (opId == null || opId.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < entries.size(); i++) {
+            Entry entry = entries.get(i);
+            if (!opId.equals(entry.opId) || !"issue".equals(entry.op)) {
+                continue;
+            }
+            if (entry.payload.bool("delivered", false)) {
+                return true;
+            }
+            entries.set(i, new Entry(entry.opId, entry.issuedAt, entry.serverId, entry.op,
+                    entry.payload.toBuilder().put("delivered", true).build()));
+            save();
+            return true;
+        }
+        return false;
+    }
+
     synchronized List<Entry> snapshot() {
         List<Entry> copy = new ArrayList<Entry>(entries);
         Collections.sort(copy, ORDER);

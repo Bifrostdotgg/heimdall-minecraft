@@ -562,12 +562,13 @@ class HeimdallPunishmentsModuleTest {
             harness.module.onStaffCommand(moderator, "warn", Arrays.asList("Steve", "spamming"));
 
             assertFalse(moderator.wasTold("no length"), moderator.messageText().toString());
-            ActivePunishment warn = harness.module.mirrorForTest()
-                    .get("warn:" + FakePlayer.named("Steve").uuid());
-            assertNotNull(warn, "the warn was issued");
-            assertEquals("spamming", warn.reason);
-            assertNull(warn.durationSeconds);
-            assertNull(warn.expiresAt);
+            // Steve is online here, so the warn is shown now and uploaded as delivered rather
+            // than kept for his next join: what was issued is the queued body.
+            Payload warn = queuedBody(harness);
+            assertEquals("warn", warn.string("type", ""));
+            assertEquals("spamming", warn.string("reason", ""));
+            assertFalse(warn.has("durationSeconds"), warn.toJson());
+            assertFalse(warn.has("durationMinutes"), warn.toJson());
         }
     }
 
@@ -585,8 +586,7 @@ class HeimdallPunishmentsModuleTest {
             assertFalse(moderator.wasTold("no length"),
                     "the parser only takes a WHOLE duration token, so this one is reason text and "
                             + "the refusal must not fire on it: " + moderator.messageText());
-            assertEquals("1day-old account", harness.module.mirrorForTest()
-                    .get("warn:" + FakePlayer.named("Steve").uuid()).reason);
+            assertEquals("1day-old account", queuedBody(harness).string("reason", ""));
         }
     }
 
