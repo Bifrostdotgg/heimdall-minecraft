@@ -4,6 +4,7 @@ import com.heimdall.core.link.LinkCodePrompt;
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.text.Msg;
 import com.heimdall.platform.bukkit.adapter.LinkDialogPresenter;
+import com.heimdall.platform.common.ServerAdventure;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -51,9 +52,6 @@ public final class PaperLinkDialogs implements LinkDialogPresenter {
 
     /** The first client protocol with a dialog screen: Minecraft 1.21.6. */
     static final int DIALOG_PROTOCOL = 771;
-
-    /** Fragments, joined at runtime; see {@code VelocityText} for why nothing here may be a literal. */
-    private static final String[] ADVENTURE = {"net", "kyori", "adventure"};
 
     private static final String DIALOG = "io.papermc.paper.dialog.Dialog";
     private static final String REGISTRY_BUILDER_FACTORY =
@@ -289,20 +287,6 @@ public final class PaperLinkDialogs implements LinkDialogPresenter {
         return cause;
     }
 
-    private static String adventure(String... rest) {
-        StringBuilder name = new StringBuilder();
-        for (String part : ADVENTURE) {
-            name.append(part).append('.');
-        }
-        for (int i = 0; i < rest.length; i++) {
-            if (i > 0) {
-                name.append('.');
-            }
-            name.append(rest[i]);
-        }
-        return name.toString();
-    }
-
     /** Every lookup, resolved in one place so a missing one fails the whole binding at enable. */
     static final class Lookups {
 
@@ -333,19 +317,19 @@ public final class PaperLinkDialogs implements LinkDialogPresenter {
             // Probed first, so a server without dialogs stops here with one cheap ClassNotFound.
             Class<?> dialog = type(DIALOG);
 
-            Class<?> component = type(adventure("text", "Component"));
-            Class<?> legacy = type(
-                    adventure("text", "serializer", "legacy", "LegacyComponentSerializer"));
+            Class<?> component = type(ServerAdventure.name("text", "Component"));
+            Class<?> legacy = type(ServerAdventure.name(
+                    "text", "serializer", "legacy", "LegacyComponentSerializer"));
             found.legacySerializer = legacy.getMethod("legacySection").invoke(null);
             found.deserialize = legacy.getMethod("deserialize", String.class);
-            Class<?> clickEvent = type(adventure("text", "event", "ClickEvent"));
+            Class<?> clickEvent = type(ServerAdventure.name("text", "event", "ClickEvent"));
             try {
                 found.copyToClipboard = clickEvent.getMethod("copyToClipboard", String.class);
             } catch (NoSuchMethodException noCopy) {
                 found.copyToClipboard = null;
             }
-            Class<?> dialogLike = type(adventure("dialog", "DialogLike"));
-            found.showDialog = type(adventure("audience", "Audience"))
+            Class<?> dialogLike = type(ServerAdventure.name("dialog", "DialogLike"));
+            found.showDialog = type(ServerAdventure.name("audience", "Audience"))
                     .getMethod("showDialog", dialogLike);
 
             found.create = dialog.getMethod("create", Consumer.class);

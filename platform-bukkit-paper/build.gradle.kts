@@ -7,6 +7,8 @@ dependencies {
     // For the TickSource interface only. The direction is one-way: :platform-bukkit knows this
     // module by name and loads it reflectively, and must never depend on it.
     implementation(project(":platform-bukkit"))
+    // ServerAdventure: class names in the server's own Adventure, assembled at runtime.
+    implementation(project(":platform-common"))
 
     // Paper-only API, loaded reflectively at runtime so the same jar still starts
     // on plain Spigot. 1.16.5 is the oldest Paper line whose API carries the

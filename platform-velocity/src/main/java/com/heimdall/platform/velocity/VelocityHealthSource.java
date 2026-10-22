@@ -3,6 +3,7 @@ package com.heimdall.platform.velocity;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.tunnel.HealthSnapshotSource;
 import com.heimdall.platform.common.JvmHealth;
+import com.heimdall.platform.common.ServerAdventure;
 import com.heimdall.platform.common.StatusHealth;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.config.ProxyConfig;
@@ -29,11 +30,9 @@ import java.util.Optional;
 final class VelocityHealthSource implements HealthSnapshotSource {
 
     /**
-     * Fragments, joined at runtime. Shadow remaps string constants that match
-     * {@code net.kyori.adventure}, including the descriptor of a direct {@code getMotd()} call.
+     * Reflective, like the serializers it feeds ({@link ServerAdventure}): Shadow remaps the
+     * descriptor of a direct {@code getMotd()} call to the relocated Adventure.
      */
-    private static final String[] ADVENTURE = {"net", "kyori", "adventure"};
-
     private static final Method GET_MOTD = resolveGetMotd();
 
     private final ProxyServer proxy;
@@ -97,10 +96,18 @@ final class VelocityHealthSource implements HealthSnapshotSource {
             if (component == null) {
                 return new String[] {"", ""};
             }
-            String clean = serialize(
-                    component, "plain", "PlainTextComponentSerializer", "plainText");
-            String raw = serialize(
-                    component, "legacy", "LegacyComponentSerializer", "legacySection");
+            String clean = null;
+            try {
+                clean = ServerAdventure.plainText(component);
+            } catch (Throwable missing) {
+                // Either half may be missing; see the javadoc.
+            }
+            String raw = null;
+            try {
+                raw = ServerAdventure.legacySection(component);
+            } catch (Throwable missing) {
+                // Either half may be missing; see the javadoc.
+            }
             if (clean == null && raw != null) {
                 clean = StatusHealth.clean(raw);
             }
@@ -110,45 +117,11 @@ final class VelocityHealthSource implements HealthSnapshotSource {
         }
     }
 
-    private static String serialize(
-            Object component, String serializerPackage, String serializerClass, String factory) {
-        try {
-            ClassLoader loader = component.getClass().getClassLoader();
-            if (loader == null) {
-                loader = GET_MOTD.getReturnType().getClassLoader();
-            }
-            Class<?> componentType = GET_MOTD.getReturnType();
-            Class<?> type = Class.forName(
-                    adventureName("text", "serializer", serializerPackage, serializerClass),
-                    true,
-                    loader);
-            Object serializer = type.getMethod(factory).invoke(null);
-            Object text = type.getMethod("serialize", componentType).invoke(serializer, component);
-            return text == null ? null : text.toString();
-        } catch (Throwable failed) {
-            return null;
-        }
-    }
-
     private static Method resolveGetMotd() {
         try {
             return ProxyConfig.class.getMethod("getMotd");
         } catch (NoSuchMethodException missing) {
             return null;
         }
-    }
-
-    private static String adventureName(String... parts) {
-        StringBuilder name = new StringBuilder();
-        for (int i = 0; i < ADVENTURE.length; i++) {
-            if (i > 0) {
-                name.append('.');
-            }
-            name.append(ADVENTURE[i]);
-        }
-        for (int i = 0; i < parts.length; i++) {
-            name.append('.').append(parts[i]);
-        }
-        return name.toString();
     }
 }

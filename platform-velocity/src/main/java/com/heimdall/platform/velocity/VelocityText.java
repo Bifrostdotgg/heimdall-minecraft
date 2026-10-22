@@ -2,6 +2,7 @@ package com.heimdall.platform.velocity;
 
 import com.heimdall.core.log.HeimdallLogger;
 import com.heimdall.core.text.Msg;
+import com.heimdall.platform.common.ServerAdventure;
 import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -30,14 +31,7 @@ import net.kyori.adventure.text.Component;
  * cross the boundary go through reflection, they are all in this file, and everything else on
  * Velocity uses plain types. See departure D44.
  *
- * <h2>Why the class names are assembled at runtime</h2>
- *
- * <p>Shadow's remapper rewrites string constants that match a relocation pattern, not just
- * bytecode references — so a literal {@code "net.kyori.adventure.text.Component"} would be
- * relocated too, and {@code Class.forName} would look for a class that is not there. Even
- * {@code "net.kyori" + ".adventure"} is folded by javac into one constant before Shadow sees it.
- * Joining an array of fragments is the form that survives, because no fragment matches the pattern
- * on its own.
+ * <p>The class names are assembled at runtime by {@link ServerAdventure}, which says why.
  *
  * <h2>Degrading</h2>
  *
@@ -47,15 +41,6 @@ import net.kyori.adventure.text.Component;
  * better than a plugin that fails to load.
  */
 final class VelocityText {
-
-    /**
-     * Fragments, joined at runtime.
-     *
-     * <p>Not a constant, and not concatenated with {@code +}: javac folds compile-time constant
-     * concatenation into a single string literal, which is exactly the shape Shadow's remapper
-     * rewrites. Nothing here matches {@code net.kyori} on its own.
-     */
-    private static final String[] ADVENTURE = {"net", "kyori", "adventure"};
 
     private static final String COMPONENT_RESULT =
             "com.velocitypowered.api.event.ResultedEvent$ComponentResult";
@@ -85,9 +70,10 @@ final class VelocityText {
         Method deserialize = null;
         Method denied = null;
         try {
-            componentType = Class.forName(name("text", "Component"));
+            componentType = Class.forName(ServerAdventure.name("text", "Component"));
             Class<?> serializerType =
-                    Class.forName(name("text", "serializer", "legacy", "LegacyComponentSerializer"));
+                    Class.forName(ServerAdventure.name(
+                            "text", "serializer", "legacy", "LegacyComponentSerializer"));
             serializer = serializerType.getMethod("legacySection").invoke(null);
             deserialize = serializerType.getMethod("deserialize", String.class);
             denied = Class.forName(COMPONENT_RESULT).getMethod("denied", componentType);
@@ -292,20 +278,5 @@ final class VelocityText {
         public String toString() {
             return receiver.getName() + "#" + methodName;
         }
-    }
-
-    /** {@code net.kyori.adventure.<parts>}, assembled so no constant matches the relocation. */
-    private static String name(String... parts) {
-        StringBuilder builder = new StringBuilder();
-        for (String fragment : ADVENTURE) {
-            builder.append(fragment).append('.');
-        }
-        for (int i = 0; i < parts.length; i++) {
-            builder.append(parts[i]);
-            if (i < parts.length - 1) {
-                builder.append('.');
-            }
-        }
-        return builder.toString();
     }
 }
