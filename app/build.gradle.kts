@@ -286,6 +286,8 @@ val verifyCoreJar by tasks.registering(VerifyShadowJar::class) {
     // this jar can show a literal "net.kyori..." that Shadow relocated into a name the server lacks.
     serverLibraryClasses.set(
         listOf(
+            "com/heimdall/platform/common/ServerAdventure",
+            "com/heimdall/platform/bukkit/ZelChatChannels",
             "com/heimdall/platform/bukkit/paper/PaperLinkDialogs",
             "com/heimdall/platform/velocity/VelocityText",
             "com/heimdall/platform/velocity/VelocityHealthSource",

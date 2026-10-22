@@ -43,7 +43,7 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     private final BukkitConsoleBridge console;
     private final BukkitCommandRegistrar commands;
     private final BukkitIntegrations integrations;
-    private final ChatControlChannels chatControl;
+    private final ChatChannelHooks chatChannels;
     private final BukkitItemImages itemImages;
     private final BukkitVanish vanish;
     private final LinkDialogs linkDialogs;
@@ -83,27 +83,24 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
             this.console = new BukkitConsoleBridge(logger, mainThread, consoleTap);
             this.commands = new BukkitCommandRegistrar(registrations, logger, messenger);
             final BukkitPlayerDirectory directory = builtPlayers;
-            this.chatControl = ChatControlChannels.create(
-                    logger, plugin, new Function<Player, PlayerHandle>() {
-                        @Override
-                        public PlayerHandle apply(Player player) {
-                            return directory.wrap(player);
-                        }
-                    });
+            Function<Player, PlayerHandle> handles = new Function<Player, PlayerHandle>() {
+                @Override
+                public PlayerHandle apply(Player player) {
+                    return directory.wrap(player);
+                }
+            };
+            // ChatControl first: with neither installed, its NONE is the answer.
+            this.chatChannels = new ChatChannelHooks(
+                    ChatControlChannels.create(logger, plugin, handles),
+                    ZelChatChannels.create(logger, handles));
             // Builds nothing heavy: two idle executors and some paths. No asset is touched, and no
             // thread started, until the bridge asks for an image or prepares.
             this.itemImages = BukkitItemImages.create(logger, plugin);
             // Resolves nothing yet: PremiumVanish is looked up on first use, and the bootstrap asks
             // once it has wired the listeners. Its event hook is tracked against this generation.
-            this.vanish = BukkitVanish.create(
-                    logger, registrations, plugin, new Function<Player, PlayerHandle>() {
-                        @Override
-                        public PlayerHandle apply(Player player) {
-                            return directory.wrap(player);
-                        }
-                    });
+            this.vanish = BukkitVanish.create(logger, registrations, plugin, handles);
             this.integrations = new BukkitIntegrations(
-                    logger, executors.io(), chatControl, itemImages, vanish);
+                    logger, executors.io(), chatChannels, itemImages, vanish);
             // A handful of reflective lookups and nothing else: no dialog is built until a player
             // has a code to be shown, and a server without Paper's dialog API gets chat.
             this.linkDialogs = BukkitLinkDialogs.create(logger, mainThread);
@@ -168,11 +165,11 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
     }
 
     /**
-     * The ChatControl integration, so the bootstrap can hand it the chat pipeline and the chat
-     * listener can ask it where a line is going.
+     * The chat-plugin integration (ChatControl or ZelChat), so the bootstrap can hand it the chat
+     * pipeline and the chat listener can ask it where a line is going.
      */
-    ChatControlChannels chatControl() {
-        return chatControl;
+    ChatChannelHooks chatChannels() {
+        return chatChannels;
     }
 
     /** The vanish integration, so the bootstrap can resolve it before anybody joins. */
@@ -251,9 +248,9 @@ final class BukkitPlatform implements PlatformFacade, AutoCloseable {
         // reference the server itself owns, and leaving a root appender attached to a plugin that
         // has been disabled is how a reload leaks one per cycle.
         consoleTap.close();
-        // The ChatControl channel hook is registered lazily, from whichever thread first asked, and
-        // a plugin disable was the only thing that ever took it off again. A swap is not one.
-        closeQuietly(chatControl);
+        // The chat-plugin channel hooks are registered lazily, from whichever thread first asked,
+        // and a plugin disable was the only thing that ever took them off again. A swap is not one.
+        closeQuietly(chatChannels);
         // The PremiumVanish hook, for the same reason: a swap is not a plugin disable. It is also
         // tracked against this generation, so this is the first of two ways it comes off.
         closeQuietly(vanish);

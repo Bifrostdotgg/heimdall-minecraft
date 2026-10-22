@@ -24,8 +24,9 @@ import org.bukkit.plugin.Plugin;
  *
  * <p>LuckPerms and Floodgate are handled by {@code :platform-common} — neither needs a Bukkit type
  * and writing them twice is what let v2's two copies drift. Trace is genuinely Bukkit-only: it
- * probes a player's <em>client</em>, and a proxy has no client connection to inspect. So is
- * ChatControl, whose channels only exist on the backend that runs it ({@link ChatControlChannels}).
+ * probes a player's <em>client</em>, and a proxy has no client connection to inspect. So are
+ * ChatControl and ZelChat, whose channels only exist on the backend that runs them
+ * ({@link ChatChannelHooks}).
  */
 final class BukkitIntegrations implements Integrations {
 
@@ -36,16 +37,16 @@ final class BukkitIntegrations implements Integrations {
     private final HeimdallLogger logger;
     private final Executor ioExecutor;
     private final BedrockIdentityProvider floodgate;
-    private final ChatControlChannels chatControl;
+    private final ChatChannels chatChannels;
     private final ItemImages itemImages;
     private final Vanish vanish;
 
     BukkitIntegrations(
-            HeimdallLogger logger, Executor ioExecutor, ChatControlChannels chatControl,
+            HeimdallLogger logger, Executor ioExecutor, ChatChannels chatChannels,
             ItemImages itemImages, Vanish vanish) {
         this.logger = logger;
         this.ioExecutor = ioExecutor;
-        this.chatControl = chatControl;
+        this.chatChannels = chatChannels;
         this.itemImages = itemImages == null ? ItemImages.NONE : itemImages;
         this.vanish = vanish == null ? Vanish.NONE : vanish;
         // Fixed at construction: this answers a classpath question, which cannot change while the
@@ -90,12 +91,12 @@ final class BukkitIntegrations implements Integrations {
     }
 
     /**
-     * ChatControl's channels. Answers {@link ChatChannels.State#NONE} on a server without it, so a
-     * caller never has to ask whether it is installed first. Departure D85.
+     * ChatControl's or ZelChat's channels. Answers {@link ChatChannels.State#NONE} on a server with
+     * neither, so a caller never has to ask whether one is installed first. Departures D85 and D92.
      */
     @Override
     public ChatChannels chatChannels() {
-        return chatControl;
+        return chatChannels;
     }
 
     /**

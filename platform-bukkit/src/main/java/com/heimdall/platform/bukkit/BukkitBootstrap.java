@@ -376,9 +376,9 @@ final class BukkitBootstrap {
         // listener at all, in which everybody would be admitted (departure D87).
         registrations.keep(shell.bindLoginGate(new BukkitLoginListener(
                 logger, runtime.loginPipeline(), platform.integrations().floodgate())));
-        // Before the chat listener, so the first line typed already knows whether ChatControl is
-        // deciding channels. attach() also registers ChatControl's channel hook when it is there.
-        platform.chatControl().attach(runtime.chatPipeline());
+        // Before the chat listener, so the first line typed already knows whether ChatControl or
+        // ZelChat is deciding channels. attach() also registers the plugin's hook when it is there.
+        platform.chatChannels().attach(runtime.chatPipeline());
         // PremiumVanish's hide/show hook, in place before the first join on an ordinary boot
         // (plugin.yml softdepends on it). A miss is retried on first use. Departure D88.
         platform.vanish().prepare();
@@ -386,7 +386,7 @@ final class BukkitBootstrap {
         // the legacy chat event, and on Paper that is where ChatControl does its work, so with
         // ChatControl installed the untagged relay waits for it. Absent on Spigot. See D85.
         final BukkitChatListener chat = new BukkitChatListener(
-                logger, runtime.chatPipeline(), platform.messenger(), platform.chatControl(),
+                logger, runtime.chatPipeline(), platform.messenger(), platform.chatChannels(),
                 BukkitChatListener.ModernChat.detect(Bukkit.class.getClassLoader()),
                 new IntSupplier() {
                     @Override

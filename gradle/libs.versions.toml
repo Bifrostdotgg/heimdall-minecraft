@@ -71,6 +71,11 @@ bungeecord-api = "1.16-R0.4"
 # Log4jConsoleTap.
 luckperms-api = "5.4"
 log4j = "2.19.0"
+# TEST-ONLY. ZelChat's API, which :platform-bukkit reaches by reflection (ZelChatChannels: it is
+# Java 21 bytecode and speaks the server's own Adventure, so it cannot be a compile dependency of a
+# --release 8 module that relocates Adventure). Its tests resolve every lookup against this jar, so a
+# ZelChat release that renames something fails the build, not a server. Bump it with ZelChat.
+zelchat-api = "2.0.0-pre-31"
 
 # Test and verification tooling.
 junit = "5.10.2"
@@ -101,6 +106,7 @@ adventure-platform-bukkit = { module = "net.kyori:adventure-platform-bukkit", ve
 adventure-api = { module = "net.kyori:adventure-api", version.ref = "adventure" }
 adventure-text-serializer-legacy = { module = "net.kyori:adventure-text-serializer-legacy", version.ref = "adventure" }
 adventure-text-minimessage = { module = "net.kyori:adventure-text-minimessage", version.ref = "adventure" }
+adventure-text-serializer-plain = { module = "net.kyori:adventure-text-serializer-plain", version.ref = "adventure" }
 
 spigot-api = { module = "org.spigotmc:spigot-api", version.ref = "spigot-api" }
 paper-api = { module = "com.destroystokyo.paper:paper-api", version.ref = "paper-api" }
@@ -110,6 +116,7 @@ bungeecord-api = { module = "net.md-5:bungeecord-api", version.ref = "bungeecord
 
 luckperms-api = { module = "net.luckperms:api", version.ref = "luckperms-api" }
 log4j-core = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }
+zelchat-api = { module = "it.pino.zelchat:zelchat-api", version.ref = "zelchat-api" }
 
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }

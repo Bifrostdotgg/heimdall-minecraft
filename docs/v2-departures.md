@@ -2951,6 +2951,59 @@ check fell back to whatever an older check had found, and with no older answer i
 notice still keep the previous answer through a failed check, because there a stale answer
 only informs; here it would decide what gets installed.
 
+### D92 - the bridge follows ZelChat's public and staff chat too
+
+**Before:** D85 taught the bridge ChatControl's channels and nothing else. On a server running
+ZelChat, staff chat was invisible to it: a toggled player's staff line could reach a public Discord
+channel, and a Discord line could never be addressed to staff.
+**Now:** ZelChat is a second channel plugin behind the same `ChatChannels` seam, with two fixed
+channels, `global` (public chat) and `staff`, which the dashboard maps like any of ChatControl's.
+
+**One seam, two plugins.** The machinery D85 built inside `ChatControlChannels` (finding the
+plugin, the retry throttle, resolving through the plugin's own class loader, the one-shot hook
+registration, reload detection, the broken-versus-transient split, and the read-only pipeline relay)
+moved into `PluginChannelHook`, which `ChatControlChannels` and `ZelChatChannels` both extend.
+ChatControl's behaviour is unchanged: its tests run as before. `ChatChannelHooks` answers for
+whichever plugin is installed. With both installed it is `broken` and vetoes every relay from
+either hook, because two plugins routing chat is a server where nobody can say which audience a line
+is for. The `bridge.channels` frame gains an optional `provider` (`chatcontrol`, `zelchat`) so the
+dashboard can name the plugin; a bot that predates it ignores it.
+
+**What ZelChat offers.** No named channels. Its v2 API (`it.pino.zelchat:zelchat-api`) fires
+`AsyncPostMessageDispatchEvent` through its own `EventRegistry`, not Bukkit's, with a `ChannelType`
+of `EVERYONE`, `STAFF`, `CUSTOM` (Towny town chat, or an addon's) or `PRIVATE`. `EVERYONE` is
+relayed as `global`, `STAFF` as `staff`, and the other two never. Inbound, `global` reaches everyone
+online and `staff` reaches holders of `zelchat.command.staffchat`, the permission ZelChat's staff
+chat checks, because the API has no membership query and no way to post into staff chat that would
+not fire the event again and loop the line back to Discord.
+
+**Every ZelChat line comes from its hook.** While it is live, the legacy chat listener relays
+nothing at all (`SKIP`), public chat included. The API does not say whether ZelChat cancels the
+Bukkit chat event or which audience a line in it is for, so relaying from there would be a guess.
+While ZelChat is running but not yet hooked (it publishes its API from its own `onEnable`, which
+Bukkit runs after marking it enabled), a legacy line is dropped rather than relayed untagged, since
+it may already be a toggled player's staff line. Switched off, ZelChat routes nothing and chat
+relays as one room.
+
+**Proxies.** A line is relayed only when its sender is online on this server, so a line delivered
+here but typed on another backend is that backend's to relay, as for ChatControl.
+
+**Reflection, not a compile dependency.** The API is Java 21 bytecode and this module compiles at
+`--release 8`, and the event's message is the server's own Adventure `Component` while Heimdall
+relocates its Adventure, so a direct call would fail with `NoSuchMethodError` (D44). The hook is a
+`java.lang.reflect.Proxy` of ZelChat's `EventListener`, and the component becomes text through the
+server's plain-text serializer, by a name assembled at runtime. `ServerAdventure` in
+`:platform-common` now holds that name assembly and the server's serializers, replacing the copies
+in `VelocityText`, `VelocityHealthSource` and `PaperLinkDialogs`. `zelchat-api` is on
+`:platform-bukkit`'s test classpath only, and its tests resolve every lookup against that jar, so a
+ZelChat release that renames something fails the build, not a server.
+
+**Not verified against a live ZelChat.** The tests prove the lookups and the routing. Three things
+only a real server can show: that ZelChat fires the event for `/staffchat`, that its message is the
+body rather than the formatted line, and how it treats the Bukkit chat event. None of them can leak
+a staff line if wrong: the first and third mean a quiet bridge, the second a sender's name printed
+twice in Discord.
+
 ---
 
 ## Structure
