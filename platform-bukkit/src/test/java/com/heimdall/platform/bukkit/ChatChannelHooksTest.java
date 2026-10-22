@@ -223,6 +223,45 @@ class ChatChannelHooksTest {
     }
 
     @Test
+    @DisplayName("a ZelChat that never published its API and then stopped no longer blocks ChatControl")
+    void staleNotReadyIsNotInPlay() {
+        chatControl = plugin();
+        zelChat = plugin();
+        Settings.Channels.ENABLED = Boolean.TRUE;
+        Channel.create("staff");
+        ZelChatProvider.set(null);
+        ChatChannelHooks hooks = hooks();
+        assertEquals(ChatChannels.State.BROKEN, hooks.state(),
+                "both running: a conflict, whether or not ZelChat is hooked yet");
+
+        // Paper disables a plugin whose onEnable threw.
+        when(zelChat.isEnabled()).thenReturn(false);
+
+        assertEquals(ChatChannels.State.ACTIVE, hooks.state());
+        assertEquals("chatcontrol", hooks.provider());
+    }
+
+    @Test
+    @DisplayName("a ChatControl broken by a reload still counts beside a running ZelChat")
+    void brokenButStoppedIsInPlay() {
+        chatControl = plugin();
+        Settings.Channels.ENABLED = Boolean.TRUE;
+        Channel.create("staff");
+        ChatChannelHooks hooks = hooks();
+        assertEquals(ChatChannels.State.ACTIVE, hooks.state());
+
+        // A plugin manager swaps ChatControl for a fresh copy, then ZelChat appears too.
+        when(chatControl.isEnabled()).thenReturn(false);
+        chatControl = plugin();
+        zelChat = plugin();
+
+        assertEquals(ChatChannels.State.BROKEN, hooks.state(),
+                "the old hook is blind to the new ChatControl, which may be routing staff chat");
+        fireZelChat(steve, ChannelType.EVERYONE);
+        assertTrue(relayed.isEmpty());
+    }
+
+    @Test
     @DisplayName("a disabled ChatControl jar beside a working ZelChat is not a conflict")
     void disabledJarIsNotAConflict() {
         Plugin disabled = mock(Plugin.class);

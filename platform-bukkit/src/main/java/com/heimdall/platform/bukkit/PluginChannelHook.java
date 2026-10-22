@@ -232,10 +232,19 @@ abstract class PluginChannelHook<A> implements ChannelHook {
         if (why != null) {
             return why;
         }
-        return awaitingReady
+        return stillAwaitingReady()
                 ? pluginName + " is enabled but has not published its API, so Heimdall cannot hook "
                         + "it (did " + pluginName + " fail to start?)"
                 : null;
+    }
+
+    /**
+     * {@link #awaitingReady}, only while it can still be true: the plugin is running and nothing is
+     * hooked. A flag left behind by a plugin that has since stopped, or written late by a thread that
+     * lost the race to a registration, means nothing.
+     */
+    private boolean stillAwaitingReady() {
+        return awaitingReady && !hooked && !closed && running();
     }
 
     /** Called by {@link ChatChannelHooks}; see {@link #relayVetoed}. */
@@ -272,7 +281,7 @@ abstract class PluginChannelHook<A> implements ChannelHook {
                 if (brokenBecause != null) {
                     return State.BROKEN;
                 }
-                return awaitingReady && pipeline != null && !closed ? State.BROKEN : State.NONE;
+                return pipeline != null && stillAwaitingReady() ? State.BROKEN : State.NONE;
             }
             // Another thread is inside the registration right now. The plugin may already be
             // routing channels, so NONE would be a lie (inbound, it would broadcast an untagged
@@ -418,6 +427,7 @@ abstract class PluginChannelHook<A> implements ChannelHook {
                 hookHandle = handle;
                 register(resolved, handle);
                 hooked = true;
+                awaitingReady = false;
                 registered = true;
             } catch (Throwable failed) {
                 markBroken("registering the " + pluginName + " channel listener failed", failed);

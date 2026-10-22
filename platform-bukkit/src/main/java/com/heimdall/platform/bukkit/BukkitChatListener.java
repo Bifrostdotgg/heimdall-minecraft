@@ -9,6 +9,7 @@ import java.lang.reflect.Method;
 import java.util.Collection;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntSupplier;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Cancellable;
@@ -153,8 +154,12 @@ final class BukkitChatListener implements Listener {
      */
     private final ThreadLocal<ChatState> current = new ThreadLocal<ChatState>();
 
-    /** Whether the "relay paused, integration broken" error has been logged. Once per boot. */
-    private final AtomicBoolean reportedBroken = new AtomicBoolean();
+    /**
+     * The reason the "relay paused, integration broken" error was last logged with. Once per reason,
+     * not once per boot: a passing reason (ZelChat still starting) must not use up the line a lasting
+     * one (an API that moved) needs.
+     */
+    private final AtomicReference<String> reportedBroken = new AtomicReference<String>();
 
     /** Whether the "Paper chat hook unavailable" error has been logged. Once per boot. */
     private final AtomicBoolean reportedModernUnavailable = new AtomicBoolean();
@@ -305,12 +310,15 @@ final class BukkitChatListener implements Listener {
         try {
             ChannelHook.UntaggedRelay decision = channelPlugin.untaggedRelay(sender);
             if (decision == ChannelHook.UntaggedRelay.BROKEN) {
-                if (reportedBroken.compareAndSet(false, true)) {
-                    // Once per boot. The integration logged the cause when it broke; this line says
-                    // what that means for chat, without repeating it for every line anyone types.
+                String reason = String.valueOf(channelPlugin.brokenReason());
+                String previous = reportedBroken.get();
+                if (!reason.equals(previous) && reportedBroken.compareAndSet(previous, reason)) {
+                    // Once per reason. The integration logged the cause when it broke; this line
+                    // says what that means for chat, without repeating it for every line anyone
+                    // types.
                     logger.severe("the chat channel integration (" + channelPlugin.pluginName()
-                            + ") is not working (" + channelPlugin.brokenReason()
-                            + "); in-game chat is not being relayed to Discord on this server");
+                            + ") is not working (" + reason + "); in-game chat is not being "
+                            + "relayed to Discord on this server");
                 }
                 return;
             }

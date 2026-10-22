@@ -98,6 +98,9 @@ class ZelChatChannelsTest {
         /** When set, runs inside register() before it records anything. */
         volatile Runnable gate;
 
+        /** When set, register() records the listener and then throws. */
+        volatile RuntimeException failAfterAdding;
+
         @Override
         public <E extends Event> void register(Class<E> eventClass, EventListener<E> listener) {
             Runnable hold = gate;
@@ -106,6 +109,10 @@ class ZelChatChannelsTest {
             }
             types.add(eventClass);
             listeners.add(listener);
+            RuntimeException failure = failAfterAdding;
+            if (failure != null) {
+                throw failure;
+            }
         }
 
         @Override
@@ -237,6 +244,20 @@ class ZelChatChannelsTest {
         assertEquals(ChatChannels.State.ACTIVE, channels.state());
         assertEquals(1, registry.listeners.size());
         assertEquals(null, channels.brokenReason());
+    }
+
+    @Test
+    @DisplayName("a registration that half-succeeded and threw is broken, and still taken off at close")
+    void halfRegistered() {
+        registry.failAfterAdding = new IllegalStateException("registry full");
+        ZelChatChannels channels = active();
+
+        assertEquals(ChatChannels.State.BROKEN, channels.state());
+        assertEquals(1, registry.listeners.size());
+
+        channels.close();
+
+        assertTrue(registry.listeners.isEmpty(), "a listener left behind would pin this core");
     }
 
     @Test
