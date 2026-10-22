@@ -28,6 +28,8 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import net.kyori.adventure.text.Component;
 import org.bukkit.entity.Player;
@@ -93,8 +95,15 @@ class ZelChatChannelsTest {
         final List<EventListener<?>> listeners = new ArrayList<EventListener<?>>();
         final List<Class<?>> types = new ArrayList<Class<?>>();
 
+        /** When set, runs inside register() before it records anything. */
+        volatile Runnable gate;
+
         @Override
         public <E extends Event> void register(Class<E> eventClass, EventListener<E> listener) {
+            Runnable hold = gate;
+            if (hold != null) {
+                hold.run();
+            }
             types.add(eventClass);
             listeners.add(listener);
         }
@@ -209,22 +218,103 @@ class ZelChatChannelsTest {
     }
 
     @Test
-    @DisplayName("enabled before its API is published: not hooked, not broken, picked up later")
+    @DisplayName("enabled before its API is published: broken with a reason, but not for good")
     void apiPublishedLate() {
         environment.zelChat = plugin(true);
         ZelChatChannels channels = channels();
         channels.attach(pipeline);
 
-        assertEquals(ChatChannels.State.NONE, channels.state());
+        assertEquals(ChatChannels.State.BROKEN, channels.state(),
+                "running but unhooked may already be routing staff chat: not one public room");
         assertTrue(registry.listeners.isEmpty());
-        assertEquals(null, channels.brokenReason(), "ZelChat starting up is not ZelChat broken");
-        assertEquals(ChannelHook.UntaggedRelay.TRANSIENT, channels.untaggedRelay(steve),
-                "running but unhooked, a toggled player's line may be staff chat: dropped");
+        assertTrue(channels.brokenReason().contains("has not published its API"),
+                channels.brokenReason());
+        assertEquals(ChannelHook.UntaggedRelay.BROKEN, channels.untaggedRelay(steve));
+        assertTrue(logger.at(LogLevel.SEVERE).isEmpty(), "not recorded as broken for the boot");
 
         publishApi();
 
         assertEquals(ChatChannels.State.ACTIVE, channels.state());
         assertEquals(1, registry.listeners.size());
+        assertEquals(null, channels.brokenReason());
+    }
+
+    @Test
+    @DisplayName("a hook still attached after close relays nothing")
+    void closedHookIsSilent() {
+        ZelChatChannels channels = active();
+        List<EventListener<?>> attached = new ArrayList<EventListener<?>>(registry.listeners);
+        channels.close();
+
+        // ZelChat keeping a reference past unregister (or dispatching one already in flight).
+        registry.listeners.addAll(attached);
+        registry.fire(line(steve, "after close", ChannelType.EVERYONE));
+
+        assertTrue(relayed.isEmpty());
+    }
+
+    @Test
+    @DisplayName("a legacy line while another thread is still registering the hook is dropped")
+    void registrationInProgress() throws Exception {
+        environment.zelChat = plugin(true);
+        environment.online = Arrays.asList(steve);
+        publishApi();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        registry.gate = () -> {
+            entered.countDown();
+            await(release);
+        };
+        ZelChatChannels channels = channels();
+        channels.registrationWaitMillis = 20;
+
+        Thread registering = new Thread(() -> channels.attach(pipeline));
+        registering.start();
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS), "registration never started");
+            assertEquals(ChannelHook.UntaggedRelay.TRANSIENT, channels.untaggedRelay(steve),
+                    "the hook may already be live: relaying untagged could publish staff chat");
+            assertFalse(channels.members("global").isPresent());
+        } finally {
+            release.countDown();
+            registering.join(5_000);
+        }
+        assertEquals(ChannelHook.UntaggedRelay.SKIP, channels.untaggedRelay(steve));
+    }
+
+    @Test
+    @DisplayName("ZelChat's own getter throwing drops that line, says so, and stays active")
+    void ownCodeThrowing() {
+        ZelChatChannels channels = active();
+        ChatPlayer chatPlayer = mock(ChatPlayer.class);
+        when(chatPlayer.getBukkitPlayer()).thenThrow(new IllegalStateException("quit"));
+        registry.fire(new AsyncPostMessageDispatchEvent(
+                Component.text("secret"), ChannelType.EVERYONE, chatPlayer));
+
+        assertTrue(relayed.isEmpty());
+        assertEquals(ChatChannels.State.ACTIVE, channels.state());
+        assertTrue(logger.logged(LogLevel.WARN, "ZelChat threw"), logger.records().toString());
+        assertFalse(logger.records().toString().contains("secret"), "never with the text");
+    }
+
+    /** A ZelChat whose ChannelType lost a room it routes by. */
+    private enum RenamedChannelType { EVERYONE, STAFF_ONLY }
+
+    @Test
+    @DisplayName("a ChannelType without EVERYONE or STAFF is a moved API, not silence")
+    void missingRoomIsAMovedApi() throws Exception {
+        ZelChatChannels.Api.requireConstants(ChannelType.class, "EVERYONE", "STAFF");
+        org.junit.jupiter.api.Assertions.assertThrows(NoSuchFieldException.class,
+                () -> ZelChatChannels.Api.requireConstants(
+                        RenamedChannelType.class, "EVERYONE", "STAFF"));
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await(5, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Test

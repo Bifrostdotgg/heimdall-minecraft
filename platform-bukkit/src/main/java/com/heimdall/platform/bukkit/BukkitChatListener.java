@@ -308,8 +308,8 @@ final class BukkitChatListener implements Listener {
                 if (reportedBroken.compareAndSet(false, true)) {
                     // Once per boot. The integration logged the cause when it broke; this line says
                     // what that means for chat, without repeating it for every line anyone types.
-                    logger.severe(channelPlugin.pluginName() + " is installed but its channel "
-                            + "integration is not working (" + channelPlugin.brokenReason()
+                    logger.severe("the chat channel integration (" + channelPlugin.pluginName()
+                            + ") is not working (" + channelPlugin.brokenReason()
                             + "); in-game chat is not being relayed to Discord on this server");
                 }
                 return;

@@ -209,7 +209,7 @@ class ChatChannelHooksTest {
 
         assertTrue(hooks.installed());
         assertEquals(ChatChannels.State.BROKEN, hooks.state());
-        assertNull(hooks.provider());
+        assertEquals("multiple", hooks.provider(), "so the bot does not read it as ChatControl");
         assertTrue(hooks.channelNames().isEmpty());
         assertFalse(hooks.members("staff").isPresent());
         assertEquals(ChannelHook.UntaggedRelay.BROKEN, hooks.untaggedRelay(steve));
@@ -220,5 +220,20 @@ class ChatChannelHooksTest {
 
         assertTrue(relayed.isEmpty(),
                 "two plugins routing chat: which audience a line is for cannot be told");
+    }
+
+    @Test
+    @DisplayName("a disabled ChatControl jar beside a working ZelChat is not a conflict")
+    void disabledJarIsNotAConflict() {
+        Plugin disabled = mock(Plugin.class);
+        when(disabled.isEnabled()).thenReturn(false);
+        chatControl = disabled;
+        zelChat = plugin();
+        ChatChannelHooks hooks = hooks();
+
+        assertEquals(ChatChannels.State.ACTIVE, hooks.state());
+        assertEquals("zelchat", hooks.provider());
+        fireZelChat(steve, ChannelType.EVERYONE);
+        assertEquals(1, relayed.size());
     }
 }

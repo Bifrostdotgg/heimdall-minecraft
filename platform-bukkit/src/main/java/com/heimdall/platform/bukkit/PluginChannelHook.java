@@ -116,6 +116,12 @@ abstract class PluginChannelHook<A> implements ChannelHook {
     private volatile boolean closed;
 
     /**
+     * Whether the last attempt to hook found the plugin running but not {@link #ready}. Reported as
+     * {@link State#BROKEN} with a reason, but not recorded: the next call tries again.
+     */
+    private volatile boolean awaitingReady;
+
+    /**
      * When true, no line is relayed from the hook. Set by {@link ChatChannelHooks} to "another channel
      * plugin is installed too", because two plugins both routing chat is a state nobody can read.
      */
@@ -144,18 +150,27 @@ abstract class PluginChannelHook<A> implements ChannelHook {
     /**
      * Whether the plugin is far enough through its own startup to be hooked. A plugin is marked
      * enabled before its {@code onEnable} runs, so one that publishes its API there can briefly be
-     * enabled with nothing to hook. {@code false}, or a throw, defers registration to a later call;
-     * neither is a failure.
+     * enabled with nothing to hook. {@code false}, or a throw, defers registration to a later call,
+     * and until then the state is {@link State#BROKEN} (not recorded): a running plugin may already
+     * be routing chat, and "none" would let it relay as one room. A plugin whose {@code onEnable}
+     * failed stays there, which is the honest answer.
      */
     boolean ready(A resolved) throws Exception {
         return true;
     }
 
     /**
-     * Registers the post-delivery hook and returns whatever {@link #unregister} needs. A throw here is
-     * a resolution failure and marks the integration broken.
+     * Builds what the hook is registered with, and what {@link #unregister} needs to take it off.
+     * Recorded before {@link #register} is called, so a registration that half-succeeded and then
+     * threw is still taken off at {@link #close()}.
      */
-    abstract Object register(A resolved) throws Exception;
+    abstract Object newHandle(A resolved) throws Exception;
+
+    /**
+     * Registers the post-delivery hook with {@code handle}. A throw here (or from
+     * {@link #newHandle}) is a resolution failure and marks the integration broken.
+     */
+    abstract void register(A resolved, Object handle) throws Exception;
 
     /** Takes the hook off again. May throw; the caller contains it. */
     abstract void unregister(A resolved, Object handle) throws Exception;
@@ -213,7 +228,14 @@ abstract class PluginChannelHook<A> implements ChannelHook {
 
     @Override
     public final String brokenReason() {
-        return brokenBecause;
+        String why = brokenBecause;
+        if (why != null) {
+            return why;
+        }
+        return awaitingReady
+                ? pluginName + " is enabled but has not published its API, so Heimdall cannot hook "
+                        + "it (did " + pluginName + " fail to start?)"
+                : null;
     }
 
     /** Called by {@link ChatChannelHooks}; see {@link #relayVetoed}. */
@@ -244,10 +266,13 @@ abstract class PluginChannelHook<A> implements ChannelHook {
         }
         if (!hooked) {
             if (pipeline == null || !registrationClaimed.get()) {
-                // No pipeline yet (bootstrap has not attached), or the plugin is not ready to be
-                // hooked, so nothing could be relayed with a channel. Not ACTIVE: that state
-                // promises the hook is live.
-                return brokenBecause != null ? State.BROKEN : State.NONE;
+                // No pipeline yet (bootstrap has not attached), so nothing could be relayed with a
+                // channel. Not ACTIVE: that state promises the hook is live. Running but not ready
+                // to be hooked is BROKEN, not NONE (see ready()), and asked again next call.
+                if (brokenBecause != null) {
+                    return State.BROKEN;
+                }
+                return awaitingReady && pipeline != null && !closed ? State.BROKEN : State.NONE;
             }
             // Another thread is inside the registration right now. The plugin may already be
             // routing channels, so NONE would be a lie (inbound, it would broadcast an untagged
@@ -378,7 +403,10 @@ abstract class PluginChannelHook<A> implements ChannelHook {
                 resolved = api;
             }
         }
-        if (!hooked && pipeline != null && !closed && readySafely(resolved)
+        if (!hooked && pipeline != null && !closed && !registrationClaimed.get()) {
+            awaitingReady = !readySafely(resolved);
+        }
+        if (!hooked && pipeline != null && !closed && !awaitingReady
                 && registrationClaimed.compareAndSet(false, true)) {
             // One attempt, ever, by whichever thread claims it: a second registration would relay
             // every channel line twice. Another thread arriving meanwhile waits on
@@ -386,7 +414,9 @@ abstract class PluginChannelHook<A> implements ChannelHook {
             // already be live; the latch is released however this ends.
             boolean registered = false;
             try {
-                hookHandle = register(resolved);
+                Object handle = newHandle(resolved);
+                hookHandle = handle;
+                register(resolved, handle);
                 hooked = true;
                 registered = true;
             } catch (Throwable failed) {

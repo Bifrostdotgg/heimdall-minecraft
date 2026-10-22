@@ -157,7 +157,7 @@ final class ZelChatChannels extends PluginChannelHook<ZelChatChannels.Api> {
     }
 
     @Override
-    Object register(final Api resolved) throws ReflectiveOperationException {
+    Object newHandle(final Api resolved) throws ReflectiveOperationException {
         Object zelChat = resolved.get.invoke(null);
         Object registry = resolved.eventRegistry.invoke(zelChat);
         Object listener = Proxy.newProxyInstance(resolved.loader,
@@ -173,8 +173,13 @@ final class ZelChatChannels extends PluginChannelHook<ZelChatChannels.Api> {
                         return null;
                     }
                 });
-        resolved.register.invoke(registry, resolved.postEvent, listener);
         return new Registration(registry, listener);
+    }
+
+    @Override
+    void register(Api resolved, Object handle) throws ReflectiveOperationException {
+        Registration registration = (Registration) handle;
+        resolved.register.invoke(registration.registry, resolved.postEvent, registration.listener);
     }
 
     @Override
@@ -242,9 +247,10 @@ final class ZelChatChannels extends PluginChannelHook<ZelChatChannels.Api> {
                 // Every ZelChat line, public included, is relayed from the hook.
                 return UntaggedRelay.SKIP;
             case NONE:
-                // Switched off, ZelChat routes nothing and chat is one room. Running but not hooked
-                // yet (its API is published from its own onEnable), it may already be turning a
-                // toggled player's line into staff chat, so that line is dropped, not guessed at.
+                // Switched off, ZelChat routes nothing and chat is one room. Running and still NONE
+                // means not attached yet (running but not ready is BROKEN), and a running ZelChat
+                // may already be turning a toggled player's line into staff chat, so that line is
+                // dropped, not guessed at.
                 return running() ? UntaggedRelay.TRANSIENT : UntaggedRelay.RELAY;
             default:
                 return UntaggedRelay.BROKEN;
@@ -373,7 +379,7 @@ final class ZelChatChannels extends PluginChannelHook<ZelChatChannels.Api> {
         }
 
         /** The rooms this maps by name must still exist, or every line would silently drop. */
-        private static void requireConstants(Class<?> type, String... names)
+        static void requireConstants(Class<?> type, String... names)
                 throws NoSuchFieldException {
             Object[] constants = type.getEnumConstants();
             if (constants == null) {

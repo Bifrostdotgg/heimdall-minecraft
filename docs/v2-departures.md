@@ -2964,10 +2964,11 @@ plugin, the retry throttle, resolving through the plugin's own class loader, the
 registration, reload detection, the broken-versus-transient split, and the read-only pipeline relay)
 moved into `PluginChannelHook`, which `ChatControlChannels` and `ZelChatChannels` both extend.
 ChatControl's behaviour is unchanged: its tests run as before. `ChatChannelHooks` answers for
-whichever plugin is installed. With both installed it is `broken` and vetoes every relay from
-either hook, because two plugins routing chat is a server where nobody can say which audience a line
-is for. The `bridge.channels` frame gains an optional `provider` (`chatcontrol`, `zelchat`) so the
-dashboard can name the plugin; a bot that predates it ignores it.
+whichever plugin is in play (running, or broken; a jar that failed to enable is neither). With both
+in play it is `broken` and vetoes every relay from either hook, because two plugins routing chat is
+a server where nobody can say which audience a line is for. The `bridge.channels` frame gains an
+optional `provider` (`chatcontrol`, `zelchat`, or `multiple` when both run) so the dashboard can
+name the plugin; a bot that predates it ignores it, and a bot reads an absent one as ChatControl.
 
 **What ZelChat offers.** No named channels. Its v2 API (`it.pino.zelchat:zelchat-api`) fires
 `AsyncPostMessageDispatchEvent` through its own `EventRegistry`, not Bukkit's, with a `ChannelType`
@@ -2980,10 +2981,18 @@ not fire the event again and loop the line back to Discord.
 **Every ZelChat line comes from its hook.** While it is live, the legacy chat listener relays
 nothing at all (`SKIP`), public chat included. The API does not say whether ZelChat cancels the
 Bukkit chat event or which audience a line in it is for, so relaying from there would be a guess.
-While ZelChat is running but not yet hooked (it publishes its API from its own `onEnable`, which
-Bukkit runs after marking it enabled), a legacy line is dropped rather than relayed untagged, since
-it may already be a toggled player's staff line. Switched off, ZelChat routes nothing and chat
-relays as one room.
+While ZelChat is running but its API is not published yet (it publishes it from its own
+`onEnable`, which Bukkit runs after marking it enabled), the state is `broken` with a reason, not
+recorded for the boot: a legacy line may already be a toggled player's staff line, and `none` would
+also tell the bot to stop guarding against a proxy's untagged copies. A ZelChat whose `onEnable`
+failed stays there, which is logged once. Switched off, ZelChat routes nothing and chat relays as
+one room.
+
+**Upgrading a ZelChat server.** Every ZelChat line is now tagged, and a mapping with no channel
+picked carries untagged lines only, so a bridge that relayed a ZelChat server's chat before this
+release goes quiet in both directions until `global` is ticked on its mapping. That is the same
+fail-closed rule as D85, and the dashboard shows the amber "no channels picked" warning; it belongs
+in the release notes.
 
 **Proxies.** A line is relayed only when its sender is online on this server, so a line delivered
 here but typed on another backend is that backend's to relay, as for ChatControl.

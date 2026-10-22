@@ -135,16 +135,19 @@ final class ChatControlChannels extends PluginChannelHook<ChatControlChannels.Ap
     }
 
     @Override
-    Object register(final Api resolved) {
-        Listener listener = new Listener() {
+    Object newHandle(Api resolved) {
+        return new Listener() {
         };
-        environment.register(resolved.postEvent, listener, new EventExecutor() {
+    }
+
+    @Override
+    void register(final Api resolved, Object handle) {
+        environment.register(resolved.postEvent, (Listener) handle, new EventExecutor() {
             @Override
             public void execute(Listener ignored, Event event) {
                 onChannelPost(resolved, event);
             }
         });
-        return listener;
     }
 
     @Override

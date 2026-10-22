@@ -90,9 +90,9 @@ public interface ChatChannels {
 
     /**
      * Which chat plugin is answering, as the {@code bridge.channels} frame spells it
-     * ({@code chatcontrol}, {@code zelchat}). A wire contract. {@code null} when no plugin is, or
-     * when it cannot be said which one is; the bot reads an absent provider as ChatControl's, since
-     * builds before this one only ever spoke for ChatControl.
+     * ({@code chatcontrol}, {@code zelchat}, or {@code multiple} when more than one is running). A
+     * wire contract. {@code null} when no plugin is; the bot reads an absent provider as
+     * ChatControl's, since builds before this one only ever spoke for ChatControl.
      */
     default String provider() {
         return null;
