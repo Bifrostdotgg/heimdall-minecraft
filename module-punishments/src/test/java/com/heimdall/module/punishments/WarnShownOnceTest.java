@@ -161,6 +161,34 @@ class WarnShownOnceTest {
     }
 
     @Test
+    @DisplayName("the first sync after a restart is a full one, so the proxy flag is read again")
+    void firstSyncAfterARestartSendsNoEtag() throws Exception {
+        try (PunishmentsHarness before = new PunishmentsHarness(dataDir, ServerRole.ENFORCER)
+                .enableReplace()) {
+            // A tag saved with the mirror, as a server that synced before it stopped has.
+            before.module.mirrorForTest().setLastEtag("\"tag-1\"");
+        }
+        try (ScriptedPunishApi bot = new ScriptedPunishApi()
+                .syncResponds("{\"success\":true,\"data\":{\"punishments\":[],"
+                        + "\"hash\":\"\\\"tag-1\\\"\",\"proxyShowsWarns\":true}}", "\"tag-1\"");
+                PunishmentsHarness after = PunishmentsHarness
+                        .withApi(dataDir, ServerRole.ENFORCER, bot.baseUrl())
+                        .enableReplace()) {
+            long deadline = System.currentTimeMillis() + 5_000L;
+            while (bot.lastGetContaining("/punishments/sync") == null
+                    && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20L);
+            }
+
+            ScriptedPunishApi.Hit first = bot.lastGetContaining("/punishments/sync");
+            assertNotNull(first, "the module pulls at start");
+            // With the saved tag the bot would answer 304, and the flag, which lives only in
+            // memory, would stay at its default until some row changed.
+            assertNull(first.ifNoneMatch, "a 304 here would leave the proxy flag unread");
+        }
+    }
+
+    @Test
     @DisplayName("LiteBans showing its own warn leaves a Heimdall warn still to be shown")
     void hookWarnKeepsTheHeimdallWarn() {
         try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)

@@ -127,6 +127,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      */
     private volatile boolean proxyShowsWarns;
     /**
+     * Whether a full sync has answered since this module started. Until one has, the flag above
+     * is only its default, and the restored ETag would get a 304 that never sets it, so the
+     * first pull goes without one.
+     */
+    private volatile boolean syncedSinceStart;
+    /**
      * Operation ids this server issued itself, newest last, capped at {@value #ECHO_MEMORY}.
      *
      * <p>The bot excludes the issuing server from its {@code punish.apply} fanout, but it can only
@@ -2013,7 +2019,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String key = keyFor(local);
         if (key == null) return;
         ActivePunishment existing = mirror.get(key);
-        if (existing != null) {
+        // Only the row this upload was standing in for: its local id, or none at all (a replay
+        // after a restart rebuilds it without one). Anything else at the key arrived from the
+        // bot since, a newer punishment with its own id, and renaming it would have its next
+        // acknowledgement name this row instead.
+        String opId = request.string("opId", "");
+        boolean standIn = existing != null && (existing.id == null || existing.id.isEmpty()
+                || (!opId.isEmpty() && existing.id.equals(LOCAL_ID_PREFIX + opId)));
+        if (standIn) {
             existing.id = id;
             mirror.record(key, existing);
         }
@@ -2033,7 +2046,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 && System.currentTimeMillis() - lastFullSyncAt < TimeUnit.MINUTES.toMillis(4)) {
             return;
         }
-        ctx.api().punishmentSync(store.lastEtag()).whenComplete((data, failure) -> {
+        String etag = syncedSinceStart ? store.lastEtag() : null;
+        ctx.api().punishmentSync(etag).whenComplete((data, failure) -> {
             if (failure != null || data == null) return;
             try {
                 java.util.Map<String, ActivePunishment> authoritative =
@@ -2056,6 +2070,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 }
                 store.reconcile(authoritative);
                 proxyShowsWarns = data.bool("proxyShowsWarns", false);
+                syncedSinceStart = true;
                 String hash = data.string("hash", "");
                 if (!hash.isEmpty()) {
                     store.setLastEtag(hash);
