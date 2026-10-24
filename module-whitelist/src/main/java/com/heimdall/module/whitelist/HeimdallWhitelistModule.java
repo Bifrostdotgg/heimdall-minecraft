@@ -211,6 +211,7 @@ public final class HeimdallWhitelistModule
     private void schedulePolls(
             ModuleContext ctx, WhitelistSettings atOpen, final WhitelistMirrorService mirrorService) {
         long prewarmMs = TimeUnit.MINUTES.toMillis(atOpen.prewarmIntervalMinutes());
+        mirrorService.pollScheduledEvery(prewarmMs);
         ctx.scheduleRepeating(new Runnable() {
             @Override
             public void run() {

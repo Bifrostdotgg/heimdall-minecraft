@@ -74,6 +74,9 @@ final class WhitelistMirrorService {
      */
     private volatile long lastSyncAtMs;
 
+    /** The pre-warm poll's interval as scheduled, or {@code 0} before it is. */
+    private volatile long scheduledIntervalMs;
+
     WhitelistMirrorService(
             HeimdallLogger logger,
             HeimdallApi api,
@@ -147,11 +150,21 @@ final class WhitelistMirrorService {
         return lastSyncAtMs;
     }
 
-    /** The pre-warm interval as currently configured, or {@code 0} when the poll is switched off. */
+    /**
+     * How often the poll actually runs, or {@code 0} when it is switched off or not scheduled yet.
+     *
+     * <p>The interval the poll was <em>scheduled</em> with, not the one in the live settings: the
+     * schedule is fixed when the module opens, so a dashboard change to the interval does not move
+     * it until the module is next enabled. Judging staleness against the live value would call a
+     * perfectly healthy hourly poll overdue fifteen minutes after somebody typed "5".
+     */
     long syncIntervalMs() {
-        WhitelistSettings current = settings.get();
-        return current.prewarmEnabled()
-                ? TimeUnit.MINUTES.toMillis(current.prewarmIntervalMinutes()) : 0L;
+        return settings.get().prewarmEnabled() ? scheduledIntervalMs : 0L;
+    }
+
+    /** Records the interval the poll was just scheduled with. See {@link #syncIntervalMs()}. */
+    void pollScheduledEvery(long intervalMs) {
+        scheduledIntervalMs = Math.max(0L, intervalMs);
     }
 
     /** Empties the mirror and its ETag, so the next poll is a full one. {@code /hd cache clear}. */
