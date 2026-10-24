@@ -277,7 +277,7 @@ class StatusSubcommandTest {
             unconfigured.configured = false;
 
             assertRow(refused, "Bot", StatusSubcommand.Health.BROKEN, "token refused");
-            assertTrue(problemSaying(StatusSubcommand.assess(refused), "/hd setup again"));
+            assertTrue(problemSaying(StatusSubcommand.assess(refused), "/hd setup <new code>"));
             assertRow(unreachable, "Bot", StatusSubcommand.Health.BROKEN, "unreachable");
             assertTrue(problemSaying(StatusSubcommand.assess(unreachable), "Cannot reach the bot"));
             assertRow(discovering, "Bot", StatusSubcommand.Health.ATTENTION, "finding its guild");
@@ -310,7 +310,7 @@ class StatusSubcommandTest {
             assertTrue(problemSaying(report, "Credentials bound to another machine"),
                     "a copied directory whose twin re-ran setup shows up as a refused token, and "
                             + "the mismatch is the explanation");
-            assertTrue(problemSaying(report, "refused this token"));
+            assertTrue(problemSaying(report, "Token refused"));
         }
 
         @Test
@@ -328,7 +328,10 @@ class StatusSubcommandTest {
             StatusSubcommand.Snapshot s = healthy();
             s.endpointHost = StatusSubcommand.endpointHost("https://bot.example.com/");
 
-            assertRow(s, "Bot", StatusSubcommand.Health.OK, "via bot.example.com");
+            assertRow(s, "Bot", StatusSubcommand.Health.OK, "linked via bot.example.com");
+            s.endpointHost = "minecraft-bot.a-very-long-customer-domain.example";
+            assertTrue(row(StatusSubcommand.assess(s), "Bot").value.length() <= 50,
+                    "a long host is abbreviated, not wrapped");
             assertEquals("", StatusSubcommand.endpointHost("https://api.bifrost.gg"));
             assertEquals("", StatusSubcommand.endpointHost("HTTPS://API.BIFROST.GG/"));
             assertEquals("", StatusSubcommand.endpointHost("http://api.bifrost.gg/v1"));
@@ -358,7 +361,7 @@ class StatusSubcommandTest {
             assertRow(down, "Tunnel", StatusSubcommand.Health.BROKEN, "not connected");
             assertTrue(problemSaying(StatusSubcommand.assess(down), "Live link to the bot is down"));
             assertRow(incomplete, "Tunnel", StatusSubcommand.Health.BROKEN, "settings incomplete");
-            assertTrue(problemSaying(StatusSubcommand.assess(incomplete), "setup again"));
+            assertTrue(problemSaying(StatusSubcommand.assess(incomplete), "/hd setup <new code>"));
         }
 
         @Test
@@ -565,17 +568,87 @@ class StatusSubcommandTest {
         }
 
         @Test
-        @DisplayName("problem lines stay short enough to read at chat width")
-        void shortProblems() {
-            StatusSubcommand.Snapshot[] states = {stateWith(GuildDiscovery.Status.TOKEN_REFUSED),
-                    stateWith(GuildDiscovery.Status.UNREACHABLE), stateWith(GuildDiscovery.Status.DISCOVERING)};
+        @DisplayName("every row and problem line stays short enough to read at chat width")
+        void shortLines() {
+            List<StatusSubcommand.Snapshot> states = new ArrayList<StatusSubcommand.Snapshot>();
+            for (GuildDiscovery.Status discovery : GuildDiscovery.Status.values()) {
+                states.add(stateWith(discovery == GuildDiscovery.Status.RESOLVED ? null : discovery));
+            }
+            StatusSubcommand.Snapshot unconfigured = healthy();
+            unconfigured.configured = false;
+            states.add(unconfigured);
+            StatusSubcommand.Snapshot blocked = healthy();
+            blocked.identityBlocks = true;
+            states.add(blocked);
+            StatusSubcommand.Snapshot down = healthy();
+            down.tunnelConnected = false;
+            states.add(down);
+            StatusSubcommand.Snapshot incomplete = healthy();
+            incomplete.tunnelConnected = false;
+            incomplete.tunnelConfigured = false;
+            states.add(incomplete);
+            StatusSubcommand.Snapshot compat = healthy();
+            compat.mode = ProtocolMode.V2_COMPAT;
+            states.add(compat);
+            StatusSubcommand.Snapshot noConfig = healthy();
+            noConfig.configVersion = -1;
+            noConfig.apiReady = false;
+            noConfig.apiDescribe = "discovering this token's guild";
+            states.add(noConfig);
+            states.add(withMirror(123456, minutesAgo(3000), TimeUnit.MINUTES.toMillis(5)));
+            states.add(withMirror(123456, 0L, TimeUnit.MINUTES.toMillis(5)));
+            StatusSubcommand.Snapshot busy = healthy();
+            busy.label = "hdp";
+            busy.identityMismatch = true;
+            busy.droppedTapConsumers = 12;
+            busy.updatesSupported = true;
+            busy.updateAvailable = true;
+            busy.latestVersion = "3.0.0-rc.123";
+            for (String id : Arrays.asList("whitelist", "punishments", "rolesync", "chatchannels")) {
+                busy.modules.put(id, ModuleState.FAILED);
+            }
+            busy.locallyOff.addAll(Arrays.asList("whitelist", "punishments", "rolesync"));
+            busy.modules.put("itemimages", ModuleState.FAILED);
+            states.add(busy);
+
             for (StatusSubcommand.Snapshot s : states) {
-                s.identityMismatch = true;
-                s.droppedTapConsumers = 3;
-                for (StatusSubcommand.Problem problem : StatusSubcommand.assess(s).problems) {
-                    assertTrue(problem.text.length() <= 60, "wraps more than once: " + problem.text);
+                StatusSubcommand.Report report = StatusSubcommand.assess(s);
+                for (StatusSubcommand.Row row : report.rows) {
+                    String line = row.label + " " + row.value;
+                    assertTrue(line.length() <= 55, "row wraps: " + line);
+                }
+                for (StatusSubcommand.Problem problem : report.problems) {
+                    assertTrue(problem.text.length() <= 60, "problem wraps: " + problem.text);
                 }
             }
+        }
+    }
+
+    @Nested
+    @DisplayName("reading a live runtime")
+    class Reading {
+
+        @Test
+        @DisplayName("Snapshot.of carries what an unconfigured runtime says")
+        void unconfigured() {
+            registerModule("bridge", false);
+            install(context());
+            say("disable", "bridge");
+
+            StatusSubcommand.Snapshot s = StatusSubcommand.Snapshot.of(context().label("hdp").build());
+
+            assertEquals("hdp", s.label);
+            assertEquals("standalone", s.role);
+            assertEquals(BuildConstants.VERSION, s.pluginVersion);
+            assertFalse(s.configured);
+            assertFalse(s.apiReady, "an unconfigured API is not ready");
+            assertEquals("not set up", s.apiDescribe);
+            assertFalse(s.tunnelConnected);
+            assertFalse(s.tunnelConfigured, "an unconfigured tunnel has no settings");
+            assertEquals(null, s.discovery, "nothing to discover without credentials");
+            assertTrue(s.modules.containsKey("bridge"));
+            assertTrue(s.locallyOff.contains("bridge"));
+            assertEquals(0, s.droppedTapConsumers);
         }
     }
 
@@ -594,6 +667,10 @@ class StatusSubcommandTest {
                     "identity:", "api:", "tunnel:")) {
                 assertTrue(anyContains(lines, label), label + " missing from " + lines);
             }
+            assertTrue(anyContains(lines, "endpoint: none"), lines.toString());
+            assertTrue(anyContains(lines, "status: " + runtime.connectionStatus()),
+                    "the full sentence behind the short Bot row lives here");
+            assertTrue(anyContains(lines, "api: not set up"));
         }
 
         @Test

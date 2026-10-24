@@ -114,6 +114,12 @@ final class StatusSubcommand implements AdminSubcommand {
      */
     static final long STALE_FLOOR_MS = TimeUnit.MINUTES.toMillis(15);
 
+    /** The longest whitelabel host the Bot row prints before abbreviating it. */
+    static final int MAX_HOST_CHARS = 32;
+
+    /** The longest list of locally disabled modules a problem line names before counting them. */
+    static final int MAX_NAMES_CHARS = 22;
+
     /** How many missed polls in a row make a mirror stale. */
     static final long STALE_AFTER_POLLS = 3L;
 
@@ -390,8 +396,8 @@ final class StatusSubcommand implements AdminSubcommand {
             switch (s.discovery) {
                 case TOKEN_REFUSED:
                     report.rows.add(new Row("Bot", Health.BROKEN, "token refused", "bot"));
-                    report.problem(Health.BROKEN, "The bot refused this token: run /" + l
-                            + " setup again");
+                    report.problem(Health.BROKEN, "Token refused: /" + l
+                            + " setup <new code>");
                     return false;
                 case UNREACHABLE:
                     report.rows.add(new Row("Bot", Health.BROKEN, "unreachable", "bot"));
@@ -409,8 +415,11 @@ final class StatusSubcommand implements AdminSubcommand {
         // "linked", not "connected": the guild is known and the API works, but whether the live
         // connection is up is the Tunnel row's to say, and a green "connected" here above a red
         // tunnel would contradict it.
-        String value = "linked, guild " + (s.guildId.isEmpty() ? "none" : s.guildId)
-                + (s.endpointHost.isEmpty() ? "" : " via " + s.endpointHost);
+        // One or the other, so the row stays one chat line: a whitelabel server's host is what
+        // support asks first, and its guild is a click away in status bot.
+        String value = s.endpointHost.isEmpty()
+                ? "linked, guild " + (s.guildId.isEmpty() ? "none" : s.guildId)
+                : "linked via " + abbreviate(s.endpointHost, MAX_HOST_CHARS);
         Health health = s.identityMismatch ? Health.ATTENTION : Health.OK;
         if (!s.apiReady) {
             health = Health.ATTENTION;
@@ -435,8 +444,8 @@ final class StatusSubcommand implements AdminSubcommand {
             if (!s.tunnelConfigured) {
                 // Idle on purpose: retrying will never fix it, so it must not read like a blip.
                 report.rows.add(new Row("Tunnel", Health.BROKEN, "idle, settings incomplete", "bot"));
-                report.problem(Health.BROKEN, "Tunnel settings incomplete: run /" + l
-                        + " setup again");
+                report.problem(Health.BROKEN, "Tunnel settings incomplete: /" + l
+                        + " setup <new code>");
                 return;
             }
             report.rows.add(new Row("Tunnel", Health.BROKEN, "not connected", "bot"));
@@ -493,7 +502,10 @@ final class StatusSubcommand implements AdminSubcommand {
             if (health == Health.OK) {
                 health = Health.ATTENTION;
             }
-            report.problem(Health.ATTENTION, "Locally disabled: " + String.join(", ", s.locallyOff)
+            String names = String.join(", ", s.locallyOff);
+            String which = names.length() <= MAX_NAMES_CHARS ? names
+                    : plural(s.locallyOff.size(), "module");
+            report.problem(Health.ATTENTION, "Locally disabled: " + which
                     + " (/" + s.label + " enable <module>)");
         }
         report.rows.add(new Row("Modules", health, value.toString(), "modules"));
@@ -840,6 +852,10 @@ final class StatusSubcommand implements AdminSubcommand {
             return hours + "h";
         }
         return (hours / 24L) + "d";
+    }
+
+    private static String abbreviate(String value, int max) {
+        return value.length() <= max ? value : value.substring(0, max - 1) + "\u2026";
     }
 
     private static String plural(int count, String noun) {
