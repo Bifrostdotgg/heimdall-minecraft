@@ -175,8 +175,13 @@ class IdentityCommandTest {
 
             List<String> lines = say("status");
 
-            assertTrue(anyContains(lines, "identity: "), lines.toString());
-            assertTrue(anyContains(lines, "MISMATCH"), lines.toString());
+            assertTrue(anyContains(lines, "identity mismatch"), lines.toString());
+            assertTrue(anyContains(lines, "/hd identity"), lines.toString());
+
+            List<String> bot = say("status", "bot");
+
+            assertTrue(anyContains(bot, "identity: "), bot.toString());
+            assertTrue(anyContains(bot, "MISMATCH"), bot.toString());
         }
     }
 
