@@ -119,7 +119,7 @@ class HeimdallPunishmentsModuleTest {
             harness.enableWith(Payload.builder()
                     .put("mode", "replace")
                     .put("ipSalt", "replace-salt")
-                    .putStrings("blockedCommands", java.util.Arrays.asList("/ch  Send", "me", "r"))
+                    .putStrings("blockedCommands", java.util.Arrays.asList("/ch  Send", "me", "r", "tpa*", "*"))
                     .build());
             ActivePunishment mute = new ActivePunishment();
             mute.id = "mute-2";
@@ -131,7 +131,7 @@ class HeimdallPunishmentsModuleTest {
 
             String[] blocked = {
                 "/ch send hello", "/chatplugin:ch send hello", "/CH   SEND", "ch send", "/me waves",
-                "/minecraft:me", "/r hi",
+                "/minecraft:me", "/r hi", "/tpa Alex", "/tpa",
             };
             for (String line : blocked) {
                 assertTrue(harness.commandPipeline.dispatch(CommandAttempt.of(STEVE, "Steve", line)).isDeny(),
@@ -139,6 +139,7 @@ class HeimdallPunishmentsModuleTest {
             }
             String[] allowed = {
                 "/ch join global", "/ch", "/chsend hi", "/menu", "/rtp", "/msg Alex hi", "//r 5",
+                "/tpaccept", "/tpa*",
             };
             for (String line : allowed) {
                 assertFalse(harness.commandPipeline.dispatch(CommandAttempt.of(STEVE, "Steve", line)).isDeny(),

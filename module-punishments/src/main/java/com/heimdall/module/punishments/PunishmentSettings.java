@@ -67,7 +67,9 @@ final class PunishmentSettings {
                 PunishmentScreens.KEY_ANNOUNCE_REVOKE, PunishmentScreens.ANNOUNCE_REVOKE);
         List<String> blocked = new ArrayList<String>();
         for (String entry : settings.strings("blockedCommands")) {
-            String words = commandWords(entry);
+            // A trailing "*" is what an operator types to mean "and anything after it", which
+            // every entry already means. Kept, it would be a literal word nobody can type.
+            String words = commandWords(entry == null ? "" : entry.replaceAll("[\\s*]+$", ""));
             if (!words.isEmpty() && !blocked.contains(words)) blocked.add(words);
         }
         this.blockedCommands = blocked.isEmpty()

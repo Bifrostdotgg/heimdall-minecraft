@@ -88,6 +88,23 @@ class MuteNoticeTest {
     }
 
     @Test
+    @DisplayName("a chat-plugin channel line, whose refusal the player never sees, leaves the screen")
+    void channelLineLeavesTheScreen() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            FakePlayer steve = FakePlayer.named("Steve");
+            harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000cb"));
+            harness.platform.join(steve);
+
+            Verdict channel = harness.chatPipeline.dispatch(
+                    ChatMessage.inChannel(steve.uuid(), "Steve", "hi", "global"));
+            assertTrue(channel.isDeny(), "still not relayed");
+            Verdict chat = harness.chatPipeline.dispatch(ChatMessage.of(steve.uuid(), "Steve", "hi"));
+            assertTrue(text(chat).contains("spam"), text(chat));
+        }
+    }
+
+    @Test
     @DisplayName("a proxy never tells the player: it cannot refuse their chat")
     void proxyStaysQuiet() {
         try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.GATEKEEPER)
@@ -147,6 +164,14 @@ class MuteNoticeTest {
                 PunishmentsHarness harness = PunishmentsHarness.withApi(
                         dataDir, ServerRole.STANDALONE, bot.baseUrl()).enableReplace()) {
             FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            // Enabling starts a sync whose empty answer, landing after the upload's, would reconcile
+            // the mute away: let it land first.
+            long synced = System.currentTimeMillis() + 5_000;
+            while (!"\"etag-1\"".equals(harness.module.mirrorForTest().lastEtag())
+                    && System.currentTimeMillis() < synced) {
+                Thread.sleep(20);
+            }
+            assertEquals("\"etag-1\"", harness.module.mirrorForTest().lastEtag(), "the startup sync landed");
             harness.module.onStaffCommand(FakeCommandSource.console(), "tempmute",
                     Arrays.asList("Steve", "10m", "-s", "spam"));
             assertEquals(1, steve.messages().size(), steve.messageText().toString());

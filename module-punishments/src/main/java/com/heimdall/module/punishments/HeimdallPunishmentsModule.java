@@ -1255,6 +1255,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         ActivePunishment mute = mirror.get("mute:" + message.senderUuid());
         if (mute != null && !mute.expired(System.currentTimeMillis())) {
+            // A chat-plugin channel line is dispatched only to decide whether to relay it, and
+            // its verdict never reaches the player, so it must not use up the screen.
+            if (message.channel() != null) return Verdict.deny(renderReminder(mute, settings));
             return Verdict.deny(muteNotice(message.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
