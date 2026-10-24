@@ -24,6 +24,7 @@ import com.heimdall.core.punish.HiddenPunishments;
 import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.punish.PunishmentScreens;
 import com.heimdall.core.punish.PunishmentView;
 import com.heimdall.core.punish.SilenceDecision;
 import com.heimdall.core.remoteconfig.ModuleConfig;
@@ -44,8 +45,10 @@ import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -167,6 +170,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private final AtomicBoolean flushing = new AtomicBoolean();
     private final AtomicBoolean flushAgain = new AtomicBoolean();
     private final List<Registration> aliasBinds = new CopyOnWriteArrayList<Registration>();
+    /**
+     * Per player, the ids of the mute whose full screen this server has shown them this session.
+     * A set because one mute has two ids here: its {@code local-<opId>} stand-in and the bot's,
+     * and a sync or replay can put either back in the mirror. See {@link #muteNotice}.
+     */
+    private final Map<UUID, Set<String>> muteScreenShown = new ConcurrentHashMap<UUID, Set<String>>();
 
     /**
      * The enabled instance, or {@code null}.
@@ -247,6 +256,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
                 names.quit(player.name());
+                // Each session shows the full mute screen once, with its reason and appeal link.
+                muteScreenShown.remove(player.uuid());
             }
         });
         seedKnownNames();
@@ -327,6 +338,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         LiteBansSupport.unhook();
         aliasBinds.clear();
+        muteScreenShown.clear();
         geo = null;
         outbox = null;
         if (INSTANCE == this) INSTANCE = null;
@@ -1243,24 +1255,74 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         ActivePunishment mute = mirror.get("mute:" + message.senderUuid());
         if (mute != null && !mute.expired(System.currentTimeMillis())) {
-            return Verdict.deny(render(mute, settings));
+            // A chat-plugin channel line is dispatched only to decide whether to relay it, and
+            // its verdict never reaches the player, so it must not use up the screen.
+            if (message.channel() != null) return Verdict.deny(renderReminder(mute, settings));
+            return Verdict.deny(muteNotice(message.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
     }
 
     private Verdict onCommand(CommandAttempt attempt) {
         if (mirror == null) return Verdict.abstain();
+        // The mute first: settings are parsed per call, and most commands are typed by players
+        // who are neither frozen nor muted.
+        ActivePunishment mute = mirror.get("mute:" + attempt.senderUuid());
+        boolean muted = mute != null && !mute.expired(System.currentTimeMillis());
+        if (!muted && !isFrozen(attempt.senderUuid())) return Verdict.abstain();
         PunishmentSettings settings = PunishmentSettings.from(context.config());
         if (!settings.replaceMode()) return Verdict.abstain();
         if (isFrozen(attempt.senderUuid())) {
             return Verdict.deny(Msg.legacy("§cYou are frozen."));
         }
-        ActivePunishment mute = mirror.get("mute:" + attempt.senderUuid());
-        if (mute == null || mute.expired(System.currentTimeMillis())) return Verdict.abstain();
-        if (settings.blockedCommands.contains(attempt.label())) {
-            return Verdict.deny(render(mute, settings));
+        if (!muted) return Verdict.abstain();
+        if (settings.blocksCommand(attempt.raw())) {
+            return Verdict.deny(muteNotice(attempt.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
+    }
+
+    /**
+     * What a muted player is told when a message is refused: the full mute screen the first time
+     * for this mute on this server, then {@link PunishmentScreens#MUTE_REMINDER}. Keyed by the
+     * mute's id, so a new mute shows its screen again.
+     */
+    private Component muteNotice(UUID player, ActivePunishment mute, PunishmentSettings settings) {
+        return markMuteShown(player, mute) ? render(mute, settings) : renderReminder(mute, settings);
+    }
+
+    /**
+     * Records that this mute's screen is being shown, answering whether it is news: false when
+     * the screen was already shown for it. One atomic step, so a chat refusal and a live apply
+     * racing each other show it once between them.
+     */
+    private boolean markMuteShown(UUID player, ActivePunishment mute) {
+        String id = mute.id == null ? "" : mute.id;
+        final boolean[] news = {false};
+        muteScreenShown.compute(player, (key, ids) -> {
+            if (ids != null && ids.contains(id)) return ids;
+            news[0] = true;
+            Set<String> next = new LinkedHashSet<String>();
+            next.add(id);
+            return next;
+        });
+        return news[0];
+    }
+
+    /** The same mute, now also known by the bot's id. Nothing when the player was not shown it. */
+    private void muteAlsoKnownAs(UUID player, String knownId, String otherId) {
+        if (player == null || knownId == null || otherId == null || otherId.isEmpty()) return;
+        muteScreenShown.computeIfPresent(player, (key, ids) -> {
+            if (!ids.contains(knownId)) return ids;
+            Set<String> next = new LinkedHashSet<String>(ids);
+            next.add(otherId);
+            return next;
+        });
+    }
+
+    static Component renderReminder(ActivePunishment mute, PunishmentSettings settings) {
+        return Template.render(PunishmentScreens.MUTE_REMINDER,
+                viewOf(mute, settings).tokens(System.currentTimeMillis()));
     }
 
     private void notifyWarn(PlayerHandle player) {
@@ -1389,7 +1451,15 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 }
                 mirror.record(key, p);
                 refreshRevokeCandidacy(revokeFamily(p.type), p.targetUuid, p.targetName);
-                applyLive(p.targetUuid, p, settings);
+                if (echo && "mute".equals(p.type)) {
+                    // This server issued it and already told the player, under the stand-in id.
+                    // The echo can beat the upload's response, which then finds no stand-in to
+                    // rename, so the shown id moves to the bot's here as well.
+                    muteAlsoKnownAs(parseUuid(p.targetUuid),
+                            LOCAL_ID_PREFIX + payload.string("opId", ""), p.id);
+                } else {
+                    applyLive(p.targetUuid, p, settings);
+                }
                 if (!announced) announce(announcementFor(p, settings));
             }
         };
@@ -1703,6 +1773,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 // the moderator asked for.
                 ActivePunishment lifted = mirror.get(key);
                 mirror.evict(key);
+                if ("mute".equals(type)) {
+                    UUID player = parseUuid(uuid);
+                    if (player != null) muteScreenShown.remove(player);
+                }
                 if (lifted == null) return;
                 refreshRevokeCandidacy(
                         revokeFamily(lifted.type), lifted.targetUuid, lifted.targetName);
@@ -2026,6 +2100,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String opId = request.string("opId", "");
         boolean standIn = existing != null && existing.id != null && !opId.isEmpty()
                 && existing.id.equals(LOCAL_ID_PREFIX + opId);
+        // The player may have seen this mute's screen under its stand-in id; it is the same mute,
+        // whether or not an echo already replaced the stand-in in the mirror.
+        if ("mute".equals(local.type) && local.targetUuid != null && !opId.isEmpty()) {
+            muteAlsoKnownAs(parseUuid(local.targetUuid), LOCAL_ID_PREFIX + opId, id);
+        }
         if (standIn) {
             existing.id = id;
             mirror.record(key, existing);
@@ -2105,6 +2184,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             if (!showsWarns()) return;
             player.sendMessage(render(punishment, settings));
             warnShown(punishment);
+            return;
+        }
+        if ("mute".equals(punishment.type)) {
+            // Only where mutes are enforced: a proxy cannot cancel signed chat, so the backend
+            // the player is on is the one that tells them, once, and then refuses their messages.
+            // And only when Heimdall is the one refusing their messages: in hook mode LiteBans
+            // enforces the mute and has told them itself.
+            if (context.platform().role() == ServerRole.GATEKEEPER || !settings.replaceMode()) return;
+            if (punishment.expired(System.currentTimeMillis())) return;
+            if (markMuteShown(player.uuid(), punishment)) {
+                player.sendMessage(render(punishment, settings));
+            }
             return;
         }
         if (!"ban".equals(punishment.type) && !"ipban".equals(punishment.type)

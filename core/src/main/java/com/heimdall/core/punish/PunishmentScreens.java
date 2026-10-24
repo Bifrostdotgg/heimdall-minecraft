@@ -76,6 +76,17 @@ public final class PunishmentScreens {
     /** The permanent variant. Empty means reuse {@link #MUTE}. */
     public static final String MUTE_PERMANENT = "";
 
+    /**
+     * The one line a muted player gets for every blocked message after the first.
+     *
+     * <p>The full {@link #MUTE} screen is shown once per mute on each server: when the mute
+     * lands while they are online, or at their first blocked message. Repeating seven lines for
+     * every message they try to send buries the chat they can still read. Not a guild segment
+     * yet, so not customisable from the dashboard.
+     */
+    public static final String MUTE_REMINDER =
+            "<red>You are muted</red>[ <gray>for another {remaining}</gray>]<red>.</red>";
+
     /** The disconnect screen for a kick. */
     public static final String KICK =
             "{base}\n"

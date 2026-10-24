@@ -1,12 +1,14 @@
 package com.heimdall.module.punishments;
 
 import com.heimdall.core.json.Payload;
+import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.punish.PunishmentScreens;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 
 final class PunishmentSettings {
 
@@ -17,6 +19,7 @@ final class PunishmentSettings {
     final String mode;
     final boolean rootAliases;
     final boolean silentByDefault;
+    /** Normalised by {@link #commandWords}: {@code msg}, {@code ch send}. */
     final List<String> blockedCommands;
     final String ipSalt;
     final String appealUrl;
@@ -62,10 +65,53 @@ final class PunishmentSettings {
                 PunishmentScreens.KEY_ANNOUNCE_ISSUE, PunishmentScreens.ANNOUNCE_ISSUE);
         this.announceRevoke = settings.string(
                 PunishmentScreens.KEY_ANNOUNCE_REVOKE, PunishmentScreens.ANNOUNCE_REVOKE);
-        List<String> blocked = new ArrayList<String>(settings.strings("blockedCommands"));
+        List<String> blocked = new ArrayList<String>();
+        for (String entry : settings.strings("blockedCommands")) {
+            // A trailing "*" is what an operator types to mean "and anything after it", which
+            // every entry already means. Kept, it would be a literal word nobody can type.
+            String words = commandWords(entry == null ? "" : entry.replaceAll("[\\s*]+$", ""));
+            if (!words.isEmpty() && !blocked.contains(words)) blocked.add(words);
+        }
         this.blockedCommands = blocked.isEmpty()
                 ? DEFAULT_BLOCKED
                 : Collections.unmodifiableList(blocked);
+    }
+
+    /**
+     * Whether a muted player may not run this command line.
+     *
+     * <p>An entry blocks the command it names and anything typed after it, a whole word at a
+     * time: {@code ch send} blocks {@code /ch send hi} and {@code /chat:ch send hi}, but not
+     * {@code /ch join}; {@code me} blocks {@code /me waves} but not {@code /menu}, and {@code r}
+     * not {@code /rtp}. A plain character prefix would have muted players out of every command
+     * that starts with the same letters as a short entry.
+     */
+    boolean blocksCommand(String rawLine) {
+        String line = commandWords(rawLine);
+        if (line.isEmpty()) return false;
+        for (String entry : blockedCommands) {
+            if (line.equals(entry) || line.startsWith(entry + " ")) return true;
+        }
+        return false;
+    }
+
+    /**
+     * A command line or blocked entry in one spelling: the leading slash gone, the {@code plugin:}
+     * namespace dropped from the first word as {@link CommandAttempt#commandLabel} does, words
+     * lower-cased and separated by single spaces.
+     */
+    static String commandWords(String raw) {
+        // commandLabel strips the one leading slash, as the label always did: "//set" is
+        // WorldEdit's own command, not "set".
+        String text = raw == null ? "" : raw.trim();
+        String[] words = text.split("\\s+");
+        if (words.length == 0 || words[0].isEmpty()) return "";
+        StringBuilder out = new StringBuilder(CommandAttempt.commandLabel(words[0]));
+        if (out.length() == 0) return "";
+        for (int i = 1; i < words.length; i++) {
+            out.append(' ').append(words[i].toLowerCase(Locale.ROOT));
+        }
+        return out.toString();
     }
 
     static PunishmentSettings from(ModuleConfig config) {
