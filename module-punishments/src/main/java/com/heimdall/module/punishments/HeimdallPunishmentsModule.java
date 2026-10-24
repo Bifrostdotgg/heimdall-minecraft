@@ -170,8 +170,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private final AtomicBoolean flushing = new AtomicBoolean();
     private final AtomicBoolean flushAgain = new AtomicBoolean();
     private final List<Registration> aliasBinds = new CopyOnWriteArrayList<Registration>();
-    /** Per player, the mute whose full screen this server has shown them. See {@link #muteNotice}. */
-    private final Map<UUID, String> muteScreenShown = new ConcurrentHashMap<UUID, String>();
+    /**
+     * Per player, the ids of the mute whose full screen this server has shown them this session.
+     * A set because one mute has two ids here: its {@code local-<opId>} stand-in and the bot's,
+     * and a sync or replay can put either back in the mirror. See {@link #muteNotice}.
+     */
+    private final Map<UUID, Set<String>> muteScreenShown = new ConcurrentHashMap<UUID, Set<String>>();
 
     /**
      * The enabled instance, or {@code null}.
@@ -252,6 +256,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             @Override
             public void onPlayerSession(PlayerHandle player, long timestampMs) {
                 names.quit(player.name());
+                // Each session shows the full mute screen once, with its reason and appeal link.
+                muteScreenShown.remove(player.uuid());
             }
         });
         seedKnownNames();
@@ -1279,10 +1285,36 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * mute's id, so a new mute shows its screen again.
      */
     private Component muteNotice(UUID player, ActivePunishment mute, PunishmentSettings settings) {
+        return markMuteShown(player, mute) ? render(mute, settings) : renderReminder(mute, settings);
+    }
+
+    /**
+     * Records that this mute's screen is being shown, answering whether it is news: false when
+     * the screen was already shown for it. One atomic step, so a chat refusal and a live apply
+     * racing each other show it once between them.
+     */
+    private boolean markMuteShown(UUID player, ActivePunishment mute) {
         String id = mute.id == null ? "" : mute.id;
-        String shown = muteScreenShown.put(player, id);
-        if (!id.equals(shown)) return render(mute, settings);
-        return renderReminder(mute, settings);
+        final boolean[] news = {false};
+        muteScreenShown.compute(player, (key, ids) -> {
+            if (ids != null && ids.contains(id)) return ids;
+            news[0] = true;
+            Set<String> next = new LinkedHashSet<String>();
+            next.add(id);
+            return next;
+        });
+        return news[0];
+    }
+
+    /** The same mute, now also known by the bot's id. Nothing when the player was not shown it. */
+    private void muteAlsoKnownAs(UUID player, String knownId, String otherId) {
+        if (player == null || knownId == null || otherId == null || otherId.isEmpty()) return;
+        muteScreenShown.computeIfPresent(player, (key, ids) -> {
+            if (!ids.contains(knownId)) return ids;
+            Set<String> next = new LinkedHashSet<String>(ids);
+            next.add(otherId);
+            return next;
+        });
     }
 
     static Component renderReminder(ActivePunishment mute, PunishmentSettings settings) {
@@ -1420,11 +1452,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                     // This server issued it and already told the player, under the stand-in id.
                     // The echo can beat the upload's response, which then finds no stand-in to
                     // rename, so the shown id moves to the bot's here as well.
-                    UUID player = parseUuid(p.targetUuid);
-                    if (player != null && p.id != null) {
-                        muteScreenShown.replace(
-                                player, LOCAL_ID_PREFIX + payload.string("opId", ""), p.id);
-                    }
+                    muteAlsoKnownAs(parseUuid(p.targetUuid),
+                            LOCAL_ID_PREFIX + payload.string("opId", ""), p.id);
                 } else {
                     applyLive(p.targetUuid, p, settings);
                 }
@@ -2068,15 +2097,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String opId = request.string("opId", "");
         boolean standIn = existing != null && existing.id != null && !opId.isEmpty()
                 && existing.id.equals(LOCAL_ID_PREFIX + opId);
+        // The player may have seen this mute's screen under its stand-in id; it is the same mute,
+        // whether or not an echo already replaced the stand-in in the mirror.
+        if ("mute".equals(local.type) && local.targetUuid != null && !opId.isEmpty()) {
+            muteAlsoKnownAs(parseUuid(local.targetUuid), LOCAL_ID_PREFIX + opId, id);
+        }
         if (standIn) {
-            String standInId = existing.id;
             existing.id = id;
             mirror.record(key, existing);
-            // The player has seen this mute's screen under its stand-in id; it is the same mute.
-            if ("mute".equals(local.type) && local.targetUuid != null) {
-                UUID player = parseUuid(local.targetUuid);
-                if (player != null) muteScreenShown.replace(player, standInId, id);
-            }
         }
     }
 
@@ -2162,9 +2190,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             // enforces the mute and has told them itself.
             if (context.platform().role() == ServerRole.GATEKEEPER || !settings.replaceMode()) return;
             if (punishment.expired(System.currentTimeMillis())) return;
-            String id = punishment.id == null ? "" : punishment.id;
-            if (id.equals(muteScreenShown.get(player.uuid()))) return;
-            player.sendMessage(muteNotice(player.uuid(), punishment, settings));
+            if (markMuteShown(player.uuid(), punishment)) {
+                player.sendMessage(render(punishment, settings));
+            }
             return;
         }
         if (!"ban".equals(punishment.type) && !"ipban".equals(punishment.type)

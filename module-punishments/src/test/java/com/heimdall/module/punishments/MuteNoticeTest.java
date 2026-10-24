@@ -104,10 +104,11 @@ class MuteNoticeTest {
         try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
                 .enableReplace()) {
             FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
-            harness.module.onStaffCommand(FakeCommandSource.console(), "mute",
+            harness.module.onStaffCommand(FakeCommandSource.console(), "tempmute",
                     Arrays.asList("Steve", "10m", "-s", "spam"));
+            assertEquals(1, steve.messages().size(), steve.messageText().toString());
+            assertTrue(steve.messageText().get(0).contains("spam"), "the full screen, with the reason");
             int afterIssue = steve.messages().size();
-            assertTrue(afterIssue >= 1, "Steve was told he is muted");
 
             String opId = "";
             for (PunishmentOutbox.Entry entry : harness.module.outboxForTest().snapshot()) {
@@ -129,6 +130,72 @@ class MuteNoticeTest {
 
             Verdict chat = harness.chatPipeline.dispatch(ChatMessage.of(steve.uuid(), "Steve", "hi"));
             assertTrue(text(chat).startsWith("You are muted for another"), text(chat));
+
+            // A sync or a replay of the queued upload can put the stand-in back in the mirror.
+            ActivePunishment standIn = harness.module.mirrorForTest().get("mute:" + steve.uuid());
+            standIn.id = HeimdallPunishmentsModule.LOCAL_ID_PREFIX + opId;
+            harness.module.mirrorForTest().record("mute:" + steve.uuid(), standIn);
+            Verdict again = harness.chatPipeline.dispatch(ChatMessage.of(steve.uuid(), "Steve", "hi"));
+            assertTrue(text(again).startsWith("You are muted for another"), text(again));
+        }
+    }
+
+    @Test
+    @DisplayName("a mute issued here whose upload answers first is still the same mute")
+    void localIssueThenResponseShowsReminder() throws Exception {
+        try (ScriptedPunishApi bot = new ScriptedPunishApi();
+                PunishmentsHarness harness = PunishmentsHarness.withApi(
+                        dataDir, ServerRole.STANDALONE, bot.baseUrl()).enableReplace()) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            harness.module.onStaffCommand(FakeCommandSource.console(), "tempmute",
+                    Arrays.asList("Steve", "10m", "-s", "spam"));
+            assertEquals(1, steve.messages().size(), steve.messageText().toString());
+            harness.module.flushQueue();
+            long deadline = System.currentTimeMillis() + 5_000;
+            while (!harness.module.outboxForTest().isEmpty() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20);
+            }
+            assertTrue(harness.module.outboxForTest().isEmpty(), "the upload was answered");
+            assertEquals("mongo-1", harness.module.mirrorForTest().get("mute:" + steve.uuid()).id);
+
+            // The reminder, not the screen. Its time left can be missing here: a queued write
+            // replayed after a sync carries no expiry until the bot's row arrives.
+            Verdict chat = harness.chatPipeline.dispatch(ChatMessage.of(steve.uuid(), "Steve", "hi"));
+            assertTrue(text(chat).startsWith("You are muted"), text(chat));
+            assertTrue(!text(chat).contains("spam"), text(chat));
+        }
+    }
+
+    @Test
+    @DisplayName("each session shows the full screen once")
+    void quitResetsTheScreen() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.ENFORCER)
+                .enableReplace()) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000c9"));
+            harness.sessions.quit(steve, System.currentTimeMillis());
+            harness.platform.leave(steve);
+            harness.platform.join(steve);
+            Verdict chat = harness.chatPipeline.dispatch(ChatMessage.of(steve.uuid(), "Steve", "hi"));
+            assertTrue(text(chat).contains("spam"), text(chat));
+        }
+    }
+
+    @Test
+    @DisplayName("a frozen player who is not muted still cannot run commands")
+    void frozenWithoutMuteBlocksCommands() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            ActivePunishment freeze = new ActivePunishment();
+            freeze.id = "freeze-1";
+            freeze.type = "freeze";
+            freeze.targetUuid = steve.uuid().toString();
+            harness.module.mirrorForTest().record("freeze:" + steve.uuid(), freeze);
+            Verdict spawn = harness.commandPipeline.dispatch(
+                    CommandAttempt.of(steve.uuid(), "Steve", "/spawn"));
+            assertTrue(spawn.isDeny());
+            assertTrue(text(spawn).contains("frozen"), text(spawn));
         }
     }
 

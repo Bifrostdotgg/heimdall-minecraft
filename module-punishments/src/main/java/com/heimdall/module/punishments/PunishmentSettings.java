@@ -94,13 +94,14 @@ final class PunishmentSettings {
     }
 
     /**
-     * A command line or blocked entry in one spelling: leading slashes gone, the {@code plugin:}
+     * A command line or blocked entry in one spelling: the leading slash gone, the {@code plugin:}
      * namespace dropped from the first word as {@link CommandAttempt#commandLabel} does, words
      * lower-cased and separated by single spaces.
      */
     static String commandWords(String raw) {
+        // commandLabel strips the one leading slash, as the label always did: "//set" is
+        // WorldEdit's own command, not "set".
         String text = raw == null ? "" : raw.trim();
-        while (text.startsWith("/")) text = text.substring(1).trim();
         String[] words = text.split("\\s+");
         if (words.length == 0 || words[0].isEmpty()) return "";
         StringBuilder out = new StringBuilder(CommandAttempt.commandLabel(words[0]));

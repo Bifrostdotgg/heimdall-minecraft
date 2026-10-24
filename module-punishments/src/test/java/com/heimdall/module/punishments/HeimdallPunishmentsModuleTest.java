@@ -137,7 +137,9 @@ class HeimdallPunishmentsModuleTest {
                 assertTrue(harness.commandPipeline.dispatch(CommandAttempt.of(STEVE, "Steve", line)).isDeny(),
                         line + " should be blocked");
             }
-            String[] allowed = {"/ch join global", "/ch", "/chsend hi", "/menu", "/rtp", "/msg Alex hi"};
+            String[] allowed = {
+                "/ch join global", "/ch", "/chsend hi", "/menu", "/rtp", "/msg Alex hi", "//r 5",
+            };
             for (String line : allowed) {
                 assertFalse(harness.commandPipeline.dispatch(CommandAttempt.of(STEVE, "Steve", line)).isDeny(),
                         line + " should not be blocked");
