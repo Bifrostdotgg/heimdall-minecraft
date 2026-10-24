@@ -18,8 +18,11 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -37,40 +40,55 @@ import net.kyori.adventure.text.format.NamedTextColor;
  * <h2>Two layers</h2>
  *
  * <p>The bare verb prints a fixed summary: a header, the same five rows in the same order (Bot,
- * Tunnel, Modules, Mirror, Updates), one line per actual problem, and a footer naming the detail
- * views. Healthy is seven lines and it never passes ten, because a status screen that scrolls off the
- * top of the chat box is one nobody reads. The rows never move, so the eye learns where to look.
+ * Tunnel, Modules, Mirror, Updates), one short line per actual problem, and a footer naming the
+ * detail views. Healthy is seven lines and it never passes ten, because a status screen that scrolls
+ * off the top of the chat box is one nobody reads. The rows never move, so the eye learns where to
+ * look. Problem lines are kept to about one chat line each: they name the fault and the command that
+ * fixes it, and the full sentence lives in the detail view.
  *
  * <p>{@code status bot|modules|server} each print one section in full, and {@code status all}
- * prints all three for the console and for pasting into a support ticket. Everything the old single
- * screen printed is still in one of them.
+ * prints every problem and then all three sections, for the console and for pasting into a support
+ * ticket. Everything the old single screen printed is still in one of them.
  *
  * <h2>Every confusable state is still a different line</h2>
  *
- * <p>The summary is shorter, not vaguer. These pairs in particular each still produce a visibly
- * different row and a problem line:
+ * <p>The summary is shorter, not vaguer. These each still produce their own row value and their own
+ * problem line:
  *
  * <ul>
- *   <li><em>Not set up</em> versus <em>set up but still discovering its guild</em> versus <em>set up
- *       and the bot refused the token</em>. The middle one looks like a network problem and is not;
- *       the third one looks like a network problem and is a revoked credential. The problem line is
- *       {@link HeimdallRuntime#connectionStatus()} verbatim, so both platforms say the same thing.
+ *   <li><em>Not set up</em>, <em>still discovering its guild</em>, <em>the bot refused the
+ *       token</em>, <em>the bot is unreachable</em>. The second looks like a network problem and is
+ *       not; the third looks like a network problem and is a revoked credential.
+ *   <li>An identity mismatch that blocked the tunnel, and one that only warns. The warning is raised
+ *       in every state, because it is usually the explanation for whatever else is wrong.
  *   <li><em>v3</em> versus <em>v2-compat</em>. A tunnel that negotiated down runs on built-in
  *       defaults with no dashboard control at all, and looks perfectly connected while doing it.
  *   <li>Per module: <em>switched off</em>, <em>running</em>, <em>failed to start</em>, <em>switched
- *       off locally</em>. A failed module is named in its own problem line.
+ *       off locally</em>.
  *   <li>The console feed being quiet because nothing is happening, versus being quiet because a
  *       consumer threw and was silently unsubscribed. That is the {@code droppedTapConsumers}
  *       counter, and this is the only place it is ever reported, because the drop cannot log for
  *       itself: it happens inside the logging pipeline.
  * </ul>
  *
+ * <h2>One cause, one line</h2>
+ *
+ * <p>While the bot side is the problem, the rows that depend on it go grey rather than raising
+ * problems of their own: a tunnel that cannot start without a guild is not a second fault, and
+ * advice to sync the mirror is useless while the bot cannot be reached.
+ *
  * <h2>Colour is never the only signal</h2>
  *
  * <p>Each row's dot is coloured by its health, and its words say the same thing ("FAILED", "not
- * connected"), because the console log and a pasted screenshot-as-text lose the colour. The rows and
- * the footer are clickable on servers that render click events (Paper through Adventure, Velocity);
- * BungeeCord and the console get legacy text, so nothing is only behind a click or a hover.
+ * connected"), because the console log and pasted text lose the colour. The rows and the footer are
+ * clickable on servers that render click events (Paper through Adventure, Velocity); BungeeCord and
+ * the console get legacy text, so nothing is only behind a click or a hover.
+ *
+ * <h2>Testable without a running bot</h2>
+ *
+ * <p>Every judgement is made by {@link #assess(Snapshot)}, a pure function of a {@link Snapshot}
+ * of plain values, and the summary is rendered by {@link #render(Snapshot)}. The states that need a
+ * configured server and a live bot to reach for real are tested by building the snapshot directly.
  *
  * <p>Read-only and non-blocking throughout: every value is a field read or a cheap snapshot, so this
  * is safe to run on the server thread and safe to run while the bot is unreachable.
@@ -89,15 +107,15 @@ final class StatusSubcommand implements AdminSubcommand {
      */
     static final int MAX_PROBLEM_LINES = 3;
 
-    /** The endpoint {@code /hd setup} uses when given none; only a different one is worth a word. */
-    private static final String DEFAULT_ENDPOINT = SetupSubcommand.DEFAULT_ENDPOINT;
-
     /**
      * The floor below which a mirror is never called stale, whatever the poll interval says.
      *
      * <p>A short interval and one slow poll should not turn the row yellow.
      */
-    private static final long STALE_FLOOR_MS = TimeUnit.MINUTES.toMillis(15);
+    static final long STALE_FLOOR_MS = TimeUnit.MINUTES.toMillis(15);
+
+    /** How many missed polls in a row make a mirror stale. */
+    static final long STALE_AFTER_POLLS = 3L;
 
     /** The leading dotted number of a version string: {@code 26.2} out of {@code 26.2.build.2622}. */
     private static final Pattern LEADING_VERSION = Pattern.compile("^\\d+(?:\\.\\d+)*");
@@ -130,7 +148,9 @@ final class StatusSubcommand implements AdminSubcommand {
         String section = args.isEmpty() ? "" : args.get(0).toLowerCase(Locale.ROOT);
         switch (section) {
             case "":
-                summary(source, context);
+                for (Component line : render(Snapshot.of(context))) {
+                    source.sendMessage(line);
+                }
                 return;
             case "bot":
                 botSection(source, context);
@@ -142,7 +162,9 @@ final class StatusSubcommand implements AdminSubcommand {
                 serverSection(source, context);
                 return;
             case "all":
-                source.sendMessage(Msg.legacy(header(context) + " §8- §7full status"));
+                Snapshot snapshot = Snapshot.of(context);
+                source.sendMessage(Msg.legacy(header(snapshot) + " §8- §7full status"));
+                problemsSection(source, assess(snapshot));
                 botSection(source, context);
                 modulesSection(source, context);
                 serverSection(source, context);
@@ -153,7 +175,103 @@ final class StatusSubcommand implements AdminSubcommand {
         }
     }
 
-    // ── The summary ──────────────────────────────────────────────────────────
+    // ── What the summary is built from ───────────────────────────────────────
+
+    /**
+     * Every value the summary judges, read once.
+     *
+     * <p>Plain mutable fields, deliberately: the tests set exactly the state they mean and leave the
+     * rest at a healthy default, and nothing outside this class and its test ever sees one.
+     */
+    static final class Snapshot {
+        String label = "hd";
+        String pluginVersion = "";
+        String role = "";
+        String software = "unknown server";
+
+        boolean configured = true;
+        boolean identityBlocks;
+        boolean identityMismatch;
+        /** {@code null} once discovery has resolved, or when there is nothing to discover. */
+        GuildDiscovery.Status discovery;
+        String guildId = "";
+        String endpointHost = "";
+        boolean apiReady = true;
+        String apiDescribe = "";
+
+        boolean tunnelConnected = true;
+        boolean tunnelConfigured = true;
+        ProtocolMode mode = ProtocolMode.V3;
+        int configVersion = 1;
+
+        final Map<String, ModuleState> modules = new LinkedHashMap<String, ModuleState>();
+        final Set<String> locallyOff = new LinkedHashSet<String>();
+
+        boolean whitelistAvailable;
+        int mirrorEntries = -1;
+        long lastSyncAtMs;
+        long syncIntervalMs;
+
+        boolean updatesSupported;
+        boolean updateAvailable;
+        String latestVersion = "";
+
+        /** {@code -1} when the platform could not say. */
+        int droppedTapConsumers;
+
+        long nowMs = System.currentTimeMillis();
+
+        /** Reads a live server. Every accessor here is a field read or a cheap snapshot. */
+        static Snapshot of(AdminContext context) {
+            Snapshot s = new Snapshot();
+            HeimdallRuntime runtime = context.runtime();
+            s.label = context.label();
+            s.pluginVersion = context.pluginVersion();
+            s.role = context.role().wireName();
+            s.software = shortServer(runtime);
+
+            s.configured = runtime.isConfigured();
+            IdentityGuard.Decision identity = runtime.identity();
+            s.identityBlocks = identity != null && identity.blocksTunnel();
+            s.identityMismatch = identity != null && identity.isMismatch();
+            s.discovery = runtime.discoveryStatus();
+            s.guildId = Strings.trimToEmpty(runtime.guildId());
+            s.endpointHost = endpointHost(runtime.bootstrap().endpoint());
+            HeimdallApi api = runtime.api();
+            s.apiReady = api.availability() == HeimdallApi.Availability.READY;
+            s.apiDescribe = api.describe();
+
+            TunnelClient tunnel = runtime.tunnel();
+            s.tunnelConnected = tunnel.isConnected();
+            s.tunnelConfigured = tunnel.settings().isConfigured();
+            s.mode = tunnel.mode();
+            s.configVersion = tunnel.configVersion();
+
+            ModuleManager modules = runtime.modules();
+            for (String id : modules.registeredIds()) {
+                s.modules.put(id, modules.state(id));
+            }
+            s.locallyOff.addAll(runtime.locallyDisabledModules());
+
+            WhitelistAdmin whitelist = context.whitelist();
+            s.whitelistAvailable = whitelist.isAvailable();
+            s.mirrorEntries = whitelist.mirrorEntries();
+            s.lastSyncAtMs = whitelist.lastSyncAtMs();
+            s.syncIntervalMs = whitelist.syncIntervalMs();
+
+            UpdateAdmin updates = context.updates();
+            s.updatesSupported = updates.isSupported();
+            s.updateAvailable = updates.isUpdateAvailable();
+            s.latestVersion = updates.latestVersion();
+
+            try {
+                s.droppedTapConsumers = runtime.platform().console().droppedTapConsumers();
+            } catch (RuntimeException unavailable) {
+                s.droppedTapConsumers = -1;
+            }
+            return s;
+        }
+    }
 
     /** How one row stands. The colour of its dot, and the colour of any problem line it raises. */
     enum Health {
@@ -185,7 +303,7 @@ final class StatusSubcommand implements AdminSubcommand {
         }
     }
 
-    /** One line under the rows: what is wrong, in a sentence that says what to do about it. */
+    /** One line under the rows: what is wrong, and the command that does something about it. */
     static final class Problem {
         final Health health;
         final String text;
@@ -209,53 +327,263 @@ final class StatusSubcommand implements AdminSubcommand {
         void problem(Health health, String text) {
             problems.add(new Problem(health, text));
         }
+
+        /** Broken first, then everything else, each in the order raised. */
+        List<Problem> ordered() {
+            List<Problem> out = new ArrayList<Problem>();
+            for (Problem problem : problems) {
+                if (problem.health == Health.BROKEN) {
+                    out.add(problem);
+                }
+            }
+            for (Problem problem : problems) {
+                if (problem.health != Health.BROKEN) {
+                    out.add(problem);
+                }
+            }
+            return out;
+        }
     }
 
-    private void summary(CommandSource source, AdminContext context) {
-        Report report = assess(context);
-        String label = context.label();
+    // ── Judging ──────────────────────────────────────────────────────────────
 
-        source.sendMessage(Msg.legacy(header(context)));
-        for (Row row : report.rows) {
-            Component line = Msg.legacy(" " + row.health.colour + DOT + " §7" + row.label + " §f"
-                    + row.value);
-            source.sendMessage(clickable(line, label, row.section));
+    /** Works out every row and every problem. A pure function of the snapshot. */
+    static Report assess(Snapshot s) {
+        Report report = new Report();
+        boolean botUp = assessBot(report, s);
+        assessTunnel(report, s, botUp);
+        assessModules(report, s);
+        assessMirror(report, s, botUp);
+        assessUpdates(report, s);
+        if (s.droppedTapConsumers > 0) {
+            report.problem(Health.BROKEN, s.droppedTapConsumers + " console reader(s) dropped: /"
+                    + s.label + " status server");
         }
-
-        List<Problem> ordered = new ArrayList<Problem>();
-        for (Problem problem : report.problems) {
-            if (problem.health == Health.BROKEN) {
-                ordered.add(problem);
-            }
-        }
-        for (Problem problem : report.problems) {
-            if (problem.health != Health.BROKEN) {
-                ordered.add(problem);
-            }
-        }
-        int shown = ordered.size() <= MAX_PROBLEM_LINES ? ordered.size() : MAX_PROBLEM_LINES - 1;
-        for (int i = 0; i < shown; i++) {
-            Problem problem = ordered.get(i);
-            source.sendMessage(Msg.legacy(" " + problem.health.colour + WARN + " §f" + problem.text));
-        }
-        if (ordered.size() > shown) {
-            int more = ordered.size() - shown;
-            source.sendMessage(clickable(Msg.legacy(" §8+" + more + " more: §7/" + label
-                    + " status all"), label, "all"));
-        }
-
-        source.sendMessage(footer(label));
-    }
-
-    /** {@code Heimdall 3.0.0-rc.22 · enforcer · Purpur 26.2}: what this is, in one short line. */
-    private static String header(AdminContext context) {
-        return "§6Heimdall §f" + context.pluginVersion() + " §8· §7" + context.role().wireName()
-                + " §8· §7" + shortServer(context.runtime());
+        return report;
     }
 
     /**
-     * {@code » /hd status bot · modules · server · all}, each word running its view when clicked.
+     * The Bot row.
+     *
+     * @return whether the bot side is far enough along that the rows depending on it are judged
      */
+    private static boolean assessBot(Report report, Snapshot s) {
+        String l = s.label;
+        // Raised in every state, not only the healthy one: a copied server directory whose twin
+        // re-ran setup shows up here as a refused token, and the mismatch is the explanation.
+        if (s.identityMismatch && !s.identityBlocks) {
+            report.problem(Health.ATTENTION, "Credentials bound to another machine: /" + l
+                    + " identity");
+        }
+        if (!s.configured) {
+            report.rows.add(new Row("Bot", Health.BROKEN, "not set up", "bot"));
+            report.problem(Health.BROKEN, "Not set up: /" + l + " setup <code> from the dashboard");
+            return false;
+        }
+        if (s.identityBlocks) {
+            report.rows.add(new Row("Bot", Health.BROKEN, "blocked: identity mismatch", "bot"));
+            report.problem(Health.BROKEN, "Credentials belong to another machine: /" + l
+                    + " identity");
+            return false;
+        }
+        if (s.discovery != null) {
+            switch (s.discovery) {
+                case TOKEN_REFUSED:
+                    report.rows.add(new Row("Bot", Health.BROKEN, "token refused", "bot"));
+                    report.problem(Health.BROKEN, "The bot refused this token: run /" + l
+                            + " setup again");
+                    return false;
+                case UNREACHABLE:
+                    report.rows.add(new Row("Bot", Health.BROKEN, "unreachable", "bot"));
+                    report.problem(Health.BROKEN, "Cannot reach the bot, retrying: /" + l
+                            + " status bot");
+                    return false;
+                case DISCOVERING:
+                default:
+                    report.rows.add(new Row("Bot", Health.ATTENTION, "finding its guild", "bot"));
+                    report.problem(Health.ATTENTION, "Asking the bot which guild this is");
+                    return false;
+            }
+        }
+
+        // "linked", not "connected": the guild is known and the API works, but whether the live
+        // connection is up is the Tunnel row's to say, and a green "connected" here above a red
+        // tunnel would contradict it.
+        String value = "linked, guild " + (s.guildId.isEmpty() ? "none" : s.guildId)
+                + (s.endpointHost.isEmpty() ? "" : " via " + s.endpointHost);
+        Health health = s.identityMismatch ? Health.ATTENTION : Health.OK;
+        if (!s.apiReady) {
+            health = Health.ATTENTION;
+            report.problem(Health.ATTENTION, "Bot API: " + s.apiDescribe);
+        }
+        report.rows.add(new Row("Bot", health, value, "bot"));
+        return true;
+    }
+
+    /**
+     * The Tunnel row. A down tunnel is idle while the bot row is already the problem. A connected
+     * one is judged either way: a server still rediscovering its guild can be running on the cached
+     * one, tunnel and all.
+     */
+    private static void assessTunnel(Report report, Snapshot s, boolean botUp) {
+        String l = s.label;
+        if (!s.tunnelConnected) {
+            if (!botUp) {
+                report.rows.add(new Row("Tunnel", Health.IDLE, "waiting on the bot", "bot"));
+                return;
+            }
+            if (!s.tunnelConfigured) {
+                // Idle on purpose: retrying will never fix it, so it must not read like a blip.
+                report.rows.add(new Row("Tunnel", Health.BROKEN, "idle, settings incomplete", "bot"));
+                report.problem(Health.BROKEN, "Tunnel settings incomplete: run /" + l
+                        + " setup again");
+                return;
+            }
+            report.rows.add(new Row("Tunnel", Health.BROKEN, "not connected", "bot"));
+            report.problem(Health.BROKEN, "Live link to the bot is down, reconnecting");
+            return;
+        }
+        if (s.mode == ProtocolMode.V2_COMPAT) {
+            report.rows.add(new Row("Tunnel", Health.BROKEN, "protocol v2-compat", "bot"));
+            report.problem(Health.BROKEN, "Bot only speaks v2: dashboard settings are ignored");
+            return;
+        }
+        if (s.configVersion < 0) {
+            report.rows.add(new Row("Tunnel", Health.ATTENTION, "protocol v3, no config yet", "bot"));
+            report.problem(Health.ATTENTION, "Waiting for the bot to send this server's settings");
+            return;
+        }
+        report.rows.add(new Row("Tunnel", Health.OK, "protocol v3, config v" + s.configVersion, "bot"));
+    }
+
+    /** The Modules row: counts, with failed and locally disabled modules named underneath. */
+    private static void assessModules(Report report, Snapshot s) {
+        if (s.modules.isEmpty()) {
+            report.rows.add(new Row("Modules", Health.IDLE, "none in this build", "modules"));
+            return;
+        }
+        int running = 0;
+        int off = 0;
+        List<String> failed = new ArrayList<String>();
+        for (Map.Entry<String, ModuleState> entry : s.modules.entrySet()) {
+            ModuleState state = entry.getValue();
+            if (s.locallyOff.contains(entry.getKey())) {
+                off++;
+            } else if (state == ModuleState.ENABLED) {
+                running++;
+            } else if (state == ModuleState.FAILED) {
+                failed.add(entry.getKey());
+            } else if (state == ModuleState.STOPPED) {
+                off++;
+            }
+            // INELIGIBLE (and an unknown state) are not counted: a module that cannot run with this
+            // role is not something anybody switched off. status modules lists them.
+        }
+        StringBuilder value = new StringBuilder().append(running).append(" running, ")
+                .append(off).append(" off");
+        Health health = Health.OK;
+        if (!failed.isEmpty()) {
+            value.append(", ").append(failed.size()).append(" FAILED");
+            health = Health.BROKEN;
+            for (String id : failed) {
+                report.problem(Health.BROKEN, id + " failed to start: check the server log");
+            }
+        }
+        if (!s.locallyOff.isEmpty()) {
+            if (health == Health.OK) {
+                health = Health.ATTENTION;
+            }
+            report.problem(Health.ATTENTION, "Locally disabled: " + String.join(", ", s.locallyOff)
+                    + " (/" + s.label + " enable <module>)");
+        }
+        report.rows.add(new Row("Modules", health, value.toString(), "modules"));
+    }
+
+    /** The Mirror row: how many players, and how long since the bot last confirmed them. */
+    private static void assessMirror(Report report, Snapshot s, boolean botUp) {
+        if (!s.whitelistAvailable) {
+            report.rows.add(new Row("Mirror", Health.IDLE, "not used (whitelist is off)", "modules"));
+            return;
+        }
+        String count = s.mirrorEntries < 0 ? "unknown size" : plural(s.mirrorEntries, "player");
+        if (s.syncIntervalMs <= 0L) {
+            report.rows.add(new Row("Mirror", Health.OK, count + ", pre-warm off", "modules"));
+            return;
+        }
+        // lastSyncAtMs is per process: a mirror loaded from disk has entries and no sync yet.
+        long age = s.lastSyncAtMs <= 0L ? -1L : Math.max(0L, s.nowMs - s.lastSyncAtMs);
+        String value = count + (age < 0L ? ", not synced since start" : ", synced " + ago(age));
+        if (!botUp) {
+            // The bot is the problem, and a sync cannot happen until it is back. Saying so twice,
+            // with advice that cannot work, would bury the line that matters.
+            report.rows.add(new Row("Mirror", Health.IDLE, value, "modules"));
+            return;
+        }
+        if (age < 0L) {
+            report.rows.add(new Row("Mirror", Health.ATTENTION, value, "modules"));
+            report.problem(Health.ATTENTION, "Mirror not synced since start: /" + s.label
+                    + " cache sync");
+            return;
+        }
+        if (age > Math.max(STALE_FLOOR_MS, s.syncIntervalMs * STALE_AFTER_POLLS)) {
+            report.rows.add(new Row("Mirror", Health.ATTENTION, value, "modules"));
+            report.problem(Health.ATTENTION, "Mirror synced " + ago(age) + ", due every "
+                    + span(s.syncIntervalMs) + ": /" + s.label + " cache sync");
+            return;
+        }
+        report.rows.add(new Row("Mirror", Health.OK, value, "modules"));
+    }
+
+    /** The Updates row. */
+    private static void assessUpdates(Report report, Snapshot s) {
+        if (!s.updatesSupported) {
+            report.rows.add(new Row("Updates", Health.IDLE, "no self-updater in this build", "server"));
+            return;
+        }
+        if (s.updateAvailable) {
+            report.rows.add(new Row("Updates", Health.ATTENTION, s.latestVersion + " available",
+                    "server"));
+            report.problem(Health.ATTENTION, s.latestVersion + " is out: /" + s.label + " update");
+            return;
+        }
+        report.rows.add(new Row("Updates", Health.OK, "up to date", "server"));
+    }
+
+    // ── Rendering the summary ────────────────────────────────────────────────
+
+    /** The summary, one component per chat line. */
+    static List<Component> render(Snapshot s) {
+        Report report = assess(s);
+        List<Component> lines = new ArrayList<Component>();
+        lines.add(Msg.legacy(header(s)));
+        for (Row row : report.rows) {
+            lines.add(clickable(Msg.legacy(" " + row.health.colour + DOT + " §7" + row.label + " §f"
+                    + row.value), s.label, row.section));
+        }
+        List<Problem> ordered = report.ordered();
+        int shown = ordered.size() <= MAX_PROBLEM_LINES ? ordered.size() : MAX_PROBLEM_LINES - 1;
+        for (int i = 0; i < shown; i++) {
+            lines.add(problemLine(ordered.get(i)));
+        }
+        if (ordered.size() > shown) {
+            lines.add(clickable(Msg.legacy(" §8+" + (ordered.size() - shown) + " more: §7/" + s.label
+                    + " status all"), s.label, "all"));
+        }
+        lines.add(footer(s.label));
+        return lines;
+    }
+
+    private static Component problemLine(Problem problem) {
+        return Msg.legacy(" " + problem.health.colour + WARN + " §f" + problem.text);
+    }
+
+    /** {@code Heimdall 3.0.0-rc.22 · enforcer · Purpur 26.2}: what this is, in one short line. */
+    private static String header(Snapshot s) {
+        return "§6Heimdall §f" + s.pluginVersion + " §8· §7" + s.role + " §8· §7"
+                + s.software;
+    }
+
+    /** {@code » /hd status bot · modules · server · all}, each word running its view. */
     private static Component footer(String label) {
         TextComponent.Builder footer = Component.text()
                 .append(Msg.legacy(" §8» §7/" + label + " status "));
@@ -276,209 +604,20 @@ final class StatusSubcommand implements AdminSubcommand {
                 .hoverEvent(HoverEvent.showText(Component.text(command, NamedTextColor.GRAY)));
     }
 
-    /** Works out every row and every problem. Package-private so the tests can read it directly. */
-    static Report assess(AdminContext context) {
-        Report report = new Report();
-        HeimdallRuntime runtime = context.runtime();
-        String label = context.label();
-
-        boolean botUp = assessBot(report, runtime, label);
-        assessTunnel(report, runtime.tunnel(), botUp, label);
-        assessModules(report, runtime, label);
-        assessMirror(report, context.whitelist(), label);
-        assessUpdates(report, context.updates(), label);
-
-        int dropped = droppedTapConsumers(runtime);
-        if (dropped > 0) {
-            report.problem(Health.BROKEN, dropped + " console feed reader(s) threw and were "
-                    + "unsubscribed, so whatever was reading the console has stopped receiving it.");
-        }
-        return report;
-    }
-
-    /**
-     * The Bot row, from the same states {@link HeimdallRuntime#connectionStatus()} describes.
-     *
-     * @return whether the bot side is far enough along that the tunnel row should be judged at all
-     */
-    private static boolean assessBot(Report report, HeimdallRuntime runtime, String label) {
-        if (!runtime.isConfigured()) {
-            report.rows.add(new Row("Bot", Health.BROKEN, "not set up", "bot"));
-            report.problem(Health.BROKEN, "This server is not set up. Mint a code on the "
-                    + "Minecraft page of the dashboard, then run /" + label + " setup <code>.");
-            return false;
-        }
-        IdentityGuard.Decision identity = runtime.identity();
-        if (identity != null && identity.blocksTunnel()) {
-            report.rows.add(new Row("Bot", Health.BROKEN, "blocked: identity mismatch", "bot"));
-            report.problem(Health.BROKEN, runtime.connectionStatus());
-            return false;
-        }
-        GuildDiscovery.Status discovery = runtime.discoveryStatus();
-        if (discovery != null) {
-            switch (discovery) {
-                case TOKEN_REFUSED:
-                    report.rows.add(new Row("Bot", Health.BROKEN, "token refused", "bot"));
-                    report.problem(Health.BROKEN, runtime.connectionStatus());
-                    return false;
-                case UNREACHABLE:
-                    report.rows.add(new Row("Bot", Health.BROKEN, "cannot reach the bot", "bot"));
-                    report.problem(Health.BROKEN, runtime.connectionStatus());
-                    return false;
-                case DISCOVERING:
-                default:
-                    report.rows.add(new Row("Bot", Health.ATTENTION, "finding its guild", "bot"));
-                    report.problem(Health.ATTENTION, runtime.connectionStatus());
-                    return false;
-            }
-        }
-
-        String via = endpointHost(runtime.bootstrap());
-        String value = "connected, guild " + orNone(runtime.guildId())
-                + (via.isEmpty() ? "" : " via " + via);
-        Health health = Health.OK;
-        if (identity != null && identity.isMismatch()) {
-            health = Health.ATTENTION;
-            report.problem(Health.ATTENTION, "These credentials were bound to another machine "
-                    + "(warning only). Run /" + label + " identity.");
-        }
-        if (runtime.api().availability() != HeimdallApi.Availability.READY) {
-            health = Health.ATTENTION;
-            report.problem(Health.ATTENTION, "The tunnel is up but the bot API says \""
-                    + runtime.api().describe() + "\". Details: /" + label + " status bot.");
-        }
-        report.rows.add(new Row("Bot", health, value, "bot"));
-        return true;
-    }
-
-    /**
-     * The Tunnel row. A down tunnel is idle while the bot row is already the problem, so one cause
-     * is one line. A connected one is judged either way: a server still rediscovering its guild can
-     * be running on the cached one, tunnel and all.
-     */
-    private static void assessTunnel(Report report, TunnelClient tunnel, boolean botUp, String label) {
-        if (!tunnel.isConnected()) {
-            if (!botUp) {
-                report.rows.add(new Row("Tunnel", Health.IDLE, "waiting on the bot", "bot"));
-                return;
-            }
-            report.rows.add(new Row("Tunnel", Health.BROKEN, "not connected", "bot"));
-            report.problem(Health.BROKEN, "The live connection to the bot is down, so dashboard "
-                    + "changes are not reaching this server. Details: /" + label + " status bot.");
-            return;
-        }
-        int version = tunnel.configVersion();
-        if (tunnel.mode() == ProtocolMode.V2_COMPAT) {
-            report.rows.add(new Row("Tunnel", Health.BROKEN, "protocol v2-compat", "bot"));
-            report.problem(Health.BROKEN, "The bot only offered the old v2 protocol, so this server "
-                    + "runs on built-in defaults and dashboard settings do not reach it.");
-            return;
-        }
-        if (version < 0) {
-            report.rows.add(new Row("Tunnel", Health.ATTENTION, "protocol v3, no config yet", "bot"));
-            report.problem(Health.ATTENTION, "Connected, but the bot has not sent this server's "
-                    + "settings yet.");
-            return;
-        }
-        report.rows.add(new Row("Tunnel", Health.OK, "protocol v3, config v" + version, "bot"));
-    }
-
-    /** The Modules row: counts, with failed and locally disabled modules named underneath. */
-    private static void assessModules(Report report, HeimdallRuntime runtime, String label) {
-        ModuleManager modules = runtime.modules();
-        Set<String> ids = modules.registeredIds();
-        if (ids.isEmpty()) {
-            report.rows.add(new Row("Modules", Health.IDLE, "none in this build", "modules"));
-            return;
-        }
-        Set<String> locallyOff = runtime.locallyDisabledModules();
-        int running = 0;
-        int off = 0;
-        List<String> failed = new ArrayList<String>();
-        for (String id : ids) {
-            ModuleState state = modules.state(id);
-            if (locallyOff.contains(id)) {
-                off++;
-            } else if (state == ModuleState.ENABLED) {
-                running++;
-            } else if (state == ModuleState.FAILED) {
-                failed.add(id);
-            } else if (state == ModuleState.STOPPED) {
-                off++;
-            }
-            // INELIGIBLE (and an unknown state) are not counted: a module that cannot run with this
-            // role is not something anybody switched off. status modules lists them.
-        }
-        StringBuilder value = new StringBuilder().append(running).append(" running, ")
-                .append(off).append(" off");
-        Health health = Health.OK;
-        if (!failed.isEmpty()) {
-            value.append(", ").append(failed.size()).append(" FAILED");
-            health = Health.BROKEN;
-            for (String id : failed) {
-                report.problem(Health.BROKEN, id + " failed to start. See the server log, then "
-                        + "toggle it off and on.");
-            }
-        }
-        if (!locallyOff.isEmpty()) {
-            if (health == Health.OK) {
-                health = Health.ATTENTION;
-            }
-            report.problem(Health.ATTENTION, "Locally disabled: " + String.join(", ", locallyOff)
-                    + ". /" + label + " enable <module> hands it back to the dashboard.");
-        }
-        report.rows.add(new Row("Modules", health, value.toString(), "modules"));
-    }
-
-    /** The Mirror row: how many players, and how long since the bot last confirmed them. */
-    private static void assessMirror(Report report, WhitelistAdmin whitelist, String label) {
-        if (!whitelist.isAvailable()) {
-            report.rows.add(new Row("Mirror", Health.IDLE, "not used (whitelist is off)", "modules"));
-            return;
-        }
-        int entries = whitelist.mirrorEntries();
-        String count = entries < 0 ? "unknown size" : plural(entries, "player");
-        long interval = whitelist.syncIntervalMs();
-        long at = whitelist.lastSyncAtMs();
-        if (interval <= 0L) {
-            report.rows.add(new Row("Mirror", Health.OK, count + ", pre-warm off", "modules"));
-            return;
-        }
-        if (at <= 0L) {
-            report.rows.add(new Row("Mirror", Health.ATTENTION, count + ", never synced", "modules"));
-            report.problem(Health.ATTENTION, "The whitelist mirror has not synced with the bot yet. "
-                    + "/" + label + " cache sync pulls it now.");
-            return;
-        }
-        long age = Math.max(0L, System.currentTimeMillis() - at);
-        String value = count + ", synced " + ago(age);
-        if (age > Math.max(STALE_FLOOR_MS, interval * 3L)) {
-            report.rows.add(new Row("Mirror", Health.ATTENTION, value, "modules"));
-            report.problem(Health.ATTENTION, "The whitelist mirror last synced " + ago(age)
-                    + " but should every " + span(interval) + ". /" + label
-                    + " cache sync pulls it now.");
-            return;
-        }
-        report.rows.add(new Row("Mirror", Health.OK, value, "modules"));
-    }
-
-    /** The Updates row. */
-    private static void assessUpdates(Report report, UpdateAdmin updates, String label) {
-        if (!updates.isSupported()) {
-            report.rows.add(new Row("Updates", Health.IDLE, "no self-updater in this build", "server"));
-            return;
-        }
-        if (updates.isUpdateAvailable()) {
-            report.rows.add(new Row("Updates", Health.ATTENTION,
-                    updates.latestVersion() + " available", "server"));
-            report.problem(Health.ATTENTION, updates.latestVersion() + " is out: /" + label
-                    + " update");
-            return;
-        }
-        report.rows.add(new Row("Updates", Health.OK, "up to date", "server"));
-    }
-
     // ── The detail views ─────────────────────────────────────────────────────
+
+    /** Every problem, uncapped. What the summary's "+N more" points at. */
+    private static void problemsSection(CommandSource source, Report report) {
+        source.sendMessage(Msg.legacy("§6Problems"));
+        List<Problem> ordered = report.ordered();
+        if (ordered.isEmpty()) {
+            source.sendMessage(Msg.legacy(" §anone"));
+            return;
+        }
+        for (Problem problem : ordered) {
+            source.sendMessage(problemLine(problem));
+        }
+    }
 
     /** Everything about how this server reaches its bot. */
     private static void botSection(CommandSource source, AdminContext context) {
@@ -489,6 +628,8 @@ final class StatusSubcommand implements AdminSubcommand {
         // different one, and "which bot is this server actually talking to?" is the first question a
         // whitelabel support conversation asks.
         detail(source, "endpoint", orNone(bootstrap.endpoint()));
+        // connectionStatus() is the full sentence behind the summary's short Bot line, including
+        // the last discovery failure and the cached guild a server is running on meanwhile.
         detail(source, "status", runtime.connectionStatus());
         detail(source, "guild", orNone(runtime.guildId()));
         detail(source, "serverId", orNone(bootstrap.serverId()));
@@ -550,14 +691,19 @@ final class StatusSubcommand implements AdminSubcommand {
      * somebody looking for a bug that is really a stale identity.
      */
     private static String describeServer(HeimdallRuntime runtime) {
-        ServerIdentity identity = identity(runtime);
-        if (identity == null) {
+        IdentitySource source = runtime.identitySource();
+        if (source == null) {
             return "unknown server software";
         }
-        String software = Strings.isBlank(identity.serverSoftware())
-                ? identity.platform() : identity.serverSoftware();
-        String version = Strings.isBlank(identity.mcVersion()) ? "" : " " + identity.mcVersion();
-        return orNone(software) + version;
+        try {
+            ServerIdentity identity = source.identity();
+            String software = Strings.isBlank(identity.serverSoftware())
+                    ? identity.platform() : identity.serverSoftware();
+            String version = Strings.isBlank(identity.mcVersion()) ? "" : " " + identity.mcVersion();
+            return orNone(software) + version;
+        } catch (RuntimeException unavailable) {
+            return "unknown server software (" + unavailable + ")";
+        }
     }
 
     /**
@@ -565,12 +711,17 @@ final class StatusSubcommand implements AdminSubcommand {
      * number, so {@code Purpur 26.2-2622-48bcd91 (MC: 26.2) 26.2.build.2622-stable} reads
      * {@code Purpur 26.2}. The full string is in {@code status server}.
      */
-    static String shortServer(HeimdallRuntime runtime) {
-        ServerIdentity identity = identity(runtime);
-        if (identity == null) {
+    private static String shortServer(HeimdallRuntime runtime) {
+        IdentitySource source = runtime.identitySource();
+        if (source == null) {
             return "unknown server";
         }
-        return shortServer(identity.serverSoftware(), identity.platform(), identity.mcVersion());
+        try {
+            ServerIdentity identity = source.identity();
+            return shortServer(identity.serverSoftware(), identity.platform(), identity.mcVersion());
+        } catch (RuntimeException unavailable) {
+            return "unknown server";
+        }
     }
 
     static String shortServer(String software, String platform, String mcVersion) {
@@ -593,18 +744,6 @@ final class StatusSubcommand implements AdminSubcommand {
         return matcher.find() ? matcher.group() : "";
     }
 
-    private static ServerIdentity identity(HeimdallRuntime runtime) {
-        IdentitySource source = runtime.identitySource();
-        if (source == null) {
-            return null;
-        }
-        try {
-            return source.identity();
-        } catch (RuntimeException unavailable) {
-            return null;
-        }
-    }
-
     /**
      * The protocol the tunnel is actually speaking, and the config version behind it.
      *
@@ -614,38 +753,32 @@ final class StatusSubcommand implements AdminSubcommand {
      */
     private static String describeTunnel(TunnelClient tunnel) {
         if (!tunnel.isConnected()) {
-            return "not connected (" + tunnel.mode().name().toLowerCase(Locale.ROOT) + ")";
+            String why = tunnel.settings().isConfigured() ? "" : ", tunnel settings incomplete";
+            return "not connected (" + tunnel.mode().name().toLowerCase(Locale.ROOT) + why + ")";
         }
         int version = tunnel.configVersion();
         return "connected, protocol " + tunnel.mode().name().toLowerCase(Locale.ROOT)
                 + ", bot config version " + (version < 0 ? "none yet" : Integer.toString(version));
     }
 
-    /** Whether anything reading the console feed has been dropped for throwing. */
-    private static String describeConsole(HeimdallRuntime runtime) {
-        int dropped = droppedTapConsumers(runtime);
-        if (dropped < 0) {
-            return "unknown";
-        }
-        return dropped == 0
-                ? "ok"
-                : dropped + " consumer(s) threw and were unsubscribed; whatever was reading the "
-                        + "console feed has stopped receiving it";
-    }
-
     /**
-     * The dropped-consumer count, or {@code -1} if the platform could not say.
+     * Whether anything reading the console feed has been dropped for throwing.
      *
      * <p>This is the only place that number is ever reported, and it has to be: the drop happens
      * inside the log-capture path, where writing a line would be captured and fed back into the loop
      * the re-entrancy guard exists to break. So the tap counts silently and this asks.
      */
-    private static int droppedTapConsumers(HeimdallRuntime runtime) {
+    private static String describeConsole(HeimdallRuntime runtime) {
+        int dropped;
         try {
-            return runtime.platform().console().droppedTapConsumers();
+            dropped = runtime.platform().console().droppedTapConsumers();
         } catch (RuntimeException unavailable) {
-            return -1;
+            return "unknown (" + unavailable + ")";
         }
+        return dropped == 0
+                ? "ok"
+                : dropped + " consumer(s) threw and were unsubscribed; whatever was reading the "
+                        + "console feed has stopped receiving it";
     }
 
     private static String describeUpdates(AdminContext context) {
@@ -663,15 +796,22 @@ final class StatusSubcommand implements AdminSubcommand {
     // ── Formatting ───────────────────────────────────────────────────────────
 
     /**
-     * The endpoint's host when it is not the default, else {@code ""}.
+     * The endpoint's host when it is not the default instance's, else {@code ""}.
      *
      * <p>Only a whitelabel endpoint earns space on the summary row; everybody else's is the same.
+     * Compared by host, so a scheme, a port or a trailing path does not make the default look like
+     * a whitelabel instance.
      */
-    static String endpointHost(BootstrapConfig bootstrap) {
-        String endpoint = Strings.trimToEmpty(bootstrap.endpoint());
-        if (endpoint.isEmpty() || endpoint.equalsIgnoreCase(DEFAULT_ENDPOINT)) {
+    static String endpointHost(String endpoint) {
+        String trimmed = Strings.trimToEmpty(endpoint);
+        if (trimmed.isEmpty()) {
             return "";
         }
+        String host = hostOf(trimmed);
+        return host.equalsIgnoreCase(hostOf(SetupSubcommand.DEFAULT_ENDPOINT)) ? "" : host;
+    }
+
+    private static String hostOf(String endpoint) {
         try {
             String host = new URI(endpoint).getHost();
             return host == null ? endpoint : host;

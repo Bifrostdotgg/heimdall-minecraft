@@ -10,11 +10,15 @@ import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.RecordingLogger;
 import com.heimdall.core.module.HeimdallModule;
 import com.heimdall.core.module.ModuleContext;
+import com.heimdall.core.module.ModuleState;
 import com.heimdall.core.testing.FakeCommandSource;
 import com.heimdall.core.testing.FakePlatform;
 import com.heimdall.core.testing.RecordingCommands;
+import com.heimdall.core.testing.TestText;
+import com.heimdall.core.tunnel.ProtocolMode;
 import com.heimdall.core.update.InstallOutcome;
 import com.heimdall.core.util.Registration;
+import com.heimdall.core.wiring.GuildDiscovery;
 import com.heimdall.core.wiring.HeimdallRuntime;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -23,6 +27,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -133,7 +139,7 @@ class StatusSubcommandTest {
     }
 
     @Nested
-    @DisplayName("the summary")
+    @DisplayName("the summary, on a live runtime")
     class Summary {
 
         @Test
@@ -152,7 +158,7 @@ class StatusSubcommandTest {
             int updates = indexOf(lines, "Updates ");
             assertEquals(Arrays.asList(1, 2, 3, 4, 5), Arrays.asList(bot, tunnel, modules, mirror, updates),
                     "the rows never move, so the eye learns where to look: " + lines);
-            assertTrue(lines.get(lines.size() - 1).contains("/hd status bot · modules · server · all"),
+            assertTrue(lines.get(lines.size() - 1).contains("/hd status bot \u00B7 modules \u00B7 server \u00B7 all"),
                     lines.get(lines.size() - 1));
         }
 
@@ -172,6 +178,12 @@ class StatusSubcommandTest {
             assertTrue(lines.size() <= 10, "a status screen that scrolls is one nobody reads: " + lines);
             assertTrue(anyContains(lines, "+2 more"), lines.toString());
             assertTrue(anyContains(lines, "/hd status all"));
+
+            List<String> all = say("status", "all");
+            for (String needle : Arrays.asList("Not set up", "broken failed to start",
+                    "Locally disabled: whitelist", "3.0.0-rc.99 is out")) {
+                assertTrue(anyContains(all, needle), "+N more has to point at every problem: " + needle);
+            }
         }
 
         @Test
@@ -194,9 +206,9 @@ class StatusSubcommandTest {
         void failedModule() {
             registerModule("rolesync", true);
             runtime.modules().reconcile(Collections.singleton("rolesync"));
-            install(context());
 
-            StatusSubcommand.Report report = StatusSubcommand.assess(context().build());
+            StatusSubcommand.Report report = StatusSubcommand.assess(
+                    StatusSubcommand.Snapshot.of(context().build()));
 
             StatusSubcommand.Row modules = row(report, "Modules");
             assertEquals(StatusSubcommand.Health.BROKEN, modules.health);
@@ -213,20 +225,9 @@ class StatusSubcommandTest {
 
             List<String> lines = say("status");
 
-            assertTrue(anyContains(lines, "Locally disabled: whitelist"), lines.toString());
-            assertTrue(anyContains(lines, "/hd enable <module>"));
-        }
-
-        @Test
-        @DisplayName("an available update is yellow and says the command")
-        void updateAvailable() {
-            install(context().updates(new AvailableUpdates("3.0.0-rc.99")));
-
-            StatusSubcommand.Report report = StatusSubcommand.assess(context()
-                    .updates(new AvailableUpdates("3.0.0-rc.99")).build());
-
-            assertEquals(StatusSubcommand.Health.ATTENTION, row(report, "Updates").health);
-            assertTrue(problemSaying(report, "/hd update"));
+            assertTrue(anyContains(lines, "Locally disabled: whitelist (/hd enable <module>)"),
+                    lines.toString());
+            assertTrue(anyContains(say("status", "server"), "locally disabled: whitelist"));
         }
 
         @Test
@@ -246,71 +247,335 @@ class StatusSubcommandTest {
     }
 
     @Nested
+    @DisplayName("the bot and tunnel rows")
+    class BotAndTunnel {
+
+        @Test
+        @DisplayName("healthy reads linked and connected, both green, and raises nothing")
+        void allGreen() {
+            StatusSubcommand.Snapshot s = healthy();
+
+            StatusSubcommand.Report report = StatusSubcommand.assess(s);
+
+            assertEquals(StatusSubcommand.Health.OK, row(report, "Bot").health);
+            assertEquals("linked, guild 1342530243746857112", row(report, "Bot").value);
+            assertEquals(StatusSubcommand.Health.OK, row(report, "Tunnel").health);
+            assertEquals("protocol v3, config v8", row(report, "Tunnel").value);
+            assertTrue(report.problems.isEmpty(), "healthy has no problem lines");
+        }
+
+        @Test
+        @DisplayName("the four discovery states each read differently")
+        void discoveryStates() {
+            StatusSubcommand.Snapshot refused = healthy();
+            refused.discovery = GuildDiscovery.Status.TOKEN_REFUSED;
+            StatusSubcommand.Snapshot unreachable = healthy();
+            unreachable.discovery = GuildDiscovery.Status.UNREACHABLE;
+            StatusSubcommand.Snapshot discovering = healthy();
+            discovering.discovery = GuildDiscovery.Status.DISCOVERING;
+            StatusSubcommand.Snapshot unconfigured = healthy();
+            unconfigured.configured = false;
+
+            assertRow(refused, "Bot", StatusSubcommand.Health.BROKEN, "token refused");
+            assertTrue(problemSaying(StatusSubcommand.assess(refused), "/hd setup again"));
+            assertRow(unreachable, "Bot", StatusSubcommand.Health.BROKEN, "unreachable");
+            assertTrue(problemSaying(StatusSubcommand.assess(unreachable), "Cannot reach the bot"));
+            assertRow(discovering, "Bot", StatusSubcommand.Health.ATTENTION, "finding its guild");
+            assertTrue(problemSaying(StatusSubcommand.assess(discovering), "which guild"));
+            assertRow(unconfigured, "Bot", StatusSubcommand.Health.BROKEN, "not set up");
+        }
+
+        @Test
+        @DisplayName("a blocking identity mismatch is red and says /hd identity")
+        void identityBlocks() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.identityMismatch = true;
+            s.identityBlocks = true;
+            s.tunnelConnected = false;
+
+            assertRow(s, "Bot", StatusSubcommand.Health.BROKEN, "blocked: identity mismatch");
+            assertTrue(problemSaying(StatusSubcommand.assess(s), "another machine: /hd identity"));
+            assertRow(s, "Tunnel", StatusSubcommand.Health.IDLE, "waiting on the bot");
+        }
+
+        @Test
+        @DisplayName("an advisory mismatch is raised even while discovery is failing")
+        void advisoryMismatchSurvivesDiscovery() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.identityMismatch = true;
+            s.discovery = GuildDiscovery.Status.TOKEN_REFUSED;
+
+            StatusSubcommand.Report report = StatusSubcommand.assess(s);
+
+            assertTrue(problemSaying(report, "Credentials bound to another machine"),
+                    "a copied directory whose twin re-ran setup shows up as a refused token, and "
+                            + "the mismatch is the explanation");
+            assertTrue(problemSaying(report, "refused this token"));
+        }
+
+        @Test
+        @DisplayName("an advisory mismatch on a healthy server turns the bot row yellow")
+        void advisoryMismatchHealthy() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.identityMismatch = true;
+
+            assertRow(s, "Bot", StatusSubcommand.Health.ATTENTION, "linked");
+        }
+
+        @Test
+        @DisplayName("a whitelabel endpoint is named; the default one is not")
+        void whitelabel() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.endpointHost = StatusSubcommand.endpointHost("https://bot.example.com/");
+
+            assertRow(s, "Bot", StatusSubcommand.Health.OK, "via bot.example.com");
+            assertEquals("", StatusSubcommand.endpointHost("https://api.bifrost.gg"));
+            assertEquals("", StatusSubcommand.endpointHost("HTTPS://API.BIFROST.GG/"));
+            assertEquals("", StatusSubcommand.endpointHost("http://api.bifrost.gg/v1"));
+            assertEquals("", StatusSubcommand.endpointHost(""));
+        }
+
+        @Test
+        @DisplayName("an API that is not ready behind a linked bot is flagged")
+        void apiNotReady() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.apiReady = false;
+            s.apiDescribe = "discovering this token's guild";
+
+            assertRow(s, "Bot", StatusSubcommand.Health.ATTENTION, "linked");
+            assertTrue(problemSaying(StatusSubcommand.assess(s), "Bot API: discovering"));
+        }
+
+        @Test
+        @DisplayName("a down tunnel behind a linked bot is red; with no guild it is grey")
+        void tunnelDown() {
+            StatusSubcommand.Snapshot down = healthy();
+            down.tunnelConnected = false;
+            StatusSubcommand.Snapshot incomplete = healthy();
+            incomplete.tunnelConnected = false;
+            incomplete.tunnelConfigured = false;
+
+            assertRow(down, "Tunnel", StatusSubcommand.Health.BROKEN, "not connected");
+            assertTrue(problemSaying(StatusSubcommand.assess(down), "Live link to the bot is down"));
+            assertRow(incomplete, "Tunnel", StatusSubcommand.Health.BROKEN, "settings incomplete");
+            assertTrue(problemSaying(StatusSubcommand.assess(incomplete), "setup again"));
+        }
+
+        @Test
+        @DisplayName("a connected tunnel is judged even while the guild is being rediscovered")
+        void connectedWhileDiscovering() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.discovery = GuildDiscovery.Status.DISCOVERING;
+            s.mode = ProtocolMode.V2_COMPAT;
+
+            assertRow(s, "Tunnel", StatusSubcommand.Health.BROKEN, "v2-compat");
+        }
+
+        @Test
+        @DisplayName("v2-compat and a missing config are told apart from healthy")
+        void protocol() {
+            StatusSubcommand.Snapshot compat = healthy();
+            compat.mode = ProtocolMode.V2_COMPAT;
+            StatusSubcommand.Snapshot noConfig = healthy();
+            noConfig.configVersion = -1;
+
+            assertRow(compat, "Tunnel", StatusSubcommand.Health.BROKEN, "protocol v2-compat");
+            assertTrue(problemSaying(StatusSubcommand.assess(compat), "only speaks v2"));
+            assertRow(noConfig, "Tunnel", StatusSubcommand.Health.ATTENTION, "no config yet");
+            assertTrue(problemSaying(StatusSubcommand.assess(noConfig), "send this server's settings"));
+        }
+
+        @Test
+        @DisplayName("dropped console readers are reported here, because nowhere else can")
+        void droppedTap() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.droppedTapConsumers = 2;
+
+            StatusSubcommand.Report report = StatusSubcommand.assess(s);
+
+            assertTrue(problemSaying(report, "2 console reader(s) dropped"));
+            assertEquals(StatusSubcommand.Health.BROKEN, report.ordered().get(0).health);
+        }
+    }
+
+    @Nested
+    @DisplayName("the modules and updates rows")
+    class ModulesAndUpdates {
+
+        @Test
+        @DisplayName("counts running and off, and names a locally disabled module as off")
+        void counts() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.modules.put("whitelist", ModuleState.ENABLED);
+            s.modules.put("bridge", ModuleState.ENABLED);
+            s.modules.put("console", ModuleState.STOPPED);
+            s.modules.put("health", ModuleState.INELIGIBLE);
+            s.locallyOff.add("bridge");
+
+            assertRow(s, "Modules", StatusSubcommand.Health.ATTENTION, "1 running, 2 off");
+            assertTrue(problemSaying(StatusSubcommand.assess(s), "Locally disabled: bridge"));
+        }
+
+        @Test
+        @DisplayName("an available update is yellow and says the command")
+        void updateAvailable() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.updatesSupported = true;
+            s.updateAvailable = true;
+            s.latestVersion = "3.0.0-rc.99";
+
+            assertRow(s, "Updates", StatusSubcommand.Health.ATTENTION, "3.0.0-rc.99 available");
+            assertTrue(problemSaying(StatusSubcommand.assess(s), "3.0.0-rc.99 is out: /hd update"));
+        }
+    }
+
+    @Nested
     @DisplayName("the mirror row")
     class Mirror {
 
         @Test
         @DisplayName("shows the size and the age of the last sync")
         void fresh() {
-            StatusSubcommand.Row mirror = row(StatusSubcommand.assess(context()
-                    .whitelist(new Whitelist(3072, minutesAgo(4), TimeUnit.MINUTES.toMillis(5)))
-                    .build()), "Mirror");
+            StatusSubcommand.Snapshot s = withMirror(3072, minutesAgo(4), TimeUnit.MINUTES.toMillis(5));
 
-            assertEquals(StatusSubcommand.Health.OK, mirror.health);
-            assertEquals("3,072 players, synced 4m ago", mirror.value);
+            assertRow(s, "Mirror", StatusSubcommand.Health.OK, "3,072 players, synced 4m ago");
         }
 
         @Test
-        @DisplayName("goes yellow when the poll has clearly stopped landing")
+        @DisplayName("goes yellow after three missed polls")
         void stale() {
-            StatusSubcommand.Report report = StatusSubcommand.assess(context()
-                    .whitelist(new Whitelist(10, minutesAgo(120), TimeUnit.MINUTES.toMillis(5)))
-                    .build());
+            StatusSubcommand.Snapshot s = withMirror(10, minutesAgo(120), TimeUnit.MINUTES.toMillis(5));
 
-            assertEquals(StatusSubcommand.Health.ATTENTION, row(report, "Mirror").health);
-            assertTrue(problemSaying(report, "last synced 2h ago but should every 5m"));
-            assertTrue(problemSaying(report, "/hd cache sync"));
+            assertRow(s, "Mirror", StatusSubcommand.Health.ATTENTION, "synced 2h ago");
+            assertTrue(problemSaying(StatusSubcommand.assess(s),
+                    "Mirror synced 2h ago, due every 5m: /hd cache sync"));
+            // Two missed hourly polls is not yet stale; three is.
+            assertRow(withMirror(10, minutesAgo(150), TimeUnit.HOURS.toMillis(1)), "Mirror",
+                    StatusSubcommand.Health.OK, "synced");
+            assertRow(withMirror(10, minutesAgo(190), TimeUnit.HOURS.toMillis(1)), "Mirror",
+                    StatusSubcommand.Health.ATTENTION, "synced");
         }
 
         @Test
         @DisplayName("is not called stale for one slow poll on a short interval")
         void floor() {
-            StatusSubcommand.Row mirror = row(StatusSubcommand.assess(context()
-                    .whitelist(new Whitelist(10, minutesAgo(10), TimeUnit.MINUTES.toMillis(1)))
-                    .build()), "Mirror");
-
-            assertEquals(StatusSubcommand.Health.OK, mirror.health);
+            assertRow(withMirror(10, minutesAgo(10), TimeUnit.MINUTES.toMillis(1)), "Mirror",
+                    StatusSubcommand.Health.OK, "synced 10m ago");
         }
 
         @Test
-        @DisplayName("a mirror that never synced says so")
+        @DisplayName("a mirror that has not synced since start says so")
         void neverSynced() {
-            StatusSubcommand.Report report = StatusSubcommand.assess(context()
-                    .whitelist(new Whitelist(0, 0L, TimeUnit.MINUTES.toMillis(5)))
-                    .build());
+            StatusSubcommand.Snapshot s = withMirror(0, 0L, TimeUnit.MINUTES.toMillis(5));
 
-            assertEquals("0 players, never synced", row(report, "Mirror").value);
-            assertTrue(problemSaying(report, "has not synced"));
+            assertRow(s, "Mirror", StatusSubcommand.Health.ATTENTION, "0 players, not synced since start");
+            assertTrue(problemSaying(StatusSubcommand.assess(s), "/hd cache sync"));
+        }
+
+        @Test
+        @DisplayName("raises nothing while the bot is the problem, since a sync cannot help")
+        void botDown() {
+            StatusSubcommand.Snapshot s = withMirror(10, minutesAgo(120), TimeUnit.MINUTES.toMillis(5));
+            s.discovery = GuildDiscovery.Status.UNREACHABLE;
+
+            StatusSubcommand.Report report = StatusSubcommand.assess(s);
+
+            assertEquals(StatusSubcommand.Health.IDLE, row(report, "Mirror").health);
+            assertFalse(problemSaying(report, "cache sync"));
         }
 
         @Test
         @DisplayName("with the pre-warm off, its age means nothing and is not judged")
         void prewarmOff() {
-            StatusSubcommand.Report report = StatusSubcommand.assess(context()
-                    .whitelist(new Whitelist(1, 0L, 0L))
-                    .build());
+            StatusSubcommand.Snapshot s = withMirror(1, 0L, 0L);
 
-            assertEquals(StatusSubcommand.Health.OK, row(report, "Mirror").health);
-            assertEquals("1 player, pre-warm off", row(report, "Mirror").value);
-            assertFalse(problemSaying(report, "mirror"));
+            assertRow(s, "Mirror", StatusSubcommand.Health.OK, "1 player, pre-warm off");
+            assertFalse(problemSaying(StatusSubcommand.assess(s), "Mirror"));
         }
 
         @Test
         @DisplayName("is grey with no whitelist module running")
         void absent() {
-            StatusSubcommand.Row mirror = row(StatusSubcommand.assess(context().build()), "Mirror");
+            assertRow(healthy(), "Mirror", StatusSubcommand.Health.IDLE, "not used");
+        }
+    }
 
-            assertEquals(StatusSubcommand.Health.IDLE, mirror.health);
+    @Nested
+    @DisplayName("rendering")
+    class Rendering {
+
+        @Test
+        @DisplayName("every row and the footer words run their view when clicked, with the label")
+        void clickable() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.label = "hdp";
+
+            List<Component> lines = StatusSubcommand.render(s);
+
+            assertEquals("/hdp status bot", clickOf(lines.get(1)), "the Bot row");
+            assertEquals("/hdp status modules", clickOf(lines.get(3)), "the Modules row");
+            assertEquals("/hdp status server", clickOf(lines.get(5)), "the Updates row");
+            Component footer = lines.get(lines.size() - 1);
+            List<String> clicks = new ArrayList<String>();
+            for (Component child : footer.children()) {
+                String click = clickOf(child);
+                if (click != null) {
+                    clicks.add(click);
+                }
+            }
+            assertEquals(Arrays.asList("/hdp status bot", "/hdp status modules",
+                    "/hdp status server", "/hdp status all"), clicks);
+        }
+
+        @Test
+        @DisplayName("the header names version, role and the short software")
+        void header() {
+            StatusSubcommand.Snapshot s = healthy();
+
+            String header = TestText.plain(StatusSubcommand.render(s).get(0));
+
+            assertEquals("Heimdall 3.0.0-rc.22 \u00B7 enforcer \u00B7 Purpur 26.2", header);
+        }
+
+        @Test
+        @DisplayName("healthy is seven lines; three problems print in full")
+        void lengths() {
+            assertEquals(7, StatusSubcommand.render(healthy()).size());
+
+            StatusSubcommand.Snapshot three = healthy();
+            three.mode = ProtocolMode.V2_COMPAT;
+            three.droppedTapConsumers = 1;
+            three.identityMismatch = true;
+            List<Component> lines = StatusSubcommand.render(three);
+            assertEquals(10, lines.size());
+            assertFalse(TestText.plain(lines.get(8)).contains("more"));
+        }
+
+        @Test
+        @DisplayName("broken problems print before attention ones")
+        void ordering() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.identityMismatch = true;
+            s.droppedTapConsumers = 1;
+
+            List<Component> lines = StatusSubcommand.render(s);
+
+            assertTrue(TestText.plain(lines.get(6)).contains("console reader"), TestText.plain(lines.get(6)));
+            assertTrue(TestText.plain(lines.get(7)).contains("another machine"));
+        }
+
+        @Test
+        @DisplayName("problem lines stay short enough to read at chat width")
+        void shortProblems() {
+            StatusSubcommand.Snapshot[] states = {stateWith(GuildDiscovery.Status.TOKEN_REFUSED),
+                    stateWith(GuildDiscovery.Status.UNREACHABLE), stateWith(GuildDiscovery.Status.DISCOVERING)};
+            for (StatusSubcommand.Snapshot s : states) {
+                s.identityMismatch = true;
+                s.droppedTapConsumers = 3;
+                for (StatusSubcommand.Problem problem : StatusSubcommand.assess(s).problems) {
+                    assertTrue(problem.text.length() <= 60, "wraps more than once: " + problem.text);
+                }
+            }
         }
     }
 
@@ -437,6 +702,44 @@ class StatusSubcommandTest {
             }
         }
         return false;
+    }
+
+    /** A configured, linked, connected server with nothing wrong, and no optional parts. */
+    private static StatusSubcommand.Snapshot healthy() {
+        StatusSubcommand.Snapshot s = new StatusSubcommand.Snapshot();
+        s.pluginVersion = "3.0.0-rc.22";
+        s.role = "enforcer";
+        s.software = "Purpur 26.2";
+        s.guildId = "1342530243746857112";
+        s.configVersion = 8;
+        return s;
+    }
+
+    private static StatusSubcommand.Snapshot stateWith(GuildDiscovery.Status discovery) {
+        StatusSubcommand.Snapshot s = healthy();
+        s.discovery = discovery;
+        return s;
+    }
+
+    private static StatusSubcommand.Snapshot withMirror(int entries, long lastSyncAtMs, long intervalMs) {
+        StatusSubcommand.Snapshot s = healthy();
+        s.whitelistAvailable = true;
+        s.mirrorEntries = entries;
+        s.lastSyncAtMs = lastSyncAtMs;
+        s.syncIntervalMs = intervalMs;
+        return s;
+    }
+
+    private static void assertRow(StatusSubcommand.Snapshot s, String label,
+            StatusSubcommand.Health health, String valuePart) {
+        StatusSubcommand.Row row = row(StatusSubcommand.assess(s), label);
+        assertEquals(health, row.health, label + " row: " + row.value);
+        assertTrue(row.value.contains(valuePart), label + " row was \"" + row.value + "\"");
+    }
+
+    private static String clickOf(Component component) {
+        ClickEvent click = component.clickEvent();
+        return click == null ? null : click.value();
     }
 
     private static long minutesAgo(long minutes) {
