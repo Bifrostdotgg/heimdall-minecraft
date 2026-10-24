@@ -39,6 +39,11 @@ class MuteNoticeTest {
                 .build();
     }
 
+    private static String mirroredId(PunishmentsHarness harness, FakePlayer player) {
+        ActivePunishment row = harness.module.mirrorForTest().get("mute:" + player.uuid());
+        return row == null || row.id == null ? "" : row.id;
+    }
+
     private static String text(Verdict verdict) {
         return TestText.plain(verdict.reason());
     }
@@ -176,12 +181,15 @@ class MuteNoticeTest {
                     Arrays.asList("Steve", "10m", "-s", "spam"));
             assertEquals(1, steve.messages().size(), steve.messageText().toString());
             harness.module.flushQueue();
+            // The outbox empties a moment before the mirror row is renamed: wait for both.
             long deadline = System.currentTimeMillis() + 5_000;
-            while (!harness.module.outboxForTest().isEmpty() && System.currentTimeMillis() < deadline) {
+            while (!(harness.module.outboxForTest().isEmpty()
+                            && "mongo-1".equals(mirroredId(harness, steve)))
+                    && System.currentTimeMillis() < deadline) {
                 Thread.sleep(20);
             }
             assertTrue(harness.module.outboxForTest().isEmpty(), "the upload was answered");
-            assertEquals("mongo-1", harness.module.mirrorForTest().get("mute:" + steve.uuid()).id);
+            assertEquals("mongo-1", mirroredId(harness, steve));
 
             // The reminder, not the screen. Its time left can be missing here: a queued write
             // replayed after a sync carries no expiry until the bot's row arrives.
