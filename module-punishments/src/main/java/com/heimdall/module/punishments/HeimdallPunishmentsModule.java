@@ -1256,13 +1256,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
 
     private Verdict onCommand(CommandAttempt attempt) {
         if (mirror == null) return Verdict.abstain();
+        // The mute first: settings are parsed per call, and most commands are typed by players
+        // who are neither frozen nor muted.
+        ActivePunishment mute = mirror.get("mute:" + attempt.senderUuid());
+        boolean muted = mute != null && !mute.expired(System.currentTimeMillis());
+        if (!muted && !isFrozen(attempt.senderUuid())) return Verdict.abstain();
         PunishmentSettings settings = PunishmentSettings.from(context.config());
         if (!settings.replaceMode()) return Verdict.abstain();
         if (isFrozen(attempt.senderUuid())) {
             return Verdict.deny(Msg.legacy("§cYou are frozen."));
         }
-        ActivePunishment mute = mirror.get("mute:" + attempt.senderUuid());
-        if (mute == null || mute.expired(System.currentTimeMillis())) return Verdict.abstain();
+        if (!muted) return Verdict.abstain();
         if (settings.blocksCommand(attempt.raw())) {
             return Verdict.deny(muteNotice(attempt.senderUuid(), mute, settings));
         }
@@ -1412,8 +1416,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 }
                 mirror.record(key, p);
                 refreshRevokeCandidacy(revokeFamily(p.type), p.targetUuid, p.targetName);
-                // This server issued it and already told the player, under the stand-in id.
-                if (!(echo && "mute".equals(p.type))) applyLive(p.targetUuid, p, settings);
+                if (echo && "mute".equals(p.type)) {
+                    // This server issued it and already told the player, under the stand-in id.
+                    // The echo can beat the upload's response, which then finds no stand-in to
+                    // rename, so the shown id moves to the bot's here as well.
+                    UUID player = parseUuid(p.targetUuid);
+                    if (player != null && p.id != null) {
+                        muteScreenShown.replace(
+                                player, LOCAL_ID_PREFIX + payload.string("opId", ""), p.id);
+                    }
+                } else {
+                    applyLive(p.targetUuid, p, settings);
+                }
                 if (!announced) announce(announcementFor(p, settings));
             }
         };
@@ -1727,6 +1741,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 // the moderator asked for.
                 ActivePunishment lifted = mirror.get(key);
                 mirror.evict(key);
+                if ("mute".equals(type)) {
+                    UUID player = parseUuid(uuid);
+                    if (player != null) muteScreenShown.remove(player);
+                }
                 if (lifted == null) return;
                 refreshRevokeCandidacy(
                         revokeFamily(lifted.type), lifted.targetUuid, lifted.targetName);
@@ -2140,7 +2158,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if ("mute".equals(punishment.type)) {
             // Only where mutes are enforced: a proxy cannot cancel signed chat, so the backend
             // the player is on is the one that tells them, once, and then refuses their messages.
-            if (context.platform().role() == ServerRole.GATEKEEPER) return;
+            // And only when Heimdall is the one refusing their messages: in hook mode LiteBans
+            // enforces the mute and has told them itself.
+            if (context.platform().role() == ServerRole.GATEKEEPER || !settings.replaceMode()) return;
+            if (punishment.expired(System.currentTimeMillis())) return;
             String id = punishment.id == null ? "" : punishment.id;
             if (id.equals(muteScreenShown.get(player.uuid()))) return;
             player.sendMessage(muteNotice(player.uuid(), punishment, settings));
