@@ -87,6 +87,51 @@ final class PunishmentOutbox {
         }
     }
 
+    /**
+     * Marks a queued warn issue as already shown to its player, so it uploads with
+     * {@code delivered} and the bot never has it shown again. Returns whether an entry was found:
+     * not finding one means the issue has already gone up, which costs at most one more showing.
+     */
+    synchronized boolean markIssueDelivered(String opId) {
+        if (opId == null || opId.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < entries.size(); i++) {
+            Entry entry = entries.get(i);
+            if (!opId.equals(entry.opId) || !"issue".equals(entry.op)) {
+                continue;
+            }
+            if (entry.payload.bool("delivered", false)) {
+                return true;
+            }
+            entries.set(i, new Entry(entry.opId, entry.issuedAt, entry.serverId, entry.op,
+                    entry.payload.toBuilder().put("delivered", true).build()));
+            save();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Removes and returns the entry with this op id, as it is now rather than as a snapshot had
+     * it, or null when there is none. The flush takes an uploaded issue with this, so a mark
+     * made while the upload was in flight is seen rather than dropped with the entry.
+     */
+    synchronized Entry take(String opId) {
+        if (opId == null) {
+            return null;
+        }
+        for (Iterator<Entry> it = entries.iterator(); it.hasNext(); ) {
+            Entry entry = it.next();
+            if (opId.equals(entry.opId)) {
+                it.remove();
+                save();
+                return entry;
+            }
+        }
+        return null;
+    }
+
     synchronized List<Entry> snapshot() {
         List<Entry> copy = new ArrayList<Entry>(entries);
         Collections.sort(copy, ORDER);

@@ -103,6 +103,17 @@ public final class Capabilities {
      * it understands perfectly.
      */
     public static final String PUNISHMENTS = "punishments@1";
+    /**
+     * Import previews: this client honours {@code dryRun} on a {@code punish.import} notification,
+     * sending every batch with {@code dryRun} and its run id and writing nothing locally, and
+     * acknowledges a warn it has shown with {@code POST punishments/{id}/delivered}.
+     *
+     * <p>A build capability declared alongside {@link #PUNISHMENTS}, like {@link #CHAT_CHANNELS}
+     * beside the bridge. It exists because the bot has to know before it asks: an older client
+     * ignores {@code dryRun} and runs a real import, writing every case the preview was meant only
+     * to count, so the bot sends a preview only to a client that declared this.
+     */
+    public static final String PUNISH_PREVIEW = "punishpreview@1";
 
     /**
      * Link-code prompts: this client answers a {@code show_link_code} request by presenting the code

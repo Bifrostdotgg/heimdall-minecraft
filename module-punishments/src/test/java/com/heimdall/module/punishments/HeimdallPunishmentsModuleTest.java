@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
@@ -298,6 +299,28 @@ class HeimdallPunishmentsModuleTest {
     }
 
     @Test
+    @DisplayName("a queued issue replayed after a stale pull keeps its stand-in id")
+    void replayedIssueKeepsItsStandInId() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE).enableReplace()) {
+            harness.platform.join(new FakePlayer(STEVE, "Steve"));
+            harness.module.onStaffCommand(FakeCommandSource.console(), "ban", Arrays.asList("Steve", "griefing"));
+            List<PunishmentOutbox.Entry> queued = harness.module.outboxForTest().snapshot();
+            assertEquals(1, queued.size());
+
+            // A snapshot from before the bot heard of it drops the row, and the replay puts it
+            // back from the queued body, which carries no id of its own.
+            harness.module.mirrorForTest().reconcile(new LinkedHashMap<String, ActivePunishment>());
+            assertNull(harness.module.mirrorForTest().get("ban:" + STEVE));
+            harness.module.replayPendingWrites();
+
+            ActivePunishment replayed = harness.module.mirrorForTest().get("ban:" + STEVE);
+            assertNotNull(replayed);
+            assertEquals(HeimdallPunishmentsModule.LOCAL_ID_PREFIX + queued.get(0).opId, replayed.id,
+                    "the upload's answer renames only its own stand-in");
+        }
+    }
+
+    @Test
     @DisplayName("flushQueue posts issue then filter-revoke, and stores the sync ETag")
     void flushQueueHitsHttpAndKeepsEtag() throws Exception {
         try (ScriptedPunishApi bot = new ScriptedPunishApi();
@@ -562,12 +585,13 @@ class HeimdallPunishmentsModuleTest {
             harness.module.onStaffCommand(moderator, "warn", Arrays.asList("Steve", "spamming"));
 
             assertFalse(moderator.wasTold("no length"), moderator.messageText().toString());
-            ActivePunishment warn = harness.module.mirrorForTest()
-                    .get("warn:" + FakePlayer.named("Steve").uuid());
-            assertNotNull(warn, "the warn was issued");
-            assertEquals("spamming", warn.reason);
-            assertNull(warn.durationSeconds);
-            assertNull(warn.expiresAt);
+            // Steve is online here, so the warn is shown now and uploaded as delivered rather
+            // than kept for his next join: what was issued is the queued body.
+            Payload warn = queuedBody(harness);
+            assertEquals("warn", warn.string("type", ""));
+            assertEquals("spamming", warn.string("reason", ""));
+            assertFalse(warn.has("durationSeconds"), warn.toJson());
+            assertFalse(warn.has("durationMinutes"), warn.toJson());
         }
     }
 
@@ -585,8 +609,7 @@ class HeimdallPunishmentsModuleTest {
             assertFalse(moderator.wasTold("no length"),
                     "the parser only takes a WHOLE duration token, so this one is reason text and "
                             + "the refusal must not fire on it: " + moderator.messageText());
-            assertEquals("1day-old account", harness.module.mirrorForTest()
-                    .get("warn:" + FakePlayer.named("Steve").uuid()).reason);
+            assertEquals("1day-old account", queuedBody(harness).string("reason", ""));
         }
     }
 

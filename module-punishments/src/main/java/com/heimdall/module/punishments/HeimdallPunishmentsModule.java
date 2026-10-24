@@ -64,6 +64,12 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
 
     public static final String ID = "punishments";
 
+    /** The id a punishment issued here carries until the bot has given it a real one. */
+    static final String LOCAL_ID_PREFIX = "local-";
+
+    /** The outbox operation that tells the bot a warn was shown. */
+    static final String OP_DELIVERED = "delivered";
+
     /** The bot asking which other accounts have shared an address with a player. */
     static final String DUPEIP_QUERY = "dupeip.query";
 
@@ -114,6 +120,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private volatile LastIpStore lastIps;
     private volatile GeoCountryLookup geo;
     private volatile long lastFullSyncAt;
+    /**
+     * Whether the bot last said a Heimdall proxy that shows warns is connected. Only a backend
+     * reads it: false (the bot has not said, or is older than the field) leaves it showing warns
+     * itself, as it always did.
+     */
+    private volatile boolean proxyShowsWarns;
+    /**
+     * Whether a full sync has answered since this module started. Until one has, the flag above
+     * is only its default, and the restored ETag would get a 304 that never sets it, so the
+     * first pull goes without one.
+     */
+    private volatile boolean syncedSinceStart;
     /**
      * Operation ids this server issued itself, newest last, capped at {@value #ECHO_MEMORY}.
      *
@@ -175,7 +193,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
 
     @Override
     public Set<String> capabilities() {
-        return Collections.singleton(Capabilities.PUNISHMENTS);
+        // Both, always. PUNISH_PREVIEW is a build capability, not a module of its own: it tells the
+        // bot this client can preview an import, which an older one would run for real.
+        return Collections.unmodifiableSet(new LinkedHashSet<String>(Arrays.asList(
+                Capabilities.PUNISHMENTS, Capabilities.PUNISH_PREVIEW)));
     }
 
     @Override
@@ -232,6 +253,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         context.tunnel().subscribe("punish.apply", applyHandler());
         context.tunnel().subscribe("punish.revoke", revokeHandler());
         context.tunnel().subscribe("punish.import", importHandler());
+        context.tunnel().subscribe("punish.delivered", deliveredHandler());
         context.tunnel().subscribe(DUPEIP_QUERY, dupeipHandler(context.tunnel(), context.logger()));
         context.onConfigChanged(new ModuleConfigListener() {
             @Override
@@ -725,7 +747,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (ctx == null) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
         if ("import".equals(type)) {
-            runImportCommand(source, ctx);
+            runImportCommand(source, ctx, args);
             return;
         }
         if (isLookup(type)) {
@@ -922,7 +944,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         // Before anything is sent, so an echo cannot outrun the record of what caused it.
         rememberIssued(opId);
         ActivePunishment local = new ActivePunishment();
-        local.id = "local-" + opId;
+        local.id = LOCAL_ID_PREFIX + opId;
         local.type = type;
         local.targetUuid = uuid;
         local.targetName = name;
@@ -940,12 +962,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         names.remember(name);
         String mirrorKey = keyFor(local);
-        if (mirror != null && !"kick".equals(type) && mirrorKey != null) {
-            mirror.record(mirrorKey, local);
-            // After the record, because the candidacy is recomputed from the mirror.
-            refreshRevokeCandidacy(revokeFamily(type), uuid, name);
+        // A warn to a player online here is shown now and uploaded as delivered, so no server
+        // shows it again. Anything else is recorded and applied as before.
+        boolean warnDelivered = "warn".equals(type) && showWarnNow(uuid, local, settings);
+        if (warnDelivered) {
+            // The player's older warn, if this server still held one, is closed with this one.
+            if (mirror != null && mirrorKey != null) mirror.evict(mirrorKey);
+        } else {
+            if (mirror != null && !"kick".equals(type) && mirrorKey != null) {
+                mirror.record(mirrorKey, local);
+                // After the record, because the candidacy is recomputed from the mirror.
+                refreshRevokeCandidacy(revokeFamily(type), uuid, name);
+            }
+            applyLive(uuid, local, settings);
         }
-        applyLive(uuid, local, settings);
         Payload.Builder body = Payload.builder()
                 .put("type", type)
                 .put("targetUuid", uuid)
@@ -956,6 +986,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 .put("source", "command")
                 .put("opId", opId)
                 .put("issuedAt", now);
+        if (warnDelivered) {
+            body.put("delivered", true);
+        }
         if (parsed.durationSeconds != null) {
             putDuration(body, parsed.durationSeconds.longValue());
         }
@@ -1233,10 +1266,89 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     private void notifyWarn(PlayerHandle player) {
         if (player == null || mirror == null || context == null) return;
         PunishmentSettings settings = PunishmentSettings.from(context.config());
-        if (!settings.replaceMode()) return;
+        if (!settings.replaceMode() || !showsWarns()) return;
         ActivePunishment warn = mirror.get("warn:" + player.uuid());
         if (warn == null || warn.expired(System.currentTimeMillis())) return;
         player.sendMessage(render(warn, settings));
+        warnShown(warn);
+    }
+
+    /**
+     * Whether this server is the one that shows a player their warns: the proxy, or a server with
+     * no proxy in front of it, or a backend whose proxy does not run Heimdall.
+     *
+     * <p>A warn is news, shown once. On a network every server holds the same warn in its mirror,
+     * and each one used to show it at every join, so a player saw it once from the proxy and again
+     * from every backend they switched to, at every login, forever. The proxy sees every player on
+     * the network, so it is the one place that can show it once.
+     *
+     * <p>A backend cannot tell from its own config whether its proxy runs Heimdall: proxy
+     * forwarding is on either way, so it resolves {@code ENFORCER} in both cases. The bot sees
+     * every connection and says ({@code proxyShowsWarns} on a warn frame and on the sync), and a
+     * backend with no such proxy shows warns itself.
+     */
+    private boolean showsWarns() {
+        ModuleContext ctx = this.context;
+        if (ctx == null) return false;
+        ServerRole role = ctx.platform().role();
+        if (role == ServerRole.ENFORCER) return !proxyShowsWarns;
+        return role == ServerRole.GATEKEEPER || role == ServerRole.STANDALONE;
+    }
+
+    /**
+     * Records that a warn reached its player: drops it from the mirror, so the next join does not
+     * show it again, and tells the bot, which marks it (and the player's older warns) delivered,
+     * leaves it out of every server's sync, and tells the other servers to drop their copy.
+     *
+     * <p>A warn still queued for upload has only a local id, so the bot has nothing to acknowledge
+     * yet: the queued issue carries {@code delivered} instead. The acknowledgement goes through the
+     * outbox, so a bot that is unreachable now still hears about it. A bot older than the route
+     * answers 404 and the entry is dropped, which leaves that bot's behaviour as it was.
+     */
+    private void warnShown(ActivePunishment warn) {
+        if (warn == null || warn.targetUuid == null) return;
+        MirrorStore<ActivePunishment> store = this.mirror;
+        if (store != null) {
+            String key = "warn:" + warn.targetUuid;
+            ActivePunishment held = store.get(key);
+            if (held == null || sameId(held.id, warn.id)) store.evict(key);
+        }
+        String id = warn.id == null ? "" : warn.id;
+        if (id.isEmpty()) return;
+        PunishmentOutbox box = this.outbox;
+        if (id.startsWith(LOCAL_ID_PREFIX)) {
+            if (box != null) box.markIssueDelivered(id.substring(LOCAL_ID_PREFIX.length()));
+            return;
+        }
+        long now = System.currentTimeMillis();
+        enqueue(OP_DELIVERED, OP_DELIVERED + "-" + id, now, Payload.builder().put("id", id).build());
+        flushSoon();
+    }
+
+    private static boolean sameId(String left, String right) {
+        return left != null && left.equals(right);
+    }
+
+    /**
+     * {@code punish.delivered}: another server showed the player a warn. Drops this server's copy
+     * when it is one of the warns the bot marked, so this server does not show it again.
+     */
+    private TunnelMessageHandler deliveredHandler() {
+        return new TunnelMessageHandler() {
+            @Override
+            public void onMessage(Envelope envelope) {
+                MirrorStore<ActivePunishment> store = mirror;
+                if (store == null) return;
+                Payload payload = envelope.payload();
+                String uuid = payload.string("targetUuid", "");
+                if (uuid.isEmpty()) return;
+                String key = "warn:" + uuid;
+                ActivePunishment held = store.get(key);
+                if (held != null && payload.strings("ids").contains(held.id)) {
+                    store.evict(key);
+                }
+            }
+        };
     }
 
     private TunnelMessageHandler applyHandler() {
@@ -1258,6 +1370,23 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 String key = keyFor(p);
                 if (key == null) return;
                 names.remember(p.targetName);
+                if ("warn".equals(p.type) && payload.has("proxyShowsWarns")) {
+                    proxyShowsWarns = payload.bool("proxyShowsWarns", false);
+                }
+                if ("warn".equals(p.type) && !payload.string("deliveredAt", "").isEmpty()) {
+                    if ("hook".equalsIgnoreCase(payload.string("source", ""))) {
+                        // LiteBans showed its own warn. That says nothing about a Heimdall warn
+                        // this server still holds for the player, which stays to be shown.
+                        ActivePunishment held = mirror.get(key);
+                        if (held != null && sameId(held.id, p.id)) mirror.evict(key);
+                    } else {
+                        // Shown by another server, which also closed the player's older warns:
+                        // this server has nothing left to show.
+                        mirror.evict(key);
+                    }
+                    if (!announced) announce(announcementFor(p, settings));
+                    return;
+                }
                 mirror.record(key, p);
                 refreshRevokeCandidacy(revokeFamily(p.type), p.targetUuid, p.targetName);
                 applyLive(p.targetUuid, p, settings);
@@ -1372,16 +1501,32 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             public void onMessage(Envelope envelope) {
                 ModuleContext ctx = HeimdallPunishmentsModule.this.context;
                 if (ctx == null) return;
+                // A preview is only ever asked of a client that declared punishpreview@1, which is
+                // this one: the bot asking is the proof it reads the flag.
+                boolean dryRun = envelope.payload().bool("dryRun", false);
                 // Hands off at once: this is the tunnel's thread, and the import reads whole tables.
-                if (!startImport(ctx, consoleProgress(ctx))) {
+                if (!startImport(ctx, consoleProgress(ctx), dryRun)) {
                     ctx.logger().warn("punishment import requested while one is already running; ignored");
                 }
             }
         };
     }
 
-    private boolean startImport(ModuleContext ctx, PunishmentImporters.Progress progress) {
-        return PunishmentImporters.start(ctx, lastIps, progress);
+    private boolean startImport(ModuleContext ctx, PunishmentImporters.Progress progress,
+            boolean dryRun) {
+        return PunishmentImporters.start(ctx, lastIps, progress, dryRun);
+    }
+
+    /** {@code --dry-run}, or {@code --preview}, anywhere in the arguments of {@code /hd import}. */
+    static boolean isDryRun(List<String> args) {
+        if (args == null) return false;
+        for (int i = 0; i < args.size(); i++) {
+            String arg = args.get(i) == null ? "" : args.get(i).trim().toLowerCase(Locale.ROOT);
+            if ("--dry-run".equals(arg) || "--dryrun".equals(arg) || "--preview".equals(arg)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static PunishmentImporters.Progress consoleProgress(final ModuleContext ctx) {
@@ -1398,8 +1543,18 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      *
      * <p>Allowed in every mode. Importing is how a server moves off LiteBans, so it has to work
      * while LiteBans is still the one enforcing. Lines go to whoever ran it and to the console.
+     *
+     * <p>{@code --dry-run} is the dashboard's Preview import. It is refused, rather than run, when
+     * the bot has not accepted {@code punishpreview@1}: an older bot ignores the flag, and the
+     * preview would import everything it was meant only to count.
      */
-    private void runImportCommand(final CommandSource source, ModuleContext ctx) {
+    private void runImportCommand(final CommandSource source, ModuleContext ctx, List<String> args) {
+        final boolean dryRun = isDryRun(args);
+        if (dryRun && !ctx.tunnel().peerAccepts(Capabilities.PUNISH_PREVIEW)) {
+            source.sendMessage(Msg.legacy("§cThis bot cannot preview an import yet, or is not "
+                    + "connected. Nothing was run."));
+            return;
+        }
         final ModuleContext context = ctx;
         PunishmentImporters.Progress progress = new PunishmentImporters.Progress() {
             @Override
@@ -1408,11 +1563,13 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 source.sendMessage(Msg.legacy("§7[import] §f" + message));
             }
         };
-        if (!startImport(ctx, progress)) {
+        if (!startImport(ctx, progress, dryRun)) {
             source.sendMessage(Msg.legacy("§eAn import is already running on this server."));
             return;
         }
-        source.sendMessage(Msg.legacy("§aImport started. Progress follows here and in the console."));
+        source.sendMessage(Msg.legacy(dryRun
+                ? "§aPreview started. Nothing is written. Progress follows here and in the console."
+                : "§aImport started. Progress follows here and in the console."));
     }
 
     /**
@@ -1718,9 +1875,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 if ("issue".equals(entry.op)) {
                     Payload result = ctx.api().issuePunishment(entry.payload)
                             .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
+                    // Taken before the id is remembered: a warn shown while this upload was in
+                    // flight was marked on the queued copy, and the bot has the unmarked one.
+                    PunishmentOutbox.Entry taken = box.take(entry.opId);
                     rememberIssuedId(entry.payload, result);
-                    box.remove(entry.opId);
-                    uploaded = true;
+                    if (taken != null && taken.payload.bool("delivered", false)
+                            && !entry.payload.bool("delivered", false)) {
+                        String id = issuedIdOf(result);
+                        if (!id.isEmpty()) {
+                            enqueue(OP_DELIVERED, OP_DELIVERED + "-" + id, System.currentTimeMillis(),
+                                    Payload.builder().put("id", id).build());
+                            flushAgain.set(true);
+                        }
+                    }
+                    if (!isHookWrite(entry)) uploaded = true;
                 } else if ("revoke".equals(entry.op)) {
                     Payload result = ctx.api().revokePunishment(entry.payload)
                             .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
@@ -1729,7 +1897,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         continue;
                     }
                     box.remove(entry.opId);
-                    uploaded = true;
+                    if (!isHookWrite(entry)) uploaded = true;
+                } else if (OP_DELIVERED.equals(entry.op)) {
+                    ctx.api().markWarnDelivered(entry.payload.string("id", ""))
+                            .get(ctx.api().settings().overallTimeoutMs(), TimeUnit.MILLISECONDS);
+                    box.remove(entry.opId);
                 } else {
                     box.remove(entry.opId);
                 }
@@ -1737,6 +1909,21 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 Throwable cause = e instanceof ExecutionException && e.getCause() != null
                         ? e.getCause()
                         : e;
+                if (OP_DELIVERED.equals(entry.op) && isRefusedAcknowledgement(cause)) {
+                    // A bot older than the route, or a warn it no longer has. An acknowledgement
+                    // is only ever an improvement on today, so it is not worth holding.
+                    box.remove(entry.opId);
+                    continue;
+                }
+                if ("hook".equals(entry.payload.string("source", "")) && isPermanentRefusal(cause)) {
+                    // LiteBans already applied it, and the bot will never take this mirror of it
+                    // (a row it cannot store, say). Holding it would retry it every few seconds
+                    // forever; it was dropped outright before the bridge used the outbox.
+                    ctx.logger().warn("punishment outbox dropped LiteBans " + entry.op + " "
+                            + entry.opId + ", which the bot refused: " + cause.getMessage());
+                    box.remove(entry.opId);
+                    continue;
+                }
                 if (isGone(cause)) {
                     ctx.logger().warn("punishment outbox dropped " + entry.op + " " + entry.opId
                             + " (already gone): " + cause.getMessage());
@@ -1755,6 +1942,15 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (uploaded) {
             sync(true);
         }
+    }
+
+    /**
+     * A write the LiteBans hook queued. It changes nothing this server enforces from its mirror
+     * (LiteBans enforces it, or the bot's fan-out brings it back), so it does not need the full
+     * sync a native write does, which on a busy server would be one per LiteBans action.
+     */
+    private static boolean isHookWrite(PunishmentOutbox.Entry entry) {
+        return "hook".equalsIgnoreCase(entry.payload.string("source", ""));
     }
 
     /**
@@ -1778,11 +1974,38 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 || message.contains("gone");
     }
 
+    /**
+     * A 4xx answer to a warn acknowledgement, which no retry will change: a bot older than the
+     * route answers 404, or 403 where the token's scope does not list it. A timeout or a rate limit
+     * is not one.
+     */
+    static boolean isRefusedAcknowledgement(Throwable cause) {
+        if (!(cause instanceof ApiError)) return false;
+        int status = ((ApiError) cause).httpStatus();
+        return status >= 400 && status < 500 && status != 408 && status != 429;
+    }
+
+    /**
+     * A refusal of the row itself, which no retry will change. Unlike
+     * {@link #isRefusedAcknowledgement}, 401 and 403 are held: they are this server's credentials
+     * or scope, which an operator fixes, and the row should still go up once they have.
+     */
+    static boolean isPermanentRefusal(Throwable cause) {
+        if (!isRefusedAcknowledgement(cause)) return false;
+        int status = ((ApiError) cause).httpStatus();
+        return status != 401 && status != 403;
+    }
+
     private void rememberIssuedId(Payload request, Payload result) {
         if (mirror == null || result == null) return;
-        String id = result.string("id", "");
-        if (id.isEmpty()) id = result.string("_id", "");
+        String id = issuedIdOf(result);
         if (id.isEmpty()) return;
+        // A warn the LiteBans hook mirrored is LiteBans' own. Naming the warn this server holds
+        // after it would have the next showing acknowledge the wrong row.
+        if ("warn".equals(request.string("type", ""))
+                && "hook".equalsIgnoreCase(request.string("source", ""))) {
+            return;
+        }
         ActivePunishment local = new ActivePunishment();
         local.id = id;
         local.type = request.string("type", result.string("type", ""));
@@ -1796,10 +2019,23 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         String key = keyFor(local);
         if (key == null) return;
         ActivePunishment existing = mirror.get(key);
-        if (existing != null) {
+        // Only the row this upload was standing in for: its local id, which a replay after a
+        // restart gives it too. Anything else at the key arrived from the bot since, a newer
+        // punishment with its own id, and renaming it would have its next acknowledgement name
+        // this row instead.
+        String opId = request.string("opId", "");
+        boolean standIn = existing != null && existing.id != null && !opId.isEmpty()
+                && existing.id.equals(LOCAL_ID_PREFIX + opId);
+        if (standIn) {
             existing.id = id;
             mirror.record(key, existing);
         }
+    }
+
+    private static String issuedIdOf(Payload result) {
+        if (result == null) return "";
+        String id = result.string("id", "");
+        return id.isEmpty() ? result.string("_id", "") : id;
     }
 
     private void sync(boolean force) {
@@ -1810,7 +2046,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 && System.currentTimeMillis() - lastFullSyncAt < TimeUnit.MINUTES.toMillis(4)) {
             return;
         }
-        ctx.api().punishmentSync(store.lastEtag()).whenComplete((data, failure) -> {
+        String etag = syncedSinceStart ? store.lastEtag() : null;
+        ctx.api().punishmentSync(etag).whenComplete((data, failure) -> {
             if (failure != null || data == null) return;
             try {
                 java.util.Map<String, ActivePunishment> authoritative =
@@ -1832,6 +2069,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                     authoritative.put(key, p);
                 }
                 store.reconcile(authoritative);
+                proxyShowsWarns = data.bool("proxyShowsWarns", false);
+                syncedSinceStart = true;
                 String hash = data.string("hash", "");
                 if (!hash.isEmpty()) {
                     store.setLastEtag(hash);
@@ -1845,12 +2084,27 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         });
     }
 
+    /**
+     * Shows a warn this server just issued to its player, when they are online here and this is
+     * the server that shows warns. The caller uploads it as delivered; nothing is acknowledged
+     * separately, because the warn has no id the bot knows yet.
+     */
+    private boolean showWarnNow(String uuid, ActivePunishment warn, PunishmentSettings settings) {
+        if (uuid == null || context == null || !showsWarns()) return false;
+        PlayerHandle player = context.platform().players().byUuid(parseUuid(uuid)).orElse(null);
+        if (player == null) return false;
+        player.sendMessage(render(warn, settings));
+        return true;
+    }
+
     private void applyLive(String uuid, ActivePunishment punishment, PunishmentSettings settings) {
         if (uuid == null || context == null || punishment == null) return;
         PlayerHandle player = context.platform().players().byUuid(parseUuid(uuid)).orElse(null);
         if (player == null) return;
         if ("warn".equals(punishment.type)) {
+            if (!showsWarns()) return;
             player.sendMessage(render(punishment, settings));
+            warnShown(punishment);
             return;
         }
         if (!"ban".equals(punishment.type) && !"ipban".equals(punishment.type)
@@ -2170,6 +2424,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         return null;
     }
 
+    /**
+     * Queues a write the LiteBans bridge saw, so it reaches the bot even when the bot is
+     * unreachable right now. Returns {@code false} when this module is not enabled and has no
+     * outbox, for the bridge to fall back on.
+     */
+    boolean queueHookWrite(String op, Payload body) {
+        if (outbox == null || context == null || body == null) return false;
+        String opId = body.string("opId", "");
+        if (opId.isEmpty()) return false;
+        enqueue(op, opId, body.longValue("issuedAt", System.currentTimeMillis()), body);
+        flushSoon();
+        return true;
+    }
+
     private void enqueue(String op, String opId, long issuedAt, Payload payload) {
         PunishmentOutbox box = this.outbox;
         if (box == null) return;
@@ -2196,12 +2464,31 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             if ("issue".equals(entry.op)) {
                 ActivePunishment local = fromPayload(entry.payload);
                 if (local == null || "kick".equals(local.type)) continue;
+                // A warn already shown here is not one to show again, and one the LiteBans hook
+                // queued is LiteBans' to show.
+                if ("warn".equals(local.type) && (entry.payload.bool("delivered", false)
+                        || "hook".equalsIgnoreCase(entry.payload.string("source", "")))) {
+                    continue;
+                }
+                // The queued body has no id of its own until the bot answers. Give it the same
+                // stand-in a fresh issue gets, so its upload's answer renames it and a warn shown
+                // before then is acknowledged against this queued write, not against "".
+                if (local.id == null || local.id.isEmpty()) local.id = LOCAL_ID_PREFIX + entry.opId;
                 String key = keyFor(local);
                 if (key != null) {
                     store.record(key, local);
                 }
             } else if ("revoke".equals(entry.op)) {
                 evictFromPayload(entry.payload);
+            } else if (OP_DELIVERED.equals(entry.op)) {
+                // Shown, and the bot not told yet: a full snapshot from before it hears put the
+                // warn back.
+                String id = entry.payload.string("id", "");
+                for (String key : store.keys()) {
+                    if (!key.startsWith("warn:")) continue;
+                    ActivePunishment held = store.get(key);
+                    if (held != null && sameId(held.id, id)) store.evict(key);
+                }
             }
         }
     }

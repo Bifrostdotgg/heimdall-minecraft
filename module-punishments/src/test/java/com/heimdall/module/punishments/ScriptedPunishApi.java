@@ -31,12 +31,15 @@ final class ScriptedPunishApi implements AutoCloseable {
         /** The raw query string, "" when there was none. The {@code includeHidden} flag lives here. */
         final String query;
         final String body;
+        /** The {@code If-None-Match} the caller sent, or null. */
+        final String ifNoneMatch;
 
-        Hit(String method, String path, String query, String body) {
+        Hit(String method, String path, String query, String body, String ifNoneMatch) {
             this.method = method;
             this.path = path;
             this.query = query == null ? "" : query;
             this.body = body == null ? "" : body;
+            this.ifNoneMatch = ifNoneMatch;
         }
     }
 
@@ -52,6 +55,8 @@ final class ScriptedPunishApi implements AutoCloseable {
     private volatile String syncEtag = "\"etag-1\"";
     private volatile String playerBody = "{\"success\":true,\"data\":{\"punishments\":[]}}";
     private volatile String listBody = "{\"success\":true,\"data\":{\"punishments\":[]}}";
+    /** What {@code POST punishments/import} answers: one batch's counts. 404 until set. */
+    private volatile String importBody;
 
     ScriptedPunishApi() {
         try {
@@ -91,11 +96,31 @@ final class ScriptedPunishApi implements AutoCloseable {
         return this;
     }
 
+    /** What {@code POST punishments/import} answers, so an import run gets past its first batch. */
+    ScriptedPunishApi importResponds(String body) {
+        this.importBody = body;
+        return this;
+    }
+
     /** The last hit whose path ends with {@code suffix}, or null. */
     Hit lastSuffix(String suffix) {
         Hit found = null;
         for (int i = 0; i < hits.size(); i++) {
             if (hits.get(i).path.endsWith(suffix)) found = hits.get(i);
+        }
+        return found;
+    }
+
+    /**
+     * The last hit whose path ends with {@code suffix} and whose body contains {@code fragment}, or
+     * null. Reports are sent without waiting on each other, so the last to arrive need not be the
+     * last sent.
+     */
+    Hit lastSuffixWithBody(String suffix, String fragment) {
+        Hit found = null;
+        for (int i = 0; i < hits.size(); i++) {
+            Hit hit = hits.get(i);
+            if (hit.path.endsWith(suffix) && hit.body != null && hit.body.contains(fragment)) found = hit;
         }
         return found;
     }
@@ -146,7 +171,8 @@ final class ScriptedPunishApi implements AutoCloseable {
         String path = exchange.getRequestURI().getRawPath();
         String body = read(exchange.getRequestBody());
         hits.add(new Hit(exchange.getRequestMethod(), path,
-                exchange.getRequestURI().getRawQuery(), body));
+                exchange.getRequestURI().getRawQuery(), body,
+                exchange.getRequestHeaders().getFirst("If-None-Match")));
         if ("GET".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/sync")) {
             if (syncEtag != null) {
                 exchange.getResponseHeaders().set("ETag", syncEtag);
@@ -171,6 +197,18 @@ final class ScriptedPunishApi implements AutoCloseable {
         }
         if ("GET".equals(exchange.getRequestMethod()) && path.endsWith("/punishments")) {
             send(exchange, 200, listBody);
+            return;
+        }
+        if ("POST".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/import")
+                && importBody != null) {
+            send(exchange, 200, importBody);
+            return;
+        }
+        // A bot that runs imports takes their reports too. Without this the first report is
+        // refused with a 404, and the plugin stops reporting, as it should for a bot that old.
+        if ("POST".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/import/report")
+                && importBody != null) {
+            send(exchange, 200, "{\"success\":true,\"data\":{}}");
             return;
         }
         if ("POST".equals(exchange.getRequestMethod()) && path.endsWith("/punishments/revoke")) {

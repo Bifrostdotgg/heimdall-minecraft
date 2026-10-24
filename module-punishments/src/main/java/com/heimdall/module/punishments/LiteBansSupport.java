@@ -29,8 +29,9 @@ final class LiteBansSupport {
         try {
             Class.forName("litebans.api.Events");
             Class<?> bridge = Class.forName("com.heimdall.module.punishments.LiteBansEventBridge");
-            Object handle = bridge.getDeclaredMethod("install", ModuleContext.class)
-                    .invoke(null, context);
+            Object handle = bridge.getDeclaredMethod("install", ModuleContext.class,
+                            HeimdallPunishmentsModule.class)
+                    .invoke(null, context, module);
             if (handle instanceof Registration) {
                 hook = (Registration) handle;
             }
@@ -43,6 +44,14 @@ final class LiteBansSupport {
             context.logger().debug(() -> "LiteBans is not on the classpath; hook idle");
         } catch (Throwable failed) {
             context.logger().warn("LiteBans probe failed: " + failed);
+        }
+    }
+
+    private static String ownServerId(ModuleContext context) {
+        try {
+            return context.api().settings().serverId();
+        } catch (RuntimeException unavailable) {
+            return null;
         }
     }
 
@@ -71,7 +80,8 @@ final class LiteBansSupport {
                 frame.string("targetUuid", ""),
                 frame.string("revokeCause", ""),
                 frame.string("source", ""),
-                frame.string("importProviderId", ""));
+                frame.string("importProviderId", ""),
+                ownServerId(context));
         if (request == null) return;
         LiteBansRevokeLift.lift(request, check, context.executors().io(),
                 context.platform().console(), context.logger(), !BUKKIT);

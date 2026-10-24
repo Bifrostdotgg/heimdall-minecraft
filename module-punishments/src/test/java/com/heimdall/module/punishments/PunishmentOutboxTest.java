@@ -2,6 +2,7 @@ package com.heimdall.module.punishments;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.json.Payload;
@@ -30,6 +31,22 @@ class PunishmentOutboxTest {
         assertEquals("c", snap.get(0).opId);
         assertEquals("a", snap.get(1).opId);
         assertEquals("b", snap.get(2).opId);
+    }
+
+    @Test
+    void takeReturnsTheEntryAsItIsNowSoAMarkMadeMidUploadIsSeen() {
+        PunishmentOutbox box = new PunishmentOutbox(new RecordingLogger(true), dir.resolve("outbox.json"));
+        box.enqueue(new PunishmentOutbox.Entry("op-w", 1L, "lobby", "issue",
+                Payload.builder().put("type", "warn").build()));
+        PunishmentOutbox.Entry uploading = box.snapshot().get(0);
+
+        assertTrue(box.markIssueDelivered("op-w"), "the warn is shown while its upload is in flight");
+        PunishmentOutbox.Entry taken = box.take("op-w");
+
+        assertFalse(uploading.payload.bool("delivered", false), "the upload sent the unmarked copy");
+        assertTrue(taken.payload.bool("delivered", false), "and the flush sees the mark");
+        assertTrue(box.isEmpty());
+        assertNull(box.take("op-w"));
     }
 
     @Test
