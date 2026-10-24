@@ -113,6 +113,39 @@ class HeimdallPunishmentsModuleTest {
     }
 
     @Test
+    @DisplayName("a blocked entry covers what is typed after it, a whole word at a time")
+    void blockedCommandsMatchWordPrefixes() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)) {
+            harness.enableWith(Payload.builder()
+                    .put("mode", "replace")
+                    .put("ipSalt", "replace-salt")
+                    .putStrings("blockedCommands", java.util.Arrays.asList("/ch  Send", "me", "r"))
+                    .build());
+            ActivePunishment mute = new ActivePunishment();
+            mute.id = "mute-2";
+            mute.type = "mute";
+            mute.targetUuid = STEVE.toString();
+            mute.targetName = "Steve";
+            mute.reason = "spam";
+            harness.module.mirrorForTest().record("mute:" + STEVE, mute);
+
+            String[] blocked = {
+                "/ch send hello", "/chatplugin:ch send hello", "/CH   SEND", "ch send", "/me waves",
+                "/minecraft:me", "/r hi",
+            };
+            for (String line : blocked) {
+                assertTrue(harness.commandPipeline.dispatch(CommandAttempt.of(STEVE, "Steve", line)).isDeny(),
+                        line + " should be blocked");
+            }
+            String[] allowed = {"/ch join global", "/ch", "/chsend hi", "/menu", "/rtp", "/msg Alex hi"};
+            for (String line : allowed) {
+                assertFalse(harness.commandPipeline.dispatch(CommandAttempt.of(STEVE, "Steve", line)).isDeny(),
+                        line + " should not be blocked");
+            }
+        }
+    }
+
+    @Test
     @DisplayName("a throwing command interceptor fails open next to the mute gate")
     void throwingInterceptorFailsOpen() {
         try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE).enableReplace()) {
