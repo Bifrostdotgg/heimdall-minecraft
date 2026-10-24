@@ -320,6 +320,24 @@ public final class HeimdallWhitelistModule
         return live == null ? "the whitelist module is not running" : live.adminStats();
     }
 
+    @Override
+    public int mirrorEntries() {
+        WhitelistMirrorService live = mirror;
+        return live == null ? -1 : live.size();
+    }
+
+    @Override
+    public long lastSyncAtMs() {
+        WhitelistMirrorService live = mirror;
+        return live == null ? 0L : live.lastSyncAtMs();
+    }
+
+    @Override
+    public long syncIntervalMs() {
+        WhitelistMirrorService live = mirror;
+        return live == null ? 0L : live.syncIntervalMs();
+    }
+
     /**
      * The store's own counts, without the sync age.
      *

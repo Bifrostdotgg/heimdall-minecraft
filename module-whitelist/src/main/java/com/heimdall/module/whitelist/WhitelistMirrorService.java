@@ -137,6 +137,23 @@ final class WhitelistMirrorService {
         return mirror.stats() + ", last synced " + agoSeconds + "s ago";
     }
 
+    /** How many players the mirror holds. */
+    int size() {
+        return mirror.size();
+    }
+
+    /** When the last poll confirmed the mirror against the bot, or {@code 0}. */
+    long lastSyncAtMs() {
+        return lastSyncAtMs;
+    }
+
+    /** The pre-warm interval as currently configured, or {@code 0} when the poll is switched off. */
+    long syncIntervalMs() {
+        WhitelistSettings current = settings.get();
+        return current.prewarmEnabled()
+                ? TimeUnit.MINUTES.toMillis(current.prewarmIntervalMinutes()) : 0L;
+    }
+
     /** Empties the mirror and its ETag, so the next poll is a full one. {@code /hd cache clear}. */
     void clear() {
         mirror.clear();
