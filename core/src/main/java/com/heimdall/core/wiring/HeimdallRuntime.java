@@ -1220,6 +1220,19 @@ public final class HeimdallRuntime implements AutoCloseable {
     }
 
     /**
+     * Where guild discovery stands while it is still asking, or {@code null} once it has resolved
+     * or when there is nothing to discover.
+     *
+     * <p>{@code /hd status} colours its bot row from this. {@link #connectionStatus()} carries the
+     * same states as a sentence, and a status screen that parsed that sentence would break the
+     * first time somebody reworded it.
+     */
+    public GuildDiscovery.Status discoveryStatus() {
+        GuildDiscovery discovery = guildDiscovery;
+        return discovery == null || discovery.isResolved() ? null : discovery.status();
+    }
+
+    /**
      * One line describing how this server stands with its bot, for {@code /hd}.
      *
      * <p>Three states an operator confuses constantly, told apart here rather than in the command so

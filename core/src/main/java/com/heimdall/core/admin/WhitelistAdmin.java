@@ -68,6 +68,32 @@ public interface WhitelistAdmin {
     String stats();
 
     /**
+     * How many players the mirror holds, or {@code -1} when the module is not running.
+     *
+     * <p>This and the two below are what {@code /hd status} builds its one-row mirror summary from.
+     * {@link #stats()} is a display string, and a summary that parsed it would break the first time
+     * somebody reworded it.
+     */
+    default int mirrorEntries() {
+        return -1;
+    }
+
+    /** When the last successful sync with the bot finished, in epoch millis, or {@code 0} if never. */
+    default long lastSyncAtMs() {
+        return 0L;
+    }
+
+    /**
+     * How often the pre-warm poll is meant to sync, in millis, or {@code 0} when it is switched off.
+     *
+     * <p>{@code 0} means the mirror only fills from individual logins, so its age says nothing and
+     * {@code /hd status} does not call it stale.
+     */
+    default long syncIntervalMs() {
+        return 0L;
+    }
+
+    /**
      * Empties the mirror, ETag included.
      *
      * <p>Destructive in a way worth naming: with {@code apiFallbackMode: whitelist-only}, an empty
