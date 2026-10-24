@@ -41,6 +41,28 @@ class WhitelistMirrorSyncTest {
     }
 
     @Test
+    @DisplayName("/hd status is told the size, the sync age and the interval the poll really runs at")
+    void statusValues(@TempDir Path dir) {
+        try (WhitelistHarness h = WhitelistHarness.standalone(dir)) {
+            h.enableWith(Payload.builder().put("prewarmIntervalMinutes", 60).build());
+            h.awaitMirrorEntries(2);
+
+            assertEquals(2, h.module.mirrorEntries());
+            assertTrue(h.module.lastSyncAtMs() > 0L, "the first poll runs on enable");
+            assertEquals(3_600_000L, h.module.syncIntervalMs());
+
+            // The schedule is fixed at enable, so a pushed interval does not move it. Reporting the
+            // new value would call the still-hourly poll overdue fifteen minutes from now.
+            h.enableWith(Payload.builder().put("prewarmIntervalMinutes", 5).build());
+            assertEquals(3_600_000L, h.module.syncIntervalMs());
+
+            // Switching the poll off is read live: syncNow() checks it on every run.
+            h.enableWith(Payload.builder().put("prewarmEnabled", false).build());
+            assertEquals(0L, h.module.syncIntervalMs());
+        }
+    }
+
+    @Test
     @DisplayName("a pre-warmed player survives the bot vanishing entirely")
     void prewarmCarriesAnOutage(@TempDir Path dir) {
         try (WhitelistHarness h = WhitelistHarness.standalone(dir)) {
