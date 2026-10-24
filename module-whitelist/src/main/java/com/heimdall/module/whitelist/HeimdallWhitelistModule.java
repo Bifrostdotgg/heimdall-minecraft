@@ -211,6 +211,7 @@ public final class HeimdallWhitelistModule
     private void schedulePolls(
             ModuleContext ctx, WhitelistSettings atOpen, final WhitelistMirrorService mirrorService) {
         long prewarmMs = TimeUnit.MINUTES.toMillis(atOpen.prewarmIntervalMinutes());
+        mirrorService.pollScheduledEvery(prewarmMs);
         ctx.scheduleRepeating(new Runnable() {
             @Override
             public void run() {
@@ -318,6 +319,24 @@ public final class HeimdallWhitelistModule
     public String stats() {
         WhitelistMirrorService live = mirror;
         return live == null ? "the whitelist module is not running" : live.adminStats();
+    }
+
+    @Override
+    public int mirrorEntries() {
+        WhitelistMirrorService live = mirror;
+        return live == null ? -1 : live.size();
+    }
+
+    @Override
+    public long lastSyncAtMs() {
+        WhitelistMirrorService live = mirror;
+        return live == null ? 0L : live.lastSyncAtMs();
+    }
+
+    @Override
+    public long syncIntervalMs() {
+        WhitelistMirrorService live = mirror;
+        return live == null ? 0L : live.syncIntervalMs();
     }
 
     /**

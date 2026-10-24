@@ -175,8 +175,21 @@ class IdentityCommandTest {
 
             List<String> lines = say("status");
 
-            assertTrue(anyContains(lines, "identity: "), lines.toString());
-            assertTrue(anyContains(lines, "MISMATCH"), lines.toString());
+            assertTrue(anyContains(lines, "identity mismatch"), lines.toString());
+            assertTrue(anyContains(lines, "/hd identity"), lines.toString());
+
+            StatusSubcommand.Snapshot snapshot = StatusSubcommand.Snapshot.of(
+                    AdminContext.builder(runtime).role(ServerRole.STANDALONE).build());
+            assertTrue(snapshot.configured);
+            assertTrue(snapshot.identityMismatch, "Snapshot.of has to carry the mismatch");
+            assertTrue(snapshot.identityBlocks);
+            assertTrue(snapshot.discovery != null,
+                    "a configured server that has not heard from the bot is still discovering");
+
+            List<String> bot = say("status", "bot");
+
+            assertTrue(anyContains(bot, "identity: "), bot.toString());
+            assertTrue(anyContains(bot, "MISMATCH"), bot.toString());
         }
     }
 

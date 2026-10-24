@@ -202,7 +202,8 @@ STUB_LEGACY_IDENTIFY_PATTERN="identify: guild=${STUB_GUILD} \\(legacy: no token 
 # at <data>/core/staged.jar before boot, by a `/hd swap` (`/hdp swap` on a proxy) the stub sends as
 # run_command on the first config ack: a proxy image has no console to type it into, and every
 # platform answers run_command. The swapped-in core reconnects, acks its config again, and the
-# stub sends the second command, `status`, which only a working core can answer with its identity.
+# stub sends the second command, `status server`, which only a working core can answer with its
+# identity.
 #
 # The patterns are written from the shell's own format strings (ShellHost, CoreIdentity) rather
 # than copied from a green run, because no swap row had run when they were written. The self-test
@@ -211,7 +212,7 @@ SWAP_CORE_NAME='heimdall-core-swaptest.jar'
 SWAP_STARTED_PATTERN='swapping core .* for core [^ ]+\+swaptest \(sha256 [0-9a-f]{12}\)'
 SWAP_DONE_PATTERN='core [^ ]+\+swaptest \(sha256 [0-9a-f]{12}\) is running \(was '
 SWAP_STATUS_PATTERN='core: .*\+swaptest \(sha256 [0-9a-f]{12}\)'
-STUB_SWAP_COMMAND_PATTERN="on-ack run_command\\[2\\] '(hd|hdp) status' -> ${STUB_SERVER_ID}: output=dispatched: (hd|hdp) status"
+STUB_SWAP_COMMAND_PATTERN="on-ack run_command\\[2\\] '(hd|hdp) status server' -> ${STUB_SERVER_ID}: output=dispatched: (hd|hdp) status server"
 
 ENABLE_PATTERN='Heimdall v[0-9][^ ]* enabled'
 DISABLE_PATTERN='Heimdall v[0-9][^ ]* shutting down'
@@ -494,22 +495,22 @@ selftest() {
         "[18:02:14 WARN]: [Heimdall] rolled back: core 3.0.0-SNAPSHOT+swaptest (sha256 71d507301cb3) failed to start; still running core 3.0.0-SNAPSHOT (sha256 12ec55bda7da)" \
         no "swap: running vs rolled back" || failures=$((failures + 1))
     check_match "${SWAP_STATUS_PATTERN}" \
-        "[18:02:20 INFO]: core: 3.0.0-SNAPSHOT+swaptest (sha256 71d507301cb3)   shell: 3.0.0-SNAPSHOT" \
-        yes "swap: /hd status names the swapped-in core" || failures=$((failures + 1))
+        "[18:02:20 INFO]:  core: 3.0.0-SNAPSHOT+swaptest (sha256 71d507301cb3)" \
+        yes "swap: /hd status server names the swapped-in core" || failures=$((failures + 1))
     check_match "${SWAP_STATUS_PATTERN}" \
-        "[18:02:20 INFO]: core: 3.0.0-SNAPSHOT (sha256 12ec55bda7da)   shell: 3.0.0-SNAPSHOT" \
+        "[18:02:20 INFO]:  core: 3.0.0-SNAPSHOT (sha256 12ec55bda7da)" \
         no "swap: the new core's status vs the old core's" || failures=$((failures + 1))
     check_match "${STUB_SWAP_COMMAND_PATTERN}" \
-        "[stub-bot 18:02:20.101] on-ack run_command[2] 'hdp status' -> ${STUB_SERVER_ID}: output=dispatched: hdp status" \
+        "[stub-bot 18:02:20.101] on-ack run_command[2] 'hdp status server' -> ${STUB_SERVER_ID}: output=dispatched: hdp status server" \
         yes "swap: a command reached the reconnected core" || failures=$((failures + 1))
     # The verb not existing after the swap is the failure this row is for.
     check_match "${STUB_SWAP_COMMAND_PATTERN}" \
-        "[stub-bot 18:02:20.101] on-ack run_command[2] 'hdp status' -> ${STUB_SERVER_ID}: output=no such command: hdp status" \
+        "[stub-bot 18:02:20.101] on-ack run_command[2] 'hdp status server' -> ${STUB_SERVER_ID}: output=no such command: hdp status server" \
         no "swap: an answered command vs an unknown one" || failures=$((failures + 1))
     # And the FIRST command answered must not stand in for the second: that reply came from the
     # core being swapped out, before anything was proven about the new one.
     check_match "${STUB_SWAP_COMMAND_PATTERN}" \
-        "[stub-bot 18:02:10.101] on-ack run_command[1] 'hd status' -> ${STUB_SERVER_ID}: output=dispatched: hd status" \
+        "[stub-bot 18:02:10.101] on-ack run_command[1] 'hd status server' -> ${STUB_SERVER_ID}: output=dispatched: hd status server" \
         no "swap: the second command vs the first" || failures=$((failures + 1))
 
     # ── Setup ────────────────────────────────────────────────────────────────
@@ -970,7 +971,7 @@ row_body() {
     elif [ "${mode}" = "swap" ]; then
         local admin="hd"
         [ "${platform}" != "bukkit" ] && admin="hdp"
-        stub_env=(-e "STUB_BOT_COMMANDS_ON_ACK=${admin} swap|${admin} status")
+        stub_env=(-e "STUB_BOT_COMMANDS_ON_ACK=${admin} swap|${admin} status server")
     fi
 
     pull_image eclipse-temurin:21-jre

@@ -155,7 +155,7 @@ class AdminCommandTest {
             assertTrue(onDisk.disabledModules().contains("whitelist"),
                     "the override has to survive a restart, or it is no escape hatch");
 
-            assertTrue(anyContains(say("status"), "locally disabled"));
+            assertTrue(anyContains(say("status"), "Locally disabled: whitelist"));
 
             assertTrue(anyContains(say("enable", "whitelist"), "dashboard controls it again"));
             assertFalse(runtime.locallyDisabledModules().contains("whitelist"));
@@ -319,11 +319,14 @@ class AdminCommandTest {
             assertTrue(anyContains(lines, "standalone"), "the RESOLVED role, not the configured one");
             assertTrue(anyContains(lines, "not set up"),
                     "'not set up' and 'set up but unreachable' are different conversations");
-            assertTrue(anyContains(lines, "whitelist mirror"));
-            assertTrue(anyContains(lines, "console tap"),
-                    "the dropped-consumer count is reported here or nowhere — the drop cannot log "
-                            + "for itself");
+            assertTrue(anyContains(lines, "Mirror"));
             assertTrue(anyContains(lines, "no self-updater in this build"));
+
+            List<String> all = say("status", "all");
+            assertTrue(anyContains(all, "whitelist mirror"));
+            assertTrue(anyContains(all, "console tap"),
+                    "the dropped-consumer count is reported here or nowhere: the drop cannot log "
+                            + "for itself");
         }
 
         @Test
@@ -333,7 +336,7 @@ class AdminCommandTest {
                     .whitelist(new FakeWhitelist("41 entries (0 expired), etag=abc, last synced 3s ago"))
                     .offenses(new FakeOffenses()));
 
-            List<String> lines = say("status");
+            List<String> lines = say("status", "modules");
 
             assertTrue(anyContains(lines, "41 entries"));
             assertTrue(anyContains(lines, "last synced"),

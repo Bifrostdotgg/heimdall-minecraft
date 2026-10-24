@@ -126,8 +126,8 @@ core is swapped in while the server runs: the bot link reconnects within a few s
 wait briefly, and bridged chat in that window is not relayed. The JAR is still installed for the
 next restart too, so the update survives one. A release with no published checksum, or one that
 changes the shell itself, applies on restart only, and `/hd update` says which. The first release
-with the shell needs one ordinary restart to install it. `/hd status` shows the running core's
-version and checksum, and `/hd swap` swaps in a core placed by hand at
+with the shell needs one ordinary restart to install it. `/hd status server` shows the running
+core's version and checksum, and `/hd swap` swaps in a core placed by hand at
 `plugins/Heimdall/core/staged.jar` (`plugins/heimdall/core/` on Velocity). See departure D87 in
 `docs/v2-departures.md` for the details and the limits.
 
@@ -377,8 +377,13 @@ to the same tree and prints a one-time-per-start warning telling you to switch.
 
 - `/hd setup <code> [endpoint]` - claim this server with a setup code minted on the dashboard;
   connects immediately, no restart
-- `/hd status` - version, role, serverId, endpoint, guild, tunnel state, per-module state, whitelist
-  mirror stats, console tap health and update availability
+- `/hd status` - a one-screen summary: version, role and server software, then one coloured row
+  each for the bot connection, the tunnel, modules, the whitelist mirror and updates, with a line
+  per problem saying how to fix it. Rows and the footer are clickable on Paper and Velocity
+- `/hd status bot|modules|server|all` - the detail behind the summary: endpoint, guild, serverId,
+  identity and protocol (`bot`); per-module state, capabilities and full mirror stats (`modules`);
+  software, core and shell versions, console tap health and updates (`server`); or all three for
+  pasting into a support ticket (`all`)
 - `/hd reload` - re-read `bootstrap.yml` and reconnect the tunnel in place
 - `/hd identity` - show which machine this server's credentials are bound to, this machine's
   fingerprint, and the `identityCheck` policy
@@ -523,7 +528,7 @@ Three more decide who hears about a punishment, rather than only who may issue o
 - Check that the bot has necessary permissions in Discord
 - Verify the server ID matches between plugin and bot
 
-**"identity mismatch" in the console, or `/hd status` says `identity: MISMATCH`**
+**"identity mismatch" in the console, or `/hd status` says `identity mismatch`**
 
 This `bootstrap.yml` was bound to a different machine than the one reading it. Almost always a
 server directory that was copied, or a backup restored next to the original. Both copies claim the
