@@ -70,8 +70,9 @@ You also need a Discord server with Heimdall in it and the Minecraft feature tur
 
    The server connects straight away. No restart, no file to edit.
 
-If you use a whitelabel Heimdall, its setup codes only work against its own address. Pass it as the
-second argument: `/hd setup <code> <endpoint>`.
+Whitelabel bots use the same address as everyone else, so the command above is all they need. Only
+a self-hosted Heimdall (an enterprise contract) has its own address, and its setup codes only work
+there. Pass it as the second argument: `/hd setup <code> <endpoint>`.
 
 Run `/hd status` (`/hdp status`) to check it connected. On a network, install the plugin on the
 proxy and on every backend, and claim each one with its own code.
