@@ -2954,6 +2954,38 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         return activeFor("freeze", uuid) != null;
     }
 
+    /**
+     * A command the proxy itself would run, typed by a frozen player: refused, and the player told.
+     *
+     * <p>A backend refuses every command a frozen player types, but a command the proxy owns never
+     * reaches a backend. {@code /server} and every lobby or hub command are proxy commands, so
+     * without this a frozen player could walk off to another server, where nothing about the freeze
+     * stops them talking to anyone. The proxy listeners call this for proxy-owned commands only:
+     * a command bound for a backend is the backend's to refuse.
+     *
+     * <p>Server switches themselves are left alone on purpose. Staff moving a frozen player with a
+     * send command, and the proxy's own fallback when a backend goes down, are both switches the
+     * player did not ask for, and refusing the fallback would disconnect a frozen player for a
+     * server crash and start the logout ban on them.
+     *
+     * @return true when the command is refused
+     */
+    public boolean refuseFrozenProxyCommand(UUID uuid) {
+        if (!isFrozen(uuid)) return false;
+        ModuleContext ctx = this.context;
+        if (ctx != null) {
+            PlayerHandle player = ctx.platform().players().byUuid(uuid).orElse(null);
+            if (player != null) {
+                try {
+                    player.sendMessage(FrozenPlayers.commandRefused());
+                } catch (RuntimeException gone) {
+                    // Left in the meantime: the command is refused all the same.
+                }
+            }
+        }
+        return true;
+    }
+
     public boolean isMuted(UUID uuid) {
         return activeFor("mute", uuid) != null;
     }

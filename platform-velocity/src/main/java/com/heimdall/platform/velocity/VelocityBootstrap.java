@@ -15,6 +15,7 @@ import com.heimdall.core.wiring.MigrationBoot;
 import com.heimdall.core.wiring.UpdateWiring;
 import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
+import com.heimdall.platform.common.FrozenProxyCommands;
 import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
@@ -22,6 +23,7 @@ import com.heimdall.shell.contract.ShellContext;
 import com.velocitypowered.api.event.EventHandler;
 import com.velocitypowered.api.event.EventManager;
 import com.velocitypowered.api.event.PostOrder;
+import com.velocitypowered.api.event.command.CommandExecuteEvent;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.player.PlayerChatEvent;
@@ -330,6 +332,12 @@ final class VelocityBootstrap {
         final VelocityChatListener chat = new VelocityChatListener(logger, runtime.chatPipeline());
         registrations.track(VelocityEvents.listen(
                 events, plugin, PlayerChatEvent.class, PostOrder.LAST, chat::onChat));
+        // A frozen player's proxy commands, /server first among them. EARLY, so the command is
+        // refused before anything else on the proxy acts on it.
+        final VelocityFrozenCommandListener frozen = new VelocityFrozenCommandListener(
+                logger, proxy.getCommandManager(), FrozenProxyCommands::refuse);
+        registrations.track(VelocityEvents.listen(
+                events, plugin, CommandExecuteEvent.class, PostOrder.EARLY, frozen::onCommand));
     }
 
     /**

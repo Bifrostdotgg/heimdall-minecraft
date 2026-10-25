@@ -15,6 +15,7 @@ import com.heimdall.core.wiring.MigrationBoot;
 import com.heimdall.core.wiring.UpdateWiring;
 import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
+import com.heimdall.platform.common.FrozenProxyCommands;
 import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
@@ -329,6 +330,8 @@ final class BungeeBootstrap {
         // Discord relay possible. It is inert unless the bridge module's relayChat setting is on,
         // and that defaults to false on a gatekeeper. See BungeeChatListener, departure D81.
         listen(new BungeeChatListener(logger, runtime.chatPipeline()));
+        // A frozen player's proxy commands, /server first among them.
+        listen(new BungeeFrozenCommandListener(logger, FrozenProxyCommands::refuse));
     }
 
     /**

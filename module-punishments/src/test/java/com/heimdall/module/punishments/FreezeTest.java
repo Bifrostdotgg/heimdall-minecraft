@@ -287,6 +287,26 @@ class FreezeTest {
     }
 
     @Test
+    @DisplayName("on the proxy a frozen player's own commands are refused, and they are told")
+    void proxyCommandsRefused() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.GATEKEEPER), "hook")) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer alex = harness.platform.join(FakePlayer.named("Alex"));
+            assertFalse(harness.module.refuseFrozenProxyCommand(steve.uuid()));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b0000000000000000000fc", false));
+
+            assertTrue(harness.module.refuseFrozenProxyCommand(steve.uuid()));
+            String told = steve.messageText().get(steve.messageText().size() - 1);
+            assertTrue(told.contains("commands are blocked"), told);
+            assertFalse(harness.module.refuseFrozenProxyCommand(alex.uuid()));
+
+            harness.tunnel.push("punish.revoke", revokeFrame(steve));
+            assertFalse(harness.module.refuseFrozenProxyCommand(steve.uuid()));
+        }
+    }
+
+    @Test
     @DisplayName("the held ban, once fired, bans for the configured length and for the fixed reason")
     void logoutBanFires() {
         try (PunishmentsHarness harness = enable(

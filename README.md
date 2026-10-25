@@ -193,12 +193,13 @@ and anything typed after it, a whole word at a time: `ch send` blocks `/ch send 
 
 **Freezes.** A frozen player cannot move (looking around is fine), interact, break or place
 blocks, drop or pick up items, use their inventory or run commands, and cannot take or deal
-damage. Staff can still teleport them. What they type in chat is not shown publicly: it goes to
+damage. On a network that includes the proxy's own commands, so `/server` and hub commands cannot
+take them to another server; staff can still move or teleport them. What they type in chat is not shown publicly: it goes to
 staff on the same server holding `heimdall.punishments.freeze` (or `heimdall.admin`), so you can
 talk them through a check. They are shown the freeze message (editable on the dashboard) when the
 freeze lands, when they join, and every 15 seconds. A freeze is only ever announced to staff, has
 no length, and lasts until someone runs `unfreeze`. When a frozen player logs out, staff on the
-proxy (or standalone server) are told, and if **Ban players who log out while frozen** is on, they
+proxy (or standalone server) are told, and if **Ban frozen players who log out** is on, they
 are banned unless they reconnect within 30 seconds. Alongside LiteBans that ban is issued through
 LiteBans, so it needs LiteBans on the server that sees the logout. A backend behind a proxy never
 treats a server switch as a logout.
