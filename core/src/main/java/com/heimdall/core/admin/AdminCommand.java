@@ -5,7 +5,6 @@ import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandRegistrar;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
-import com.heimdall.core.punish.PunishmentPermissions;
 import com.heimdall.core.text.Msg;
 import com.heimdall.core.util.Registration;
 import java.util.ArrayList;
@@ -103,40 +102,23 @@ public final class AdminCommand {
                 new WhitelistSubcommands.Test(),
                 new WhitelistSubcommands.Cache(),
                 new PunishmentSubcommands.Offense(),
-                PunishmentSubcommands.verb("ban", "<player> [duration] [reason]", "ban a player", "ban",
-                        PunishmentPermissions.nodeFor("ban")),
-                PunishmentSubcommands.verb("tempban", "<player> <duration> [reason]", "temporarily ban a player", "tempban",
-                        PunishmentPermissions.nodeFor("tempban")),
-                PunishmentSubcommands.verb("ipban", "<player> [duration] [reason]", "IP-ban a player", "ipban",
-                        PunishmentPermissions.nodeFor("ipban")),
-                PunishmentSubcommands.verb("mute", "<player> [duration] [reason]", "mute a player", "mute",
-                        PunishmentPermissions.nodeFor("mute")),
-                PunishmentSubcommands.verb("tempmute", "<player> <duration> [reason]", "temporarily mute a player", "tempmute",
-                        PunishmentPermissions.nodeFor("tempmute")),
-                PunishmentSubcommands.verb("unmute", "<player> [reason]", "revoke a mute", "unmute",
-                        PunishmentPermissions.nodeFor("unmute")),
-                PunishmentSubcommands.verb("kick", "<player> [reason]", "kick a player", "kick",
-                        PunishmentPermissions.nodeFor("kick")),
-                PunishmentSubcommands.verb("warn", "<player> [reason]", "warn a player", "warn",
-                        PunishmentPermissions.nodeFor("warn")),
-                PunishmentSubcommands.verb("unwarn", "<player> [reason]", "revoke a warn", "unwarn",
-                        PunishmentPermissions.nodeFor("unwarn")),
-                PunishmentSubcommands.verb("unban", "<player> [reason]", "revoke a ban", "unban",
-                        PunishmentPermissions.nodeFor("unban")),
-                PunishmentSubcommands.verb("rollback", "<player>", "revoke the latest active punishment", "rollback",
-                        PunishmentPermissions.nodeFor("rollback")),
-                PunishmentSubcommands.verb("history", "<player>", "punishment history", "history",
-                        PunishmentPermissions.nodeFor("history")),
-                PunishmentSubcommands.verb("staffhistory", "<staff>", "punishments issued by staff", "staffhistory",
-                        PunishmentPermissions.nodeFor("staffhistory")),
-                PunishmentSubcommands.verb("banlist", "", "list active bans", "banlist",
-                        PunishmentPermissions.nodeFor("banlist")),
-                PunishmentSubcommands.verb("dupeip", "<player>", "accounts sharing a last address", "dupeip",
-                        PunishmentPermissions.nodeFor("dupeip")),
-                PunishmentSubcommands.verb("iphistory", "<player>", "local address history", "iphistory",
-                        PunishmentPermissions.nodeFor("iphistory")),
-                PunishmentSubcommands.verb("import", "[--dry-run]", "import punishment history (LiteBans and others)", "import",
-                        null),
+                PunishmentSubcommands.verb("ban", "<player> [duration] [reason]", "ban a player", "ban"),
+                PunishmentSubcommands.verb("tempban", "<player> <duration> [reason]", "temporarily ban a player", "tempban"),
+                PunishmentSubcommands.verb("ipban", "<player> [duration] [reason]", "IP-ban a player", "ipban"),
+                PunishmentSubcommands.verb("mute", "<player> [duration] [reason]", "mute a player", "mute"),
+                PunishmentSubcommands.verb("tempmute", "<player> <duration> [reason]", "temporarily mute a player", "tempmute"),
+                PunishmentSubcommands.verb("unmute", "<player> [reason]", "revoke a mute", "unmute"),
+                PunishmentSubcommands.verb("kick", "<player> [reason]", "kick a player", "kick"),
+                PunishmentSubcommands.verb("warn", "<player> [reason]", "warn a player", "warn"),
+                PunishmentSubcommands.verb("unwarn", "<player> [reason]", "revoke a warn", "unwarn"),
+                PunishmentSubcommands.verb("unban", "<player> [reason]", "revoke a ban", "unban"),
+                PunishmentSubcommands.verb("rollback", "<player>", "revoke the latest active punishment", "rollback"),
+                PunishmentSubcommands.verb("history", "<player>", "punishment history", "history"),
+                PunishmentSubcommands.verb("staffhistory", "<staff>", "punishments issued by staff", "staffhistory"),
+                PunishmentSubcommands.verb("banlist", "", "list active bans", "banlist"),
+                PunishmentSubcommands.verb("dupeip", "<player>", "accounts sharing a last address", "dupeip"),
+                PunishmentSubcommands.verb("iphistory", "<player>", "local address history", "iphistory"),
+                PunishmentSubcommands.verb("import", "[--dry-run]", "import punishment history (LiteBans and others)", "import"),
                 new CaseSubcommand(),
                 new UpdateSubcommands.Version(),
                 new UpdateSubcommands.Update(),
@@ -194,7 +176,9 @@ public final class AdminCommand {
                                     "§cYou do not have permission to use that."));
                             return;
                         }
-                        if (deprecated) {
+                        // Only for someone who runs the server: a moderator using /hwl ban would
+                        // otherwise spend the once-per-start notice before an admin ever saw it.
+                        if (deprecated && source.hasPermission(PERMISSION)) {
                             warnAboutDeprecatedName(source);
                         }
                         dispatch(source, args, name);
@@ -251,7 +235,7 @@ public final class AdminCommand {
         // which is the administrator's business, not a moderator's who can only run /hd ban.
         source.sendMessage(Msg.legacy("§6Heimdall §7v" + context.pluginVersion()
                 + (source.hasPermission(PERMISSION)
-                        ? " §8— §7" + context.runtime().connectionStatus()
+                        ? " §8- §7" + context.runtime().connectionStatus()
                         : "")));
         for (AdminSubcommand subcommand : subcommands.values()) {
             if (!subcommand.permits(source)) {
@@ -260,7 +244,7 @@ public final class AdminCommand {
             String usage = subcommand.usage().isEmpty() ? "" : " " + subcommand.usage();
             source.sendMessage(Msg.legacy(
                     "§7/" + label + " §f" + subcommand.name() + "§7" + usage
-                            + " §8— §7" + subcommand.description()));
+                            + " §8- §7" + subcommand.description()));
         }
     }
 

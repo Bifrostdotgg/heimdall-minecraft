@@ -1,6 +1,7 @@
 package com.heimdall.core.admin;
 
 import com.heimdall.core.command.CommandSource;
+import com.heimdall.core.punish.PunishmentPermissions;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.text.Msg;
 import java.util.Arrays;
@@ -86,15 +87,13 @@ final class PunishmentSubcommands {
     }
 
     /**
-     * One punishment verb.
-     *
-     * @param permission the {@code heimdall.punishments.*} node that also lets a sender run it, the
-     *     same node its root alias is registered with; {@code null} for a verb only
-     *     {@code heimdall.admin} may run
+     * One punishment verb. A holder of the node {@link PunishmentPermissions} gives {@code type}
+     * may run it, as may {@code heimdall.admin}; a type the table does not list, such as
+     * {@code import}, is {@code heimdall.admin} only.
      */
-    static AdminSubcommand verb(String name, String usage, String description, String type,
-            String permission) {
-        return new Verb(name, usage, description, type, permission);
+    static AdminSubcommand verb(String name, String usage, String description, String type) {
+        return new Verb(name, usage, description, type,
+                PunishmentPermissions.byVerb().get(type));
     }
 
     private static final class Verb implements AdminSubcommand {

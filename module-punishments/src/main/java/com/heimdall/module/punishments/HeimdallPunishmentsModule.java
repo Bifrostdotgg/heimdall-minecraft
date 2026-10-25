@@ -368,30 +368,35 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         boolean proxy = role == ServerRole.GATEKEEPER || role == ServerRole.STANDALONE;
         boolean backend = role == ServerRole.ENFORCER || role == ServerRole.STANDALONE;
         if (proxy) {
-            bind(ctx, "ban", PunishmentPermissions.nodeFor("ban"), "ban");
-            bind(ctx, "tempban", PunishmentPermissions.nodeFor("tempban"), "tempban");
-            bind(ctx, "ipban", PunishmentPermissions.nodeFor("ipban"), "ipban");
-            bind(ctx, "unban", PunishmentPermissions.nodeFor("unban"), "unban");
-            bind(ctx, "kick", PunishmentPermissions.nodeFor("kick"), "kick");
-            bind(ctx, "warn", PunishmentPermissions.nodeFor("warn"), "warn");
-            bind(ctx, "unwarn", PunishmentPermissions.nodeFor("unwarn"), "unwarn");
-            bind(ctx, "history", PunishmentPermissions.nodeFor("history"), "history");
-            bind(ctx, "staffhistory", PunishmentPermissions.nodeFor("staffhistory"), "staffhistory");
-            bind(ctx, "banlist", PunishmentPermissions.nodeFor("banlist"), "banlist");
-            bind(ctx, "dupeip", PunishmentPermissions.nodeFor("dupeip"), "dupeip");
-            bind(ctx, "iphistory", PunishmentPermissions.nodeFor("iphistory"), "iphistory");
-            bind(ctx, "rollback", PunishmentPermissions.nodeFor("rollback"), "rollback");
+            bind(ctx, "ban", "ban");
+            bind(ctx, "tempban", "tempban");
+            bind(ctx, "ipban", "ipban");
+            bind(ctx, "unban", "unban");
+            bind(ctx, "kick", "kick");
+            bind(ctx, "warn", "warn");
+            bind(ctx, "unwarn", "unwarn");
+            bind(ctx, "history", "history");
+            bind(ctx, "staffhistory", "staffhistory");
+            bind(ctx, "banlist", "banlist");
+            bind(ctx, "dupeip", "dupeip");
+            bind(ctx, "iphistory", "iphistory");
+            bind(ctx, "rollback", "rollback");
         }
         if (backend) {
-            bind(ctx, "mute", PunishmentPermissions.nodeFor("mute"), "mute");
-            bind(ctx, "tempmute", PunishmentPermissions.nodeFor("tempmute"), "tempmute");
-            bind(ctx, "unmute", PunishmentPermissions.nodeFor("unmute"), "unmute");
+            bind(ctx, "mute", "mute");
+            bind(ctx, "tempmute", "tempmute");
+            bind(ctx, "unmute", "unmute");
         }
     }
 
-    private void bind(ModuleContext context, final String name, String permission, final String type) {
+    /**
+     * Registers one root alias, gated on the node {@link PunishmentPermissions} gives its verb, the
+     * same node {@code /hd <verb>} accepts. Looked up here rather than passed in, so no call site
+     * can pair a verb with another verb's node.
+     */
+    private void bind(ModuleContext context, final String name, final String type) {
         Registration handle = context.registerCommand(CommandSpec.named(name)
-                .permission(permission)
+                .permission(PunishmentPermissions.nodeFor(type))
                 .usage(usage(name))
                 .description("Heimdall punishment")
                 .handler(new CommandHandler() {

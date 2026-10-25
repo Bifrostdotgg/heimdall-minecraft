@@ -508,7 +508,7 @@ class AdminCommandTest {
         }
 
         @Test
-        @DisplayName("each verb takes the node its root alias is registered with, and no other")
+        @DisplayName("each /hd verb is offered to the holder of its table node, and not to other nodes")
         void eachVerbTakesItsTableNode() {
             for (java.util.Map.Entry<String, String> verb
                     : com.heimdall.core.punish.PunishmentPermissions.byVerb().entrySet()) {
