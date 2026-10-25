@@ -1271,8 +1271,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             // its verdict never reaches the player, so it must not use up the screen.
             // Nor does it alert staff: the line was not refused here, so there is nothing to tell.
             if (message.channel() != null) return Verdict.deny(renderReminder(mute, settings));
+            // The notice first: staff are told the line was refused only once its refusal exists.
+            Component notice = muteNotice(message.senderUuid(), mute, settings);
             alertStaff(message.senderUuid(), message.senderName(), mute, false, message.message());
-            return Verdict.deny(muteNotice(message.senderUuid(), mute, settings));
+            return Verdict.deny(notice);
         }
         return Verdict.abstain();
     }
@@ -1291,8 +1293,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         if (!muted) return Verdict.abstain();
         if (settings.blocksCommand(attempt.raw())) {
+            Component notice = muteNotice(attempt.senderUuid(), mute, settings);
             alertStaff(attempt.senderUuid(), attempt.senderName(), mute, true, attempt.raw());
-            return Verdict.deny(muteNotice(attempt.senderUuid(), mute, settings));
+            return Verdict.deny(notice);
         }
         return Verdict.abstain();
     }

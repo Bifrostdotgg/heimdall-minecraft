@@ -331,4 +331,25 @@ class MutedChatAlertsTest {
                 steve, "Steve", "m1", false, false, "hi", 1_000);
         assertEquals(1, mod.messages().size(), mod.messageText().toString());
     }
+
+    @Test
+    @DisplayName("a visible mute replacing a hidden one carries no count from it")
+    void replacedHiddenMuteStartsFresh() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(
+                    FakePlayer.named("Mod").grant(MutedChatAlerts.PERMISSION));
+            harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000e1", true));
+            chat(harness, steve, "one");
+            chat(harness, steve, "two");
+            chat(harness, steve, "three");
+            harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000e2"));
+            int before = mod.messages().size();
+            chat(harness, steve, "four");
+            assertEquals(before + 1, mod.messages().size(), mod.messageText().toString());
+            assertEquals("[Heimdall] Steve tried to speak while muted",
+                    mod.messageText().get(before));
+        }
+    }
 }

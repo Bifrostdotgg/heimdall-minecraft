@@ -447,7 +447,8 @@ Five more decide who hears about a punishment, rather than only who may issue on
 - `heimdall.punishments.notify.muted` - be told when a muted player tries to talk: "Steve tried
   to speak while muted", or "tried to use a blocked command" (default: **nobody**, operators
   included, and not implied by `heimdall.admin`). Shown on the server that refused the line, at
-  most once per player every 30 seconds with a count of what it folded in. For a hidden mute it
+  most once every 30 seconds per mute while the player stays online, with a count of what it
+  folded in. For a hidden mute it
   additionally needs `heimdall.punishments.hidden` and is prefixed `(hidden)`.
 - `heimdall.punishments.notify.muted.content` - with the node above, a second line with what the
   player tried to say, or the command as typed (default: nobody). Plain text, so a player cannot

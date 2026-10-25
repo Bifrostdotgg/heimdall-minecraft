@@ -58,8 +58,10 @@ final class MutedChatAlerts {
      *
      * <p>A window belongs to one mute. Attempts folded under a hidden mute must never surface as
      * "(4 more since)" on the next mute's alert, which ordinary staff may see, and a count from an
-     * earlier mute is wrong anyway. A mute issued here changes id once, from its local stand-in to
-     * the bot's, which costs at most one extra alert.
+     * earlier mute is wrong anyway. A mute issued here changes id between its local stand-in and
+     * the bot's id, usually once and occasionally more while a sync races its upload; each change
+     * costs one extra alert to the same audience, never a leak, because every copy of the row
+     * carries the same hidden flag.
      */
     int admit(UUID player, String muteId, long now) {
         if (player == null) return -1;
