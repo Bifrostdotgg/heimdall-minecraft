@@ -65,6 +65,28 @@ final class FrozenPlayers {
     /** Logout bans waiting out {@link #LOGOUT_GRACE_MS}, by player. */
     private final Map<UUID, Held> pendingLogoutBans = new ConcurrentHashMap<UUID, Held>();
 
+    /**
+     * How long after a kick its server is pinged. Long enough for a server that is shutting down
+     * to have closed its port after kicking everyone, far too short for it to be back up.
+     */
+    static final long EARLY_PING_MS = 3_000L;
+
+    /** How long a ping has to answer before the server counts as not answering. */
+    static final long PING_TIMEOUT_MS = 10_000L;
+
+    /**
+     * Frozen players who just left and are waiting on a lookup off the main thread before
+     * anything is held. Bounded: each entry goes when the lookup settles, when they rejoin, and
+     * on stop.
+     */
+    private final Map<UUID, Departure> departures = new ConcurrentHashMap<UUID, Departure>();
+
+    /** One departure waiting on a lookup. */
+    static final class Departure {
+        /** Set when a Heimdall kick for them arrives before the lookup settles. */
+        volatile boolean heimdallKicked;
+    }
+
     /** A waiting logout ban: the timer that fires it, and when it started waiting. */
     private static final class Held {
         final Registration timer;
@@ -155,6 +177,18 @@ final class FrozenPlayers {
                         + " were on is down.", NamedTextColor.GRAY));
     }
 
+    /**
+     * The staff notice for a logout ban that did not fire because LiteBans could not be asked
+     * whether it already bans them: a ban from the console would override one staff just gave.
+     */
+    static Component liteBansUnknownAlert(String name, boolean hidden) {
+        String who = name == null || name.isEmpty() ? "A frozen player" : name;
+        return Component.text("[Heimdall] " + (hidden ? "(hidden) " : ""), NamedTextColor.DARK_GRAY)
+                .append(Component.text(who, NamedTextColor.WHITE))
+                .append(Component.text(" was not banned for leaving while frozen: LiteBans could"
+                        + " not be checked. Ban them by hand if they should be.", NamedTextColor.GRAY));
+    }
+
     /** The staff notice for a held logout ban called off because the kick was Heimdall's own. */
     static Component kickWaivedAlert(String name, boolean hidden) {
         String who = name == null || name.isEmpty() ? "A frozen player" : name;
@@ -230,6 +264,8 @@ final class FrozenPlayers {
         final Kick kind;
         /** Null for a Heimdall kick, and wherever the platform cannot ping the server. */
         final ServerProbe server;
+        /** Set when the ping {@link #EARLY_PING_MS} after the kick got no answer. */
+        volatile boolean serverDown;
 
         KickRecord(long at, Kick kind, ServerProbe server) {
             this.at = at;
@@ -242,18 +278,20 @@ final class FrozenPlayers {
      * A frozen player was kicked off the network. {@code byHeimdall} for Heimdall's own kicks;
      * {@code server} pings the server another kick came from, where the platform can.
      */
-    void noteKicked(UUID player, long now, boolean byHeimdall, ServerProbe server) {
-        if (player == null) return;
+    KickRecord noteKicked(UUID player, long now, boolean byHeimdall, ServerProbe server) {
+        if (player == null) return null;
         pruneKicks(now);
         KickRecord previous = recentKicks.get(player);
         // A Heimdall kick is not downgraded by the platform's own report of the same kick.
         if (!byHeimdall && previous != null && previous.kind == Kick.HEIMDALL
                 && now - previous.at <= KICK_MEMORY_MS) {
-            return;
+            return null;
         }
-        recentKicks.put(player, byHeimdall
+        KickRecord kick = byHeimdall
                 ? new KickRecord(now, Kick.HEIMDALL, null)
-                : new KickRecord(now, Kick.OTHER, server));
+                : new KickRecord(now, Kick.OTHER, server);
+        recentKicks.put(player, kick);
+        return kick;
     }
 
     /** This player's last kick, if moments ago, consuming the record; never null. */
@@ -278,13 +316,44 @@ final class FrozenPlayers {
      * ban that started waiting in the last {@link #KICK_WAIVE_MS}, answering whether there was
      * one. An older one is a logout of their own that staff kicked after the fact.
      */
-    boolean waiveForHeimdallKick(UUID player, long now) {
-        if (player == null) return false;
+    Waiver waiveForHeimdallKick(UUID player, long now) {
+        if (player == null) return Waiver.NONE;
+        Departure departing = departures.get(player);
+        if (departing != null) {
+            // Still being looked up: nothing is held yet, and nothing will be.
+            departing.heimdallKicked = true;
+            return Waiver.BEFORE_HOLD;
+        }
         Held held = pendingLogoutBans.get(player);
-        if (held == null || now - held.since > KICK_WAIVE_MS) return false;
-        if (!pendingLogoutBans.remove(player, held)) return false;
+        if (held == null || now - held.since > KICK_WAIVE_MS) return Waiver.NONE;
+        if (!pendingLogoutBans.remove(player, held)) return Waiver.NONE;
         held.timer.close();
-        return true;
+        return Waiver.CALLED_OFF;
+    }
+
+    /** What a late Heimdall kick did to a logout ban. */
+    enum Waiver {
+        /** Nothing was waiting. */
+        NONE,
+        /** A held ban was called off; staff were told it was coming, so they are told it is not. */
+        CALLED_OFF,
+        /** It arrived before anything was held or said, so nothing ever will be. */
+        BEFORE_HOLD
+    }
+
+    /** A frozen player left and a lookup has to run before anything is held. */
+    Departure departing(UUID player) {
+        Departure departure = new Departure();
+        departures.put(player, departure);
+        return departure;
+    }
+
+    /**
+     * The lookup for this departure is done: true when it still stands, false when they rejoined
+     * or left again in the meantime, which a later lookup answers for.
+     */
+    boolean settle(UUID player, Departure departure) {
+        return player != null && departures.remove(player, departure);
     }
 
     /** Whether a logout ban is waiting for this player. */
@@ -305,6 +374,7 @@ final class FrozenPlayers {
     /** The player came back, or was unfrozen: nothing fires. */
     void cancel(UUID player) {
         if (player == null) return;
+        departures.remove(player);
         Held pending = pendingLogoutBans.remove(player);
         if (pending != null) pending.timer.close();
     }
@@ -312,6 +382,7 @@ final class FrozenPlayers {
     /** The module is stopping: nothing that was waiting fires. */
     void clear() {
         recentKicks.clear();
+        departures.clear();
         Iterator<Held> waiting = pendingLogoutBans.values().iterator();
         while (waiting.hasNext()) {
             Held pending = waiting.next();

@@ -206,8 +206,9 @@ When a frozen player logs out, staff on the proxy (or standalone server) are tol
 frozen players who log out** is on, they are banned unless they reconnect within 30 seconds. That
 ban is always silent, and never filed over a ban or IP ban already in force. A kick is reported to
 staff as a kick. One issued through Heimdall is never banned for; any other kick still is, since a
-player can get themselves kicked, unless the server that kicked them no longer answers a ping when
-the 30 seconds are up (a crash or restart with no fallback server). Alongside LiteBans the ban is issued through LiteBans, so it
+player can get themselves kicked, unless the server that kicked them does not answer a ping a few
+seconds after the kick or when the 30 seconds are up (a crash or restart with no fallback server).
+Alongside LiteBans the ban is issued through LiteBans, so it
 needs LiteBans on the server that sees the logout, and a hidden freeze is never banned for in that
 mode, because LiteBans has no hidden bans. A backend behind a proxy never treats a server switch as
 a logout. On a network with more than one proxy, a player who drops off one proxy and comes back

@@ -583,12 +583,25 @@ class FreezeTest {
             harness.tunnel.push("punish.apply", freezeFrame(steve, "64b00000000000000000010c", false));
             harness.platform.leave(steve);
 
-            harness.module.fireLogoutBanForTest(steve.uuid(), "Steve", false, answer -> answer.accept(false));
+            long now = System.currentTimeMillis();
+            harness.module.fireLogoutBanForTest(steve.uuid(), "Steve", false, new FrozenPlayers.KickRecord(
+                    now, FrozenPlayers.Kick.OTHER, answer -> answer.accept(false)));
             String alert = mod.messageText().get(mod.messageText().size() - 1);
             assertTrue(alert.contains("the server they were on is down"), alert);
             assertTrue(queued(harness, "issue").isEmpty());
 
-            harness.module.fireLogoutBanForTest(steve.uuid(), "Steve", false, answer -> answer.accept(true));
+            // Back up by the time the ban fires, but it did not answer just after the kick: a
+            // quick restart, not a kick they provoked.
+            FrozenPlayers.KickRecord restarted = new FrozenPlayers.KickRecord(
+                    now, FrozenPlayers.Kick.OTHER, answer -> answer.accept(true));
+            restarted.serverDown = true;
+            int before = mod.messageText().size();
+            harness.module.fireLogoutBanForTest(steve.uuid(), "Steve", false, restarted);
+            assertEquals(before + 1, mod.messageText().size());
+            assertTrue(queued(harness, "issue").isEmpty());
+
+            harness.module.fireLogoutBanForTest(steve.uuid(), "Steve", false, new FrozenPlayers.KickRecord(
+                    now, FrozenPlayers.Kick.OTHER, answer -> answer.accept(true)));
             waitFor(() -> queued(harness, "issue").size() == 1, 5_000L);
         }
     }
@@ -628,6 +641,81 @@ class FreezeTest {
             harness.platform.leave(steve);
             harness.sessions.quit(steve, System.currentTimeMillis());
             waitFor(() -> harness.module.frozenForTest().holding(steve.uuid()), 5_000L);
+        }
+    }
+
+    @Test
+    @DisplayName("hook mode: a LiteBans lookup that fails stands the ban down and tells staff")
+    void liteBansLookupFailureStandsDown() {
+        LiteBansSupport.activeCheckForTest(new LiteBansRevokeLift.ActiveCheck() {
+            @Override
+            public boolean isActive(LiteBansRevokeLift.Family family, UUID uuid) throws Exception {
+                throw new java.sql.SQLException("pool exhausted");
+            }
+        });
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "hook", true, 0L)) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b00000000000000000010e", false));
+            harness.platform.leave(steve);
+
+            harness.module.banFrozenLogout(steve.uuid(), "Steve");
+            assertTrue(harness.platform.dispatchedCommands().isEmpty());
+            String alert = mod.messageText().get(mod.messageText().size() - 1);
+            assertTrue(alert.contains("LiteBans could not be checked"), alert);
+        }
+    }
+
+    @Test
+    @DisplayName("hook mode: a rejoin or a staff kick during the LiteBans lookup is not lost")
+    void liteBansLookupRaces() throws InterruptedException {
+        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.atomic.AtomicInteger asked = new java.util.concurrent.atomic.AtomicInteger();
+        LiteBansSupport.activeCheckForTest(new LiteBansRevokeLift.ActiveCheck() {
+            @Override
+            public boolean isActive(LiteBansRevokeLift.Family family, UUID uuid) throws Exception {
+                asked.incrementAndGet();
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                return false;
+            }
+        });
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.GATEKEEPER), "hook", true, 0L)) {
+            final FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            final FakePlayer alex = harness.platform.join(FakePlayer.named("Alex"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b00000000000000000010f", false));
+            harness.tunnel.push("punish.apply", freezeFrame(alex, "64b000000000000000000110", false));
+            int before = mod.messageText().size();
+
+            // Steve leaves and is back before LiteBans answers.
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+            harness.platform.join(steve);
+            harness.sessions.join(steve, System.currentTimeMillis());
+            // Alex leaves, and staff's kick reaches this proxy before LiteBans answers.
+            harness.module.noteKicked(alex.uuid());
+            harness.platform.leave(alex);
+            harness.sessions.quit(alex, System.currentTimeMillis());
+            waitFor(() -> asked.get() == 2, 5_000L);
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "kick")
+                    .put("targetUuid", alex.uuid().toString())
+                    .put("targetName", "Alex")
+                    .put("reason", "go cool off")
+                    .build());
+            release.countDown();
+
+            waitFor(() -> mod.messageText().toString().contains("Alex was kicked while frozen"), 5_000L);
+            Thread.sleep(200L);
+            String told = mod.messageText().subList(before, mod.messageText().size()).toString();
+            assertFalse(told.contains("Steve"), told);
+            assertFalse(told.contains("will be banned"), told);
+            assertFalse(harness.module.frozenForTest().holding(steve.uuid()));
+            assertFalse(harness.module.frozenForTest().holding(alex.uuid()));
         }
     }
 

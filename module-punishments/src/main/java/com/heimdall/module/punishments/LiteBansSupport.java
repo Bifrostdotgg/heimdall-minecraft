@@ -93,17 +93,17 @@ final class LiteBansSupport {
     }
 
     /**
-     * Whether LiteBans holds a ban on the player right now. False when LiteBans is not hooked
-     * here or the lookup fails: the callers only use it to stand down, so not knowing means
-     * carrying on. A database query, so never on a server's main thread.
+     * Whether LiteBans holds a ban on the player right now: {@code null} when it could not be
+     * asked, which is not an answer either way, and false when LiteBans is not hooked here. A
+     * database query, so never on a server's main thread.
      */
-    static boolean banned(UUID uuid) {
+    static Boolean banned(UUID uuid) {
         LiteBansRevokeLift.ActiveCheck check = activeCheck;
-        if (check == null || uuid == null) return false;
+        if (check == null || uuid == null) return Boolean.FALSE;
         try {
             return check.isActive(LiteBansRevokeLift.Family.BAN, uuid);
         } catch (Throwable failed) {
-            return false;
+            return null;
         }
     }
 
