@@ -86,8 +86,9 @@ public final class PunishmentText {
     /**
      * How a new punishment is announced, or {@code null} for a type nobody is announced for.
      *
-     * <p>{@code null} for {@code geo}, {@code subnet} and {@code freeze}: none of them name a
-     * player, and a country-wide ban is not a moderation event a server should read as one.
+     * <p>{@code null} for {@code geo} and {@code subnet}: neither names a player, and a
+     * country-wide ban is not a moderation event a server should read as one. A freeze does name
+     * one, and is announced, but only ever to staff: the module forces it silent.
      */
     public static String issueVerb(String type, boolean permanent) {
         String key = key(type);
@@ -105,6 +106,9 @@ public final class PunishmentText {
         }
         if ("warn".equals(key)) {
             return "warned";
+        }
+        if ("freeze".equals(key)) {
+            return "froze";
         }
         return null;
     }
@@ -127,6 +131,9 @@ public final class PunishmentText {
         }
         if ("warn".equals(key) || "unwarn".equals(key)) {
             return "unwarned";
+        }
+        if ("freeze".equals(key) || "unfreeze".equals(key)) {
+            return "unfroze";
         }
         if ("rollback".equals(key)) {
             return "revoked a punishment for";
