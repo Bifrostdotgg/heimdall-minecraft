@@ -153,6 +153,16 @@ final class PunishmentSettings {
         return new PunishmentSettings(config);
     }
 
+    /**
+     * Whether freezes are enforced under this config: hook or replace mode. Read straight from the
+     * one key rather than through {@link #from}, because it is asked on every block a player walks.
+     */
+    static boolean freezesEnforced(ModuleConfig config) {
+        if (config == null) return false;
+        String mode = config.settings().string("mode", "offenses-only");
+        return "replace".equalsIgnoreCase(mode) || "hook".equalsIgnoreCase(mode);
+    }
+
     boolean replaceMode() {
         return "replace".equalsIgnoreCase(mode);
     }

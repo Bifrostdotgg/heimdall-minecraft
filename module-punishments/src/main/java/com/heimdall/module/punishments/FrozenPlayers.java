@@ -44,6 +44,15 @@ final class FrozenPlayers {
     /** The most of a frozen player's line relayed to staff. Chat is capped well below this. */
     static final int MAX_SAID_CHARS = 256;
 
+    /**
+     * How long a kick counts for. The disconnect it causes follows at once, so this only has to
+     * outlast the hop between the kick event and the quit.
+     */
+    static final long KICK_MEMORY_MS = 10_000L;
+
+    /** When each frozen player was last kicked. Bounded: entries go on read and on stop. */
+    private final Map<UUID, Long> recentKicks = new ConcurrentHashMap<UUID, Long>();
+
     /** Logout bans waiting out {@link #LOGOUT_GRACE_MS}, by player. */
     private final Map<UUID, Registration> pendingLogoutBans =
             new ConcurrentHashMap<UUID, Registration>();
@@ -97,6 +106,16 @@ final class FrozenPlayers {
         return line;
     }
 
+    /** The staff notice for a frozen player who was kicked rather than logging out. */
+    static Component kickedAlert(String name, boolean hidden) {
+        String who = name == null || name.isEmpty() ? "A frozen player" : name;
+        return Component.text("[Heimdall] " + (hidden ? "(hidden) " : ""), NamedTextColor.DARK_GRAY)
+                .append(Component.text(who, NamedTextColor.WHITE))
+                .append(Component.text(" was kicked while frozen.", NamedTextColor.RED))
+                .append(Component.text(" Not banned for it, since a kick is not logging out.",
+                        NamedTextColor.GRAY));
+    }
+
     /** What a player is told when their freeze is lifted. */
     static Component released() {
         return Component.text("You are no longer frozen.", NamedTextColor.GREEN);
@@ -145,6 +164,27 @@ final class FrozenPlayers {
         if (previous != null && previous != timer) previous.close();
     }
 
+    /** A frozen player was kicked. */
+    void noteKicked(UUID player, long now) {
+        if (player == null) return;
+        pruneKicks(now);
+        recentKicks.put(player, now);
+    }
+
+    /** Whether this player was kicked moments ago, consuming the record. */
+    boolean kickedRecently(UUID player, long now) {
+        if (player == null) return false;
+        Long at = recentKicks.remove(player);
+        return at != null && now - at.longValue() <= KICK_MEMORY_MS;
+    }
+
+    private void pruneKicks(long now) {
+        Iterator<Map.Entry<UUID, Long>> entries = recentKicks.entrySet().iterator();
+        while (entries.hasNext()) {
+            if (now - entries.next().getValue().longValue() > KICK_MEMORY_MS) entries.remove();
+        }
+    }
+
     /** Whether a logout ban is waiting for this player. */
     boolean holding(UUID player) {
         return player != null && pendingLogoutBans.containsKey(player);
@@ -167,6 +207,7 @@ final class FrozenPlayers {
 
     /** The module is stopping: nothing that was waiting fires. */
     void clear() {
+        recentKicks.clear();
         Iterator<Registration> waiting = pendingLogoutBans.values().iterator();
         while (waiting.hasNext()) {
             Registration pending = waiting.next();

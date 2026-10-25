@@ -6,7 +6,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.heimdall.core.log.RecordingLogger;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.md_5.bungee.api.connection.Connection;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
@@ -19,6 +22,7 @@ import org.junit.jupiter.api.Test;
 class BungeeFrozenCommandListenerTest {
 
     private final RecordingLogger logger = new RecordingLogger(true);
+    private final List<UUID> kicks = new ArrayList<UUID>();
 
     private static ProxiedPlayer steve() {
         ProxiedPlayer steve = mock(ProxiedPlayer.class);
@@ -40,6 +44,11 @@ class BungeeFrozenCommandListenerTest {
             @Override
             public boolean test(UUID player) {
                 return frozen;
+            }
+        }, new Consumer<UUID>() {
+            @Override
+            public void accept(UUID player) {
+                kicks.add(player);
             }
         });
     }

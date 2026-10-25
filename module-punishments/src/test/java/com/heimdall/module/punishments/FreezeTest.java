@@ -205,6 +205,10 @@ class FreezeTest {
             assertEquals(modBefore, mod.messages().size(), mod.messageText().toString());
             assertTrue(senior.messageText().contains("[Frozen] (hidden) Steve: hello"),
                     senior.messageText().toString());
+            Verdict echo = harness.chatPipeline.dispatch(
+                    ChatMessage.of(steve.uuid(), "Steve", "again"));
+            assertEquals("[Frozen] Steve: again", text(echo),
+                    "the player is never told their freeze is hidden");
         }
     }
 
@@ -402,8 +406,167 @@ class FreezeTest {
             assertTrue(queued(harness, "issue").isEmpty(), "LiteBans records it, not the outbox");
             List<String> ran = harness.platform.dispatchedCommands();
             assertEquals(1, ran.size(), ran.toString());
-            assertEquals("ban " + steve.uuid() + " 2h " + FrozenPlayers.LOGOUT_BAN_REASON,
+            // Always -s: the reason names the freeze, which is only ever told to staff.
+            assertEquals("ban " + steve.uuid() + " 2h -s " + FrozenPlayers.LOGOUT_BAN_REASON,
                     ran.get(0).replace("litebans:ban", "ban"));
+        }
+    }
+
+    @Test
+    @DisplayName("a hidden freeze in hook mode holds no logout ban: LiteBans would show it to all")
+    void hiddenFreezeInHookModeIsNotBanned() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "hook", true, 0L)) {
+            LiteBansSupport.activeCheckForTest(new LiteBansRevokeLift.ActiveCheck() {
+                @Override
+                public boolean isActive(LiteBansRevokeLift.Family family, UUID uuid) {
+                    return false;
+                }
+            });
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000101", true));
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+            assertFalse(harness.module.frozenForTest().holding(steve.uuid()));
+            harness.module.banFrozenLogout(steve.uuid(), "Steve");
+            assertTrue(harness.platform.dispatchedCommands().isEmpty(),
+                    harness.platform.dispatchedCommands().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("the replace-mode logout ban is silent even where the guild announces")
+    void logoutBanIsSilent() {
+        try (PunishmentsHarness harness = harnessAnnouncing(true, 0L)) {
+            FakePlayer steve = FakePlayer.named("Steve");
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000102", false));
+            harness.module.banFrozenLogout(steve.uuid(), "Steve");
+            List<PunishmentOutbox.Entry> issues = queued(harness, "issue");
+            assertEquals(1, issues.size());
+            assertTrue(issues.get(0).payload.bool("silent", false));
+        }
+    }
+
+    private PunishmentsHarness harnessAnnouncing(boolean logoutBan, long seconds) {
+        return new PunishmentsHarness(dataDir, ServerRole.STANDALONE).enableWith(Payload.builder()
+                .put("mode", "replace")
+                .put("ipSalt", "salt")
+                .put("rootAliases", false)
+                .put("silentByDefault", false)
+                .put(PunishmentSettings.KEY_FREEZE_LOGOUT_BAN, logoutBan)
+                .put(PunishmentSettings.KEY_FREEZE_LOGOUT_BAN_SECONDS, seconds)
+                .build());
+    }
+
+    @Test
+    @DisplayName("a frozen player who is kicked is reported as kicked, and no ban is held")
+    void kickIsNotALogout() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace", true, 0L)) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000103", false));
+
+            harness.module.noteKicked(steve.uuid());
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+
+            String alert = mod.messageText().get(mod.messageText().size() - 1);
+            assertTrue(alert.contains("was kicked while frozen"), alert);
+            assertFalse(harness.module.frozenForTest().holding(steve.uuid()));
+
+            // The kick is used up: a later logout of their own is a logout again.
+            harness.platform.join(steve);
+            harness.sessions.join(steve, System.currentTimeMillis());
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+            assertTrue(harness.module.frozenForTest().holding(steve.uuid()));
+        }
+    }
+
+    @Test
+    @DisplayName("a frozen player banned by staff gets no logout alert and no held ban")
+    void bannedWhileFrozenIsQuiet() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace", true, 0L)) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000104", false));
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("id", "64b000000000000000000105")
+                    .put("type", "ban")
+                    .put("targetUuid", steve.uuid().toString())
+                    .put("targetName", "Steve")
+                    .put("reason", "cheating")
+                    .put("source", "dashboard")
+                    .put("silent", true)
+                    .build());
+            int before = mod.messages().size();
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+            assertFalse(harness.module.frozenForTest().holding(steve.uuid()));
+            for (String line : mod.messageText().subList(before, mod.messageText().size())) {
+                assertFalse(line.contains("logged out while frozen"), line);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("offenses-only enforces no freeze, even one left over from another mode")
+    void offensesOnlyEnforcesNothing() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace")) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000106", false));
+            assertTrue(harness.module.isFrozen(steve.uuid()));
+
+            enable(harness, "offenses-only");
+            assertFalse(harness.module.isFrozen(steve.uuid()));
+            assertFalse(harness.chatPipeline.dispatch(
+                    ChatMessage.of(steve.uuid(), "Steve", "free")).isDeny());
+            assertFalse(harness.commandPipeline.dispatch(
+                    CommandAttempt.of(steve.uuid(), "Steve", "/spawn")).isDeny());
+        }
+    }
+
+    @Test
+    @DisplayName("a freeze replaced by a new one does not tell the player they are free")
+    void overrideIsNotARelease() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace", true, 0L)) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000107", false));
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+            assertTrue(harness.module.frozenForTest().holding(steve.uuid()));
+
+            harness.tunnel.push("punish.revoke", Payload.builder()
+                    .put("type", "freeze")
+                    .put("targetUuid", steve.uuid().toString())
+                    .put("revokeCause", "override")
+                    .build());
+            assertTrue(harness.module.frozenForTest().holding(steve.uuid()),
+                    "the new freeze still stands, and so does the ban waiting on it");
+            assertFalse(steve.messageText().contains("You are no longer frozen."),
+                    steve.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("nobody can freeze themselves, since they could never run /unfreeze")
+    void noSelfFreeze() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace")) {
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            FakeCommandSource source = FakeCommandSource.player(mod.uuid(), "Mod")
+                    .grant(FrozenPlayers.PERMISSION);
+            harness.module.onStaffCommand(source, "freeze", Arrays.asList("mod"));
+            assertTrue(source.wasTold("cannot freeze yourself"), source.messageText().toString());
+            assertFalse(harness.module.isFrozen(mod.uuid()));
+            assertTrue(queued(harness, "issue").isEmpty());
         }
     }
 

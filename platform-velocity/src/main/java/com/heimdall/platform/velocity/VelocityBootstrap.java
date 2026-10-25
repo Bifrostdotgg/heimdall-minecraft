@@ -15,7 +15,7 @@ import com.heimdall.core.wiring.MigrationBoot;
 import com.heimdall.core.wiring.UpdateWiring;
 import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
-import com.heimdall.platform.common.FrozenProxyCommands;
+import com.heimdall.platform.common.FrozenProxyHooks;
 import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
@@ -26,6 +26,7 @@ import com.velocitypowered.api.event.PostOrder;
 import com.velocitypowered.api.event.command.CommandExecuteEvent;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
+import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChatEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.player.ServerPostConnectEvent;
@@ -335,9 +336,22 @@ final class VelocityBootstrap {
         // A frozen player's proxy commands, /server first among them. LAST, so the check sees the
         // command after any other listener has rewritten it, which is the one the proxy runs.
         final VelocityFrozenCommandListener frozen = new VelocityFrozenCommandListener(
-                logger, proxy.getCommandManager(), FrozenProxyCommands::refuse);
+                logger, proxy.getCommandManager(), FrozenProxyHooks::refuse);
         registrations.track(VelocityEvents.listen(
                 events, plugin, CommandExecuteEvent.class, PostOrder.LAST, frozen::onCommand));
+        // A backend kicking a frozen player, so the disconnect that may follow is not read as the
+        // player logging out to escape a check.
+        registrations.track(VelocityEvents.listen(events, plugin, KickedFromServerEvent.class,
+                PostOrder.LAST, new EventHandler<KickedFromServerEvent>() {
+                    @Override
+                    public void execute(KickedFromServerEvent event) {
+                        try {
+                            FrozenProxyHooks.kicked(event.getPlayer().getUniqueId());
+                        } catch (Throwable broken) {
+                            logger.error("noting a kick for a frozen player threw", broken);
+                        }
+                    }
+                }));
     }
 
     /**
