@@ -3,18 +3,41 @@ package com.heimdall.platform.bukkit;
 import com.heimdall.core.log.HeimdallLogger;
 import java.lang.reflect.Method;
 import java.util.UUID;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.block.SignChangeEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerPickupItemEvent;
+import org.bukkit.event.vehicle.VehicleMoveEvent;
+import org.bukkit.event.vehicle.VehicleEnterEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
+import org.bukkit.event.player.PlayerKickEvent;
+import org.bukkit.event.player.PlayerItemConsumeEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.entity.ProjectileLaunchEvent;
 
 /**
- * Backend freeze (move/interact) and muted-sign cancel. Talks to the punishments module by
- * reflection so this platform module does not compile against a feature module.
+ * Backend freeze and muted-sign cancel. Talks to the punishments module by reflection so this
+ * platform module does not compile against a feature module.
+ *
+ * <p>A frozen player stays where they are and changes nothing: no walking (looking around is
+ * allowed), no clicking blocks or entities, no breaking or placing, no dropping or picking up,
+ * no moving items in an inventory. They cannot be hurt and cannot hurt anyone either, since they
+ * cannot move out of the way. They cannot throw, shoot, eat, or ride. Teleports are left alone on
+ * purpose, apart from the ones the player causes (an ender pearl, chorus fruit), so staff can still
+ * bring a frozen player somewhere to talk.
  */
 final class BukkitPunishmentGuard implements Listener {
 
@@ -37,10 +60,82 @@ final class BukkitPunishmentGuard implements Listener {
         }
     }
 
-    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    /**
+     * Not {@code ignoreCancelled}: CraftBukkit fires a click on the air already cancelled (it has
+     * no block to use), with the item in hand still allowed, so a filtered handler never saw an
+     * ender pearl, a bow or food. Cancelling denies the item as well as the block.
+     */
+    @EventHandler(priority = EventPriority.HIGH)
     public void onInteract(PlayerInteractEvent event) {
         if (frozen(event.getPlayer())) {
             event.setCancelled(true);
+        }
+    }
+
+    /** Anything that fires a projectile without a click event to stop it first. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onLaunch(ProjectileLaunchEvent event) {
+        Player shooter = attacker(event.getEntity());
+        if (shooter != null && frozen(shooter)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onConsume(PlayerItemConsumeEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /**
+     * The teleports a player causes themselves: an ender pearl, or chorus fruit on servers that
+     * have it (matched by name, since the 1.8 API this compiles against does not). Every other
+     * teleport, staff bringing them somewhere included, is left alone.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onTeleport(PlayerTeleportEvent event) {
+        PlayerTeleportEvent.TeleportCause cause = event.getCause();
+        if (cause == null) return;
+        String name = cause.name();
+        if (!"ENDER_PEARL".equals(name) && !"CHORUS_FRUIT".equals(name)) return;
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** No getting on anything. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onVehicleEnter(VehicleEnterEvent event) {
+        if (event.getEntered() instanceof Player && frozen((Player) event.getEntered())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /**
+     * Frozen while already riding: a passenger's movement arrives as the vehicle's, so no
+     * {@code PlayerMoveEvent} fires to stop it. Put them on their feet, where the move handler
+     * holds them.
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    @SuppressWarnings("deprecation")
+    public void onVehicleMove(VehicleMoveEvent event) {
+        Entity passenger = event.getVehicle().getPassenger();
+        if (passenger instanceof Player && frozen((Player) passenger)) {
+            event.getVehicle().eject();
+        }
+    }
+
+    /** Told to the module, so a frozen player kicked off this server is not banned for leaving. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onKick(PlayerKickEvent event) {
+        Object module = module();
+        if (module == null) return;
+        try {
+            module.getClass().getMethod("noteKicked", UUID.class)
+                    .invoke(module, event.getPlayer().getUniqueId());
+        } catch (Throwable e) {
+            logger.debug(() -> "punishment guard noteKicked failed: " + e);
         }
     }
 
@@ -49,6 +144,78 @@ final class BukkitPunishmentGuard implements Listener {
         if (frozen(event.getPlayer())) {
             event.setCancelled(true);
         }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onBreak(BlockBreakEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPlace(BlockPlaceEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onDrop(PlayerDropItemEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /**
+     * Deprecated on modern servers in favour of {@code EntityPickupItemEvent}, which 1.8.8 does
+     * not have, and still fired by them for a player.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPickup(PlayerPickupItemEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (event.getWhoClicked() instanceof Player && frozen((Player) event.getWhoClicked())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onInventoryClick(InventoryClickEvent event) {
+        if (event.getWhoClicked() instanceof Player && frozen((Player) event.getWhoClicked())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** A frozen player takes no damage: they cannot move out of the way of any. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onDamaged(EntityDamageEvent event) {
+        if (event.getEntity() instanceof Player && frozen((Player) event.getEntity())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** And deals none, by hand or by anything they shot before the freeze landed. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onDamaging(EntityDamageByEntityEvent event) {
+        Player attacker = attacker(event.getDamager());
+        if (attacker != null && frozen(attacker)) {
+            event.setCancelled(true);
+        }
+    }
+
+    private static Player attacker(Entity damager) {
+        if (damager instanceof Player) return (Player) damager;
+        if (damager instanceof Projectile) {
+            Object shooter = ((Projectile) damager).getShooter();
+            if (shooter instanceof Player) return (Player) shooter;
+        }
+        return null;
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)

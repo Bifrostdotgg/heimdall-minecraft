@@ -15,6 +15,7 @@ import com.heimdall.core.wiring.MigrationBoot;
 import com.heimdall.core.wiring.UpdateWiring;
 import com.heimdall.platform.common.CoreRegistrations;
 import com.heimdall.platform.common.FloodgateIdentityProvider;
+import com.heimdall.platform.common.FrozenProxyHooks;
 import com.heimdall.platform.common.HeimdallModules;
 import com.heimdall.platform.common.ShellHotSwap;
 import com.heimdall.platform.common.TunnelSpiService;
@@ -22,12 +23,15 @@ import com.heimdall.shell.contract.ShellContext;
 import com.velocitypowered.api.event.EventHandler;
 import com.velocitypowered.api.event.EventManager;
 import com.velocitypowered.api.event.PostOrder;
+import com.velocitypowered.api.event.command.CommandExecuteEvent;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
+import com.velocitypowered.api.event.player.KickedFromServerEvent;
 import com.velocitypowered.api.event.player.PlayerChatEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.player.ServerPostConnectEvent;
 import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.proxy.server.RegisteredServer;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -330,6 +334,32 @@ final class VelocityBootstrap {
         final VelocityChatListener chat = new VelocityChatListener(logger, runtime.chatPipeline());
         registrations.track(VelocityEvents.listen(
                 events, plugin, PlayerChatEvent.class, PostOrder.LAST, chat::onChat));
+        // A frozen player's proxy commands, /server first among them. LAST, so the check sees the
+        // command after any other listener has rewritten it, which is the one the proxy runs.
+        final VelocityFrozenCommandListener frozen = new VelocityFrozenCommandListener(
+                logger, proxy.getCommandManager(), FrozenProxyHooks::refuse);
+        registrations.track(VelocityEvents.listen(
+                events, plugin, CommandExecuteEvent.class, PostOrder.LAST, frozen::onCommand));
+        // A backend kick that ends the connection, so staff hear "was kicked" rather than "logged
+        // out". LAST, and only a DisconnectPlayer result: a kick another listener turns into a
+        // move to a fallback server is not a disconnect.
+        registrations.track(VelocityEvents.listen(events, plugin, KickedFromServerEvent.class,
+                PostOrder.LAST, new EventHandler<KickedFromServerEvent>() {
+                    @Override
+                    public void execute(KickedFromServerEvent event) {
+                        try {
+                            if (event.getResult()
+                                    instanceof KickedFromServerEvent.DisconnectPlayer) {
+                                final RegisteredServer from = event.getServer();
+                                FrozenProxyHooks.kicked(event.getPlayer().getUniqueId(),
+                                        answer -> from.ping().whenComplete(
+                                                (ping, failed) -> answer.accept(failed == null)));
+                            }
+                        } catch (Throwable broken) {
+                            logger.error("noting a kick for a frozen player threw", broken);
+                        }
+                    }
+                }));
     }
 
     /**
