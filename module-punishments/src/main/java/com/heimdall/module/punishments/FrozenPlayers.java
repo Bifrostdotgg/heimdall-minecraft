@@ -81,10 +81,22 @@ final class FrozenPlayers {
      */
     private final Map<UUID, Departure> departures = new ConcurrentHashMap<UUID, Departure>();
 
-    /** One departure waiting on a lookup. */
+    /**
+     * One departure waiting on a lookup. Its state moves once, by compare-and-set, so a Heimdall
+     * kick and the lookup settling cannot both believe they went first.
+     */
     static final class Departure {
-        /** Set when a Heimdall kick for them arrives before the lookup settles. */
-        volatile boolean heimdallKicked;
+        static final int OPEN = 0;
+        static final int KICKED = 1;
+        static final int SETTLED = 2;
+
+        final java.util.concurrent.atomic.AtomicInteger state =
+                new java.util.concurrent.atomic.AtomicInteger(OPEN);
+
+        /** Whether a Heimdall kick for them arrived before the lookup settled. */
+        boolean heimdallKicked() {
+            return state.get() == KICKED;
+        }
     }
 
     /** A waiting logout ban: the timer that fires it, and when it started waiting. */
@@ -319,9 +331,9 @@ final class FrozenPlayers {
     Waiver waiveForHeimdallKick(UUID player, long now) {
         if (player == null) return Waiver.NONE;
         Departure departing = departures.get(player);
-        if (departing != null) {
+        if (departing != null
+                && departing.state.compareAndSet(Departure.OPEN, Departure.KICKED)) {
             // Still being looked up: nothing is held yet, and nothing will be.
-            departing.heimdallKicked = true;
             return Waiver.BEFORE_HOLD;
         }
         Held held = pendingLogoutBans.get(player);
@@ -349,11 +361,22 @@ final class FrozenPlayers {
     }
 
     /**
-     * The lookup for this departure is done: true when it still stands, false when they rejoined
-     * or left again in the meantime, which a later lookup answers for.
+     * Done with this departure: true when it still stood, false when they rejoined, were
+     * unfrozen or left again in the meantime, which a later lookup answers for.
      */
     boolean settle(UUID player, Departure departure) {
         return player != null && departures.remove(player, departure);
+    }
+
+    /**
+     * The lookup for this departure answered: true while it still stands. Closes the door on a
+     * late Heimdall kick, which from here looks for a held ban instead. The departure stays
+     * listed until {@link #settle}, so a rejoin before then is still seen.
+     */
+    boolean claim(UUID player, Departure departure) {
+        if (player == null || departures.get(player) != departure) return false;
+        departure.state.compareAndSet(Departure.OPEN, Departure.SETTLED);
+        return true;
     }
 
     /** Whether a logout ban is waiting for this player. */

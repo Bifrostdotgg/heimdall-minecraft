@@ -1552,14 +1552,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         // A failed lookup carries on: this only holds the ban, and the ban asks
                         // again, and stands down on a failure, before it fires.
                         boolean liteBansBan = Boolean.TRUE.equals(LiteBansSupport.banned(uuid));
-                        if (!frozen.settle(uuid, departure)) return;
-                        if (HeimdallPunishmentsModule.this.context != ctx || liteBansBan) return;
-                        FrozenPlayers.KickRecord seen = departure.heimdallKicked
+                        if (!frozen.claim(uuid, departure)) return;
+                        if (HeimdallPunishmentsModule.this.context != ctx || liteBansBan) {
+                            frozen.settle(uuid, departure);
+                            return;
+                        }
+                        FrozenPlayers.KickRecord seen = departure.heimdallKicked()
                                 ? new FrozenPlayers.KickRecord(kick.at == 0L
                                         ? System.currentTimeMillis() : kick.at,
                                         FrozenPlayers.Kick.HEIMDALL, null)
                                 : kick;
-                        frozenGone(ctx, uuid, name, freeze, seen, settings);
+                        frozenGone(ctx, uuid, name, freeze, seen, settings, departure);
                     }
                 });
             } catch (RuntimeException stopping) {
@@ -1568,12 +1571,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             }
             return;
         }
-        frozenGone(ctx, uuid, name, freeze, kick, settings);
+        frozenGone(ctx, uuid, name, freeze, kick, settings, null);
     }
 
-    /** The rest of {@link #frozenLoggedOut}, once it is known they were not banned. */
+    /**
+     * The rest of {@link #frozenLoggedOut}, once it is known they were not banned. With a
+     * {@code departure}, the lookup it waited on ran off the main thread, and anything held is
+     * undone if they rejoined or were unfrozen while it was being set up.
+     */
     private void frozenGone(final ModuleContext ctx, final UUID uuid, final String name,
-            ActivePunishment freeze, FrozenPlayers.KickRecord kick, PunishmentSettings settings) {
+            ActivePunishment freeze, FrozenPlayers.KickRecord kick, PunishmentSettings settings,
+            FrozenPlayers.Departure departure) {
         // A Heimdall kick is staff's own decision, not the player escaping a check, so nothing is
         // held against them for it. Any other kick is reported as a kick but still holds the ban:
         // a player can provoke one (spam until the server kicks them), and staff can unfreeze to
@@ -1598,6 +1606,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 }
             }, FrozenPlayers.LOGOUT_GRACE_MS);
             frozen.hold(uuid, timer[0], System.currentTimeMillis());
+            if (departure != null && !frozen.settle(uuid, departure)) {
+                // Back, or unfrozen, before the hold was in place: nothing cancelled it, so
+                // it is undone here, and staff are told nothing.
+                if (frozen.release(uuid, timer[0]) && timer[0] != null) timer[0].close();
+                return;
+            }
+        } else if (departure != null && !frozen.settle(uuid, departure)) {
+            return;
         }
         final Component alert = kicked
                 ? FrozenPlayers.kickedAlert(name, hidden, ban)
