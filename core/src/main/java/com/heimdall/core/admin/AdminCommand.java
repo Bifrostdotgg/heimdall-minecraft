@@ -37,9 +37,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <h2>Permission</h2>
  *
- * <p>{@code heimdall.admin}, declared on the spec so the registrars enforce it — which on Velocity
- * also hides the command from a player's completion, and on the Bukkit family gates the completer as
- * well as the executor. No subcommand re-checks it: one gate, at the door.
+ * <p>Per verb, not at the door. Every verb needs {@code heimdall.admin}, except the punishment
+ * verbs, which also accept their own {@code heimdall.punishments.*} node (see
+ * {@link AdminSubcommand#permits}). A moderator granted {@code heimdall.punishments.ban} can run
+ * {@code /hd ban} and nothing else here, and sees only that verb in help and completion.
+ *
+ * <p>So the spec declares no permission, because one node cannot say "admin or any of these", and
+ * this class does the gating itself in {@link #dispatch} and {@link #suggest}. A sender who may run
+ * no verb at all gets the same refusal the registrar used to give. On the Bukkit family the
+ * descriptor in {@code plugin.yml} still names the nodes, separated by {@code ;} (which Bukkit reads
+ * as "any of"), so the command stays hidden from players who hold none of them. The proxies have no
+ * descriptor, so there {@code /hdp} is visible to everybody and refused here.
  *
  * <p>Both a player and the console may run everything. That is load-bearing for
  * {@code /hd setup} — the smoke harness drives it down a console pipe, and an operator claiming a
@@ -52,7 +60,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class AdminCommand {
 
-    /** The node every verb here is gated on. */
+    /** The node that runs every verb here; the punishment verbs also take their own node. */
     public static final String PERMISSION = "heimdall.admin";
 
     /** v2's admin verb, kept as a hidden forwarding alias on both platforms. */
@@ -157,13 +165,20 @@ public final class AdminCommand {
     private CommandSpec spec(final String name, List<String> aliases, final boolean deprecated) {
         return CommandSpec.named(name)
                 .aliases(aliases)
-                .permission(PERMISSION)
+                .permission("")
                 .usage("/" + name + " <" + String.join("|", subcommands.keySet()) + ">")
                 .description("Heimdall administration")
                 .handler(new CommandHandler() {
                     @Override
                     public void execute(CommandSource source, List<String> args) {
-                        if (deprecated) {
+                        if (!permitsAny(source)) {
+                            source.sendMessage(Msg.legacy(
+                                    "§cYou do not have permission to use that."));
+                            return;
+                        }
+                        // Only for someone who runs the server: a moderator using /hwl ban would
+                        // otherwise spend the once-per-start notice before an admin ever saw it.
+                        if (deprecated && source.hasPermission(PERMISSION)) {
                             warnAboutDeprecatedName(source);
                         }
                         dispatch(source, args, name);
@@ -208,17 +223,28 @@ public final class AdminCommand {
             help(source, label);
             return;
         }
+        if (!subcommand.permits(source)) {
+            source.sendMessage(Msg.legacy("§cYou do not have permission to use that."));
+            return;
+        }
         subcommand.run(source, args.subList(1, args.size()), context);
     }
 
     private void help(CommandSource source, String label) {
+        // The connection line names the guild, this machine's identity and the bot's last error,
+        // which is the administrator's business, not a moderator's who can only run /hd ban.
         source.sendMessage(Msg.legacy("§6Heimdall §7v" + context.pluginVersion()
-                + " §8— §7" + context.runtime().connectionStatus()));
+                + (source.hasPermission(PERMISSION)
+                        ? " §8- §7" + context.runtime().connectionStatus()
+                        : "")));
         for (AdminSubcommand subcommand : subcommands.values()) {
+            if (!subcommand.permits(source)) {
+                continue;
+            }
             String usage = subcommand.usage().isEmpty() ? "" : " " + subcommand.usage();
             source.sendMessage(Msg.legacy(
                     "§7/" + label + " §f" + subcommand.name() + "§7" + usage
-                            + " §8— §7" + subcommand.description()));
+                            + " §8- §7" + subcommand.description()));
         }
     }
 
@@ -231,16 +257,32 @@ public final class AdminCommand {
     private List<String> suggest(CommandSource source, List<String> args) {
         if (args.size() <= 1) {
             String prefix = args.isEmpty() ? "" : args.get(0).toLowerCase(Locale.ROOT);
-            return matching(new ArrayList<String>(subcommands.keySet()), prefix);
+            List<String> verbs = new ArrayList<String>();
+            for (AdminSubcommand subcommand : subcommands.values()) {
+                if (subcommand.permits(source)) {
+                    verbs.add(subcommand.name());
+                }
+            }
+            return matching(verbs, prefix);
         }
         AdminSubcommand subcommand = subcommands.get(args.get(0).toLowerCase(Locale.ROOT));
-        if (subcommand == null) {
+        if (subcommand == null || !subcommand.permits(source)) {
             return Collections.emptyList();
         }
         List<String> rest = args.subList(1, args.size());
         return matching(
                 subcommand.complete(source, rest, context),
                 rest.get(rest.size() - 1).toLowerCase(Locale.ROOT));
+    }
+
+    /** Whether {@code source} may run any verb here at all. */
+    private boolean permitsAny(CommandSource source) {
+        for (AdminSubcommand subcommand : subcommands.values()) {
+            if (subcommand.permits(source)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<String> matching(List<String> candidates, String prefix) {

@@ -34,6 +34,18 @@ public interface AdminSubcommand {
     String description();
 
     /**
+     * Whether {@code source} may run this verb, see it in help and have it completed.
+     *
+     * <p>{@code heimdall.admin} unless a verb says otherwise. The punishment verbs do: each also
+     * accepts its own {@code heimdall.punishments.*} node, so a moderator granted
+     * {@code heimdall.punishments.ban} can {@code /hd ban} without being able to reconfigure the
+     * plugin. {@link AdminCommand} asks this before running or offering anything.
+     */
+    default boolean permits(CommandSource source) {
+        return source.hasPermission(AdminCommand.PERMISSION);
+    }
+
+    /**
      * Runs the verb.
      *
      * @param args everything after the verb itself, never {@code null}

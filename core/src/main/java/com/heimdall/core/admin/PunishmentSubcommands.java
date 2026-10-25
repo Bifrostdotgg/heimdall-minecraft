@@ -1,6 +1,7 @@
 package com.heimdall.core.admin;
 
 import com.heimdall.core.command.CommandSource;
+import com.heimdall.core.punish.PunishmentPermissions;
 import com.heimdall.core.http.model.OffenseType;
 import com.heimdall.core.text.Msg;
 import java.util.Arrays;
@@ -85,8 +86,14 @@ final class PunishmentSubcommands {
         }
     }
 
+    /**
+     * One punishment verb. A holder of the node {@link PunishmentPermissions} gives {@code type}
+     * may run it, as may {@code heimdall.admin}; a type the table does not list, such as
+     * {@code import}, is {@code heimdall.admin} only.
+     */
     static AdminSubcommand verb(String name, String usage, String description, String type) {
-        return new Verb(name, usage, description, type);
+        return new Verb(name, usage, description, type,
+                PunishmentPermissions.byVerb().get(type));
     }
 
     private static final class Verb implements AdminSubcommand {
@@ -94,12 +101,29 @@ final class PunishmentSubcommands {
         private final String usage;
         private final String description;
         private final String type;
+        private final String permission;
 
-        Verb(String name, String usage, String description, String type) {
+        Verb(String name, String usage, String description, String type, String permission) {
             this.name = name;
             this.usage = usage;
             this.description = description;
             this.type = type;
+            this.permission = permission;
+        }
+
+        /**
+         * The verb's own node, or {@code heimdall.admin}.
+         *
+         * <p>The node alone is enough, because it is what the root alias asks for: a moderator who
+         * may {@code /ban} but not {@code /hd ban} would depend on whether the guild turned root
+         * aliases on, which is a setting about command names, not about who may ban.
+         * {@code heimdall.admin} still covers every verb, as it did when it was the only gate, so
+         * no admin loses a command they had.
+         */
+        @Override
+        public boolean permits(CommandSource source) {
+            return source.hasPermission(AdminCommand.PERMISSION)
+                    || (permission != null && source.hasPermission(permission));
         }
 
         @Override

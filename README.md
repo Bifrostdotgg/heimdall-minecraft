@@ -242,8 +242,9 @@ cannot tell channels apart, so let backends relay chat when ChatControl channels
 ### Admin
 
 `/hd` (alias `/heimdall`) on Paper, Spigot and Folia. `/hdp` (alias `/heimdallproxy`) on Velocity
-and BungeeCord, with the same subcommands. All of it needs `heimdall.admin`, and all of it works
-from the console. `/hwl` still works as a deprecated alias from v2.
+and BungeeCord, with the same subcommands. All of it needs `heimdall.admin`, except the
+[punishment verbs](#punishment-commands), which also accept their own node. All of it works from the
+console. `/hwl` still works as a deprecated alias from v2.
 
 | Command | What it does |
 | --- | --- |
@@ -296,9 +297,15 @@ A standalone server registers all of them.
 
 ## Permissions
 
-`/hd` itself needs `heimdall.admin`, which covers every `/hd` punishment verb. The per-verb nodes
-gate the root aliases, so that is how you give punishment commands to staff who should not
-administer the plugin.
+Each punishment node gives its verbs under both spellings: `heimdall.punishments.ban` allows
+`/hd ban` and `/hd tempban`, and `/ban` and `/tempban` when root aliases are on. A moderator with
+only punishment nodes sees just those verbs in `/hd` help and tab completion, and nothing else in
+the admin tree. `heimdall.admin` covers every verb as well.
+
+On Paper, Spigot and Folia this needs a restart after updating to take effect, because Bukkit
+reads the `/hd` gate from `plugin.yml` when the plugin loads. On the proxies it applies as soon as
+the update does, but `/hdp` itself shows up in every player's command list there, since a proxy
+has no descriptor to hide it with. Running it without a node is refused.
 
 | Node | Gives | Default |
 | --- | --- | --- |
@@ -306,14 +313,14 @@ administer the plugin.
 | `heimdall.linkdiscord` | `/linkdiscord` | everyone |
 | `heimdall.offend` | `/offend` | op |
 | `heimdall.bypass` | Skip command cooldowns such as `/linkdiscord`'s. Not a whitelist bypass: that is a list on the dashboard | op |
-| `heimdall.punishments.ban` | `/ban`, `/tempban` | op |
-| `heimdall.punishments.ipban` | `/ipban` | op |
-| `heimdall.punishments.mute` | `/mute`, `/tempmute` | op |
-| `heimdall.punishments.kick` | `/kick` | op |
-| `heimdall.punishments.warn` | `/warn` | op |
-| `heimdall.punishments.unban` | `/unban`, `/unmute`, `/unwarn`, `/rollback` | op |
-| `heimdall.punishments.history` | `/history`, `/staffhistory`, `/banlist` | op |
-| `heimdall.punishments.dupeip` | `/dupeip`, `/iphistory` | op |
+| `heimdall.punishments.ban` | `/ban`, `/tempban`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.ipban` | `/ipban`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.mute` | `/mute`, `/tempmute`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.kick` | `/kick`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.warn` | `/warn`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.unban` | `/unban`, `/unmute`, `/unwarn`, `/rollback`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.history` | `/history`, `/staffhistory`, `/banlist`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.dupeip` | `/dupeip`, `/iphistory`, with or without `/hd` or `/hdp` | op |
 | `heimdall.punishments.notify` | See silent punishments announced | op |
 | `heimdall.punishments.silent` | Use `-s` or `-p` against the guild's default | op |
 | `heimdall.punishments.hidden` | Use `-h`, and see hidden punishments in lookups and announcements. Not implied by `heimdall.admin` | op |

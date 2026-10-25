@@ -24,6 +24,7 @@ import com.heimdall.core.punish.HiddenPunishments;
 import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.punish.PunishmentPermissions;
 import com.heimdall.core.punish.PunishmentScreens;
 import com.heimdall.core.punish.PunishmentView;
 import com.heimdall.core.punish.SilenceDecision;
@@ -367,30 +368,35 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         boolean proxy = role == ServerRole.GATEKEEPER || role == ServerRole.STANDALONE;
         boolean backend = role == ServerRole.ENFORCER || role == ServerRole.STANDALONE;
         if (proxy) {
-            bind(ctx, "ban", "heimdall.punishments.ban", "ban");
-            bind(ctx, "tempban", "heimdall.punishments.ban", "tempban");
-            bind(ctx, "ipban", "heimdall.punishments.ipban", "ipban");
-            bind(ctx, "unban", "heimdall.punishments.unban", "unban");
-            bind(ctx, "kick", "heimdall.punishments.kick", "kick");
-            bind(ctx, "warn", "heimdall.punishments.warn", "warn");
-            bind(ctx, "unwarn", "heimdall.punishments.unban", "unwarn");
-            bind(ctx, "history", "heimdall.punishments.history", "history");
-            bind(ctx, "staffhistory", "heimdall.punishments.history", "staffhistory");
-            bind(ctx, "banlist", "heimdall.punishments.history", "banlist");
-            bind(ctx, "dupeip", "heimdall.punishments.dupeip", "dupeip");
-            bind(ctx, "iphistory", "heimdall.punishments.dupeip", "iphistory");
-            bind(ctx, "rollback", "heimdall.punishments.unban", "rollback");
+            bind(ctx, "ban", "ban");
+            bind(ctx, "tempban", "tempban");
+            bind(ctx, "ipban", "ipban");
+            bind(ctx, "unban", "unban");
+            bind(ctx, "kick", "kick");
+            bind(ctx, "warn", "warn");
+            bind(ctx, "unwarn", "unwarn");
+            bind(ctx, "history", "history");
+            bind(ctx, "staffhistory", "staffhistory");
+            bind(ctx, "banlist", "banlist");
+            bind(ctx, "dupeip", "dupeip");
+            bind(ctx, "iphistory", "iphistory");
+            bind(ctx, "rollback", "rollback");
         }
         if (backend) {
-            bind(ctx, "mute", "heimdall.punishments.mute", "mute");
-            bind(ctx, "tempmute", "heimdall.punishments.mute", "tempmute");
-            bind(ctx, "unmute", "heimdall.punishments.unban", "unmute");
+            bind(ctx, "mute", "mute");
+            bind(ctx, "tempmute", "tempmute");
+            bind(ctx, "unmute", "unmute");
         }
     }
 
-    private void bind(ModuleContext context, final String name, String permission, final String type) {
+    /**
+     * Registers one root alias, gated on the node {@link PunishmentPermissions} gives its verb, the
+     * same node {@code /hd <verb>} accepts. Looked up here rather than passed in, so no call site
+     * can pair a verb with another verb's node.
+     */
+    private void bind(ModuleContext context, final String name, final String type) {
         Registration handle = context.registerCommand(CommandSpec.named(name)
-                .permission(permission)
+                .permission(PunishmentPermissions.nodeFor(type))
                 .usage(usage(name))
                 .description("Heimdall punishment")
                 .handler(new CommandHandler() {
