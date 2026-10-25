@@ -134,6 +134,20 @@ permissions:
     # it, the same way it does everywhere else here.
     description: See silent punishment announcements
     default: op
+  heimdall.punishments.notify.muted:
+    # "Steve tried to speak while muted", on the server that refused the line.
+    # Opt-in on purpose: default false, so even operators are not told until a
+    # server grants it, and NOT a child of heimdall.admin or of
+    # heimdall.punishments.notify. Throttled per muted player.
+    description: Be told when a muted player tries to talk
+    default: false
+  heimdall.punishments.notify.muted.content:
+    # The second line of that alert: what the player tried to say, or the
+    # blocked command as typed. Separate from the alert so a server can tell
+    # staff that someone is trying to talk without showing every one of them
+    # the words. Means nothing without heimdall.punishments.notify.muted.
+    description: See what a muted player tried to say
+    default: false
   heimdall.punishments.silent:
     # Overriding the guild's silentByDefault setting, in EITHER direction: -s on
     # a guild that announces, -p on a guild that does not. Both are a decision

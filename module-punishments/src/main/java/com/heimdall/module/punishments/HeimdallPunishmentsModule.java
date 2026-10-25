@@ -176,6 +176,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * and a sync or replay can put either back in the mirror. See {@link #muteNotice}.
      */
     private final Map<UUID, Set<String>> muteScreenShown = new ConcurrentHashMap<UUID, Set<String>>();
+    private final MutedChatAlerts mutedChatAlerts = new MutedChatAlerts();
 
     /**
      * The enabled instance, or {@code null}.
@@ -258,6 +259,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 names.quit(player.name());
                 // Each session shows the full mute screen once, with its reason and appeal link.
                 muteScreenShown.remove(player.uuid());
+                mutedChatAlerts.forget(player.uuid());
             }
         });
         seedKnownNames();
@@ -339,6 +341,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         LiteBansSupport.unhook();
         aliasBinds.clear();
         muteScreenShown.clear();
+        mutedChatAlerts.clear();
         geo = null;
         outbox = null;
         if (INSTANCE == this) INSTANCE = null;
@@ -1257,7 +1260,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (mute != null && !mute.expired(System.currentTimeMillis())) {
             // A chat-plugin channel line is dispatched only to decide whether to relay it, and
             // its verdict never reaches the player, so it must not use up the screen.
+            // It does not alert staff either: the same line already came through ordinary chat.
             if (message.channel() != null) return Verdict.deny(renderReminder(mute, settings));
+            alertStaff(message.senderUuid(), message.senderName(), false, message.message());
             return Verdict.deny(muteNotice(message.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
@@ -1277,14 +1282,34 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         if (!muted) return Verdict.abstain();
         if (settings.blocksCommand(attempt.raw())) {
+            alertStaff(attempt.senderUuid(), attempt.senderName(), true, attempt.raw());
             return Verdict.deny(muteNotice(attempt.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
     }
 
     /**
+     * Tells opted-in staff on this server that a muted player tried to talk. Reached only where
+     * the mute is enforced: chat and commands are intercepted on backends alone, so a proxy never
+     * raises a second alert for the same line.
+     */
+    private void alertStaff(UUID sender, String senderName, boolean command, String said) {
+        ModuleContext ctx = this.context;
+        if (ctx == null || sender == null) return;
+        Collection<PlayerHandle> online;
+        try {
+            online = ctx.platform().players().onlinePlayers();
+        } catch (RuntimeException raced) {
+            ctx.logger().debug(() -> "could not read the online list for a muted-chat alert: "
+                    + raced);
+            return;
+        }
+        mutedChatAlerts.raise(online, sender, senderName, command, said, System.currentTimeMillis());
+    }
+
+    /**
      * What a muted player is told when a message is refused: the full mute screen the first time
-     * for this mute on this server, then {@link PunishmentScreens#MUTE_REMINDER}. Keyed by the
+     * for this mute on this server, then the guild's reminder line. Keyed by the
      * mute's id, so a new mute shows its screen again.
      */
     private Component muteNotice(UUID player, ActivePunishment mute, PunishmentSettings settings) {
@@ -1321,7 +1346,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     static Component renderReminder(ActivePunishment mute, PunishmentSettings settings) {
-        return Template.render(PunishmentScreens.MUTE_REMINDER,
+        return Template.render(settings.muteReminderScreen,
                 viewOf(mute, settings).tokens(System.currentTimeMillis()));
     }
 
@@ -1775,7 +1800,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 mirror.evict(key);
                 if ("mute".equals(type)) {
                     UUID player = parseUuid(uuid);
-                    if (player != null) muteScreenShown.remove(player);
+                    if (player != null) {
+                        muteScreenShown.remove(player);
+                        mutedChatAlerts.forget(player);
+                    }
                 }
                 if (lifted == null) return;
                 refreshRevokeCandidacy(

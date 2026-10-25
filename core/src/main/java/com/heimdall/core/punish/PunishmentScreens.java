@@ -81,8 +81,9 @@ public final class PunishmentScreens {
      *
      * <p>The full {@link #MUTE} screen is shown once per mute on each server: when the mute
      * lands while they are online, or at their first blocked message. Repeating seven lines for
-     * every message they try to send buries the chat they can still read. Not a guild segment
-     * yet, so not customisable from the dashboard.
+     * every message they try to send buries the chat they can still read. The default for the
+     * {@link #KEY_MUTE_REMINDER} segment; a blank one falls back to it, because a refused message
+     * with no line at all would leave the player thinking their chat was sent.
      */
     public static final String MUTE_REMINDER =
             "<red>You are muted</red>[ <gray>for another {remaining}</gray>]<red>.</red>";
@@ -135,6 +136,8 @@ public final class PunishmentScreens {
     public static final String KEY_MUTE = "muteScreen";
 
     public static final String KEY_MUTE_PERMANENT = "mutePermanentScreen";
+
+    public static final String KEY_MUTE_REMINDER = "muteReminderScreen";
 
     public static final String KEY_KICK = "kickScreen";
 

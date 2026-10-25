@@ -30,6 +30,8 @@ final class PunishmentSettings {
     final String banPermanentScreen;
     final String muteScreen;
     final String mutePermanentScreen;
+    /** Never blank: {@link PunishmentScreens#MUTE_REMINDER} stands in for an empty segment. */
+    final String muteReminderScreen;
     final String kickScreen;
     final String warnScreen;
     final String announceIssue;
@@ -59,6 +61,11 @@ final class PunishmentSettings {
         this.muteScreen = settings.string(PunishmentScreens.KEY_MUTE, PunishmentScreens.MUTE);
         this.mutePermanentScreen = settings.string(
                 PunishmentScreens.KEY_MUTE_PERMANENT, PunishmentScreens.MUTE_PERMANENT);
+        String reminder = settings.string(
+                PunishmentScreens.KEY_MUTE_REMINDER, PunishmentScreens.MUTE_REMINDER);
+        this.muteReminderScreen = reminder == null || reminder.trim().isEmpty()
+                ? PunishmentScreens.MUTE_REMINDER
+                : reminder;
         this.kickScreen = settings.string(PunishmentScreens.KEY_KICK, PunishmentScreens.KICK);
         this.warnScreen = settings.string(PunishmentScreens.KEY_WARN, PunishmentScreens.WARN);
         this.announceIssue = settings.string(
