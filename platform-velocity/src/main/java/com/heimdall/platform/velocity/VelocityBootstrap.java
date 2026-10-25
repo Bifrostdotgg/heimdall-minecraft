@@ -339,14 +339,18 @@ final class VelocityBootstrap {
                 logger, proxy.getCommandManager(), FrozenProxyHooks::refuse);
         registrations.track(VelocityEvents.listen(
                 events, plugin, CommandExecuteEvent.class, PostOrder.LAST, frozen::onCommand));
-        // A backend kicking a frozen player, so the disconnect that may follow is not read as the
-        // player logging out to escape a check.
+        // A backend kick that ends the connection, so staff hear "was kicked" rather than "logged
+        // out". LAST, and only a DisconnectPlayer result: a kick another listener turns into a
+        // move to a fallback server is not a disconnect.
         registrations.track(VelocityEvents.listen(events, plugin, KickedFromServerEvent.class,
                 PostOrder.LAST, new EventHandler<KickedFromServerEvent>() {
                     @Override
                     public void execute(KickedFromServerEvent event) {
                         try {
-                            FrozenProxyHooks.kicked(event.getPlayer().getUniqueId());
+                            if (event.getResult()
+                                    instanceof KickedFromServerEvent.DisconnectPlayer) {
+                                FrozenProxyHooks.kicked(event.getPlayer().getUniqueId());
+                            }
                         } catch (Throwable broken) {
                             logger.error("noting a kick for a frozen player threw", broken);
                         }

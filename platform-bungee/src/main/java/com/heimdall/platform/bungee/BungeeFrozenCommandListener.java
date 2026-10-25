@@ -33,13 +33,15 @@ public final class BungeeFrozenCommandListener implements Listener {
     }
 
     /**
-     * A backend kicking a frozen player, so the disconnect that may follow is not read as the
-     * player logging out to escape a check. Last: whether another plugin moves them elsewhere
-     * instead does not matter, since the note only counts if they then disconnect.
+     * A backend kick that ends the connection, so staff hear "was kicked" rather than "logged
+     * out". HIGHEST, which runs last, and only when nothing moved the player instead: BungeeCord
+     * sends them to the cancel server when the event is cancelled with one, and disconnects them
+     * otherwise.
      */
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onKick(ServerKickEvent event) {
         try {
+            if (event.isCancelled() && event.getCancelServer() != null) return;
             if (event.getPlayer() != null) kicked.accept(event.getPlayer().getUniqueId());
         } catch (Throwable broken) {
             logger.error("noting a kick for a frozen player threw", broken);

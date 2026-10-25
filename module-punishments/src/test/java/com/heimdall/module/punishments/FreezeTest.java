@@ -459,8 +459,8 @@ class FreezeTest {
     }
 
     @Test
-    @DisplayName("a frozen player who is kicked is reported as kicked, and no ban is held")
-    void kickIsNotALogout() {
+    @DisplayName("a frozen player kicked by something else is reported as kicked, and the ban still holds")
+    void otherKickStillHoldsTheBan() {
         try (PunishmentsHarness harness = enable(
                 new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace", true, 0L)) {
             FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
@@ -468,12 +468,43 @@ class FreezeTest {
                     .grant(FrozenPlayers.PERMISSION));
             harness.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000103", false));
 
+            // A kick a player can provoke (spam, a bad packet) must not be a way out of a check.
             harness.module.noteKicked(steve.uuid());
             harness.platform.leave(steve);
             harness.sessions.quit(steve, System.currentTimeMillis());
 
             String alert = mod.messageText().get(mod.messageText().size() - 1);
             assertTrue(alert.contains("was kicked while frozen"), alert);
+            assertTrue(alert.contains("will be banned unless"), alert);
+            assertTrue(harness.module.frozenForTest().holding(steve.uuid()));
+        }
+    }
+
+    @Test
+    @DisplayName("a frozen player kicked by Heimdall is reported as kicked, and no ban is held")
+    void heimdallKickIsNotALogout() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace", true, 0L)) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000108", false));
+
+            harness.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "kick")
+                    .put("targetUuid", steve.uuid().toString())
+                    .put("targetName", "Steve")
+                    .put("reason", "go cool off")
+                    .build());
+            assertEquals(1, steve.kickReasons().size());
+            // The platform's own kick event follows Heimdall's kick; it must not downgrade it.
+            harness.module.noteKicked(steve.uuid());
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+
+            String alert = mod.messageText().get(mod.messageText().size() - 1);
+            assertTrue(alert.contains("was kicked while frozen"), alert);
+            assertFalse(alert.contains("will be banned"), alert);
             assertFalse(harness.module.frozenForTest().holding(steve.uuid()));
 
             // The kick is used up: a later logout of their own is a logout again.

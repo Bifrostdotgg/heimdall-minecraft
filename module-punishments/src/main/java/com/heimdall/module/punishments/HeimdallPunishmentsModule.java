@@ -1536,11 +1536,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
         final UUID uuid = player.uuid();
         final String name = player.name();
-        // A kick is somebody else's decision, not the player escaping a check: staff, an AFK
-        // plugin, or a backend going down with nowhere to send them. Staff are told, but nothing
-        // is held against the player for it.
-        final boolean kicked = frozen.kickedRecently(uuid, System.currentTimeMillis());
-        final boolean ban = !kicked && settings.freezeLogoutBan && logoutBanPossible(settings, freeze);
+        // A Heimdall kick is staff's own decision, not the player escaping a check, so nothing is
+        // held against them for it. Any other kick is reported as a kick but still holds the ban:
+        // a player can provoke one (spam until the server kicks them), and staff can unfreeze to
+        // stop it.
+        final FrozenPlayers.Kick kick = frozen.lastKick(uuid, System.currentTimeMillis());
+        final boolean kicked = kick != FrozenPlayers.Kick.NONE;
+        final boolean ban = kick != FrozenPlayers.Kick.HEIMDALL && settings.freezeLogoutBan
+                && logoutBanPossible(settings, freeze);
         if (ban) {
             final Registration[] timer = new Registration[1];
             timer[0] = ctx.scheduleOnce(new Runnable() {
@@ -1557,7 +1560,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             frozen.hold(uuid, timer[0]);
         }
         final Component alert = kicked
-                ? FrozenPlayers.kickedAlert(name, freeze.hidden)
+                ? FrozenPlayers.kickedAlert(name, freeze.hidden, ban)
                 : FrozenPlayers.logoutAlert(name, freeze.hidden, ban);
         final boolean hidden = freeze.hidden;
         ctx.platform().mainThread().execute(new Runnable() {
@@ -2557,7 +2560,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (role == ServerRole.ENFORCER && !"kick".equals(punishment.type)) {
             return;
         }
-        if ("kick".equals(punishment.type)) noteKicked(player.uuid());
+        if ("kick".equals(punishment.type) && activeFreeze(player.uuid()) != null) {
+            frozen.noteKicked(player.uuid(), System.currentTimeMillis(), true);
+        }
         player.kick(render(punishment, settings));
     }
 
@@ -3000,13 +3005,15 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
     }
 
     /**
-     * A player was kicked, by staff, a plugin or a server going down. If they are frozen and the
-     * kick disconnects them, staff are told but no logout ban is held: being kicked is not
-     * logging out to escape a check. The platforms call this from their own kick events.
+     * A player was kicked off the network by something other than Heimdall. The platforms call
+     * this from their own kick events, and only for a kick that ends the connection (not one that
+     * moves the player to a fallback server). It changes what staff are told, "was kicked" rather
+     * than "logged out", and nothing else: the logout ban still holds, because a player can
+     * provoke a kick to get out of a check.
      */
     public void noteKicked(UUID uuid) {
         if (uuid == null || activeFreeze(uuid) == null) return;
-        frozen.noteKicked(uuid, System.currentTimeMillis());
+        frozen.noteKicked(uuid, System.currentTimeMillis(), false);
     }
 
     /**

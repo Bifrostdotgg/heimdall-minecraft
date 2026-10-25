@@ -45,12 +45,15 @@ final class FrozenPlayers {
     static final int MAX_SAID_CHARS = 256;
 
     /**
-     * How long a kick counts for. The disconnect it causes follows at once, so this only has to
-     * outlast the hop between the kick event and the quit.
+     * How long a kick counts for. Only kicks that end the connection are recorded, and the
+     * disconnect follows at once, so this only has to outlast the hop to the quit event.
      */
-    static final long KICK_MEMORY_MS = 10_000L;
+    static final long KICK_MEMORY_MS = 2_000L;
 
-    /** When each frozen player was last kicked. Bounded: entries go on read and on stop. */
+    /**
+     * When each frozen player was last kicked, and whether Heimdall did it. Bounded: entries go
+     * on read, on prune and on stop. Negative values mark a kick Heimdall issued.
+     */
     private final Map<UUID, Long> recentKicks = new ConcurrentHashMap<UUID, Long>();
 
     /** Logout bans waiting out {@link #LOGOUT_GRACE_MS}, by player. */
@@ -106,14 +109,22 @@ final class FrozenPlayers {
         return line;
     }
 
-    /** The staff notice for a frozen player who was kicked rather than logging out. */
-    static Component kickedAlert(String name, boolean hidden) {
+    /**
+     * The staff notice for a frozen player who was kicked rather than logging out. A kick from
+     * anything but Heimdall can be one the player provoked (spamming until the server kicks
+     * them), so it still holds the logout ban, and the notice says how to stop it.
+     */
+    static Component kickedAlert(String name, boolean hidden, boolean banPending) {
         String who = name == null || name.isEmpty() ? "A frozen player" : name;
-        return Component.text("[Heimdall] " + (hidden ? "(hidden) " : ""), NamedTextColor.DARK_GRAY)
+        Component line = Component.text("[Heimdall] " + (hidden ? "(hidden) " : ""),
+                        NamedTextColor.DARK_GRAY)
                 .append(Component.text(who, NamedTextColor.WHITE))
-                .append(Component.text(" was kicked while frozen.", NamedTextColor.RED))
-                .append(Component.text(" Not banned for it, since a kick is not logging out.",
-                        NamedTextColor.GRAY));
+                .append(Component.text(" was kicked while frozen.", NamedTextColor.RED));
+        if (banPending) {
+            line = line.append(Component.text(" They will be banned unless they are back within "
+                    + (LOGOUT_GRACE_MS / 1000L) + " seconds or are unfrozen.", NamedTextColor.GRAY));
+        }
+        return line;
     }
 
     /** What a player is told when their freeze is lifted. */
@@ -164,24 +175,45 @@ final class FrozenPlayers {
         if (previous != null && previous != timer) previous.close();
     }
 
-    /** A frozen player was kicked. */
-    void noteKicked(UUID player, long now) {
-        if (player == null) return;
-        pruneKicks(now);
-        recentKicks.put(player, now);
+    /** What became of a frozen player's last kick, read once as they disconnect. */
+    enum Kick {
+        /** Not kicked: they left on their own. */
+        NONE,
+        /** Kicked by something else: another plugin, the server, a kick they provoked. */
+        OTHER,
+        /** Kicked by a Heimdall kick punishment, which staff issued. */
+        HEIMDALL
     }
 
-    /** Whether this player was kicked moments ago, consuming the record. */
-    boolean kickedRecently(UUID player, long now) {
-        if (player == null) return false;
+    /** A frozen player was kicked off the network. {@code byHeimdall} for Heimdall's own kicks. */
+    void noteKicked(UUID player, long now, boolean byHeimdall) {
+        if (player == null) return;
+        pruneKicks(now);
+        Long previous = recentKicks.get(player);
+        // A Heimdall kick is not downgraded by the platform's own report of the same kick.
+        if (!byHeimdall && previous != null && previous.longValue() < 0L
+                && now + previous.longValue() <= KICK_MEMORY_MS) {
+            return;
+        }
+        recentKicks.put(player, byHeimdall ? -now : now);
+    }
+
+    /** How this player was last kicked, if moments ago, consuming the record. */
+    Kick lastKick(UUID player, long now) {
+        if (player == null) return Kick.NONE;
         Long at = recentKicks.remove(player);
-        return at != null && now - at.longValue() <= KICK_MEMORY_MS;
+        if (at == null) return Kick.NONE;
+        long when = Math.abs(at.longValue());
+        if (now - when > KICK_MEMORY_MS) return Kick.NONE;
+        return at.longValue() < 0L ? Kick.HEIMDALL : Kick.OTHER;
     }
 
     private void pruneKicks(long now) {
         Iterator<Map.Entry<UUID, Long>> entries = recentKicks.entrySet().iterator();
         while (entries.hasNext()) {
-            if (now - entries.next().getValue().longValue() > KICK_MEMORY_MS) entries.remove();
+            if (now - Math.abs(entries.next().getValue().longValue()) > KICK_MEMORY_MS) {
+                entries.remove();
+            }
         }
     }
 
