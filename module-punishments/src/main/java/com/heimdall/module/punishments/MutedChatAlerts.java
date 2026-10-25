@@ -1,10 +1,12 @@
 package com.heimdall.module.punishments;
 
 import com.heimdall.core.platform.PlayerHandle;
+import com.heimdall.core.punish.HiddenPunishments;
 import java.util.Collection;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -68,17 +70,24 @@ final class MutedChatAlerts {
     /**
      * Tells staff online here about one refused attempt, when the throttle lets it through.
      *
+     * @param online read only when an alert is actually sent, so a throttled line costs no roster
      * @param command true for a blocked command, whose text is shown as typed
+     * @param hidden the mute is hidden: "Steve tried to speak while muted" tells every recipient
+     *     the one fact a hidden mute keeps from them, so the audience narrows to holders of
+     *     {@link HiddenPunishments#PERMISSION} as well, the same rule as the sign notice
      */
-    void raise(Collection<PlayerHandle> online, UUID sender, String senderName, boolean command,
-            String said, long now) {
+    void raise(Supplier<Collection<PlayerHandle>> online, UUID sender, String senderName,
+            boolean command, boolean hidden, String said, long now) {
         int folded = admit(sender, now);
         if (folded < 0 || online == null) return;
-        Component alert = alert(senderName, command, folded);
+        Collection<PlayerHandle> players = online.get();
+        if (players == null) return;
+        Component alert = alert(senderName, command, hidden, folded);
         Component content = content(said, command);
-        for (PlayerHandle staff : online) {
+        for (PlayerHandle staff : players) {
             try {
                 if (sender.equals(staff.uuid()) || !staff.hasPermission(PERMISSION)) continue;
+                if (hidden && !staff.hasPermission(HiddenPunishments.PERMISSION)) continue;
                 staff.sendMessage(alert);
                 if (content != null && staff.hasPermission(CONTENT_PERMISSION)) {
                     staff.sendMessage(content);
@@ -99,15 +108,17 @@ final class MutedChatAlerts {
         windows.clear();
     }
 
-    static Component alert(String senderName, boolean command, int folded) {
+    static Component alert(String senderName, boolean command, boolean hidden, int folded) {
         String name = senderName == null || senderName.isEmpty() ? "A player" : senderName;
-        Component line = Component.text("[Heimdall] ", NamedTextColor.DARK_GRAY)
+        Component line = Component.text("[Heimdall] " + (hidden ? "(hidden) " : ""),
+                        NamedTextColor.DARK_GRAY)
                 .append(Component.text(name, NamedTextColor.WHITE))
                 .append(Component.text(command
                         ? " tried to use a blocked command while muted"
                         : " tried to speak while muted", NamedTextColor.GRAY));
         if (folded > 0) {
-            line = line.append(Component.text(" (" + folded + " more since)", NamedTextColor.DARK_GRAY));
+            line = line.append(
+                    Component.text(" (" + folded + " more since)", NamedTextColor.DARK_GRAY));
         }
         return line;
     }

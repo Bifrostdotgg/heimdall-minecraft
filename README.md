@@ -438,12 +438,20 @@ One node per verb, all OP by default:
 Every issuing verb takes the same flags, anywhere in the arguments: `-s` silent, `-p` public,
 `-h` hidden (which implies `-s`).
 
-Three more decide who hears about a punishment, rather than only who may issue one:
+Five more decide who hears about a punishment, rather than only who may issue one:
 
 - `heimdall.punishments.notify` - see **silent** punishment announcements (default: OP).
   A punishment that is not silent is announced to everybody online and needs no node; a silent one
   is announced only to holders of this (or of `heimdall.admin`), prefixed `(silent)`. Silent means
   "the server at large does not find out", not "nobody does"
+- `heimdall.punishments.notify.muted` - be told when a muted player tries to talk: "Steve tried
+  to speak while muted", or "tried to use a blocked command" (default: **nobody**, operators
+  included, and not implied by `heimdall.admin`). Shown on the server that refused the line, at
+  most once per player every 30 seconds with a count of what it folded in. For a hidden mute it
+  additionally needs `heimdall.punishments.hidden` and is prefixed `(hidden)`.
+- `heimdall.punishments.notify.muted.content` - with the node above, a second line with what the
+  player tried to say, or the command as typed (default: nobody). Plain text, so a player cannot
+  format staff chat. It never leaves the server: not stored, not sent to the bot or Discord.
 - `heimdall.punishments.hidden` - issue a **hidden** punishment with `-h`, and see hidden ones in
   `/history`, `/banlist` and `/staffhistory` (default: OP). One node for both halves: a moderator
   who can hide a punishment and then cannot find it again is worse than either. A hidden punishment

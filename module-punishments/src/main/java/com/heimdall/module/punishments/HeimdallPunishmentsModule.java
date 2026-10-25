@@ -1130,6 +1130,15 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             if (mirror != null && key != null) {
                 mirror.evict(key);
             }
+            // The bot need not echo this revoke back here, so the next mute's screen and staff
+            // alert start fresh now rather than when an echo arrives.
+            if ("mute".equals(punishment.type)) {
+                UUID muted = parseUuid(uuid);
+                if (muted != null) {
+                    muteScreenShown.remove(muted);
+                    mutedChatAlerts.forget(muted);
+                }
+            }
             String opId = UUID.randomUUID().toString();
             Payload.Builder body = Payload.builder()
                     .put("opId", opId)
@@ -1260,9 +1269,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (mute != null && !mute.expired(System.currentTimeMillis())) {
             // A chat-plugin channel line is dispatched only to decide whether to relay it, and
             // its verdict never reaches the player, so it must not use up the screen.
-            // It does not alert staff either: the same line already came through ordinary chat.
+            // Nor does it alert staff: the line was not refused here, so there is nothing to tell.
             if (message.channel() != null) return Verdict.deny(renderReminder(mute, settings));
-            alertStaff(message.senderUuid(), message.senderName(), false, message.message());
+            alertStaff(message.senderUuid(), message.senderName(), false, mute.hidden,
+                    message.message());
             return Verdict.deny(muteNotice(message.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
@@ -1282,7 +1292,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         if (!muted) return Verdict.abstain();
         if (settings.blocksCommand(attempt.raw())) {
-            alertStaff(attempt.senderUuid(), attempt.senderName(), true, attempt.raw());
+            alertStaff(attempt.senderUuid(), attempt.senderName(), true, mute.hidden, attempt.raw());
             return Verdict.deny(muteNotice(attempt.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
@@ -1293,18 +1303,19 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * the mute is enforced: chat and commands are intercepted on backends alone, so a proxy never
      * raises a second alert for the same line.
      */
-    private void alertStaff(UUID sender, String senderName, boolean command, String said) {
+    private void alertStaff(UUID sender, String senderName, boolean command, boolean hidden,
+            String said) {
         ModuleContext ctx = this.context;
         if (ctx == null || sender == null) return;
-        Collection<PlayerHandle> online;
-        try {
-            online = ctx.platform().players().onlinePlayers();
-        } catch (RuntimeException raced) {
-            ctx.logger().debug(() -> "could not read the online list for a muted-chat alert: "
-                    + raced);
-            return;
-        }
-        mutedChatAlerts.raise(online, sender, senderName, command, said, System.currentTimeMillis());
+        mutedChatAlerts.raise(() -> {
+            try {
+                return ctx.platform().players().onlinePlayers();
+            } catch (RuntimeException raced) {
+                ctx.logger().debug(() -> "could not read the online list for a muted-chat alert: "
+                        + raced);
+                return null;
+            }
+        }, sender, senderName, command, hidden, said, System.currentTimeMillis());
     }
 
     /**

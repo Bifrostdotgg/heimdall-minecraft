@@ -8,9 +8,12 @@ import com.heimdall.core.json.Payload;
 import com.heimdall.core.pipeline.ChatMessage;
 import com.heimdall.core.pipeline.CommandAttempt;
 import com.heimdall.core.pipeline.Verdict;
+import com.heimdall.core.punish.HiddenPunishments;
+import com.heimdall.core.testing.FakeCommandSource;
 import com.heimdall.core.testing.FakePlayer;
 import com.heimdall.core.testing.TestText;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -26,6 +29,10 @@ class MutedChatAlertsTest {
     Path dataDir;
 
     private static Payload muteFrame(FakePlayer player, String id) {
+        return muteFrame(player, id, false);
+    }
+
+    private static Payload muteFrame(FakePlayer player, String id, boolean hidden) {
         return Payload.builder()
                 .put("id", id)
                 .put("type", "mute")
@@ -34,6 +41,7 @@ class MutedChatAlertsTest {
                 .put("reason", "spam")
                 .put("source", "dashboard")
                 .put("silent", true)
+                .put("hidden", hidden)
                 .put("expiresAt", java.time.Instant.now().plusSeconds(600).toString())
                 .build();
     }
@@ -86,7 +94,7 @@ class MutedChatAlertsTest {
         assertEquals(-1, alerts.admit(steve, 30_001));
         alerts.forget(steve);
         assertEquals(0, alerts.admit(steve, 30_002), "a forgotten player alerts at once");
-        assertTrue(TestText.plain(MutedChatAlerts.alert("Steve", false, 2)).endsWith("(2 more since)"));
+        assertTrue(TestText.plain(MutedChatAlerts.alert("Steve", false, false, 2)).endsWith("(2 more since)"));
 
         try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
                 .enableReplace()) {
@@ -168,7 +176,7 @@ class MutedChatAlertsTest {
             harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000d7"));
             harness.chatPipeline.dispatch(
                     ChatMessage.inChannel(steve.uuid(), "Steve", "hi", "global"));
-            assertEquals(0, mod.messages().size(), "the same line already came through chat");
+            assertEquals(0, mod.messages().size(), "the line was not refused here");
         }
     }
 
@@ -222,6 +230,74 @@ class MutedChatAlertsTest {
             harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000db"));
             String line = TestText.plain(chat(harness, steve, "hi").reason());
             assertTrue(line.startsWith("You are muted for another"), line);
+        }
+    }
+
+    @Test
+    @DisplayName("a hidden mute alerts only staff who may see hidden punishments")
+    void hiddenMuteNarrowsTheAudience() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(MutedChatAlerts.PERMISSION).grant(MutedChatAlerts.CONTENT_PERMISSION));
+            FakePlayer lead = harness.platform.join(FakePlayer.named("Lead")
+                    .grant(MutedChatAlerts.PERMISSION).grant(MutedChatAlerts.CONTENT_PERMISSION)
+                    .grant(HiddenPunishments.PERMISSION));
+            FakePlayer keeper = harness.platform.join(
+                    FakePlayer.named("Keeper").grant(HiddenPunishments.PERMISSION));
+            harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000dc", true));
+            int modBefore = mod.messages().size();
+            int leadBefore = lead.messages().size();
+            int keeperBefore = keeper.messages().size();
+
+            chat(harness, steve, "hello");
+
+            assertEquals(modBefore, mod.messages().size(), mod.messageText().toString());
+            assertEquals(leadBefore + 2, lead.messages().size(), lead.messageText().toString());
+            assertEquals("[Heimdall] (hidden) Steve tried to speak while muted",
+                    lead.messageText().get(leadBefore));
+            assertEquals(keeperBefore, keeper.messages().size(), "the alert stays opt-in");
+        }
+    }
+
+    @Test
+    @DisplayName("a frozen player is refused as frozen, not reported as muted")
+    void frozenDoesNotAlert() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(
+                    FakePlayer.named("Mod").grant(MutedChatAlerts.PERMISSION));
+            harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000dd"));
+            ActivePunishment freeze = new ActivePunishment();
+            freeze.id = "freeze-1";
+            freeze.type = "freeze";
+            freeze.targetUuid = steve.uuid().toString();
+            freeze.targetName = "Steve";
+            harness.module.mirrorForTest().record("freeze:" + steve.uuid(), freeze);
+            assertTrue(chat(harness, steve, "hi").isDeny());
+            harness.commandPipeline.dispatch(CommandAttempt.of(steve.uuid(), "Steve", "/msg A hi"));
+            assertEquals(0, mod.messages().size(), mod.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("an unmute issued here resets the throttle without waiting for the bot")
+    void localUnmuteResets() {
+        try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
+                .enableReplace()) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(
+                    FakePlayer.named("Mod").grant(MutedChatAlerts.PERMISSION));
+            harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000de"));
+            chat(harness, steve, "one");
+            harness.module.onStaffCommand(FakeCommandSource.console(), "unmute",
+                    Arrays.asList("Steve"));
+            harness.tunnel.push("punish.apply", muteFrame(steve, "64b0000000000000000000df"));
+            int before = mod.messages().size();
+            chat(harness, steve, "two");
+            assertEquals(before + 1, mod.messages().size(), mod.messageText().toString());
         }
     }
 }
