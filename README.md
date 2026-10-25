@@ -88,9 +88,15 @@ forwarding settings:
 | --- | --- | --- |
 | `standalone` | A server with no proxy in front | Everything |
 | `gatekeeper` | Velocity or BungeeCord | Decides who may log in to the network, enforces bans, announces punishments |
-| `enforcer` | A backend behind a proxy | Enforces what happens in game: mutes, frozen players, role sync, `/offend` |
+| `enforcer` | A backend behind a proxy | Enforces what happens in game: mutes, blocked commands, frozen players |
 
-You can override it with `role:` in `bootstrap.yml`, but you rarely should.
+Role sync, `/offend` and the chat bridge run on every role.
+
+You can override the role with `role:` in `bootstrap.yml` (it takes effect on restart). The one
+case that needs it: **if your proxy does not run Heimdall, set `role: standalone` on each
+backend.** Otherwise a backend with proxy forwarding on counts itself as an enforcer, and an
+enforcer leaves announcements, IP bans, country and subnet bans and join-time role sync to a proxy
+that is not there.
 
 Things worth knowing on a network:
 
@@ -128,7 +134,8 @@ A player links their Minecraft account to Discord with a six-digit code:
 1. They start in Discord, from the account-linking panel or `/link-minecraft`.
 2. The code reaches them in game. A whitelisted server shows it on the disconnect screen. A server
    that lets anyone join shows it when they join: as a dialog with a copy button on Paper 1.21.7+
-   with a 1.21.6+ client, and as a click-to-copy chat message everywhere else, Bedrock included.
+   with a 1.21.6+ client, and otherwise as a chat message, click-to-copy on Paper and Spigot and
+   plain text on Velocity and BungeeCord. Bedrock players always get the chat message.
    `/linkdiscord` (or `/link`) shows it on request.
 3. They press **Confirm Code** in Discord and enter it.
 
@@ -152,8 +159,9 @@ sync**, and each one has a direction.
 
 **Known gap.** If LuckPerms runs only on the backends and the backends leave logins to the proxy,
 nothing syncs groups at join: the proxy has no LuckPerms to write to and the backends do not ask.
-Role changes still apply as they happen. Run LuckPerms on the proxy, or leave `enforceOnBackend` on,
-to get the join-time sync back.
+Role changes still apply as they happen. To get the join-time sync back, run LuckPerms on the
+proxy, or run the whitelist module on the backends with `enforceOnBackend` on. With the whitelist
+off on the backends, `enforceOnBackend` alone does not help.
 
 ### Punishments
 
@@ -201,8 +209,8 @@ the connection comes back.
 ### Offences
 
 `/offend <player> <offense> [notes]` records a breach of a rule set up on **Minecraft > Rules** and
-applies the player's next tier. The tier's command runs as the console. The player has to be
-online.
+applies the player's next tier. The tier's command runs as the console. An offline player is
+looked up through the bot, so that needs the bot to be reachable.
 
 ### Chat bridge
 
@@ -324,6 +332,9 @@ the guild's default needs no node.
 node until you grant it. `heimdall.admin` is the exception for announcements: an admin sees silent
 punishments everywhere.
 
+That includes `heimdall.linkdiscord`: on Velocity and BungeeCord, grant it to your default group,
+or the proxy will not let players run `/linkdiscord`.
+
 These nodes do not inherit from `litebans.*`. Grant them before you remove LiteBans, not after.
 
 ## Updates
@@ -375,7 +386,8 @@ guildIdCache: "..."               # written by the plugin
 
 The settings here are the ones that have to work before the dashboard can be reached: the login
 timing, the update checker, debug logging and the local module override. Do not hand-edit the
-token, ids or fingerprint. Run `/hd reload` after editing anything else.
+token, ids or fingerprint. After editing anything else, `/hd reload` applies it, except `role`
+and `updatesCheckIntervalHours`, which need a restart.
 
 ## When the bot is unreachable
 
