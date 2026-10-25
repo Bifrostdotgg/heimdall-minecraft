@@ -1532,19 +1532,46 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (freeze == null) return;
         // Banned while frozen: the ban removed them, staff already decided, and an alert that
         // they "logged out" would be wrong about both.
-        if (activeFor("ban", player.uuid()) != null) return;
-        PunishmentSettings settings = PunishmentSettings.from(ctx.config());
+        if (bannedHere(player.uuid())) return;
         final UUID uuid = player.uuid();
         final String name = player.name();
+        // Read now, while the kick is moments old, whatever happens next.
+        final FrozenPlayers.KickRecord kick = frozen.lastKick(uuid, System.currentTimeMillis());
+        final PunishmentSettings settings = PunishmentSettings.from(ctx.config());
+        if (settings.hookMode() && LiteBansSupport.hooked()) {
+            // A LiteBans ban reaches this server's records only after a round trip through the
+            // bot, so at the moment it removes them it is not here yet. LiteBans itself knows,
+            // and refuses to be asked on a server's main thread.
+            try {
+                ctx.executors().io().execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (LiteBansSupport.banned(uuid)) return;
+                        frozenGone(ctx, uuid, name, freeze, kick, settings);
+                    }
+                });
+            } catch (RuntimeException stopping) {
+                // The executor is shutting down with the module; nothing is held past that.
+            }
+            return;
+        }
+        frozenGone(ctx, uuid, name, freeze, kick, settings);
+    }
+
+    /** The rest of {@link #frozenLoggedOut}, once it is known they were not banned. */
+    private void frozenGone(final ModuleContext ctx, final UUID uuid, final String name,
+            ActivePunishment freeze, FrozenPlayers.KickRecord kick, PunishmentSettings settings) {
         // A Heimdall kick is staff's own decision, not the player escaping a check, so nothing is
         // held against them for it. Any other kick is reported as a kick but still holds the ban:
         // a player can provoke one (spam until the server kicks them), and staff can unfreeze to
-        // stop it.
-        final FrozenPlayers.Kick kick = frozen.lastKick(uuid, System.currentTimeMillis());
-        final boolean kicked = kick != FrozenPlayers.Kick.NONE;
-        final boolean ban = kick != FrozenPlayers.Kick.HEIMDALL && settings.freezeLogoutBan
+        // stop it. The one exception is a server that went down under them, checked as the ban
+        // fires.
+        final boolean kicked = kick.kind != FrozenPlayers.Kick.NONE;
+        final boolean ban = kick.kind != FrozenPlayers.Kick.HEIMDALL && settings.freezeLogoutBan
                 && logoutBanPossible(settings, freeze);
+        final boolean hidden = freeze.hidden;
         if (ban) {
+            final ServerProbe server = kick.server;
             final Registration[] timer = new Registration[1];
             timer[0] = ctx.scheduleOnce(new Runnable() {
                 @Override
@@ -1554,15 +1581,14 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                     // Closed once it has run, so a fired timer is not kept until the module stops.
                     if (self != null) self.close();
                     if (!waiting) return;
-                    banFrozenLogout(uuid, name);
+                    fireLogoutBan(ctx, uuid, name, hidden, server);
                 }
             }, FrozenPlayers.LOGOUT_GRACE_MS);
-            frozen.hold(uuid, timer[0]);
+            frozen.hold(uuid, timer[0], System.currentTimeMillis());
         }
         final Component alert = kicked
-                ? FrozenPlayers.kickedAlert(name, freeze.hidden, ban)
-                : FrozenPlayers.logoutAlert(name, freeze.hidden, ban);
-        final boolean hidden = freeze.hidden;
+                ? FrozenPlayers.kickedAlert(name, hidden, ban)
+                : FrozenPlayers.logoutAlert(name, hidden, ban);
         ctx.platform().mainThread().execute(new Runnable() {
             @Override
             public void run() {
@@ -1572,6 +1598,77 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         ctx.logger().info(name + (kicked ? " was kicked" : " logged out") + " while frozen"
                 + (ban ? "; banning in " + (FrozenPlayers.LOGOUT_GRACE_MS / 1000L)
                         + "s unless they return" : ""));
+    }
+
+    /**
+     * A held logout ban whose grace has run out. When a kick from another server put them out,
+     * that server is pinged first: one that does not answer crashed or is restarting, and a
+     * player it dropped had nowhere to come back to.
+     */
+    private void fireLogoutBan(final ModuleContext ctx, final UUID uuid, final String name,
+            final boolean hidden, ServerProbe server) {
+        if (server == null) {
+            banOffThread(ctx, uuid, name);
+            return;
+        }
+        final java.util.concurrent.atomic.AtomicBoolean answered =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        try {
+            server.reachable(new java.util.function.Consumer<Boolean>() {
+                @Override
+                public void accept(Boolean up) {
+                    if (!answered.compareAndSet(false, true)) return;
+                    if (Boolean.TRUE.equals(up)) {
+                        banOffThread(ctx, uuid, name);
+                        return;
+                    }
+                    if (HeimdallPunishmentsModule.this.context != ctx) return;
+                    ctx.logger().info("Not banning " + name + " for leaving while frozen: the"
+                            + " server that kicked them does not answer");
+                    final Component alert = FrozenPlayers.serverDownAlert(name, hidden);
+                    ctx.platform().mainThread().execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            FrozenPlayers.tellStaff(onlineOrNull(ctx), alert, hidden, uuid);
+                        }
+                    });
+                }
+            });
+        } catch (RuntimeException failed) {
+            // A probe that cannot even start says nothing about the server: the ban the guild
+            // asked for goes ahead.
+            if (answered.compareAndSet(false, true)) banOffThread(ctx, uuid, name);
+        }
+    }
+
+    /** {@link #fireLogoutBan} as the grace timer runs it. Tests only. */
+    void fireLogoutBanForTest(UUID uuid, String name, boolean hidden, ServerProbe server) {
+        ModuleContext ctx = this.context;
+        if (ctx != null) fireLogoutBan(ctx, uuid, name, hidden, server);
+    }
+
+    /** Runs {@link #banFrozenLogout} where a LiteBans lookup is allowed. */
+    private void banOffThread(final ModuleContext ctx, final UUID uuid, final String name) {
+        try {
+            ctx.executors().io().execute(new Runnable() {
+                @Override
+                public void run() {
+                    banFrozenLogout(uuid, name);
+                }
+            });
+        } catch (RuntimeException stopping) {
+            // The module is stopping, which cancels every held ban anyway.
+        }
+    }
+
+    /**
+     * Whether a ban or an IP ban this server knows of is in force on the player. IP bans are
+     * filed under the address, so they are found by the player they name.
+     */
+    private boolean bannedHere(UUID uuid) {
+        if (uuid == null) return false;
+        return activeFor("ban", uuid) != null
+                || !activeOf(uuid.toString(), new String[] {"ipban"}).isEmpty();
     }
 
     /**
@@ -1599,7 +1696,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         ActivePunishment freeze = activeFreeze(uuid);
         if (freeze == null) return;
         if (ctx.platform().players().byUuid(uuid).isPresent()) return;
-        if (activeFor("ban", uuid) != null) return;
+        if (bannedHere(uuid)) return;
         PunishmentSettings settings = PunishmentSettings.from(ctx.config());
         if (!settings.freezeLogoutBan) return;
         long seconds = settings.freezeLogoutBanSeconds;
@@ -1618,6 +1715,9 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             return;
         }
         if (settings.hookMode() && !freeze.hidden) {
+            // Banned in LiteBans in the meantime: that ban has not reached this server's records
+            // yet, and the console holds LiteBans' override, so a second ban would replace it.
+            if (LiteBansSupport.banned(uuid)) return;
             // Silent for the same reason as above.
             LiteBansSupport.banFrozenLogout(ctx, uuid, seconds, true);
         }
@@ -1759,6 +1859,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                 boolean announced = echo
                         || liteBansAnnounced(payload.string("source", ""), settings);
                 if ("kick".equals(p.type)) {
+                    waiveForHeimdallKick(p);
                     applyLive(p.targetUuid, p, settings);
                     if (!announced) announce(announcementFor(p, settings));
                     return;
@@ -2560,8 +2661,10 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         if (role == ServerRole.ENFORCER && !"kick".equals(punishment.type)) {
             return;
         }
-        if ("kick".equals(punishment.type) && activeFreeze(player.uuid()) != null) {
-            frozen.noteKicked(player.uuid(), System.currentTimeMillis(), true);
+        // Heimdall is removing them, whichever of the three it is: not a logout. A backend never
+        // acts on a quit, so it keeps no record.
+        if (role != ServerRole.ENFORCER && activeFreeze(player.uuid()) != null) {
+            frozen.noteKicked(player.uuid(), System.currentTimeMillis(), true, null);
         }
         player.kick(render(punishment, settings));
     }
@@ -3012,8 +3115,47 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * provoke a kick to get out of a check.
      */
     public void noteKicked(UUID uuid) {
-        if (uuid == null || activeFreeze(uuid) == null) return;
-        frozen.noteKicked(uuid, System.currentTimeMillis(), false);
+        noteKicked(uuid, null);
+    }
+
+    /**
+     * {@link #noteKicked(UUID)} from a proxy, which can say how to ping the server the kick came
+     * from. A logout ban held for the kick is only fired if that server still answers.
+     */
+    public void noteKicked(UUID uuid, ServerProbe server) {
+        ModuleContext ctx = this.context;
+        if (uuid == null || ctx == null || activeFreeze(uuid) == null) return;
+        // A backend never acts on a quit, so a record there would only wait to be pruned.
+        if (ctx.platform().role() == ServerRole.ENFORCER) return;
+        frozen.noteKicked(uuid, System.currentTimeMillis(), false, server);
+    }
+
+    /**
+     * A Heimdall kick for a frozen player who is already gone. On a network the backend can carry
+     * the kick out before this proxy hears of it, so the proxy saw a kick it could not place and
+     * held a logout ban; this is that kick, and the ban is called off.
+     */
+    private void waiveForHeimdallKick(ActivePunishment kick) {
+        ModuleContext ctx = this.context;
+        UUID uuid = parseUuid(kick.targetUuid);
+        if (ctx == null || uuid == null) return;
+        if (ctx.platform().players().byUuid(uuid).isPresent()) return;
+        if (!frozen.waiveForHeimdallKick(uuid, System.currentTimeMillis())) return;
+        ActivePunishment freeze = activeFreeze(uuid);
+        boolean hidden = freeze != null && freeze.hidden;
+        String name = kick.targetName == null ? uuid.toString() : kick.targetName;
+        ctx.logger().info("Not banning " + name + " for leaving while frozen: the kick was"
+                + " Heimdall's");
+        final Component alert = FrozenPlayers.kickWaivedAlert(name, hidden);
+        final boolean hiddenAlert = hidden;
+        final UUID target = uuid;
+        final ModuleContext here = ctx;
+        ctx.platform().mainThread().execute(new Runnable() {
+            @Override
+            public void run() {
+                FrozenPlayers.tellStaff(onlineOrNull(here), alert, hiddenAlert, target);
+            }
+        });
     }
 
     /**

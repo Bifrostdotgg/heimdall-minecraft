@@ -92,6 +92,21 @@ final class LiteBansSupport {
                 context.platform().console(), context.logger(), !BUKKIT);
     }
 
+    /**
+     * Whether LiteBans holds a ban on the player right now. False when LiteBans is not hooked
+     * here or the lookup fails: the callers only use it to stand down, so not knowing means
+     * carrying on. A database query, so never on a server's main thread.
+     */
+    static boolean banned(UUID uuid) {
+        LiteBansRevokeLift.ActiveCheck check = activeCheck;
+        if (check == null || uuid == null) return false;
+        try {
+            return check.isActive(LiteBansRevokeLift.Family.BAN, uuid);
+        } catch (Throwable failed) {
+            return false;
+        }
+    }
+
     /** Whether LiteBans is hooked on this server, so a command run here reaches it. */
     static boolean hooked() {
         return activeCheck != null;

@@ -2,8 +2,10 @@ package com.heimdall.platform.bungee;
 
 import com.heimdall.core.log.HeimdallLogger;
 import java.util.UUID;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import net.md_5.bungee.api.config.ServerInfo;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
 import net.md_5.bungee.api.event.ChatEvent;
 import net.md_5.bungee.api.event.ServerKickEvent;
@@ -23,10 +25,14 @@ public final class BungeeFrozenCommandListener implements Listener {
 
     private final HeimdallLogger logger;
     private final Predicate<UUID> refuse;
-    private final Consumer<UUID> kicked;
+    private final BiConsumer<UUID, Consumer<Consumer<Boolean>>> kicked;
 
-    BungeeFrozenCommandListener(
-            HeimdallLogger logger, Predicate<UUID> refuse, Consumer<UUID> kicked) {
+    /**
+     * @param kicked told of each kick that disconnects a player, with a way to ping the server
+     *     the kick came from
+     */
+    BungeeFrozenCommandListener(HeimdallLogger logger, Predicate<UUID> refuse,
+            BiConsumer<UUID, Consumer<Consumer<Boolean>>> kicked) {
         this.logger = logger;
         this.refuse = refuse;
         this.kicked = kicked;
@@ -42,7 +48,10 @@ public final class BungeeFrozenCommandListener implements Listener {
     public void onKick(ServerKickEvent event) {
         try {
             if (event.isCancelled() && event.getCancelServer() != null) return;
-            if (event.getPlayer() != null) kicked.accept(event.getPlayer().getUniqueId());
+            if (event.getPlayer() == null) return;
+            final ServerInfo from = event.getKickedFrom();
+            kicked.accept(event.getPlayer().getUniqueId(), from == null ? null
+                    : answer -> from.ping((ping, failed) -> answer.accept(failed == null)));
         } catch (Throwable broken) {
             logger.error("noting a kick for a frozen player threw", broken);
         }

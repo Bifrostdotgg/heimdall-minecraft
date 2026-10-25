@@ -517,6 +517,130 @@ class FreezeTest {
     }
 
     @Test
+    @DisplayName("on a network, a Heimdall kick the backend carried out first calls the ban off")
+    void heimdallKickAfterTheBackendsKick() {
+        try (PunishmentsHarness proxy = enable(
+                new PunishmentsHarness(dataDir, ServerRole.GATEKEEPER), "replace", true, 0L)) {
+            FakePlayer steve = proxy.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = proxy.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            proxy.tunnel.push("punish.apply", freezeFrame(steve, "64b000000000000000000109", false));
+
+            // The backend kicked him; the proxy only saw a kick it could not place.
+            proxy.module.noteKicked(steve.uuid());
+            proxy.platform.leave(steve);
+            proxy.sessions.quit(steve, System.currentTimeMillis());
+            assertTrue(proxy.module.frozenForTest().holding(steve.uuid()));
+
+            proxy.tunnel.push("punish.apply", Payload.builder()
+                    .put("type", "kick")
+                    .put("targetUuid", steve.uuid().toString())
+                    .put("targetName", "Steve")
+                    .put("reason", "go cool off")
+                    .build());
+            assertFalse(proxy.module.frozenForTest().holding(steve.uuid()));
+            assertTrue(mod.messageText().toString().contains("was kicked by staff"),
+                    mod.messageText().toString());
+        }
+    }
+
+    @Test
+    @DisplayName("an IP ban on a frozen player is not a logout, and is not banned over")
+    void ipBannedWhileFrozenIsQuiet() {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace", true, 0L)) {
+            FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b00000000000000000010a", false));
+            int before = mod.messageText().size();
+
+            ActivePunishment ipban = new ActivePunishment();
+            ipban.id = "64b00000000000000000010b";
+            ipban.type = "ipban";
+            ipban.ipDigest = "digest";
+            ipban.targetUuid = steve.uuid().toString();
+            ipban.targetName = "Steve";
+            harness.module.mirrorForTest().record("ipban:digest", ipban);
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+
+            assertEquals(before, mod.messageText().size(), mod.messageText().toString());
+            assertFalse(harness.module.frozenForTest().holding(steve.uuid()));
+            harness.module.banFrozenLogout(steve.uuid(), "Steve");
+            assertTrue(queued(harness, "issue").isEmpty());
+        }
+    }
+
+    @Test
+    @DisplayName("a held ban is called off when the server that kicked them does not answer")
+    void serverDownIsNotBanned() throws InterruptedException {
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "replace", true, 0L)) {
+            final FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b00000000000000000010c", false));
+            harness.platform.leave(steve);
+
+            harness.module.fireLogoutBanForTest(steve.uuid(), "Steve", false, answer -> answer.accept(false));
+            String alert = mod.messageText().get(mod.messageText().size() - 1);
+            assertTrue(alert.contains("the server they were on is down"), alert);
+            assertTrue(queued(harness, "issue").isEmpty());
+
+            harness.module.fireLogoutBanForTest(steve.uuid(), "Steve", false, answer -> answer.accept(true));
+            waitFor(() -> queued(harness, "issue").size() == 1, 5_000L);
+        }
+    }
+
+    @Test
+    @DisplayName("hook mode: a ban LiteBans already holds stands the logout ban down")
+    void liteBansBanStandsDown() throws InterruptedException {
+        final boolean[] banned = {true};
+        LiteBansSupport.activeCheckForTest(new LiteBansRevokeLift.ActiveCheck() {
+            @Override
+            public boolean isActive(LiteBansRevokeLift.Family family, UUID uuid) {
+                return banned[0];
+            }
+        });
+        try (PunishmentsHarness harness = enable(
+                new PunishmentsHarness(dataDir, ServerRole.STANDALONE), "hook", true, 0L)) {
+            final FakePlayer steve = harness.platform.join(FakePlayer.named("Steve"));
+            FakePlayer mod = harness.platform.join(FakePlayer.named("Mod")
+                    .grant(FrozenPlayers.PERMISSION));
+            harness.tunnel.push("punish.apply", freezeFrame(steve, "64b00000000000000000010d", false));
+            int before = mod.messageText().size();
+
+            harness.module.banFrozenLogout(steve.uuid(), "Steve");
+            assertTrue(harness.platform.dispatchedCommands().isEmpty(),
+                    "the console's ban would override the one LiteBans holds");
+
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+            Thread.sleep(300L);
+            assertEquals(before, mod.messageText().size(), mod.messageText().toString());
+            assertFalse(harness.module.frozenForTest().holding(steve.uuid()));
+
+            // Not banned after all: the same quit holds the ban, off the main thread.
+            banned[0] = false;
+            harness.platform.join(steve);
+            harness.sessions.join(steve, System.currentTimeMillis());
+            harness.platform.leave(steve);
+            harness.sessions.quit(steve, System.currentTimeMillis());
+            waitFor(() -> harness.module.frozenForTest().holding(steve.uuid()), 5_000L);
+        }
+    }
+
+    private static void waitFor(java.util.function.BooleanSupplier condition, long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (!condition.getAsBoolean() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20L);
+        }
+        assertTrue(condition.getAsBoolean(), "timed out");
+    }
+
+    @Test
     @DisplayName("a frozen player banned by staff gets no logout alert and no held ban")
     void bannedWhileFrozenIsQuiet() {
         try (PunishmentsHarness harness = enable(

@@ -31,6 +31,7 @@ import com.velocitypowered.api.event.player.PlayerChatEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.player.ServerPostConnectEvent;
 import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.proxy.server.RegisteredServer;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -349,7 +350,10 @@ final class VelocityBootstrap {
                         try {
                             if (event.getResult()
                                     instanceof KickedFromServerEvent.DisconnectPlayer) {
-                                FrozenProxyHooks.kicked(event.getPlayer().getUniqueId());
+                                final RegisteredServer from = event.getServer();
+                                FrozenProxyHooks.kicked(event.getPlayer().getUniqueId(),
+                                        answer -> from.ping().whenComplete(
+                                                (ping, failed) -> answer.accept(failed == null)));
                             }
                         } catch (Throwable broken) {
                             logger.error("noting a kick for a frozen player threw", broken);

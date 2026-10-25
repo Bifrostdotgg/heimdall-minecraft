@@ -1,7 +1,9 @@
 package com.heimdall.platform.common;
 
 import com.heimdall.module.punishments.HeimdallPunishmentsModule;
+import com.heimdall.module.punishments.ServerProbe;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * The proxy's half of a freeze: refusing the commands the proxy runs itself, and telling a kick
@@ -28,12 +30,19 @@ public final class FrozenProxyHooks {
     }
 
     /**
-     * A backend kicked this player. If they are frozen and the kick ends up disconnecting them,
-     * staff are told but no logout ban is held. See
-     * {@link HeimdallPunishmentsModule#noteKicked}.
+     * A backend kick disconnected this player. If they are frozen, staff hear "was kicked", and a
+     * logout ban held for it fires only if that backend still answers {@code ping}, which pings it
+     * and answers once with whether it replied. See
+     * {@link HeimdallPunishmentsModule#noteKicked(UUID, ServerProbe)}.
      */
-    public static void kicked(UUID player) {
+    public static void kicked(UUID player, final Consumer<Consumer<Boolean>> ping) {
         HeimdallPunishmentsModule module = HeimdallPunishmentsModule.INSTANCE;
-        if (module != null && player != null) module.noteKicked(player);
+        if (module == null || player == null) return;
+        module.noteKicked(player, ping == null ? null : new ServerProbe() {
+            @Override
+            public void reachable(Consumer<Boolean> answer) {
+                ping.accept(answer);
+            }
+        });
     }
 }

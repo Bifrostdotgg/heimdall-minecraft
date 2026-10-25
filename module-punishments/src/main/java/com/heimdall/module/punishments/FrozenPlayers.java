@@ -51,14 +51,30 @@ final class FrozenPlayers {
     static final long KICK_MEMORY_MS = 2_000L;
 
     /**
-     * When each frozen player was last kicked, and whether Heimdall did it. Bounded: entries go
-     * on read, on prune and on stop. Negative values mark a kick Heimdall issued.
+     * How long after a logout ban starts waiting a Heimdall kick can still call it off. On a
+     * network the backend can carry out a Heimdall kick before the proxy hears of it, so the proxy
+     * sees an ordinary kick first and the kick punishment a moment later.
      */
-    private final Map<UUID, Long> recentKicks = new ConcurrentHashMap<UUID, Long>();
+    static final long KICK_WAIVE_MS = 10_000L;
+
+    /**
+     * Each frozen player's last kick. Bounded: entries go on read, on prune and on stop.
+     */
+    private final Map<UUID, KickRecord> recentKicks = new ConcurrentHashMap<UUID, KickRecord>();
 
     /** Logout bans waiting out {@link #LOGOUT_GRACE_MS}, by player. */
-    private final Map<UUID, Registration> pendingLogoutBans =
-            new ConcurrentHashMap<UUID, Registration>();
+    private final Map<UUID, Held> pendingLogoutBans = new ConcurrentHashMap<UUID, Held>();
+
+    /** A waiting logout ban: the timer that fires it, and when it started waiting. */
+    private static final class Held {
+        final Registration timer;
+        final long since;
+
+        Held(Registration timer, long since) {
+            this.timer = timer;
+            this.since = since;
+        }
+    }
 
     /**
      * Whether a staff member hears this frozen player.
@@ -127,6 +143,27 @@ final class FrozenPlayers {
         return line;
     }
 
+    /**
+     * The staff notice for a held logout ban called off because the server the player was kicked
+     * from no longer answers: a crash or a restart with no fallback server, not an escape.
+     */
+    static Component serverDownAlert(String name, boolean hidden) {
+        String who = name == null || name.isEmpty() ? "A frozen player" : name;
+        return Component.text("[Heimdall] " + (hidden ? "(hidden) " : ""), NamedTextColor.DARK_GRAY)
+                .append(Component.text(who, NamedTextColor.WHITE))
+                .append(Component.text(" was not banned for leaving while frozen: the server they"
+                        + " were on is down.", NamedTextColor.GRAY));
+    }
+
+    /** The staff notice for a held logout ban called off because the kick was Heimdall's own. */
+    static Component kickWaivedAlert(String name, boolean hidden) {
+        String who = name == null || name.isEmpty() ? "A frozen player" : name;
+        return Component.text("[Heimdall] " + (hidden ? "(hidden) " : ""), NamedTextColor.DARK_GRAY)
+                .append(Component.text(who, NamedTextColor.WHITE))
+                .append(Component.text(" was kicked by staff, so they will not be banned for"
+                        + " leaving while frozen.", NamedTextColor.GRAY));
+    }
+
     /** What a player is told when their freeze is lifted. */
     static Component released() {
         return Component.text("You are no longer frozen.", NamedTextColor.GREEN);
@@ -169,10 +206,10 @@ final class FrozenPlayers {
      * Holds a logout ban until the grace period ends, replacing any already waiting for the same
      * player. The registration is what cancels it.
      */
-    void hold(UUID player, Registration timer) {
+    void hold(UUID player, Registration timer, long now) {
         if (player == null || timer == null) return;
-        Registration previous = pendingLogoutBans.put(player, timer);
-        if (previous != null && previous != timer) previous.close();
+        Held previous = pendingLogoutBans.put(player, new Held(timer, now));
+        if (previous != null && previous.timer != timer) previous.timer.close();
     }
 
     /** What became of a frozen player's last kick, read once as they disconnect. */
@@ -185,36 +222,69 @@ final class FrozenPlayers {
         HEIMDALL
     }
 
-    /** A frozen player was kicked off the network. {@code byHeimdall} for Heimdall's own kicks. */
-    void noteKicked(UUID player, long now, boolean byHeimdall) {
-        if (player == null) return;
-        pruneKicks(now);
-        Long previous = recentKicks.get(player);
-        // A Heimdall kick is not downgraded by the platform's own report of the same kick.
-        if (!byHeimdall && previous != null && previous.longValue() < 0L
-                && now + previous.longValue() <= KICK_MEMORY_MS) {
-            return;
+    /** One kick: when, by whom, and how to ask whether the server it came from is still up. */
+    static final class KickRecord {
+        static final KickRecord NONE = new KickRecord(0L, Kick.NONE, null);
+
+        final long at;
+        final Kick kind;
+        /** Null for a Heimdall kick, and wherever the platform cannot ping the server. */
+        final ServerProbe server;
+
+        KickRecord(long at, Kick kind, ServerProbe server) {
+            this.at = at;
+            this.kind = kind;
+            this.server = server;
         }
-        recentKicks.put(player, byHeimdall ? -now : now);
     }
 
-    /** How this player was last kicked, if moments ago, consuming the record. */
-    Kick lastKick(UUID player, long now) {
-        if (player == null) return Kick.NONE;
-        Long at = recentKicks.remove(player);
-        if (at == null) return Kick.NONE;
-        long when = Math.abs(at.longValue());
-        if (now - when > KICK_MEMORY_MS) return Kick.NONE;
-        return at.longValue() < 0L ? Kick.HEIMDALL : Kick.OTHER;
+    /**
+     * A frozen player was kicked off the network. {@code byHeimdall} for Heimdall's own kicks;
+     * {@code server} pings the server another kick came from, where the platform can.
+     */
+    void noteKicked(UUID player, long now, boolean byHeimdall, ServerProbe server) {
+        if (player == null) return;
+        pruneKicks(now);
+        KickRecord previous = recentKicks.get(player);
+        // A Heimdall kick is not downgraded by the platform's own report of the same kick.
+        if (!byHeimdall && previous != null && previous.kind == Kick.HEIMDALL
+                && now - previous.at <= KICK_MEMORY_MS) {
+            return;
+        }
+        recentKicks.put(player, byHeimdall
+                ? new KickRecord(now, Kick.HEIMDALL, null)
+                : new KickRecord(now, Kick.OTHER, server));
+    }
+
+    /** This player's last kick, if moments ago, consuming the record; never null. */
+    KickRecord lastKick(UUID player, long now) {
+        if (player == null) return KickRecord.NONE;
+        KickRecord kick = recentKicks.remove(player);
+        if (kick == null || now - kick.at > KICK_MEMORY_MS) return KickRecord.NONE;
+        return kick;
     }
 
     private void pruneKicks(long now) {
-        Iterator<Map.Entry<UUID, Long>> entries = recentKicks.entrySet().iterator();
+        Iterator<Map.Entry<UUID, KickRecord>> entries = recentKicks.entrySet().iterator();
         while (entries.hasNext()) {
-            if (now - Math.abs(entries.next().getValue().longValue()) > KICK_MEMORY_MS) {
+            if (now - entries.next().getValue().at > KICK_MEMORY_MS) {
                 entries.remove();
             }
         }
+    }
+
+    /**
+     * A Heimdall kick reached this server for a player who is already gone: calls off a logout
+     * ban that started waiting in the last {@link #KICK_WAIVE_MS}, answering whether there was
+     * one. An older one is a logout of their own that staff kicked after the fact.
+     */
+    boolean waiveForHeimdallKick(UUID player, long now) {
+        if (player == null) return false;
+        Held held = pendingLogoutBans.get(player);
+        if (held == null || now - held.since > KICK_WAIVE_MS) return false;
+        if (!pendingLogoutBans.remove(player, held)) return false;
+        held.timer.close();
+        return true;
     }
 
     /** Whether a logout ban is waiting for this player. */
@@ -227,24 +297,26 @@ final class FrozenPlayers {
      * false when the player came back, was unfrozen or the module stopped in the meantime.
      */
     boolean release(UUID player, Registration timer) {
-        return player != null && pendingLogoutBans.remove(player, timer);
+        if (player == null) return false;
+        Held held = pendingLogoutBans.get(player);
+        return held != null && held.timer == timer && pendingLogoutBans.remove(player, held);
     }
 
     /** The player came back, or was unfrozen: nothing fires. */
     void cancel(UUID player) {
         if (player == null) return;
-        Registration pending = pendingLogoutBans.remove(player);
-        if (pending != null) pending.close();
+        Held pending = pendingLogoutBans.remove(player);
+        if (pending != null) pending.timer.close();
     }
 
     /** The module is stopping: nothing that was waiting fires. */
     void clear() {
         recentKicks.clear();
-        Iterator<Registration> waiting = pendingLogoutBans.values().iterator();
+        Iterator<Held> waiting = pendingLogoutBans.values().iterator();
         while (waiting.hasNext()) {
-            Registration pending = waiting.next();
+            Held pending = waiting.next();
             waiting.remove();
-            pending.close();
+            pending.timer.close();
         }
     }
 }
