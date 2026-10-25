@@ -1552,22 +1552,17 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         // A failed lookup carries on: this only holds the ban, and the ban asks
                         // again, and stands down on a failure, before it fires.
                         boolean liteBansBan = Boolean.TRUE.equals(LiteBansSupport.banned(uuid));
-                        if (!frozen.claim(uuid, departure)) return;
+                        if (!frozen.stands(uuid, departure)) return;
                         if (HeimdallPunishmentsModule.this.context != ctx || liteBansBan) {
-                            frozen.settle(uuid, departure);
+                            frozen.conclude(uuid, departure, null, System.currentTimeMillis());
                             return;
                         }
-                        FrozenPlayers.KickRecord seen = departure.heimdallKicked()
-                                ? new FrozenPlayers.KickRecord(kick.at == 0L
-                                        ? System.currentTimeMillis() : kick.at,
-                                        FrozenPlayers.Kick.HEIMDALL, null)
-                                : kick;
-                        frozenGone(ctx, uuid, name, freeze, seen, settings, departure);
+                        frozenGone(ctx, uuid, name, freeze, kick, settings, departure);
                     }
                 });
             } catch (RuntimeException stopping) {
                 // The executor is shutting down with the module; nothing is held past that.
-                frozen.settle(uuid, departure);
+                frozen.conclude(uuid, departure, null, System.currentTimeMillis());
             }
             return;
         }
@@ -1587,10 +1582,11 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         // a player can provoke one (spam until the server kicks them), and staff can unfreeze to
         // stop it. The one exception is a server that went down under them, checked as the ban
         // fires.
-        final boolean kicked = kick.kind != FrozenPlayers.Kick.NONE;
-        final boolean ban = kick.kind != FrozenPlayers.Kick.HEIMDALL && settings.freezeLogoutBan
+        boolean kicked = kick.kind != FrozenPlayers.Kick.NONE;
+        boolean ban = kick.kind != FrozenPlayers.Kick.HEIMDALL && settings.freezeLogoutBan
                 && logoutBanPossible(settings, freeze);
         final boolean hidden = freeze.hidden;
+        Registration held = null;
         if (ban) {
             final FrozenPlayers.KickRecord cause = kick;
             final Registration[] timer = new Registration[1];
@@ -1605,15 +1601,20 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                     fireLogoutBan(ctx, uuid, name, hidden, cause);
                 }
             }, FrozenPlayers.LOGOUT_GRACE_MS);
-            frozen.hold(uuid, timer[0], System.currentTimeMillis());
-            if (departure != null && !frozen.settle(uuid, departure)) {
-                // Back, or unfrozen, before the hold was in place: nothing cancelled it, so
-                // it is undone here, and staff are told nothing.
-                if (frozen.release(uuid, timer[0]) && timer[0] != null) timer[0].close();
-                return;
+            held = timer[0];
+        }
+        long now = System.currentTimeMillis();
+        if (departure != null) {
+            FrozenPlayers.Outcome outcome = frozen.conclude(uuid, departure, held, now);
+            if (outcome != FrozenPlayers.Outcome.STOOD && held != null) held.close();
+            // Back, unfrozen or gone again while LiteBans was asked: staff are told nothing.
+            if (outcome == FrozenPlayers.Outcome.GONE) return;
+            if (outcome == FrozenPlayers.Outcome.KICKED) {
+                kicked = true;
+                ban = false;
             }
-        } else if (departure != null && !frozen.settle(uuid, departure)) {
-            return;
+        } else if (held != null) {
+            frozen.hold(uuid, held, now);
         }
         final Component alert = kicked
                 ? FrozenPlayers.kickedAlert(name, hidden, ban)

@@ -5,8 +5,10 @@ import com.heimdall.core.punish.HiddenPunishments;
 import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentPermissions;
 import com.heimdall.core.util.Registration;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -82,9 +84,14 @@ final class FrozenPlayers {
     private final Map<UUID, Departure> departures = new ConcurrentHashMap<UUID, Departure>();
 
     /**
-     * One departure waiting on a lookup. Its state moves once, by compare-and-set, so a Heimdall
-     * kick and the lookup settling cannot both believe they went first.
+     * Guards departures and held bans together. A rejoin, a Heimdall kick and a lookup settling
+     * arrive on three different threads, and each has to see the other two either wholly before
+     * or wholly after it; one lock for these rare events is simpler than proving every interleaving
+     * of two maps safe.
      */
+    private final Object lock = new Object();
+
+    /** One departure waiting on a lookup. Its state only moves under {@link #lock}. */
     static final class Departure {
         static final int OPEN = 0;
         static final int KICKED = 1;
@@ -92,11 +99,6 @@ final class FrozenPlayers {
 
         final java.util.concurrent.atomic.AtomicInteger state =
                 new java.util.concurrent.atomic.AtomicInteger(OPEN);
-
-        /** Whether a Heimdall kick for them arrived before the lookup settled. */
-        boolean heimdallKicked() {
-            return state.get() == KICKED;
-        }
     }
 
     /** A waiting logout ban: the timer that fires it, and when it started waiting. */
@@ -254,6 +256,12 @@ final class FrozenPlayers {
      */
     void hold(UUID player, Registration timer, long now) {
         if (player == null || timer == null) return;
+        synchronized (lock) {
+            putHold(player, timer, now);
+        }
+    }
+
+    private void putHold(UUID player, Registration timer, long now) {
         Held previous = pendingLogoutBans.put(player, new Held(timer, now));
         if (previous != null && previous.timer != timer) previous.timer.close();
     }
@@ -330,17 +338,19 @@ final class FrozenPlayers {
      */
     Waiver waiveForHeimdallKick(UUID player, long now) {
         if (player == null) return Waiver.NONE;
-        Departure departing = departures.get(player);
-        if (departing != null
-                && departing.state.compareAndSet(Departure.OPEN, Departure.KICKED)) {
-            // Still being looked up: nothing is held yet, and nothing will be.
-            return Waiver.BEFORE_HOLD;
+        synchronized (lock) {
+            Departure departing = departures.get(player);
+            if (departing != null) {
+                // Still being looked up: nothing is held yet, and nothing will be.
+                departing.state.set(Departure.KICKED);
+                return Waiver.BEFORE_HOLD;
+            }
+            Held held = pendingLogoutBans.get(player);
+            if (held == null || now - held.since > KICK_WAIVE_MS) return Waiver.NONE;
+            pendingLogoutBans.remove(player);
+            held.timer.close();
+            return Waiver.CALLED_OFF;
         }
-        Held held = pendingLogoutBans.get(player);
-        if (held == null || now - held.since > KICK_WAIVE_MS) return Waiver.NONE;
-        if (!pendingLogoutBans.remove(player, held)) return Waiver.NONE;
-        held.timer.close();
-        return Waiver.CALLED_OFF;
     }
 
     /** What a late Heimdall kick did to a logout ban. */
@@ -356,27 +366,42 @@ final class FrozenPlayers {
     /** A frozen player left and a lookup has to run before anything is held. */
     Departure departing(UUID player) {
         Departure departure = new Departure();
-        departures.put(player, departure);
+        synchronized (lock) {
+            departures.put(player, departure);
+        }
         return departure;
     }
 
-    /**
-     * Done with this departure: true when it still stood, false when they rejoined, were
-     * unfrozen or left again in the meantime, which a later lookup answers for.
-     */
-    boolean settle(UUID player, Departure departure) {
-        return player != null && departures.remove(player, departure);
+    /** Whether this departure still stands: they have not rejoined, been unfrozen or left again. */
+    boolean stands(UUID player, Departure departure) {
+        return player != null && departures.get(player) == departure;
+    }
+
+    /** How a departure ended. */
+    enum Outcome {
+        /** They rejoined, were unfrozen or left again first: nothing is held or said. */
+        GONE,
+        /** A Heimdall kick for them arrived first: nothing is held. */
+        KICKED,
+        /** It stood, and the ban, if there was one, is now held. */
+        STOOD
     }
 
     /**
-     * The lookup for this departure answered: true while it still stands. Closes the door on a
-     * late Heimdall kick, which from here looks for a held ban instead. The departure stays
-     * listed until {@link #settle}, so a rejoin before then is still seen.
+     * Ends a departure and, when {@code timer} is given, holds its ban in the same step, so a
+     * rejoin or a Heimdall kick lands wholly before (and changes the outcome) or wholly after
+     * (and finds the ban held, which it cancels or calls off as usual).
      */
-    boolean claim(UUID player, Departure departure) {
-        if (player == null || departures.get(player) != departure) return false;
-        departure.state.compareAndSet(Departure.OPEN, Departure.SETTLED);
-        return true;
+    Outcome conclude(UUID player, Departure departure, Registration timer, long now) {
+        if (player == null || departure == null) return Outcome.GONE;
+        synchronized (lock) {
+            if (departures.get(player) != departure) return Outcome.GONE;
+            departures.remove(player);
+            if (departure.state.get() == Departure.KICKED) return Outcome.KICKED;
+            departure.state.set(Departure.SETTLED);
+            if (timer != null) putHold(player, timer, now);
+            return Outcome.STOOD;
+        }
     }
 
     /** Whether a logout ban is waiting for this player. */
@@ -390,26 +415,35 @@ final class FrozenPlayers {
      */
     boolean release(UUID player, Registration timer) {
         if (player == null) return false;
-        Held held = pendingLogoutBans.get(player);
-        return held != null && held.timer == timer && pendingLogoutBans.remove(player, held);
+        synchronized (lock) {
+            Held held = pendingLogoutBans.get(player);
+            if (held == null || held.timer != timer) return false;
+            pendingLogoutBans.remove(player);
+            return true;
+        }
     }
 
     /** The player came back, or was unfrozen: nothing fires. */
     void cancel(UUID player) {
         if (player == null) return;
-        departures.remove(player);
-        Held pending = pendingLogoutBans.remove(player);
+        Held pending;
+        synchronized (lock) {
+            departures.remove(player);
+            pending = pendingLogoutBans.remove(player);
+        }
         if (pending != null) pending.timer.close();
     }
 
     /** The module is stopping: nothing that was waiting fires. */
     void clear() {
         recentKicks.clear();
-        departures.clear();
-        Iterator<Held> waiting = pendingLogoutBans.values().iterator();
-        while (waiting.hasNext()) {
-            Held pending = waiting.next();
-            waiting.remove();
+        List<Held> waiting;
+        synchronized (lock) {
+            departures.clear();
+            waiting = new ArrayList<Held>(pendingLogoutBans.values());
+            pendingLogoutBans.clear();
+        }
+        for (Held pending : waiting) {
             pending.timer.close();
         }
     }
