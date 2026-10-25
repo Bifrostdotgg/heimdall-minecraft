@@ -2,6 +2,7 @@ package com.heimdall.module.punishments;
 
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.pipeline.CommandAttempt;
+import com.heimdall.core.punish.PunishmentParser;
 import com.heimdall.core.punish.PunishmentScreens;
 import com.heimdall.core.remoteconfig.ModuleConfig;
 import java.util.ArrayList;
@@ -14,6 +15,12 @@ final class PunishmentSettings {
 
     static final List<String> DEFAULT_BLOCKED = Collections.unmodifiableList(
             Arrays.asList("msg", "tell", "me", "r", "whisper", "w"));
+
+    /** Wire key: ban a player who logs out while frozen. Matches the bot's punishmentModule.ts. */
+    static final String KEY_FREEZE_LOGOUT_BAN = "freezeLogoutBan";
+
+    /** Wire key: that ban's length in seconds, 0 or absent for permanent. */
+    static final String KEY_FREEZE_LOGOUT_BAN_SECONDS = "freezeLogoutBanSeconds";
 
     final boolean enabled;
     final String mode;
@@ -34,6 +41,15 @@ final class PunishmentSettings {
     final String muteReminderScreen;
     final String kickScreen;
     final String warnScreen;
+    /** Never blank: {@link PunishmentScreens#FREEZE} stands in for an empty segment. */
+    final String freezeScreen;
+    /**
+     * Whether a player who logs out while frozen is banned for it. Off unless a guild turns it
+     * on: a disconnect can be a crash, and a ban nobody chose is a ban somebody has to appeal.
+     */
+    final boolean freezeLogoutBan;
+    /** How long that ban lasts, in seconds; 0 is permanent. Never negative. */
+    final long freezeLogoutBanSeconds;
     final String announceIssue;
     final String announceRevoke;
 
@@ -68,6 +84,18 @@ final class PunishmentSettings {
                 : reminder;
         this.kickScreen = settings.string(PunishmentScreens.KEY_KICK, PunishmentScreens.KICK);
         this.warnScreen = settings.string(PunishmentScreens.KEY_WARN, PunishmentScreens.WARN);
+        String freeze = settings.string(PunishmentScreens.KEY_FREEZE, PunishmentScreens.FREEZE);
+        this.freezeScreen = freeze == null || freeze.trim().isEmpty()
+                ? PunishmentScreens.FREEZE
+                : freeze;
+        this.freezeLogoutBan = settings.bool(KEY_FREEZE_LOGOUT_BAN, false);
+        // Clamped to the longest length any surface may issue rather than trusted: the bot
+        // validates it on save, and a value that slipped past that would be refused by the
+        // bot's issue route, leaving a ban this server enforces and nothing else has heard of.
+        long banSeconds = settings.longValue(KEY_FREEZE_LOGOUT_BAN_SECONDS, 0L);
+        this.freezeLogoutBanSeconds = banSeconds <= 0L
+                ? 0L
+                : Math.min(banSeconds, PunishmentParser.MAX_ISSUE_SECONDS);
         this.announceIssue = settings.string(
                 PunishmentScreens.KEY_ANNOUNCE_ISSUE, PunishmentScreens.ANNOUNCE_ISSUE);
         this.announceRevoke = settings.string(
@@ -142,7 +170,7 @@ final class PunishmentSettings {
      * when there is no expiry, so one template covers both cases until a guild wants a different
      * layout for forever.
      *
-     * @param family {@code ban}, {@code mute}, {@code kick} or {@code warn}
+     * @param family {@code ban}, {@code mute}, {@code kick}, {@code warn} or {@code freeze}
      */
     String screenFor(String family, boolean permanent) {
         if ("mute".equals(family)) {
@@ -153,6 +181,9 @@ final class PunishmentSettings {
         }
         if ("warn".equals(family)) {
             return warnScreen;
+        }
+        if ("freeze".equals(family)) {
+            return freezeScreen;
         }
         return permanent && !banPermanentScreen.isEmpty() ? banPermanentScreen : banScreen;
     }

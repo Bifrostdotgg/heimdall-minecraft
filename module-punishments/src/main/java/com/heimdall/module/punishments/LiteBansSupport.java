@@ -2,7 +2,12 @@ package com.heimdall.module.punishments;
 
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.module.ModuleContext;
+import com.heimdall.core.platform.UnknownCommandException;
 import com.heimdall.core.util.Registration;
+import java.util.UUID;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.function.BiConsumer;
 
 /**
  * Optional LiteBans hook and importer. Reflection so the jar loads without LiteBans.
@@ -85,6 +90,55 @@ final class LiteBansSupport {
         if (request == null) return;
         LiteBansRevokeLift.lift(request, check, context.executors().io(),
                 context.platform().console(), context.logger(), !BUKKIT);
+    }
+
+    /** Whether LiteBans is hooked on this server, so a command run here reaches it. */
+    static boolean hooked() {
+        return activeCheck != null;
+    }
+
+    /**
+     * Bans a player who logged out while frozen, in hook mode, by running LiteBans' own
+     * {@code ban} as the console. LiteBans then enforces it, and the event bridge reports it to
+     * the bot like any other LiteBans ban, so it lands in Heimdall's records too.
+     *
+     * <p>The command line is built from a UUID, a length this plugin formatted and a fixed reason,
+     * so nothing a person typed reaches it. Namespaced first for the reason
+     * {@link LiteBansRevokeLift} gives, with the bare verb as the proxy fallback.
+     */
+    static void banFrozenLogout(ModuleContext context, UUID uuid, long seconds, boolean silent) {
+        if (activeCheck == null || context == null || uuid == null) return;
+        String length = FrozenPlayers.liteBansDuration(seconds);
+        String args = uuid + (length == null ? "" : " " + length) + (silent ? " -s " : " ")
+                + FrozenPlayers.LOGOUT_BAN_REASON;
+        dispatchBan(context, "litebans:ban " + args, "ban " + args, !BUKKIT);
+    }
+
+    private static void dispatchBan(final ModuleContext context, final String command,
+            final String bare, final boolean onProxy) {
+        context.platform().console().dispatchCommand(command).whenComplete(
+                new BiConsumer<String, Throwable>() {
+                    @Override
+                    public void accept(String ack, Throwable failure) {
+                        if (failure == null) {
+                            context.logger().info("Ran `" + command
+                                    + "` for a player who logged out while frozen");
+                            return;
+                        }
+                        Throwable cause = failure;
+                        while ((cause instanceof CompletionException
+                                || cause instanceof ExecutionException)
+                                && cause.getCause() != null) {
+                            cause = cause.getCause();
+                        }
+                        if (onProxy && bare != null && cause instanceof UnknownCommandException) {
+                            dispatchBan(context, bare, null, onProxy);
+                            return;
+                        }
+                        context.logger().warn("A player logged out while frozen, but `" + command
+                                + "` failed (" + cause + "). Ban them in LiteBans by hand.");
+                    }
+                });
     }
 
     /**
