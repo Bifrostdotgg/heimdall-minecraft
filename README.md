@@ -259,7 +259,7 @@ from the console. `/hwl` still works as a deprecated alias from v2.
 | `swap` | Swap in a core you placed at `core/staged.jar` yourself |
 | `debug on\|off` | Verbose logging, remembered across restarts |
 
-### Punishments
+### Punishment commands
 
 ```
 /hd ban <player> [duration] [reason] [-s|-p] [-h]
