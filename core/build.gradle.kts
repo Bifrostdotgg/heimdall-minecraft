@@ -139,3 +139,12 @@ sourceSets {
         java.srcDir(generateBuildConstants)
     }
 }
+
+// AdminCommandTest reads plugin.yml to check the /hd descriptor gate lists every punishment node.
+// The file lives in :app, so without declaring it the test task stays up to date (or comes from
+// the build cache) when only plugin.yml changes, and a node dropped from it passes the build.
+tasks.test {
+    inputs.file(rootProject.layout.projectDirectory.file("app/src/main/resources/plugin.yml"))
+        .withPropertyName("pluginDescriptor")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+}

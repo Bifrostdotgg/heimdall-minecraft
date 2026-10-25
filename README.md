@@ -302,8 +302,10 @@ Each punishment node gives its verbs under both spellings: `heimdall.punishments
 only punishment nodes sees just those verbs in `/hd` help and tab completion, and nothing else in
 the admin tree. `heimdall.admin` covers every verb as well.
 
-On Paper this needs a restart after updating to take effect, because Bukkit reads the `/hd` gate
-from `plugin.yml` when the plugin loads. On the proxies it applies as soon as the update does.
+On Paper, Spigot and Folia this needs a restart after updating to take effect, because Bukkit
+reads the `/hd` gate from `plugin.yml` when the plugin loads. On the proxies it applies as soon as
+the update does, but `/hdp` itself shows up in every player's command list there, since a proxy
+has no descriptor to hide it with. Running it without a node is refused.
 
 | Node | Gives | Default |
 | --- | --- | --- |
@@ -311,14 +313,14 @@ from `plugin.yml` when the plugin loads. On the proxies it applies as soon as th
 | `heimdall.linkdiscord` | `/linkdiscord` | everyone |
 | `heimdall.offend` | `/offend` | op |
 | `heimdall.bypass` | Skip command cooldowns such as `/linkdiscord`'s. Not a whitelist bypass: that is a list on the dashboard | op |
-| `heimdall.punishments.ban` | `/ban`, `/tempban`, with or without `/hd` | op |
-| `heimdall.punishments.ipban` | `/ipban`, with or without `/hd` | op |
-| `heimdall.punishments.mute` | `/mute`, `/tempmute`, with or without `/hd` | op |
-| `heimdall.punishments.kick` | `/kick`, with or without `/hd` | op |
-| `heimdall.punishments.warn` | `/warn`, with or without `/hd` | op |
-| `heimdall.punishments.unban` | `/unban`, `/unmute`, `/unwarn`, `/rollback`, with or without `/hd` | op |
-| `heimdall.punishments.history` | `/history`, `/staffhistory`, `/banlist`, with or without `/hd` | op |
-| `heimdall.punishments.dupeip` | `/dupeip`, `/iphistory`, with or without `/hd` | op |
+| `heimdall.punishments.ban` | `/ban`, `/tempban`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.ipban` | `/ipban`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.mute` | `/mute`, `/tempmute`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.kick` | `/kick`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.warn` | `/warn`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.unban` | `/unban`, `/unmute`, `/unwarn`, `/rollback`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.history` | `/history`, `/staffhistory`, `/banlist`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.dupeip` | `/dupeip`, `/iphistory`, with or without `/hd` or `/hdp` | op |
 | `heimdall.punishments.notify` | See silent punishments announced | op |
 | `heimdall.punishments.silent` | Use `-s` or `-p` against the guild's default | op |
 | `heimdall.punishments.hidden` | Use `-h`, and see hidden punishments in lookups and announcements. Not implied by `heimdall.admin` | op |

@@ -24,6 +24,7 @@ import com.heimdall.core.punish.HiddenPunishments;
 import com.heimdall.core.punish.PunishmentAnnouncement;
 import com.heimdall.core.punish.PunishmentIp;
 import com.heimdall.core.punish.PunishmentParser;
+import com.heimdall.core.punish.PunishmentPermissions;
 import com.heimdall.core.punish.PunishmentScreens;
 import com.heimdall.core.punish.PunishmentView;
 import com.heimdall.core.punish.SilenceDecision;
@@ -367,24 +368,24 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         boolean proxy = role == ServerRole.GATEKEEPER || role == ServerRole.STANDALONE;
         boolean backend = role == ServerRole.ENFORCER || role == ServerRole.STANDALONE;
         if (proxy) {
-            bind(ctx, "ban", "heimdall.punishments.ban", "ban");
-            bind(ctx, "tempban", "heimdall.punishments.ban", "tempban");
-            bind(ctx, "ipban", "heimdall.punishments.ipban", "ipban");
-            bind(ctx, "unban", "heimdall.punishments.unban", "unban");
-            bind(ctx, "kick", "heimdall.punishments.kick", "kick");
-            bind(ctx, "warn", "heimdall.punishments.warn", "warn");
-            bind(ctx, "unwarn", "heimdall.punishments.unban", "unwarn");
-            bind(ctx, "history", "heimdall.punishments.history", "history");
-            bind(ctx, "staffhistory", "heimdall.punishments.history", "staffhistory");
-            bind(ctx, "banlist", "heimdall.punishments.history", "banlist");
-            bind(ctx, "dupeip", "heimdall.punishments.dupeip", "dupeip");
-            bind(ctx, "iphistory", "heimdall.punishments.dupeip", "iphistory");
-            bind(ctx, "rollback", "heimdall.punishments.unban", "rollback");
+            bind(ctx, "ban", PunishmentPermissions.nodeFor("ban"), "ban");
+            bind(ctx, "tempban", PunishmentPermissions.nodeFor("tempban"), "tempban");
+            bind(ctx, "ipban", PunishmentPermissions.nodeFor("ipban"), "ipban");
+            bind(ctx, "unban", PunishmentPermissions.nodeFor("unban"), "unban");
+            bind(ctx, "kick", PunishmentPermissions.nodeFor("kick"), "kick");
+            bind(ctx, "warn", PunishmentPermissions.nodeFor("warn"), "warn");
+            bind(ctx, "unwarn", PunishmentPermissions.nodeFor("unwarn"), "unwarn");
+            bind(ctx, "history", PunishmentPermissions.nodeFor("history"), "history");
+            bind(ctx, "staffhistory", PunishmentPermissions.nodeFor("staffhistory"), "staffhistory");
+            bind(ctx, "banlist", PunishmentPermissions.nodeFor("banlist"), "banlist");
+            bind(ctx, "dupeip", PunishmentPermissions.nodeFor("dupeip"), "dupeip");
+            bind(ctx, "iphistory", PunishmentPermissions.nodeFor("iphistory"), "iphistory");
+            bind(ctx, "rollback", PunishmentPermissions.nodeFor("rollback"), "rollback");
         }
         if (backend) {
-            bind(ctx, "mute", "heimdall.punishments.mute", "mute");
-            bind(ctx, "tempmute", "heimdall.punishments.mute", "tempmute");
-            bind(ctx, "unmute", "heimdall.punishments.unban", "unmute");
+            bind(ctx, "mute", PunishmentPermissions.nodeFor("mute"), "mute");
+            bind(ctx, "tempmute", PunishmentPermissions.nodeFor("tempmute"), "tempmute");
+            bind(ctx, "unmute", PunishmentPermissions.nodeFor("unmute"), "unmute");
         }
     }
 

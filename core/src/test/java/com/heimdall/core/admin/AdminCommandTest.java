@@ -498,11 +498,32 @@ class AdminCommandTest {
             assertTrue(anyContains(help, "/hd tempban"));
             assertFalse(anyContains(help, "/hd setup"), "a moderator cannot run setup: " + help);
             assertFalse(anyContains(help, "/hd unban"));
+            assertFalse(anyContains(help, context().build().runtime().connectionStatus()),
+                    "the connection line is for administrators: " + help);
             assertEquals(Collections.singletonList("ban"),
                     commands().complete(moderator, "hd", "ban"),
                     "banlist is the history node's, so it is not offered");
             assertTrue(commands().complete(moderator, "hd", "status", "").isEmpty());
             assertFalse(commands().complete(moderator, "hd", "ban", "St").isEmpty());
+        }
+
+        @Test
+        @DisplayName("each verb takes the node its root alias is registered with, and no other")
+        void eachVerbTakesItsTableNode() {
+            for (java.util.Map.Entry<String, String> verb
+                    : com.heimdall.core.punish.PunishmentPermissions.byVerb().entrySet()) {
+                FakeCommandSource holder = FakeCommandSource.player("Mod").grant(verb.getValue());
+                assertTrue(commands().complete(holder, "hd").contains(verb.getKey()),
+                        verb.getValue() + " must run /hd " + verb.getKey());
+                for (String other : java.util.Arrays.asList("heimdall.punishments.ban",
+                        "heimdall.punishments.mute", "heimdall.punishments.history")) {
+                    if (!other.equals(verb.getValue())) {
+                        assertFalse(commands().complete(FakeCommandSource.player("Other")
+                                        .grant(other), "hd").contains(verb.getKey()),
+                                other + " must not run /hd " + verb.getKey());
+                    }
+                }
+            }
         }
 
         @Test
@@ -531,10 +552,8 @@ class AdminCommandTest {
                 assertFalse(verbs.isEmpty(), node + " is in plugin.yml but runs no /hd verb");
                 reachable.addAll(verbs);
             }
-            java.util.Set<String> punishmentVerbs = new java.util.TreeSet<String>(Arrays.asList(
-                    "ban", "tempban", "ipban", "mute", "tempmute", "unmute", "kick", "warn",
-                    "unwarn", "unban", "rollback", "history", "staffhistory", "banlist", "dupeip",
-                    "iphistory"));
+            java.util.Set<String> punishmentVerbs = new java.util.TreeSet<String>(
+                    com.heimdall.core.punish.PunishmentPermissions.byVerb().keySet());
             assertEquals(punishmentVerbs, reachable,
                     "a node /hd accepts but plugin.yml omits is refused by Bukkit before /hd runs");
         }

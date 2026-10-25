@@ -5,6 +5,7 @@ import com.heimdall.core.command.CommandHandler;
 import com.heimdall.core.command.CommandRegistrar;
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.command.CommandSpec;
+import com.heimdall.core.punish.PunishmentPermissions;
 import com.heimdall.core.text.Msg;
 import com.heimdall.core.util.Registration;
 import java.util.ArrayList;
@@ -103,37 +104,37 @@ public final class AdminCommand {
                 new WhitelistSubcommands.Cache(),
                 new PunishmentSubcommands.Offense(),
                 PunishmentSubcommands.verb("ban", "<player> [duration] [reason]", "ban a player", "ban",
-                        "heimdall.punishments.ban"),
+                        PunishmentPermissions.nodeFor("ban")),
                 PunishmentSubcommands.verb("tempban", "<player> <duration> [reason]", "temporarily ban a player", "tempban",
-                        "heimdall.punishments.ban"),
+                        PunishmentPermissions.nodeFor("tempban")),
                 PunishmentSubcommands.verb("ipban", "<player> [duration] [reason]", "IP-ban a player", "ipban",
-                        "heimdall.punishments.ipban"),
+                        PunishmentPermissions.nodeFor("ipban")),
                 PunishmentSubcommands.verb("mute", "<player> [duration] [reason]", "mute a player", "mute",
-                        "heimdall.punishments.mute"),
+                        PunishmentPermissions.nodeFor("mute")),
                 PunishmentSubcommands.verb("tempmute", "<player> <duration> [reason]", "temporarily mute a player", "tempmute",
-                        "heimdall.punishments.mute"),
+                        PunishmentPermissions.nodeFor("tempmute")),
                 PunishmentSubcommands.verb("unmute", "<player> [reason]", "revoke a mute", "unmute",
-                        "heimdall.punishments.unban"),
+                        PunishmentPermissions.nodeFor("unmute")),
                 PunishmentSubcommands.verb("kick", "<player> [reason]", "kick a player", "kick",
-                        "heimdall.punishments.kick"),
+                        PunishmentPermissions.nodeFor("kick")),
                 PunishmentSubcommands.verb("warn", "<player> [reason]", "warn a player", "warn",
-                        "heimdall.punishments.warn"),
+                        PunishmentPermissions.nodeFor("warn")),
                 PunishmentSubcommands.verb("unwarn", "<player> [reason]", "revoke a warn", "unwarn",
-                        "heimdall.punishments.unban"),
+                        PunishmentPermissions.nodeFor("unwarn")),
                 PunishmentSubcommands.verb("unban", "<player> [reason]", "revoke a ban", "unban",
-                        "heimdall.punishments.unban"),
+                        PunishmentPermissions.nodeFor("unban")),
                 PunishmentSubcommands.verb("rollback", "<player>", "revoke the latest active punishment", "rollback",
-                        "heimdall.punishments.unban"),
+                        PunishmentPermissions.nodeFor("rollback")),
                 PunishmentSubcommands.verb("history", "<player>", "punishment history", "history",
-                        "heimdall.punishments.history"),
+                        PunishmentPermissions.nodeFor("history")),
                 PunishmentSubcommands.verb("staffhistory", "<staff>", "punishments issued by staff", "staffhistory",
-                        "heimdall.punishments.history"),
+                        PunishmentPermissions.nodeFor("staffhistory")),
                 PunishmentSubcommands.verb("banlist", "", "list active bans", "banlist",
-                        "heimdall.punishments.history"),
+                        PunishmentPermissions.nodeFor("banlist")),
                 PunishmentSubcommands.verb("dupeip", "<player>", "accounts sharing a last address", "dupeip",
-                        "heimdall.punishments.dupeip"),
+                        PunishmentPermissions.nodeFor("dupeip")),
                 PunishmentSubcommands.verb("iphistory", "<player>", "local address history", "iphistory",
-                        "heimdall.punishments.dupeip"),
+                        PunishmentPermissions.nodeFor("iphistory")),
                 PunishmentSubcommands.verb("import", "[--dry-run]", "import punishment history (LiteBans and others)", "import",
                         null),
                 new CaseSubcommand(),
@@ -246,8 +247,12 @@ public final class AdminCommand {
     }
 
     private void help(CommandSource source, String label) {
+        // The connection line names the guild, this machine's identity and the bot's last error,
+        // which is the administrator's business, not a moderator's who can only run /hd ban.
         source.sendMessage(Msg.legacy("§6Heimdall §7v" + context.pluginVersion()
-                + " §8— §7" + context.runtime().connectionStatus()));
+                + (source.hasPermission(PERMISSION)
+                        ? " §8— §7" + context.runtime().connectionStatus()
+                        : "")));
         for (AdminSubcommand subcommand : subcommands.values()) {
             if (!subcommand.permits(source)) {
                 continue;
