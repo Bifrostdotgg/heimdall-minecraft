@@ -33,8 +33,11 @@ final class VelocityFrozenCommandListener {
     void onCommand(CommandExecuteEvent event) {
         try {
             if (!(event.getCommandSource() instanceof Player)) return;
-            if (!event.getResult().isAllowed()) return;
-            String alias = alias(event.getCommand());
+            CommandExecuteEvent.CommandResult result = event.getResult();
+            if (!result.isAllowed()) return;
+            // The command the proxy will actually run: another listener may have rewritten it,
+            // and checking the typed one would let a rewrite to /server through.
+            String alias = alias(result.getCommand().orElse(event.getCommand()));
             if (alias.isEmpty() || !commands.hasCommand(alias)) return;
             if (refuse.test(((Player) event.getCommandSource()).getUniqueId())) {
                 event.setResult(CommandExecuteEvent.CommandResult.denied());

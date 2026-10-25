@@ -27,7 +27,11 @@ public final class BungeeFrozenCommandListener implements Listener {
         this.refuse = refuse;
     }
 
-    @EventHandler(priority = EventPriority.LOW)
+    /**
+     * HIGHEST, which BungeeCord runs last: {@link ChatEvent#isProxyCommand()} reads the message as
+     * it stands, so this sees a command after any other listener has rewritten it.
+     */
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onChat(ChatEvent event) {
         try {
             if (event.isCancelled() || !event.isProxyCommand()) return;

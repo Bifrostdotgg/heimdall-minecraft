@@ -72,6 +72,15 @@ class VelocityFrozenCommandListenerTest {
     }
 
     @Test
+    @DisplayName("a command another listener rewrote to /server is checked as /server")
+    void rewrittenCommandChecked() {
+        CommandExecuteEvent event = new CommandExecuteEvent(steve(), "spawn");
+        event.setResult(CommandExecuteEvent.CommandResult.command("server survival"));
+        listener(true).onCommand(event);
+        assertFalse(event.getResult().isAllowed());
+    }
+
+    @Test
     @DisplayName("the console is never refused")
     void consoleUntouched() {
         CommandExecuteEvent event = new CommandExecuteEvent(mock(CommandSource.class), "server x");

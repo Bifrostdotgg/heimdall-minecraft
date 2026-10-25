@@ -332,12 +332,12 @@ final class VelocityBootstrap {
         final VelocityChatListener chat = new VelocityChatListener(logger, runtime.chatPipeline());
         registrations.track(VelocityEvents.listen(
                 events, plugin, PlayerChatEvent.class, PostOrder.LAST, chat::onChat));
-        // A frozen player's proxy commands, /server first among them. EARLY, so the command is
-        // refused before anything else on the proxy acts on it.
+        // A frozen player's proxy commands, /server first among them. LAST, so the check sees the
+        // command after any other listener has rewritten it, which is the one the proxy runs.
         final VelocityFrozenCommandListener frozen = new VelocityFrozenCommandListener(
                 logger, proxy.getCommandManager(), FrozenProxyCommands::refuse);
         registrations.track(VelocityEvents.listen(
-                events, plugin, CommandExecuteEvent.class, PostOrder.EARLY, frozen::onCommand));
+                events, plugin, CommandExecuteEvent.class, PostOrder.LAST, frozen::onCommand));
     }
 
     /**
