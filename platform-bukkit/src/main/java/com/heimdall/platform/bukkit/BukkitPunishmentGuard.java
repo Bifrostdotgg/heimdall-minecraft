@@ -3,18 +3,33 @@ package com.heimdall.platform.bukkit;
 import com.heimdall.core.log.HeimdallLogger;
 import java.lang.reflect.Method;
 import java.util.UUID;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Projectile;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.block.SignChangeEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerPickupItemEvent;
 
 /**
- * Backend freeze (move/interact) and muted-sign cancel. Talks to the punishments module by
- * reflection so this platform module does not compile against a feature module.
+ * Backend freeze and muted-sign cancel. Talks to the punishments module by reflection so this
+ * platform module does not compile against a feature module.
+ *
+ * <p>A frozen player stays where they are and changes nothing: no walking (looking around is
+ * allowed), no clicking blocks or entities, no breaking or placing, no dropping or picking up,
+ * no moving items in an inventory. They cannot be hurt and cannot hurt anyone either, since they
+ * cannot move out of the way. Teleports are left alone on purpose: {@code PlayerTeleportEvent}
+ * has its own handler list, so staff can still bring a frozen player somewhere to talk.
  */
 final class BukkitPunishmentGuard implements Listener {
 
@@ -49,6 +64,71 @@ final class BukkitPunishmentGuard implements Listener {
         if (frozen(event.getPlayer())) {
             event.setCancelled(true);
         }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onBreak(BlockBreakEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPlace(BlockPlaceEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onDrop(PlayerDropItemEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /**
+     * Deprecated on modern servers in favour of {@code EntityPickupItemEvent}, which 1.8.8 does
+     * not have, and still fired by them for a player.
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onPickup(PlayerPickupItemEvent event) {
+        if (frozen(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onInventoryClick(InventoryClickEvent event) {
+        if (event.getWhoClicked() instanceof Player && frozen((Player) event.getWhoClicked())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** A frozen player takes no damage: they cannot move out of the way of any. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onDamaged(EntityDamageEvent event) {
+        if (event.getEntity() instanceof Player && frozen((Player) event.getEntity())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** And deals none, by hand or by anything they shot before the freeze landed. */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onDamaging(EntityDamageByEntityEvent event) {
+        Player attacker = attacker(event.getDamager());
+        if (attacker != null && frozen(attacker)) {
+            event.setCancelled(true);
+        }
+    }
+
+    private static Player attacker(Entity damager) {
+        if (damager instanceof Player) return (Player) damager;
+        if (damager instanceof Projectile) {
+            Object shooter = ((Projectile) damager).getShooter();
+            if (shooter instanceof Player) return (Player) shooter;
+        }
+        return null;
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
