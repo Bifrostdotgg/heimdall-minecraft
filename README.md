@@ -89,15 +89,14 @@ forwarding settings:
 | --- | --- | --- |
 | `standalone` | A server with no proxy in front | Everything |
 | `gatekeeper` | Velocity or BungeeCord | Decides who may log in to the network, enforces bans, announces punishments |
-| `enforcer` | A backend behind a proxy | Enforces what happens in game: mutes, blocked commands, frozen players |
+| `enforcer` | A backend behind a proxy | Enforces what happens in game: mutes and blocked commands |
 
 Role sync, `/offend` and the chat bridge run on every role.
 
 You can override the role with `role:` in `bootstrap.yml` (it takes effect on restart). The one
 case that needs it: **if your proxy does not run Heimdall, set `role: standalone` on each
 backend.** Otherwise a backend with proxy forwarding on counts itself as an enforcer, and an
-enforcer leaves announcements, IP bans, country and subnet bans and join-time role sync to a proxy
-that is not there.
+enforcer leaves announcements, IP bans and join-time role sync to a proxy that is not there.
 
 Things worth knowing on a network:
 
@@ -172,7 +171,7 @@ The dashboard's **Minecraft > Enforcement** page sets one of three modes for the
 | --- | --- |
 | **Offenses only** (default) | Heimdall enforces nothing. `/offend` tiers run their configured commands, usually your ban plugin's |
 | **Alongside your ban plugin** | LiteBans stays in charge. Every punishment and lift it makes is copied to Heimdall, and lifting one from Heimdall (the dashboard, `/mc-punish`, an accepted appeal) lifts it in LiteBans too |
-| **Heimdall runs bans** | The plugin enforces everything itself: logins, chat, blocked commands, frozen players, IP, subnet and country bans |
+| **Heimdall runs bans** | The plugin enforces everything itself: logins, chat, blocked commands and IP bans |
 
 The `/hd` punishment commands issue punishments only in **Heimdall runs bans**. In the other modes
 the lookups (`history`, `banlist`, `dupeip`) and `import` still work.
@@ -198,10 +197,6 @@ holds either by default. What the player said is never stored or sent anywhere.
 
 **Screens** (what a banned or muted player reads) and the announcement lines are edited on the
 dashboard, not on the server.
-
-**Country bans** need a `geo-countries.tsv` file (`CIDR<TAB>ISO code` per line) in the plugin's
-folder on the proxy, or on a standalone server. Without one they deny nobody, and the console says
-so at startup.
 
 **If the bot is down**, every server checks its own copy of active punishments, so bans and mutes
 keep working. A punishment issued during an outage applies on that server at once and syncs when
