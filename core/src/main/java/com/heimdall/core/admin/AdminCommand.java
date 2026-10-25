@@ -37,9 +37,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <h2>Permission</h2>
  *
- * <p>{@code heimdall.admin}, declared on the spec so the registrars enforce it — which on Velocity
- * also hides the command from a player's completion, and on the Bukkit family gates the completer as
- * well as the executor. No subcommand re-checks it: one gate, at the door.
+ * <p>Per verb, not at the door. Every verb needs {@code heimdall.admin}, except the punishment
+ * verbs, which also accept their own {@code heimdall.punishments.*} node (see
+ * {@link AdminSubcommand#permits}). A moderator granted {@code heimdall.punishments.ban} can run
+ * {@code /hd ban} and nothing else here, and sees only that verb in help and completion.
+ *
+ * <p>So the spec declares no permission, because one node cannot say "admin or any of these", and
+ * this class does the gating itself in {@link #dispatch} and {@link #suggest}. A sender who may run
+ * no verb at all gets the same refusal the registrar used to give. On the Bukkit family the
+ * descriptor in {@code plugin.yml} still names the nodes, separated by {@code ;} (which Bukkit reads
+ * as "any of"), so the command stays hidden from players who hold none of them. The proxies have no
+ * descriptor, so there {@code /hdp} is visible to everybody and refused here.
  *
  * <p>Both a player and the console may run everything. That is load-bearing for
  * {@code /hd setup} — the smoke harness drives it down a console pipe, and an operator claiming a
@@ -52,7 +60,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class AdminCommand {
 
-    /** The node every verb here is gated on. */
+    /** The node that runs every verb here; the punishment verbs also take their own node. */
     public static final String PERMISSION = "heimdall.admin";
 
     /** v2's admin verb, kept as a hidden forwarding alias on both platforms. */
@@ -94,23 +102,40 @@ public final class AdminCommand {
                 new WhitelistSubcommands.Test(),
                 new WhitelistSubcommands.Cache(),
                 new PunishmentSubcommands.Offense(),
-                PunishmentSubcommands.verb("ban", "<player> [duration] [reason]", "ban a player", "ban"),
-                PunishmentSubcommands.verb("tempban", "<player> <duration> [reason]", "temporarily ban a player", "tempban"),
-                PunishmentSubcommands.verb("ipban", "<player> [duration] [reason]", "IP-ban a player", "ipban"),
-                PunishmentSubcommands.verb("mute", "<player> [duration] [reason]", "mute a player", "mute"),
-                PunishmentSubcommands.verb("tempmute", "<player> <duration> [reason]", "temporarily mute a player", "tempmute"),
-                PunishmentSubcommands.verb("unmute", "<player> [reason]", "revoke a mute", "unmute"),
-                PunishmentSubcommands.verb("kick", "<player> [reason]", "kick a player", "kick"),
-                PunishmentSubcommands.verb("warn", "<player> [reason]", "warn a player", "warn"),
-                PunishmentSubcommands.verb("unwarn", "<player> [reason]", "revoke a warn", "unwarn"),
-                PunishmentSubcommands.verb("unban", "<player> [reason]", "revoke a ban", "unban"),
-                PunishmentSubcommands.verb("rollback", "<player>", "revoke the latest active punishment", "rollback"),
-                PunishmentSubcommands.verb("history", "<player>", "punishment history", "history"),
-                PunishmentSubcommands.verb("staffhistory", "<staff>", "punishments issued by staff", "staffhistory"),
-                PunishmentSubcommands.verb("banlist", "", "list active bans", "banlist"),
-                PunishmentSubcommands.verb("dupeip", "<player>", "accounts sharing a last address", "dupeip"),
-                PunishmentSubcommands.verb("iphistory", "<player>", "local address history", "iphistory"),
-                PunishmentSubcommands.verb("import", "[--dry-run]", "import punishment history (LiteBans and others)", "import"),
+                PunishmentSubcommands.verb("ban", "<player> [duration] [reason]", "ban a player", "ban",
+                        "heimdall.punishments.ban"),
+                PunishmentSubcommands.verb("tempban", "<player> <duration> [reason]", "temporarily ban a player", "tempban",
+                        "heimdall.punishments.ban"),
+                PunishmentSubcommands.verb("ipban", "<player> [duration] [reason]", "IP-ban a player", "ipban",
+                        "heimdall.punishments.ipban"),
+                PunishmentSubcommands.verb("mute", "<player> [duration] [reason]", "mute a player", "mute",
+                        "heimdall.punishments.mute"),
+                PunishmentSubcommands.verb("tempmute", "<player> <duration> [reason]", "temporarily mute a player", "tempmute",
+                        "heimdall.punishments.mute"),
+                PunishmentSubcommands.verb("unmute", "<player> [reason]", "revoke a mute", "unmute",
+                        "heimdall.punishments.unban"),
+                PunishmentSubcommands.verb("kick", "<player> [reason]", "kick a player", "kick",
+                        "heimdall.punishments.kick"),
+                PunishmentSubcommands.verb("warn", "<player> [reason]", "warn a player", "warn",
+                        "heimdall.punishments.warn"),
+                PunishmentSubcommands.verb("unwarn", "<player> [reason]", "revoke a warn", "unwarn",
+                        "heimdall.punishments.unban"),
+                PunishmentSubcommands.verb("unban", "<player> [reason]", "revoke a ban", "unban",
+                        "heimdall.punishments.unban"),
+                PunishmentSubcommands.verb("rollback", "<player>", "revoke the latest active punishment", "rollback",
+                        "heimdall.punishments.unban"),
+                PunishmentSubcommands.verb("history", "<player>", "punishment history", "history",
+                        "heimdall.punishments.history"),
+                PunishmentSubcommands.verb("staffhistory", "<staff>", "punishments issued by staff", "staffhistory",
+                        "heimdall.punishments.history"),
+                PunishmentSubcommands.verb("banlist", "", "list active bans", "banlist",
+                        "heimdall.punishments.history"),
+                PunishmentSubcommands.verb("dupeip", "<player>", "accounts sharing a last address", "dupeip",
+                        "heimdall.punishments.dupeip"),
+                PunishmentSubcommands.verb("iphistory", "<player>", "local address history", "iphistory",
+                        "heimdall.punishments.dupeip"),
+                PunishmentSubcommands.verb("import", "[--dry-run]", "import punishment history (LiteBans and others)", "import",
+                        null),
                 new CaseSubcommand(),
                 new UpdateSubcommands.Version(),
                 new UpdateSubcommands.Update(),
@@ -157,12 +182,17 @@ public final class AdminCommand {
     private CommandSpec spec(final String name, List<String> aliases, final boolean deprecated) {
         return CommandSpec.named(name)
                 .aliases(aliases)
-                .permission(PERMISSION)
+                .permission("")
                 .usage("/" + name + " <" + String.join("|", subcommands.keySet()) + ">")
                 .description("Heimdall administration")
                 .handler(new CommandHandler() {
                     @Override
                     public void execute(CommandSource source, List<String> args) {
+                        if (!permitsAny(source)) {
+                            source.sendMessage(Msg.legacy(
+                                    "§cYou do not have permission to use that."));
+                            return;
+                        }
                         if (deprecated) {
                             warnAboutDeprecatedName(source);
                         }
@@ -208,6 +238,10 @@ public final class AdminCommand {
             help(source, label);
             return;
         }
+        if (!subcommand.permits(source)) {
+            source.sendMessage(Msg.legacy("§cYou do not have permission to use that."));
+            return;
+        }
         subcommand.run(source, args.subList(1, args.size()), context);
     }
 
@@ -215,6 +249,9 @@ public final class AdminCommand {
         source.sendMessage(Msg.legacy("§6Heimdall §7v" + context.pluginVersion()
                 + " §8— §7" + context.runtime().connectionStatus()));
         for (AdminSubcommand subcommand : subcommands.values()) {
+            if (!subcommand.permits(source)) {
+                continue;
+            }
             String usage = subcommand.usage().isEmpty() ? "" : " " + subcommand.usage();
             source.sendMessage(Msg.legacy(
                     "§7/" + label + " §f" + subcommand.name() + "§7" + usage
@@ -231,16 +268,32 @@ public final class AdminCommand {
     private List<String> suggest(CommandSource source, List<String> args) {
         if (args.size() <= 1) {
             String prefix = args.isEmpty() ? "" : args.get(0).toLowerCase(Locale.ROOT);
-            return matching(new ArrayList<String>(subcommands.keySet()), prefix);
+            List<String> verbs = new ArrayList<String>();
+            for (AdminSubcommand subcommand : subcommands.values()) {
+                if (subcommand.permits(source)) {
+                    verbs.add(subcommand.name());
+                }
+            }
+            return matching(verbs, prefix);
         }
         AdminSubcommand subcommand = subcommands.get(args.get(0).toLowerCase(Locale.ROOT));
-        if (subcommand == null) {
+        if (subcommand == null || !subcommand.permits(source)) {
             return Collections.emptyList();
         }
         List<String> rest = args.subList(1, args.size());
         return matching(
                 subcommand.complete(source, rest, context),
                 rest.get(rest.size() - 1).toLowerCase(Locale.ROOT));
+    }
+
+    /** Whether {@code source} may run any verb here at all. */
+    private boolean permitsAny(CommandSource source) {
+        for (AdminSubcommand subcommand : subcommands.values()) {
+            if (subcommand.permits(source)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static List<String> matching(List<String> candidates, String prefix) {

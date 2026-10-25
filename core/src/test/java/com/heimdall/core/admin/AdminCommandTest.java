@@ -193,8 +193,9 @@ class AdminCommandTest {
                             + "makes 'Unknown command' the first thing a migrating server sees");
             assertEquals(Collections.singletonList("heimdall"),
                     commands().spec("hd").aliases());
-            assertEquals(AdminCommand.PERMISSION, commands().spec("hd").permission());
-            assertEquals(AdminCommand.PERMISSION,
+            assertEquals("", commands().spec("hd").permission(),
+                    "one node cannot say 'admin or a punishment node', so the tree gates per verb");
+            assertEquals(commands().spec("hd").permission(),
                     commands().spec(AdminCommand.DEPRECATED_NAME).permission(),
                     "the alias must be gated exactly as the real verb is, or it is a way round it");
         }
@@ -212,14 +213,19 @@ class AdminCommandTest {
         }
 
         @Test
-        @DisplayName("a sender without the node is refused before any handler runs")
+        @DisplayName("a sender who may run no verb is refused, and told nothing else")
         void permissionGated() {
             install();
             FakeCommandSource nobody = FakeCommandSource.player("Griefer");
 
-            assertFalse(commands().run(nobody, "hd", "status"),
-                    "the registrar gates it, so no subcommand has to re-check — one gate, at the door");
-            assertTrue(nobody.messageText().isEmpty());
+            assertTrue(commands().run(nobody, "hd", "status"));
+            assertEquals(Collections.singletonList("You do not have permission to use that."),
+                    new ArrayList<String>(nobody.messageText()));
+            nobody.clearMessages();
+            assertTrue(commands().run(nobody, AdminCommand.DEPRECATED_NAME));
+            assertEquals(Collections.singletonList("You do not have permission to use that."),
+                    new ArrayList<String>(nobody.messageText()),
+                    "not the help listing, and not the once-per-start /hwl notice either");
         }
 
         @Test
@@ -439,6 +445,118 @@ class AdminCommandTest {
             install();
 
             assertTrue(anyContains(say("test"), "/hd test <player>"));
+        }
+    }
+
+    @Nested
+    @DisplayName("a punishment node is enough for its own verbs")
+    class PunishmentNodes {
+
+        private FakeCommandSource moderator;
+        private RecordingPunishments punishments;
+
+        @BeforeEach
+        void installWithModule() {
+            punishments = new RecordingPunishments();
+            install(context().punishments(punishments));
+            moderator = FakeCommandSource.player("Mod").grant("heimdall.punishments.ban");
+        }
+
+        @Test
+        @DisplayName("heimdall.punishments.ban runs /hd ban and /hd tempban without heimdall.admin")
+        void nodeRunsItsVerbs() {
+            assertTrue(commands().run(moderator, "hd", "ban", "Steve", "griefing"));
+            assertTrue(commands().run(moderator, AdminCommand.DEPRECATED_NAME, "tempban", "Steve", "1d"));
+
+            assertEquals(Arrays.asList("ban", "tempban"), punishments.verbs,
+                    "requiring heimdall.admin as well made the node useless without root aliases");
+        }
+
+        @Test
+        @DisplayName("and nothing else: other verbs and the admin tree stay refused")
+        void nodeRunsNothingElse() {
+            moderator.clearMessages();
+            assertTrue(commands().run(moderator, "hd", "unban", "Steve"));
+            assertTrue(commands().run(moderator, "hd", "status"));
+            assertTrue(commands().run(moderator, "hd", "import"));
+
+            assertTrue(punishments.verbs.isEmpty(), "unban has its own node, import is admin-only");
+            assertEquals(3, moderator.messageText().size());
+            for (String line : moderator.messageText()) {
+                assertEquals("You do not have permission to use that.", line);
+            }
+        }
+
+        @Test
+        @DisplayName("help and completion offer only the verbs the node runs")
+        void helpAndCompletionAreFiltered() {
+            moderator.clearMessages();
+            assertTrue(commands().run(moderator, "hd"));
+            List<String> help = new ArrayList<String>(moderator.messageText());
+
+            assertTrue(anyContains(help, "/hd ban"));
+            assertTrue(anyContains(help, "/hd tempban"));
+            assertFalse(anyContains(help, "/hd setup"), "a moderator cannot run setup: " + help);
+            assertFalse(anyContains(help, "/hd unban"));
+            assertEquals(Collections.singletonList("ban"),
+                    commands().complete(moderator, "hd", "ban"),
+                    "banlist is the history node's, so it is not offered");
+            assertTrue(commands().complete(moderator, "hd", "status", "").isEmpty());
+            assertFalse(commands().complete(moderator, "hd", "ban", "St").isEmpty());
+        }
+
+        @Test
+        @DisplayName("heimdall.admin still runs every punishment verb")
+        void adminKeepsEveryVerb() {
+            assertTrue(commands().run(admin, "hd", "unban", "Steve"));
+            assertTrue(commands().run(admin, "hd", "import", "--dry-run"));
+
+            assertEquals(Arrays.asList("unban", "import"), punishments.verbs);
+        }
+
+        @Test
+        @DisplayName("plugin.yml lets every punishment node past the Bukkit descriptor gate")
+        void descriptorListsEveryNode() throws Exception {
+            List<String> declared = descriptorPermissions("hd");
+
+            assertEquals(declared, descriptorPermissions(AdminCommand.DEPRECATED_NAME));
+            assertTrue(declared.contains(AdminCommand.PERMISSION));
+            java.util.Set<String> reachable = new java.util.TreeSet<String>();
+            for (String node : declared) {
+                if (node.equals(AdminCommand.PERMISSION)) {
+                    continue;
+                }
+                List<String> verbs = commands().complete(
+                        FakeCommandSource.player("Mod").grant(node), "hd");
+                assertFalse(verbs.isEmpty(), node + " is in plugin.yml but runs no /hd verb");
+                reachable.addAll(verbs);
+            }
+            java.util.Set<String> punishmentVerbs = new java.util.TreeSet<String>(Arrays.asList(
+                    "ban", "tempban", "ipban", "mute", "tempmute", "unmute", "kick", "warn",
+                    "unwarn", "unban", "rollback", "history", "staffhistory", "banlist", "dupeip",
+                    "iphistory"));
+            assertEquals(punishmentVerbs, reachable,
+                    "a node /hd accepts but plugin.yml omits is refused by Bukkit before /hd runs");
+        }
+
+        private List<String> descriptorPermissions(String command) throws Exception {
+            java.nio.file.Path yml = java.nio.file.Paths.get("..", "app", "src", "main", "resources",
+                    "plugin.yml");
+            if (!java.nio.file.Files.isRegularFile(yml)) {
+                yml = java.nio.file.Paths.get("app", "src", "main", "resources", "plugin.yml");
+            }
+            List<String> lines = java.nio.file.Files.readAllLines(
+                    yml, java.nio.charset.StandardCharsets.UTF_8);
+            boolean inCommand = false;
+            for (String line : lines) {
+                if (line.matches("^  \\S.*:\\s*$")) {
+                    inCommand = line.trim().equals(command + ":");
+                } else if (inCommand && line.trim().startsWith("permission:")) {
+                    return Arrays.asList(line.trim().substring("permission:".length()).trim()
+                            .split(";"));
+                }
+            }
+            throw new AssertionError("no permission for " + command + " in " + yml);
         }
     }
 

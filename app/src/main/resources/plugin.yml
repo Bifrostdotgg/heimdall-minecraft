@@ -48,7 +48,12 @@ commands:
     description: Heimdall administration
     usage: /<command>
     aliases: [heimdall]
-    permission: heimdall.admin
+    # Any one of these, which is what Bukkit reads a `;`-separated list as. The
+    # punishment verbs (/hd ban and friends) take their own node as well as
+    # heimdall.admin, so a moderator holding only heimdall.punishments.ban must
+    # get past this gate; which verbs they may then run is decided per verb in
+    # AdminCommand. Keep this list in step with the nodes there.
+    permission: heimdall.admin;heimdall.punishments.ban;heimdall.punishments.ipban;heimdall.punishments.mute;heimdall.punishments.kick;heimdall.punishments.warn;heimdall.punishments.unban;heimdall.punishments.history;heimdall.punishments.dupeip
   hwl:
     # v2's admin verb. Kept as a real command rather than as an alias of `hd`,
     # because Bukkit fixes aliases at load time and the plugin has to be able to
@@ -61,7 +66,8 @@ commands:
     description: Deprecated alias for /hd
     usage: /<command>
     aliases: [heimdallwhitelist]
-    permission: heimdall.admin
+    # The same list as hd, or /hwl ban would refuse a moderator /hd ban lets in.
+    permission: heimdall.admin;heimdall.punishments.ban;heimdall.punishments.ipban;heimdall.punishments.mute;heimdall.punishments.kick;heimdall.punishments.warn;heimdall.punishments.unban;heimdall.punishments.history;heimdall.punishments.dupeip
   linkdiscord:
     description: Get a code to link this Minecraft account to Discord
     usage: /<command>
