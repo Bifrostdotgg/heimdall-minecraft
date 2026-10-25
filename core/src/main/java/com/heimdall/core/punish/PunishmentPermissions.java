@@ -31,6 +31,9 @@ public final class PunishmentPermissions {
         nodes.put("kick", "heimdall.punishments.kick");
         nodes.put("warn", "heimdall.punishments.warn");
         nodes.put("unwarn", "heimdall.punishments.unban");
+        // One node for both: whoever holds a player for a check has to be able to let them go.
+        nodes.put("freeze", "heimdall.punishments.freeze");
+        nodes.put("unfreeze", "heimdall.punishments.freeze");
         nodes.put("unban", "heimdall.punishments.unban");
         nodes.put("rollback", "heimdall.punishments.unban");
         nodes.put("history", "heimdall.punishments.history");

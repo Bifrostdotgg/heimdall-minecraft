@@ -88,6 +88,19 @@ public final class PunishmentScreens {
     public static final String MUTE_REMINDER =
             "<red>You are muted</red>[ <gray>for another {remaining}</gray>]<red>.</red>";
 
+    /**
+     * The message a frozen player is shown: when the freeze lands, when they join while frozen,
+     * and again every few seconds for as long as it lasts.
+     *
+     * <p>Short on purpose, because it repeats. Like {@link #MUTE_REMINDER}, a blank segment falls
+     * back to this default rather than rendering nothing: a player who cannot move and has been
+     * told nothing assumes the server is broken and logs out.
+     */
+    public static final String FREEZE =
+            "<red><b>You are frozen.</b></red> <gray>Do not log out. "
+            + "Staff will talk to you here in chat.</gray>\n"
+            + "[<gray>Reason</gray> <dark_gray>»</dark_gray> <yellow>{reason}</yellow>]";
+
     /** The disconnect screen for a kick. */
     public static final String KICK =
             "{base}\n"
@@ -138,6 +151,8 @@ public final class PunishmentScreens {
     public static final String KEY_MUTE_PERMANENT = "mutePermanentScreen";
 
     public static final String KEY_MUTE_REMINDER = "muteReminderScreen";
+
+    public static final String KEY_FREEZE = "freezeScreen";
 
     public static final String KEY_KICK = "kickScreen";
 

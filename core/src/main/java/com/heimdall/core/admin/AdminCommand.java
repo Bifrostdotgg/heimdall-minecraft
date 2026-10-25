@@ -111,6 +111,8 @@ public final class AdminCommand {
                 PunishmentSubcommands.verb("kick", "<player> [reason]", "kick a player", "kick"),
                 PunishmentSubcommands.verb("warn", "<player> [reason]", "warn a player", "warn"),
                 PunishmentSubcommands.verb("unwarn", "<player> [reason]", "revoke a warn", "unwarn"),
+                PunishmentSubcommands.verb("freeze", "<player> [reason]", "freeze a player in place", "freeze"),
+                PunishmentSubcommands.verb("unfreeze", "<player> [reason]", "release a frozen player", "unfreeze"),
                 PunishmentSubcommands.verb("unban", "<player> [reason]", "revoke a ban", "unban"),
                 PunishmentSubcommands.verb("rollback", "<player>", "revoke the latest active punishment", "rollback"),
                 PunishmentSubcommands.verb("history", "<player>", "punishment history", "history"),

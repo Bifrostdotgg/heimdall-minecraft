@@ -53,7 +53,7 @@ commands:
     # heimdall.admin, so a moderator holding only heimdall.punishments.ban must
     # get past this gate; which verbs they may then run is decided per verb in
     # AdminCommand. Keep this list in step with the nodes there.
-    permission: heimdall.admin;heimdall.punishments.ban;heimdall.punishments.ipban;heimdall.punishments.mute;heimdall.punishments.kick;heimdall.punishments.warn;heimdall.punishments.unban;heimdall.punishments.history;heimdall.punishments.dupeip
+    permission: heimdall.admin;heimdall.punishments.ban;heimdall.punishments.ipban;heimdall.punishments.mute;heimdall.punishments.kick;heimdall.punishments.warn;heimdall.punishments.unban;heimdall.punishments.freeze;heimdall.punishments.history;heimdall.punishments.dupeip
   hwl:
     # v2's admin verb. Kept as a real command rather than as an alias of `hd`,
     # because Bukkit fixes aliases at load time and the plugin has to be able to
@@ -67,7 +67,7 @@ commands:
     usage: /<command>
     aliases: [heimdallwhitelist]
     # The same list as hd, or /hwl ban would refuse a moderator /hd ban lets in.
-    permission: heimdall.admin;heimdall.punishments.ban;heimdall.punishments.ipban;heimdall.punishments.mute;heimdall.punishments.kick;heimdall.punishments.warn;heimdall.punishments.unban;heimdall.punishments.history;heimdall.punishments.dupeip
+    permission: heimdall.admin;heimdall.punishments.ban;heimdall.punishments.ipban;heimdall.punishments.mute;heimdall.punishments.kick;heimdall.punishments.warn;heimdall.punishments.unban;heimdall.punishments.freeze;heimdall.punishments.history;heimdall.punishments.dupeip
   linkdiscord:
     description: Get a code to link this Minecraft account to Discord
     usage: /<command>
@@ -126,6 +126,12 @@ permissions:
     default: op
   heimdall.punishments.kick:
     description: Kick players with Heimdall
+    default: op
+  heimdall.punishments.freeze:
+    # Freeze and unfreeze, both: whoever holds a player for a check has to be
+    # able to let them go. Holders also hear a frozen player's chat, which is
+    # kept from everyone else, and are told when one logs out.
+    description: Freeze and unfreeze players with Heimdall
     default: op
   heimdall.punishments.history:
     description: View Heimdall punishment history

@@ -236,7 +236,6 @@ class PunishmentAnnouncementTest {
     void nothingToSay() {
         assertNull(issued("geo", "Adam", "DE", null, "", ANNOUNCED));
         assertNull(issued("subnet", "Adam", "10.0.0.0/8", null, "", ANNOUNCED));
-        assertNull(issued("freeze", "Adam", "Steve", null, "", ANNOUNCED));
         assertNull(issued("ban", "Adam", "", null, "", ANNOUNCED),
                 "a UUID is not a name, and announcing one would be worse than staying quiet");
         assertNull(revoked("geo", "DE", ""));

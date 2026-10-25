@@ -307,17 +307,17 @@ final class KnownNames {
     }
 
     /**
-     * The three families, each in both spellings, each with an empty set.
+     * The four families, each in both spellings, each with an empty set.
      *
      * <p>Fixed rather than created on demand, so a lookup for a family nobody has been punished in
      * is a hit on an empty map instead of a null the two writers and the reader each have to
-     * remember. A type outside the three ({@code kick}, {@code geo}, {@code subnet}) has no revoke
+     * remember. A type outside the four ({@code kick}, {@code geo}, {@code subnet}) has no revoke
      * verb that names a player and is not represented here at all.
      */
     private static Map<String, ConcurrentHashMap<String, Long>> emptyFamilies() {
         Map<String, ConcurrentHashMap<String, Long>> families =
                 new LinkedHashMap<String, ConcurrentHashMap<String, Long>>();
-        String[] names = {"ban", "mute", "warn"};
+        String[] names = {"ban", "mute", "warn", "freeze"};
         for (int i = 0; i < names.length; i++) {
             families.put(names[i], new ConcurrentHashMap<String, Long>());
             families.put(visible(names[i]), new ConcurrentHashMap<String, Long>());

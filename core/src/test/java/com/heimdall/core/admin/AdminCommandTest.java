@@ -252,8 +252,8 @@ class AdminCommandTest {
 
             for (String verb : Arrays.asList("setup", "status", "reload", "modules", "test",
                     "cache", "offense", "ban", "tempban", "ipban", "mute", "tempmute", "unmute",
-                    "unban", "unwarn", "rollback", "history", "dupeip", "iphistory", "case", "version",
-                    "update", "debug")) {
+                    "unban", "unwarn", "freeze", "unfreeze", "rollback", "history", "dupeip", "iphistory",
+                    "case", "version", "update", "debug")) {
                 assertTrue(anyContains(lines, "/hd " + verb), "help should mention " + verb
                         + " but said: " + lines);
             }
