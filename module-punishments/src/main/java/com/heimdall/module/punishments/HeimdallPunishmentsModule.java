@@ -1271,8 +1271,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
             // its verdict never reaches the player, so it must not use up the screen.
             // Nor does it alert staff: the line was not refused here, so there is nothing to tell.
             if (message.channel() != null) return Verdict.deny(renderReminder(mute, settings));
-            alertStaff(message.senderUuid(), message.senderName(), false, mute.hidden,
-                    message.message());
+            alertStaff(message.senderUuid(), message.senderName(), mute, false, message.message());
             return Verdict.deny(muteNotice(message.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
@@ -1292,7 +1291,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
         }
         if (!muted) return Verdict.abstain();
         if (settings.blocksCommand(attempt.raw())) {
-            alertStaff(attempt.senderUuid(), attempt.senderName(), true, mute.hidden, attempt.raw());
+            alertStaff(attempt.senderUuid(), attempt.senderName(), mute, true, attempt.raw());
             return Verdict.deny(muteNotice(attempt.senderUuid(), mute, settings));
         }
         return Verdict.abstain();
@@ -1303,8 +1302,8 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
      * the mute is enforced: chat and commands are intercepted on backends alone, so a proxy never
      * raises a second alert for the same line.
      */
-    private void alertStaff(UUID sender, String senderName, boolean command, boolean hidden,
-            String said) {
+    private void alertStaff(UUID sender, String senderName, ActivePunishment mute,
+            boolean command, String said) {
         ModuleContext ctx = this.context;
         if (ctx == null || sender == null) return;
         mutedChatAlerts.raise(() -> {
@@ -1315,7 +1314,7 @@ public final class HeimdallPunishmentsModule implements HeimdallModule, Punishme
                         + raced);
                 return null;
             }
-        }, sender, senderName, command, hidden, said, System.currentTimeMillis());
+        }, sender, senderName, mute.id, command, mute.hidden, said, System.currentTimeMillis());
     }
 
     /**

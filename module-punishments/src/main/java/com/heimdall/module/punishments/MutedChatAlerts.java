@@ -38,10 +38,12 @@ final class MutedChatAlerts {
     static final int MAX_SAID_CHARS = 256;
 
     private static final class Window {
+        final String muteId;
         final long startedAt;
         final int folded;
 
-        Window(long startedAt, int folded) {
+        Window(String muteId, long startedAt, int folded) {
+            this.muteId = muteId;
             this.startedAt = startedAt;
             this.folded = folded;
         }
@@ -53,16 +55,26 @@ final class MutedChatAlerts {
      * Records an attempt, answering how many earlier attempts this alert folds in, or -1 when the
      * player is inside a window and nothing is shown. One atomic step, so two chat threads cannot
      * both open a window.
+     *
+     * <p>A window belongs to one mute. Attempts folded under a hidden mute must never surface as
+     * "(4 more since)" on the next mute's alert, which ordinary staff may see, and a count from an
+     * earlier mute is wrong anyway. A mute issued here changes id once, from its local stand-in to
+     * the bot's, which costs at most one extra alert.
      */
-    int admit(UUID player, long now) {
+    int admit(UUID player, String muteId, long now) {
         if (player == null) return -1;
+        String id = muteId == null ? "" : muteId;
         final int[] shown = {-1};
         windows.compute(player, (key, open) -> {
-            if (open == null || now - open.startedAt >= WINDOW_MS) {
-                shown[0] = open == null ? 0 : open.folded;
-                return new Window(now, 0);
+            if (open == null || !open.muteId.equals(id)) {
+                shown[0] = 0;
+                return new Window(id, now, 0);
             }
-            return new Window(open.startedAt, open.folded + 1);
+            if (now - open.startedAt >= WINDOW_MS) {
+                shown[0] = open.folded;
+                return new Window(id, now, 0);
+            }
+            return new Window(id, open.startedAt, open.folded + 1);
         });
         return shown[0];
     }
@@ -77,11 +89,16 @@ final class MutedChatAlerts {
      *     {@link HiddenPunishments#PERMISSION} as well, the same rule as the sign notice
      */
     void raise(Supplier<Collection<PlayerHandle>> online, UUID sender, String senderName,
-            boolean command, boolean hidden, String said, long now) {
-        int folded = admit(sender, now);
+            String muteId, boolean command, boolean hidden, String said, long now) {
+        int folded = admit(sender, muteId, now);
         if (folded < 0 || online == null) return;
         Collection<PlayerHandle> players = online.get();
-        if (players == null) return;
+        if (players == null) {
+            // Nobody was told, so the window is given back: the next attempt alerts at once
+            // rather than 30 s of attempts going unreported.
+            windows.remove(sender);
+            return;
+        }
         Component alert = alert(senderName, command, hidden, folded);
         Component content = content(said, command);
         for (PlayerHandle staff : players) {

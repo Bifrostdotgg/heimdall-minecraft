@@ -86,14 +86,17 @@ class MutedChatAlertsTest {
         MutedChatAlerts alerts = new MutedChatAlerts();
         UUID steve = UUID.randomUUID();
         UUID alex = UUID.randomUUID();
-        assertEquals(0, alerts.admit(steve, 0));
-        assertEquals(-1, alerts.admit(steve, 1_000));
-        assertEquals(-1, alerts.admit(steve, 29_999));
-        assertEquals(0, alerts.admit(alex, 2_000), "a window is per player");
-        assertEquals(2, alerts.admit(steve, 30_000));
-        assertEquals(-1, alerts.admit(steve, 30_001));
+        assertEquals(0, alerts.admit(steve, "m1", 0));
+        assertEquals(-1, alerts.admit(steve, "m1", 1_000));
+        assertEquals(-1, alerts.admit(steve, "m1", 29_999));
+        assertEquals(0, alerts.admit(alex, "m2", 2_000), "a window is per player");
+        assertEquals(2, alerts.admit(steve, "m1", 30_000));
+        assertEquals(-1, alerts.admit(steve, "m1", 30_001));
         alerts.forget(steve);
-        assertEquals(0, alerts.admit(steve, 30_002), "a forgotten player alerts at once");
+        assertEquals(0, alerts.admit(steve, "m1", 30_002), "a forgotten player alerts at once");
+        assertEquals(-1, alerts.admit(steve, "m1", 30_003));
+        assertEquals(0, alerts.admit(steve, "m3", 30_004),
+                "a new mute alerts at once, and carries nothing folded under the old one");
         assertTrue(TestText.plain(MutedChatAlerts.alert("Steve", false, false, 2)).endsWith("(2 more since)"));
 
         try (PunishmentsHarness harness = new PunishmentsHarness(dataDir, ServerRole.STANDALONE)
@@ -299,5 +302,33 @@ class MutedChatAlertsTest {
             chat(harness, steve, "two");
             assertEquals(before + 1, mod.messages().size(), mod.messageText().toString());
         }
+    }
+
+    @Test
+    @DisplayName("attempts under a hidden mute never surface in a later mute's count")
+    void hiddenCountDoesNotCarryOver() {
+        MutedChatAlerts alerts = new MutedChatAlerts();
+        FakePlayer steve = FakePlayer.named("Steve");
+        FakePlayer mod = FakePlayer.named("Mod").grant(MutedChatAlerts.PERMISSION);
+        java.util.List<com.heimdall.core.platform.PlayerHandle> online =
+                Arrays.<com.heimdall.core.platform.PlayerHandle>asList(steve, mod);
+        for (int i = 0; i < 5; i++) {
+            alerts.raise(() -> online, steve.uuid(), "Steve", "hidden-1", false, true, "hi", i);
+        }
+        assertEquals(0, mod.messages().size(), "the hidden mute is kept from Mod");
+        alerts.raise(() -> online, steve.uuid(), "Steve", "open-2", false, false, "hi", 3_600_000);
+        assertEquals("[Heimdall] Steve tried to speak while muted", mod.messageText().get(0));
+    }
+
+    @Test
+    @DisplayName("an unreadable online list gives the window back")
+    void failedRosterGivesTheWindowBack() {
+        MutedChatAlerts alerts = new MutedChatAlerts();
+        FakePlayer mod = FakePlayer.named("Mod").grant(MutedChatAlerts.PERMISSION);
+        UUID steve = UUID.randomUUID();
+        alerts.raise(() -> null, steve, "Steve", "m1", false, false, "hi", 0);
+        alerts.raise(() -> Arrays.<com.heimdall.core.platform.PlayerHandle>asList(mod),
+                steve, "Steve", "m1", false, false, "hi", 1_000);
+        assertEquals(1, mod.messages().size(), mod.messageText().toString());
     }
 }
