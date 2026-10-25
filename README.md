@@ -1,649 +1,436 @@
-# Heimdall Whitelist Plugin
+# Heimdall for Minecraft
 
-A Minecraft plugin that integrates with the Heimdall Discord bot to provide dynamic whitelist management. This plugin replaces traditional static whitelists with API-based dynamic checking, allowing for real-time whitelist decisions and Discord-based account linking.
+The Minecraft half of [Heimdall](https://heimdall.gg), the Discord bot. One jar connects a Paper,
+Folia, Velocity or BungeeCord server to your Discord server, and from then on the Heimdall dashboard
+runs it:
 
-## Supported Platforms
+- **Discord-linked whitelist.** Players link their Minecraft account to Discord with a short code,
+  and the whitelist follows your Discord roles and approvals.
+- **Role sync** between Discord roles and LuckPerms groups, in either direction.
+- **Punishments.** Bans, IP bans, mutes, warns and kicks, enforced by the plugin and recorded as
+  Heimdall cases, with appeals and a public bans page. It can run alongside LiteBans, import its
+  history, and replace it.
+- **Offence tiers.** `/offend` records a rule breach and applies the next step on its ladder.
+- **Chat bridge** between in-game chat and Discord channels. Nothing is stored.
+- **Live console and server status** on the dashboard.
 
-- **Paper/Spigot 1.8.8+** - Backend server plugin
-- **Folia / Canvas** - Same backend jar; region schedulers are used when the server has them
-- **Velocity 3.4.0+** - Proxy plugin for network-wide whitelist checking
-- **BungeeCord / Waterfall** - Proxy plugin, same role as Velocity, for networks on the other proxy
+There is no config file to edit. Every setting lives on the dashboard and is pushed to the plugin
+live. Most updates install without a restart.
 
-The plugin can be used on either the backend servers, the proxy, or both depending on your network setup.
+This README is for whoever runs the server. What each dashboard page does is documented at
+**[heimdall.gg/docs/integrations/minecraft](https://heimdall.gg/docs/integrations/minecraft)**.
 
-A proxy is always the **gatekeeper**: it owns the login decision for everything behind it, and
-the backends behind it enforce everything that happens after. Both proxies do that job
-identically and answer the same `/hdp` command tree — pick whichever one your network already
-runs.
+## Contents
 
-## Features
-
-- **Dynamic Whitelist Checking**: Instead of relying on static whitelist files, the plugin checks with the Heimdall bot API on every connection attempt
-- **Discord Account Linking**: Players link their Minecraft accounts to Discord through an authentication code system
-- **Real-time Decisions**: Staff can approve/deny players through the Discord dashboard without server restarts
-- **Fallback System**: If the API is unavailable, configurable fallback modes (allow, deny, or whitelist-only)
-- **Performance Optimized**: Response caching and async processing to minimize server impact
-- **Configurable Messages**: Customize all player-facing messages from the Heimdall dashboard — pushed to every connected server live, no config file editing or restart
-- **LuckPerms Integration**: Sync Discord roles to LuckPerms groups, on backends and on either proxy — `net.luckperms:api` is the same artifact everywhere, so there is one implementation rather than one per platform
-- **Discord Chat Bridge**: Relay in-game chat, joins, leaves and deaths into mapped Discord channels and Discord messages back in-game — nothing is ever stored, and the plugin never edits what a player typed
-- **Multi-Platform Support**: One JAR — Paper/Spigot, Folia/Canvas, Velocity and BungeeCord
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Proxies and backends](#proxies-and-backends)
+- [Features](#features)
+- [Commands](#commands)
+- [Permissions](#permissions)
+- [Updates](#updates)
+- [Configuration](#configuration)
+- [When the bot is unreachable](#when-the-bot-is-unreachable)
+- [Troubleshooting](#troubleshooting)
+- [Upgrading from v2](#upgrading-from-v2)
+- [Development](#development)
+- [License](#license)
 
 ## Requirements
 
-- **Paper/Spigot**: Java 8+, Paper/Spigot 1.8.8+ or compatible fork
-- **Folia / Canvas**: whatever the server itself requires (Java 21 for current Folia); the plugin
-  jar stays Java 8 and selects region schedulers at runtime
-- **Velocity**: Java 17+, Velocity 3.4.0+
-- **BungeeCord/Waterfall**: Java 8+ — whatever your proxy build itself requires, which is Java 17
-  for BungeeCord builds from 2025 onwards and Java 8 for older ones. Both are covered by the
-  boot-smoke matrix
-- Heimdall Discord Bot with API enabled
-- Network connectivity between your Minecraft server and bot API
+| Platform | Versions | Java |
+| --- | --- | --- |
+| Paper, Spigot and forks | 1.8.8 or newer | 8 or newer |
+| Folia, Canvas | Whatever the server needs | Whatever the server needs (21 for current Folia) |
+| Velocity | 3.4.0 or newer | 17 or newer |
+| BungeeCord, Waterfall | Any current build | Whatever the proxy needs (17 for BungeeCord builds from 2025 on) |
+
+It is the same jar on every platform. Each platform reads its own descriptor from it and loads only
+its own classes.
+
+Optional, picked up automatically when installed: **LuckPerms** (role sync), **LiteBans**
+(punishment hook and import), **Floodgate** (Bedrock players), **ChatControl** (per-channel chat
+bridge), **PremiumVanish** or **SuperVanish** (vanished staff stay out of Discord).
+
+You also need a Discord server with Heimdall in it and the Minecraft feature turned on.
 
 ## Installation
 
-Download the latest `heimdall-whitelist-X.X.X.jar` from the
-[**Releases page**](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest).
-The same JAR works on Paper, Folia/Canvas, Velocity and BungeeCord: each platform reads its own
-descriptor out of the one file and loads only its own classes.
+1. Download `heimdall-whitelist-<version>.jar` from the
+   [latest release](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest).
+2. Put it in the server's or proxy's `plugins/` folder and start it.
+3. On the dashboard, open **Minecraft > Networks**, add the server, and copy the setup code it
+   gives you.
+4. From the console or in game as an operator, run:
 
-### Paper/Spigot Installation (fresh install)
+   ```
+   /hd setup <code>      on Paper, Spigot or Folia
+   /hdp setup <code>     on Velocity or BungeeCord
+   ```
 
-1. Download the latest `heimdall-whitelist-X.X.X.jar` from the [Releases page](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest)
-2. Place the JAR file in your server's `plugins/` folder and start the server
-3. On the Heimdall dashboard, open the guild's **Minecraft** page and mint a setup code for this server
-4. In-game or from the console, run `/hd setup <code>` — the server connects immediately, no restart needed
-5. There is no config file to hand-edit. Everything else — messages, cache windows, which modules are on, role sync, offense templates — is configured on the dashboard and pushed to the plugin over its tunnel. `plugins/Heimdall/bootstrap.yml` only holds the connection itself (see [Configuration](#configuration))
-6. After a config change later, `/hd reload` re-reads `bootstrap.yml` and reconnects in place — you rarely need it, since dashboard settings apply live already
+   The server connects straight away. No restart, no file to edit.
 
-### Velocity Installation (fresh install)
+If you use a whitelabel Heimdall, its setup codes only work against its own address. Pass it as the
+second argument: `/hd setup <code> <endpoint>`.
 
-1. Download the latest `heimdall-whitelist-X.X.X.jar` from the [Releases page](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest)
-2. Place the JAR file in your Velocity proxy's `plugins/` folder and start the proxy
-3. On the Heimdall dashboard, open the guild's **Minecraft** page and mint a setup code for this proxy
-4. From the console (or in-game as an operator), run `/hdp setup <code>` — the proxy connects immediately, no restart needed
-5. As above, there is no config file to hand-edit; `bootstrap.yml` holds only the connection
+Run `/hd status` (`/hdp status`) to check it connected. On a network, install the plugin on the
+proxy and on every backend, and claim each one with its own code.
 
-### BungeeCord / Waterfall Installation (fresh install)
+The plugin keeps its files in `plugins/Heimdall/` on Paper and BungeeCord, and in
+`plugins/heimdall/` on Velocity, which names the folder after the plugin id.
 
-1. Download the latest `heimdall-whitelist-X.X.X.jar` from the [Releases page](https://github.com/Bifrostdotgg/heimdall-minecraft/releases/latest)
-2. Place the JAR file in your proxy's `plugins/` folder and start the proxy
-3. On the Heimdall dashboard, open the guild's **Minecraft** page and mint a setup code for this proxy
-4. From the console (or in-game as an operator), run `/hdp setup <code>` — the proxy connects immediately, no restart needed
-5. As above, there is no config file to hand-edit; `plugins/Heimdall/bootstrap.yml` holds only the connection
+## Proxies and backends
 
-> Note the directory: BungeeCord names a plugin's data folder after the descriptor's **name**, so
-> it is `plugins/Heimdall/` here as it is on Paper — while Velocity names it after the plugin
-> **id** and uses `plugins/heimdall/`.
+Every install has a **role**, worked out automatically from the platform and the server's proxy
+forwarding settings:
 
-### Upgrading from v2
+| Role | Where | What it does |
+| --- | --- | --- |
+| `standalone` | A server with no proxy in front | Everything |
+| `gatekeeper` | Velocity or BungeeCord | Decides who may log in to the network, enforces bans, announces punishments |
+| `enforcer` | A backend behind a proxy | Enforces what happens in game: mutes, frozen players, role sync, `/offend` |
 
-Stop the server, drop in the new JAR in place of the old one, and start it back up — no config
-edits required. On its first boot, v3 looks for a v2 `config.yml` (Bukkit/Paper) or `config.json`
-(Velocity) both in its own data directory and in the sibling directory a v2 install actually used —
-`plugins/HeimdallWhitelist/` on Bukkit/Paper, `plugins/heimdall-whitelist/` on Velocity — and
-migrates it automatically:
+You can override it with `role:` in `bootstrap.yml`, but you rarely should.
 
-- Credentials, server id and the login-timing knobs (`timeout`, `retries`, `retryDelay`) are written
-  into a new `bootstrap.yml`.
-- Everything else the old config held (messages, cache windows, fallback mode, etc.) is staged for
-  import into the dashboard, and lights up once the server is claimed — see the next step.
-- The old config file is renamed to `*.v2-backup` (`config.yml.v2-backup` / `config.json.v2-backup`),
-  never deleted.
-- Until the server is claimed, it keeps running on v2-equivalent defaults.
+Things worth knowing on a network:
 
-**There is nothing to upgrade from on BungeeCord.** v2 shipped a Bukkit build and a Velocity
-build and nothing else, so a BungeeCord proxy is always a fresh install — follow the section
-above instead. If you copy a v2 directory across from a backend hoping it will be picked up, the
-plugin says so on boot and tells you where to put the file.
+- **The proxy owns the login decision.** By default backends check logins again too
+  (`enforceOnBackend`, a whitelist setting on the dashboard). Turn that off and backends leave it to
+  the proxy, which saves a request per server switch.
+- **Mutes are enforced on the backend.** A proxy cannot cancel signed chat, so a muted player is
+  stopped by the server they are on.
+- **Only the outermost server announces punishments**, so a ban is not announced twice. On a
+  network that is the proxy, which means the announcement permissions that matter are the proxy's.
 
-Finish the upgrade by running `/hd setup <code>` (`/hdp setup` on Velocity) with a code minted on the
-dashboard, same as a fresh install — this is what actually applies the imported settings. `/hwl` still
-works post-upgrade as a deprecated alias that forwards to `/hd`/`/hdp` (see [Commands](#commands)), so
-existing runbooks and macros are not broken by the upgrade.
+## Features
 
-### Keeping the plugin updated
+Each feature is a module you switch on and off per server on the dashboard, live. `/hd modules`
+shows what is running.
 
-The plugin checks your Heimdall bot for the latest published version on startup
-and every few hours. When a newer version is available:
+| Module | What it does |
+| --- | --- |
+| `whitelist` | The login gate and the local whitelist mirror |
+| `rolesync` | Discord roles to LuckPerms groups and back |
+| `punishments` | Bans, mutes, warns and kicks, in the mode the dashboard sets |
+| `offenses` | `/offend` and its escalation tiers |
+| `bridge` | Chat, joins, leaves and deaths to Discord, and Discord messages back in game |
+| `console` | Streams the server console to the dashboard and runs commands from it |
+| `health` | TPS, memory and player counts for the dashboard |
 
-- A warning is logged to the server console.
-- Admins (`heimdall.admin`) are notified as they join (if `updatesNotifyAdmins` is on).
-- Run `/hd version` (`/hdp version` on Velocity) to see the installed vs. latest version on demand.
-- Run `/hd update` (`/hdp update` on Velocity) to install the latest JAR. It checks the bot for
-  the newest release itself, so there is no need to run `/hd version` first, and it does nothing
-  if you are already on the latest version. Otherwise it downloads the new JAR:
-  - **Paper**: it is placed in `plugins/update/` and applied automatically on the
-    next server restart.
-  - **Velocity and BungeeCord**: the running JAR is replaced in place and picked up on the next
-    restart. Neither proxy has an `update/` staging folder, so on Windows — where an open JAR
-    cannot be replaced at all — it is downloaded into the plugin's data folder instead and the
-    console says to move it into `plugins/` yourself.
+`/hd disable <module>` and `/hd enable <module>` are a local override that wins over the dashboard
+until you clear it, and works while the bot is unreachable. `/hd disable` on its own turns off the
+whitelist: the "let everyone in now" switch.
 
-**Most updates also apply live, with no restart.** The plugin is a small permanent shell around a
-swappable core, and when a release is verified against the SHA-256 the bot publishes for it, its
-core is swapped in while the server runs: the bot link reconnects within a few seconds, logins
-wait briefly, and bridged chat in that window is not relayed. The JAR is still installed for the
-next restart too, so the update survives one. A release with no published checksum, or one that
-changes the shell itself, applies on restart only, and `/hd update` says which. The first release
-with the shell needs one ordinary restart to install it. `/hd status server` shows the running
-core's version and checksum, and `/hd swap` swaps in a core placed by hand at
-`plugins/Heimdall/core/staged.jar` (`plugins/heimdall/core/` on Velocity). See departure D87 in
-`docs/v2-departures.md` for the details and the limits.
+### Account linking
 
-`/hwl version` / `/hwl update` still work as the deprecated alias, forwarding to the same commands.
+A player links their Minecraft account to Discord with a six-digit code:
 
-Unlike most plugin behaviour, the update check has no dashboard equivalent — it has to keep working
-on a server the bot cannot currently push config to — so it is controlled locally in `bootstrap.yml`:
+1. They start in Discord, from the account-linking panel or `/link-minecraft`.
+2. The code reaches them in game. A whitelisted server shows it on the disconnect screen. A server
+   that lets anyone join shows it when they join: as a dialog with a copy button on Paper 1.21.7+
+   with a 1.21.6+ client, and as a click-to-copy chat message everywhere else, Bedrock included.
+   `/linkdiscord` (or `/link`) shows it on request.
+3. They press **Confirm Code** in Discord and enter it.
 
-```yaml
-updatesCheckEnabled: true       # check for new versions on startup + interval
-updatesNotifyAdmins: true       # message admins on join when an update is available
-updatesCheckIntervalHours: 12   # how often to re-check (minimum 1)
-```
+Players can also start in game with `/linkdiscord`. Linking works whatever modules are on, so an
+open server can use it for role sync alone.
 
-## Configuration
+The prompt names the Discord account that asked and tells the player never to give the code to
+anyone, because whoever enters it gets the link.
 
-v3 does not use a per-server `config.yml`/`config.json` the way v2 did. The only local file is a
-small `bootstrap.yml`, holding just enough to connect. Everything else — player-facing messages,
-cache windows, which modules are enabled, role-sync groups, offense templates, API fallback
-behaviour — lives on the Heimdall dashboard's **Minecraft** page and is pushed to the plugin live
-over its tunnel. Changing any of it does not need a server restart or a file edit.
+### Role sync
 
-### bootstrap.yml
+Needs LuckPerms on the server that applies it. Mappings are set on **Minecraft > Settings > Role
+sync**, and each one has a direction.
 
-Written by `/hd setup` (`/hdp setup` on Velocity) the first time a server is claimed, and lives at
-`plugins/Heimdall/bootstrap.yml` on Paper, or the plugin's data directory on Velocity:
+- **Discord to Minecraft.** Groups are applied when the player joins and whenever their Discord
+  roles change.
+- **Minecraft to Discord.** A rank a player gets in game, from a store or `/lp user ... parent`,
+  gives them the Discord role. Changes are reported as they happen, and anything missed is caught
+  up at their next join. This direction never removes a group in game, so a bought rank cannot be
+  taken away by a sync.
 
-```yaml
-endpoint: "https://api.bifrost.gg" # which Heimdall instance this server talks to
-tokenId: "..." # public identifier for the guild API token
-token: "..." # the signing secret — never share this
-serverId: "..." # this server's identity within the guild
-role: "auto" # auto | standalone | gatekeeper | enforcer — see ServerRole
-identityCheck: "auto" # auto | strict | off - what to do if this file turns up on another machine
-debug: false # verbose logging; toggle live with /hd debug on|off
-timeoutMs: 5000 # per-attempt login timeout
-retries: 3 # total login attempts, including the first
-retryDelayMs: 1000 # pause between login attempts
-updatesCheckEnabled: true # self-updater — see "Keeping the plugin updated"
-updatesNotifyAdmins: true
-updatesCheckIntervalHours: 12
-disabledModules: "" # space-separated local module overrides — see /hd disable
-instanceFingerprint: "..." # which machine these credentials were bound to; written by the plugin
-guildIdCache: "..." # cache of the last resolved guild; written by the plugin, not a setting
-```
+**Known gap.** If LuckPerms runs only on the backends and the backends leave logins to the proxy,
+nothing syncs groups at join: the proxy has no LuckPerms to write to and the backends do not ask.
+Role changes still apply as they happen. Run LuckPerms on the proxy, or leave `enforceOnBackend` on,
+to get the join-time sync back.
 
-`token`, `tokenId`, `serverId`, `instanceFingerprint` and `guildIdCache` are written by `/hd setup`
-and by the plugin itself; don't hand-edit them. The login-timing fields (`timeoutMs`/`retries`/`retryDelayMs`) and
-the update knobs are the ones you might reasonably tune by hand; they stay local because they shape
-the very request that would otherwise fetch the dashboard's config, so the dashboard can't own them.
+### Punishments
 
-`identityCheck` decides what happens when a `bootstrap.yml` is found on a machine other than the
-one it was bound to, which is what a copied server directory or a restored backup looks like. Two
-servers sharing one `serverId` both connect, and the bot keeps only the newest socket, so they evict
-each other for as long as they are both up.
+The dashboard's **Minecraft > Enforcement** page sets one of three modes for the guild:
 
-- `auto` (default) - refuse to connect when the server is on a game panel and its panel id has
-  changed, since that really is a different server. Otherwise warn on every boot and connect anyway,
-  because a container that gets recreated legitimately has a new host name.
-- `strict` - refuse to connect on any mismatch.
-- `off` - never compare.
+| Mode | In game |
+| --- | --- |
+| **Offenses only** (default) | Heimdall enforces nothing. `/offend` tiers run their configured commands, usually your ban plugin's |
+| **Alongside your ban plugin** | LiteBans stays in charge. Every punishment and lift it makes is copied to Heimdall, and lifting one from Heimdall (the dashboard, `/mc-punish`, an accepted appeal) lifts it in LiteBans too |
+| **Heimdall runs bans** | The plugin enforces everything itself: logins, chat, blocked commands, frozen players, IP, subnet and country bans |
 
-The check runs before the tunnel is dialled, which is why it lives here rather than on the
-dashboard: the connection it decides about is the one that would have fetched the setting. See
-`/hd identity` for what to do about a mismatch.
+The `/hd` punishment commands issue punishments only in **Heimdall runs bans**. In the other modes
+the lookups (`history`, `banlist`, `dupeip`) and `import` still work.
 
-`endpoint` is the field whitelabel instances care about: most installs talk to the public
-`https://api.bifrost.gg`, but a whitelabel instance has its own URL, and its setup codes are only
-claimable there — pass it as the optional second argument, `/hd setup <code> <endpoint>`.
+**Moving off LiteBans.** Run alongside it first, so staff see the history while nothing changes in
+game. Then preview the import with `/hd import --dry-run` (or **Preview import** on the dashboard),
+run `/hd import` on every server that has its own LiteBans database, switch to **Heimdall runs
+bans**, and remove LiteBans. The importer also reads AdvancedBan, BanManager and vanilla
+`banned-players.json`. IP addresses are hashed on the server before anything is sent. The full
+runbook is in the docs:
+[Cutover from LiteBans](https://heimdall.gg/docs/integrations/minecraft#cutover-from-litebans).
 
-### Modules
+**Mutes.** A muted player sees the full mute screen once per mute each session, and a one-line
+reminder after that. They also cannot run the commands on the blocked list (`msg`, `tell`, `me`, `r`, `whisper`
+and `w` by default, editable on the dashboard). An entry blocks that command, its namespaced form
+and anything typed after it, a whole word at a time: `ch send` blocks `/ch send hi` but not
+`/ch join`, and `me` does not block `/menu`.
 
-Every feature is a module that can be switched on and off from the dashboard's **Minecraft** page
-while the server is running — no restart, no file edit. `/hd modules` lists this build's set and
-each one's current state; `/hd enable`/`/hd disable` are a **local** override that wins over the
-dashboard until cleared (see [Admin Commands](#admin-commands)).
+**Staff alerts.** Staff holding `heimdall.punishments.notify.muted` are told when a muted player
+tries to talk or use a blocked command, on the server that refused it, at most once every 30
+seconds per mute. `heimdall.punishments.notify.muted.content` adds what they tried to say. Nobody
+holds either by default. What the player said is never stored or sent anywhere.
 
-| Module | What it does | Runs on | Default |
-| --- | --- | --- | --- |
-| `whitelist` | The login gate and the local whitelist mirror. On a proxied network the gatekeeper owns the decision; a backend re-check is the `enforceOnBackend` setting | every role | on |
-| `rolesync` | Applies the bot's Discord-role snapshots to a player's LuckPerms groups, on join and whenever someone's Discord roles change, and reports in-game rank changes back for Minecraft-to-Discord mappings. Does not need the whitelist module | every role | on |
-| `offenses` | `/offend` and the escalation tiers the dashboard defines | every role | on |
-| `console` | Streams the server console to the dashboard and runs commands from it | every role | off — it streams every log line |
-| `bridge` | Relays Minecraft chat and join/leave/death into Discord, and mapped Discord channels back in-game | every role | on, and inert until channels are mapped |
-| `health` | The TPS/memory/player-count snapshots that ride the heartbeat | every role | on |
+**Screens** (what a banned or muted player reads) and the announcement lines are edited on the
+dashboard, not on the server.
 
-**Linking and role sync do not need the whitelist module.** `/linkdiscord` (alias `/link`) is part of the plugin itself, not of any module: it is registered whenever the plugin is running, whatever modules are on, so players can link their Discord account on an open server too (on a server not yet connected to the bot it says so). Role sync works the same way with the whitelist on or off. When the whitelist module decides a login, the bot's answer already carries the player's role snapshot and nothing extra is asked. When it does not (the whitelist is off, or the player is on the bypass list), the server that would have asked about the login fetches the snapshot from the bot as the player joins, in the background. On a proxied network that is the proxy: a backend that leaves logins to its proxy (`enforceOnBackend` off, or the whitelist off on a backend) does not fetch. A failed fetch changes nothing until the next role change or join.
+**Country bans** need a `geo-countries.tsv` file (`CIDR<TAB>ISO code` per line) in the plugin's
+folder on the proxy, or on a standalone server. Without one they deny nobody, and the console says
+so at startup.
 
-**A link started in Discord shows up in game.** When a player has a link code waiting, the plugin shows it to them a couple of seconds after they join (on a Velocity or BungeeCord proxy, five seconds after they first reach a backend server, so that on a network running the plugin on both, the backend gets in first and can show the dialog), and the bot can also push it to a server they are already on, so nobody has to know to type `/linkdiscord`. On Paper 1.21.7 or newer, with a 1.21.6 or newer client, the code opens as a dialog with a button that copies it. Everywhere else, and always for Bedrock players, it arrives in chat, click-to-copy where the server can carry that (Spigot and Paper; on Velocity and BungeeCord it is plain text). The prompt says who started the link in Discord, when the bot reports it, and always warns the player to enter the code only themselves and never give it to anyone, since a code read out to somebody else links the account to their Discord. Like `/linkdiscord`, this needs no module.
+**If the bot is down**, every server checks its own copy of active punishments, so bans and mutes
+keep working. A punishment issued during an outage applies on that server at once and syncs when
+the connection comes back.
 
-What that costs per login depends on the network:
+### Offences
 
-- **Standalone server:** one request to the bot per login.
-- **Proxied network whose backends defer** (`enforceOnBackend` off, or no whitelist on the backends): one request per login for the whole network, made by the proxy. Switching servers costs nothing.
-- **Proxied network on the default `enforceOnBackend: true`:** every backend join and every server switch already asks the bot about the login, as it always has, and that answer carries the role snapshot, so nothing extra is sent. A player on the bypass list is the exception: the proxy and each backend that re-checks logins each fetch a snapshot for them.
+`/offend <player> <offense> [notes]` records a breach of a rule set up on **Minecraft > Rules** and
+applies the player's next tier. The tier's command runs as the console. The player has to be
+online.
 
-**Known gap: LuckPerms only on the backends.** A common setup runs LuckPerms on the backends and not on the proxy. If the backends defer to the proxy, the proxy has nowhere to write groups and skips, the backends leave it to the proxy, and no server syncs groups on join. In RCON mode the bot's RCON group update that a join would normally trigger does not happen either. The same applies to a backend behind a proxy that does not run Heimdall at all: a backend counts as "behind a proxy" from its own proxy-forwarding settings (or the role set in `bootstrap.yml`), so with the whitelist off it makes no join-time request. Groups still follow every Discord role change as it happens; only the sync at join is missing. This is a documented limitation, not a regression: before this release there was no join-time sync at all without the whitelist module. To get join-time sync on such a network, run LuckPerms on the proxy, or turn the whitelist module on (on the backends, with `enforceOnBackend` on, if the proxy has no LuckPerms).
+### Chat bridge
 
-**Give Discord roles for in-game ranks.** Role sync also runs the other way: a rank a player gets in game (bought through a store, or granted or removed with `/lp user ... parent`) can grant or remove a Discord role. This needs LuckPerms on the server. There is nothing to set on the plugin: which groups are watched is decided by the bot from the mappings you give a Minecraft-to-Discord direction in the dashboard, and the plugin reports only changes that touch one of those groups (with no such mappings it does not even listen). Changes are reported live, a few at once collapsed into one report, while the server is connected to the bot. A rank edited while the player is offline (a console command, a store delivering to an offline buyer) is reported by the server that made the edit. Anything missed (a change made on another server, a temporary rank that expired while they were away, or the bot being unreachable at the time) is reconciled at their next join, because the join-time request always carries the player's current groups. The plugin never removes a group because of this direction, so a purchased rank cannot be taken away by a sync.
+Mappings are set on **Minecraft > Chat Bridge**. The bridge keeps nothing: chat passes through
+memory and is gone, and the text is sent exactly as typed. Two per-server settings decide which
+servers relay:
 
-Two notes worth having before you turn something on:
+- `relayChat` is on for backends and off for the proxy by default, so a network running the plugin
+  everywhere does not send every line twice. A network that runs it only on the proxy can turn it
+  on there.
+- `relayEvents` (joins, leaves, deaths) is on everywhere by default. Turn it on for exactly the
+  servers you want announcing, usually the proxy. Deaths only ever come from backends.
 
-- **The chat bridge stores nothing.** Chat passes through memory and is gone — there is no history,
-  no buffer beyond a small bounded relay queue, and no log line anywhere carries a message. It also
-  never edits what a player typed: the text goes to the bot exactly as it was sent, and all
-  formatting is the dashboard's template.
-- **Who relays is a per-server choice**, and chat and player events are chosen separately —
-  `relayChat` and `relayEvents`, both per server in the dashboard.
-  - `relayChat` defaults to **on for each backend and off for the proxy**, so a network running the
-    plugin everywhere does not send every line twice. A network that only runs the plugin on its
-    proxy can flip that — the proxies observe chat and never block it, so relaying from the
-    gatekeeper is safe.
-  - `relayEvents` covers joins, leaves and deaths, and defaults to **on everywhere** — which is what
-    every server already did before the setting existed, so upgrading changes nothing. It needs no
-    per-role default the way chat does, because duplicate join/leave/death are dropped before they
-    reach Discord on a best-effort basis: several servers relaying usually shows once, rather than
-    always twice the way chat would. That drop is a backstop and not a guarantee — servers whose
-    clocks disagree can still let a duplicate through — so **turn it on for exactly the servers you
-    want announcing sessions** rather than leaving it on everywhere and relying on the backstop.
-    "The proxy announces joins, the backends only relay chat" is the usual shape. If you map each
-    server to its own channel, this is also what decides *which* channel a join appears in.
-  - Deaths are the exception to any proxy-origin plan: no proxy has a death event, so those only
-    ever come from backends.
-  - Both take effect the moment you save — no restart, and no switching the module off and on.
-- **Vanished staff stay vanished in Discord**, on every server that can see the vanish. A server
-  with PremiumVanish (or SuperVanish) never posts a vanished player's join, leave or death, nor the
-  leave of a session whose join was kept quiet.
-  - **Every server that relays events must be able to see it.** A proxy with `relayEvents` on must
-    run PremiumVanish's proxy half itself; with PremiumVanish only on the backends, the proxy
-    still announces the join the moment the player logs in. If you cannot run it on the proxy,
-    turn `relayEvents` off there and let the backends announce.
-  - On a Bukkit backend the `vanished` flag that EssentialsX, CMI and similar plugins set also
-    counts, on a best-effort basis: some of them (EssentialsX's silent join, for one) set it a
-    moment after the join, so a join can still slip through. A proxy cannot see these plugins at
-    all, so with one of them, `relayEvents` must be off on the proxy.
-  - With PremiumVanish installed, joins are posted a little late while the plugin makes sure the
-    player is not being vanished: about a second and a half on a backend, and on a proxy a second
-    and a half after the player reaches a backend, however long that takes (an auth lobby counts as
-    not there yet). Somebody who disconnects before ever reaching a backend is not announced at
-    all, neither joining nor leaving. Without PremiumVanish nothing changes.
-  - `announceVanishToggles` (per server, **off** by default) decides what happens when somebody
-    vanishes or reappears mid-session. Off: nothing is posted. On: a backend posts what players in
-    game see, a leave when they vanish and a join when they reappear (not for a silent `-s` toggle,
-    which players do not see either). A proxy never announces these, because it cannot tell a silent
-    toggle from an announced one. It only posts where `relayEvents` is on.
+**Vanished staff stay vanished** on any server that can see the vanish. With PremiumVanish or
+SuperVanish, a vanished player's join, leave and death are never posted. Every server with
+`relayEvents` on must be able to see it, so if PremiumVanish runs only on the backends, turn
+`relayEvents` off on the proxy. EssentialsX, CMI and similar vanish plugins are honoured on a
+best-effort basis on backends only. `announceVanishToggles` (off by default) posts a leave and a
+join when someone vanishes or reappears.
 
-### WebSocket Tunnel
-
-Every platform keeps a persistent 2-way WebSocket connection to the Heimdall bot (derived from
-`endpoint`, no inbound ports needed). It is core to how v3 works, not an optional extra — it is how
-the dashboard's pushed configuration actually reaches the plugin, and it also carries
-Discord→Minecraft role-sync, the dashboard's live console, player list and status, and remote
-plugin updates. There is no setting to disable it. `/hd status` reports whether it is currently
-connected; while it is down the plugin keeps running on the last configuration it received (or
-built-in v2-equivalent defaults, for a server that has not been claimed yet).
+**ChatControl channels** are honoured: only the channels ticked on a mapping are relayed. A proxy
+cannot tell channels apart, so let backends relay chat when ChatControl channels are on.
 
 ## Commands
 
-### Player Commands (every platform)
+### Players
 
-- `/linkdiscord` (alias `/link`) - request a code to link this Minecraft account to Discord
-- `/offend <player> <offense> [notes]` - record an offence against a player and apply the
-  escalation tier (requires `heimdall.offend`)
+| Command | What it does | Node |
+| --- | --- | --- |
+| `/linkdiscord` (`/link`) | Show a code to link this account to Discord | `heimdall.linkdiscord` (everyone) |
+| `/offend <player> <offense> [notes]` | Record an offence and apply its tier | `heimdall.offend` |
 
-### Punishment Commands
+### Admin
 
-`/hd ban`, `/hd tempban`, `/hd ipban`, `/hd mute`, `/hd tempmute`, `/hd kick`, `/hd warn`, their
-revoke verbs and the lookups. In `replace` mode they are also registered as root commands (`/ban`,
-`/tempban`, ...) when `rootAliases` is on, and both spellings behave identically.
+`/hd` (alias `/heimdall`) on Paper, Spigot and Folia. `/hdp` (alias `/heimdallproxy`) on Velocity
+and BungeeCord, with the same subcommands. All of it needs `heimdall.admin`, and all of it works
+from the console. `/hwl` still works as a deprecated alias from v2.
+
+| Command | What it does |
+| --- | --- |
+| `setup <code> [endpoint]` | Claim this server with a code from the dashboard |
+| `status [bot\|modules\|server\|all]` | One-screen health summary, or the detail behind it. `all` is for support tickets |
+| `reload` | Re-read `bootstrap.yml` and reconnect |
+| `modules` | List modules and what each is doing |
+| `enable [module]`, `disable [module]` | Local override of the dashboard. No module means `whitelist` |
+| `test <player>` | Run the real login check for a player without changing anything |
+| `cache stats\|clear\|cleanup\|sync` | Inspect, empty, sweep or refresh the local whitelist mirror |
+| `offense reload\|types` | Refresh or list the offence types `/offend` accepts |
+| `import [--dry-run]` | Import punishment history from LiteBans and others. `--dry-run` writes nothing |
+| `case note <number> <text>` | Add a note to a Minecraft case, signed by you. Players only |
+| `identity [adopt\|reset confirm]` | Show or rebind which machine these credentials belong to |
+| `version` | Show the installed and latest versions |
+| `update` | Install the latest release, live when it can be |
+| `swap` | Swap in a core you placed at `core/staged.jar` yourself |
+| `debug on\|off` | Verbose logging, remembered across restarts |
+
+### Punishments
 
 ```
 /hd ban <player> [duration] [reason] [-s|-p] [-h]
 ```
 
-**The duration can be anywhere after the player, and so can the flags.** The first whole token
-that is a duration becomes the length, and everything else in any order is the reason, so
-`/hd ban Steve griefing spawn 7d` and `/hd ban Steve 7d griefing spawn` are the same ban. A word
-with a duration buried in it is a word: `abc5m` and `1day-old` stay in the reason.
+| Verb | Shape | Root alias registers on |
+| --- | --- | --- |
+| `ban`, `ipban` | `<player> [duration] [reason]` | proxy |
+| `tempban` | `<player> <duration> [reason]` | proxy |
+| `mute` | `<player> [duration] [reason]` | backend |
+| `tempmute` | `<player> <duration> [reason]` | backend |
+| `kick`, `warn` | `<player> [reason]` | proxy |
+| `unban`, `unwarn` | `<player> [reason]` | proxy |
+| `unmute` | `<player> [reason]` | backend |
+| `rollback` | `<player>`, lifts their latest active punishment | proxy |
+| `history`, `staffhistory`, `banlist` | `<player>`, `<staff>`, nothing | proxy |
+| `dupeip`, `iphistory` | `<player>` | proxy |
 
-**Duration grammar** - case-insensitive, no spaces inside a token:
+A standalone server registers all of them.
 
-| Unit | Spellings |
-| --- | --- |
-| seconds | `s`, `sec`, `secs`, `second`, `seconds` |
-| minutes | `m`, `min`, `mins`, `minute`, `minutes` |
-| hours | `h`, `hr`, `hrs`, `hour`, `hours` |
-| days | `d`, `day`, `days` |
-| weeks | `w`, `week`, `weeks` |
-| months | `mo`, `month`, `months` (30 days) |
-| years | `y`, `year`, `years` (365 days) |
-| permanent | `perm`, `permanent`, or no duration at all |
-
-Tokens can be compounded: `1d12h`, `2h30m`, `1d12h30m15s`. Lengths are kept in **seconds**, so
-`30s` is thirty seconds rather than the minute it used to round up to. The longest punishment
-that can be issued is ten years; past that the command refuses and tells you to use `perm`. The
-same grammar is used by `/mc-punish` in Discord and by the dashboard form, from one shared table.
-
-**Only a ban, an IP ban and a mute have a length.** A kick and a warn are events rather than
-states, so `/hd kick` and `/hd warn` take `<player> [reason]` and nothing else: they complete no
-durations, and a command that carries one anyway is refused rather than having the word quietly
-taken out of the reason. Put it in the reason or drop it.
-
-In **hook mode**, a LiteBans ban longer than ten years is mirrored as permanent rather than
-refused. Nobody is present to be told, the ban is already live in LiteBans, and `/ban Steve 100y`
-is a common way to spell "forever" there; the server log records the length that was dropped.
-
-Also in **hook mode**, lifting a LiteBans ban or mute from Heimdall (the dashboard,
-`/mc-punish unban`, or accepting an appeal) lifts it in LiteBans too. This covers punishments
-LiteBans reported to Heimdall and ones imported from LiteBans; a ban issued from the dashboard was
-never in LiteBans, so lifting it leaves LiteBans alone. A ban left over from a time the server ran
-in replace mode counts as LiteBans' too (older bots recorded both the same way), so lifting one
-also lifts any LiteBans ban on that player, and Heimdall can go on showing that LiteBans ban as in
-force until it is lifted there by hand. The server runs LiteBans' own
-`litebans:unban <uuid> -s` (or `unmute`) as the console, or the bare verb on a proxy, and only
-when LiteBans still has one in force. A ban running out or being replaced by a newer one is left
-to LiteBans. If the command fails, the server log says so and the ban has to be lifted in
-LiteBans by hand. A server that is offline when the ban is lifted does not catch up later.
-Needs a bot new enough to say where a revoked punishment came from; with an older bot nothing is
-lifted in LiteBans.
-
-**Tab completion** offers player names at the target position - everyone online first, then
-everyone this server has seen or punished - the flags after a `-`, and, on the verbs that have a
-length, a short duration list once a player is named. A flag is offered only where it would
-actually be accepted, which is a question about the node **and** about the verb: `-s` and `-p` need
-`heimdall.punishments.silent` and work on the issuing and revoke verbs alike, `-h` needs
-`heimdall.punishments.hidden` and is issue-only (a revoke reads hidden off the row it lifts, so
-`/hd unban -h` is refused), and the lookups take no flags at all. `/hd unban`, `/hd unmute` and
-`/hd unwarn` only offer players who actually have one of those to lift, and a hidden punishment is
-a candidate only for a holder of the hidden node: offering the name to anybody else would disclose
-the punishment the flag hides.
-
-**The screens** a punished player sees, and the two chat lines a punishment is announced with, are
-MiniMessage templates edited on the dashboard's Minecraft page, not in any file here. They carry
-the guild's name, the staff member, the reason, the length, the time remaining, the punishment id
-and the appeal link, and a clause whose value is empty disappears rather than printing a blank
-row. The ID row is one of those clauses: a punishment issued while the bot is unreachable has only
-a local id, which no appeal can be opened with, so the row appears once the real id syncs.
-
-### Admin Commands
-
-The admin tree is `/hd` (alias `/heimdall`) on Paper/Spigot backend servers, and `/hdp` (alias
-`/heimdallproxy`) on **both** proxies, Velocity and BungeeCord — replace `/hd` with `/hdp` for
-everything below when running on a proxy. It is the same tree, registered through each
-platform's own command system, so a runbook does not have to know which proxy it is on.
-`/hwl` (alias `/heimdallwhitelist`) still works everywhere as a **deprecated alias**: it forwards
-to the same tree and prints a one-time-per-start warning telling you to switch.
-
-- `/hd setup <code> [endpoint]` - claim this server with a setup code minted on the dashboard;
-  connects immediately, no restart
-- `/hd status` - a one-screen summary: version, role and server software, then one coloured row
-  each for the bot connection, the tunnel, modules, the whitelist mirror and updates, with a line
-  per problem saying how to fix it. Rows and the footer are clickable on Paper and Velocity
-- `/hd status bot|modules|server|all` - the detail behind the summary: endpoint, guild, serverId,
-  identity and protocol (`bot`); per-module state, capabilities and full mirror stats (`modules`);
-  software, core and shell versions, console tap health and updates (`server`); or all three for
-  pasting into a support ticket (`all`)
-- `/hd reload` - re-read `bootstrap.yml` and reconnect the tunnel in place
-- `/hd identity` - show which machine this server's credentials are bound to, this machine's
-  fingerprint, and the `identityCheck` policy
-- `/hd identity adopt` - bind the credentials to this machine. The answer to "I moved this server"
-- `/hd identity reset confirm` - clear the token, `serverId`, binding and the cached dashboard
-  configuration, keeping the endpoint and the other local settings, so this copy can be set up
-  again with a fresh code. The answer to "I copied this server". Without `confirm` it only says
-  what it would do
-- `/hd modules` - list this build's modules and each one's state
-- `/hd enable [module]` / `/hd disable [module]` - a **local** override, persisted in
-  `bootstrap.yml`, that switches a module off/on even while the bot is unreachable and wins over
-  the dashboard until cleared. With no argument, `/hd disable` targets the `whitelist` module — the
-  "let everyone in" escape hatch, v2's global `/hwl disable` made per-module and made local
-- `/hd test <player>` - run the real login check for a player without changing anything; reports
-  the decision and which check made it
-- `/hd cache stats|clear|cleanup|sync` - inspect, empty, sweep or refresh the local whitelist mirror
-- `/hd offense reload|types` - refresh or list the offense types `/offend` accepts
-- `/hd case note <number> <text>` - add a note to a Heimdall case, by the number the dashboard and
-  Discord show. Written as you, by your account, with your linked Discord account named when you
-  have one. It can only reach a Minecraft case, and a hidden case only if you hold
-  `heimdall.punishments.hidden`. Players only, since a note is signed by the account that wrote it
-- `/hd version` - show the installed version and check for a newer one
-- `/hd update` - check for a newer release and install it; live when it can be, otherwise on the next restart
-- `/hd debug on|off` - toggle debug logging, persisted to `bootstrap.yml`
-
-**Permission Required**: `heimdall.admin` (defaults to OP)
+- **Durations** go anywhere after the player: `/hd ban Steve 7d griefing` and
+  `/hd ban Steve griefing 7d` are the same ban. Units are `s`, `m`, `h`, `d`, `w`, `mo` and `y`,
+  compoundable (`1d12h`), and `perm` or no duration means permanent. Ten years is the longest
+  allowed. A kick or a warn takes no duration, and one that has one is refused.
+- **Flags** go anywhere too. `-s` is silent (only staff are told), `-p` is public, and `-h` is
+  hidden (kept out of other staff's lookups, and implies `-s`).
+- **Root aliases.** With **Register root command aliases** on, in **Heimdall runs bans** mode only,
+  the verbs also register as `/ban`, `/mute` and so on. The table says where each one lands on a
+  network. Leave it off while LiteBans is installed, or the two fight over `/ban`.
 
 ## Permissions
 
-- `heimdall.admin` - access to the `/hd`/`/hdp`/`/hwl` admin tree (default: OP)
-- `heimdall.linkdiscord` - use `/linkdiscord` (default: true — everyone, since it only ever acts on
-  the sender's own account)
-- `heimdall.offend` - use `/offend` (default: OP)
-- `heimdall.bypass` - skip Heimdall's per-player command cooldowns, e.g. the `/linkdiscord` cooldown
-  (default: OP). This does **not** bypass the whitelist itself — the login-time bypass is a UUID
-  list managed on the dashboard, since permissions aren't available yet at
-  `AsyncPlayerPreLoginEvent`
+`/hd` itself needs `heimdall.admin`, which covers every `/hd` punishment verb. The per-verb nodes
+gate the root aliases, so that is how you give punishment commands to staff who should not
+administer the plugin.
 
-### Punishments
+| Node | Gives | Default |
+| --- | --- | --- |
+| `heimdall.admin` | The whole `/hd` tree. Also grants `notify` and `silent` | op |
+| `heimdall.linkdiscord` | `/linkdiscord` | everyone |
+| `heimdall.offend` | `/offend` | op |
+| `heimdall.bypass` | Skip command cooldowns such as `/linkdiscord`'s. Not a whitelist bypass: that is a list on the dashboard | op |
+| `heimdall.punishments.ban` | `/ban`, `/tempban` | op |
+| `heimdall.punishments.ipban` | `/ipban` | op |
+| `heimdall.punishments.mute` | `/mute`, `/tempmute` | op |
+| `heimdall.punishments.kick` | `/kick` | op |
+| `heimdall.punishments.warn` | `/warn` | op |
+| `heimdall.punishments.unban` | `/unban`, `/unmute`, `/unwarn`, `/rollback` | op |
+| `heimdall.punishments.history` | `/history`, `/staffhistory`, `/banlist` | op |
+| `heimdall.punishments.dupeip` | `/dupeip`, `/iphistory` | op |
+| `heimdall.punishments.notify` | See silent punishments announced | op |
+| `heimdall.punishments.silent` | Use `-s` or `-p` against the guild's default | op |
+| `heimdall.punishments.hidden` | Use `-h`, and see hidden punishments in lookups and announcements. Not implied by `heimdall.admin` | op |
+| `heimdall.punishments.notify.muted` | Alert when a muted player tries to talk | nobody |
+| `heimdall.punishments.notify.muted.content` | Add what they tried to say to that alert | nobody |
 
-One node per verb, all OP by default:
+Without the node, `-s`, `-p` and `-h` are refused rather than quietly dropped. A flag that matches
+the guild's default needs no node.
 
-- `heimdall.punishments.ban` - `/ban`, `/tempban`
-- `heimdall.punishments.ipban` - `/ipban`
-- `heimdall.punishments.mute` - `/mute`, `/tempmute`
-- `heimdall.punishments.kick` - `/kick`
-- `heimdall.punishments.warn` - `/warn`
-- `heimdall.punishments.unban` - `/unban`, `/unmute`, `/unwarn`, `/rollback`
-- `heimdall.punishments.history` - `/history`, `/staffhistory`, `/banlist`
-- `heimdall.punishments.dupeip` - `/dupeip`, `/iphistory`
+**On a proxy, grant these through your permissions plugin.** The defaults above come from
+`plugin.yml`, which Velocity and BungeeCord do not read, so there nobody but the console holds a
+node until you grant it. `heimdall.admin` is the exception for announcements: an admin sees silent
+punishments everywhere.
 
-Every issuing verb takes the same flags, anywhere in the arguments: `-s` silent, `-p` public,
-`-h` hidden (which implies `-s`).
+These nodes do not inherit from `litebans.*`. Grant them before you remove LiteBans, not after.
 
-Five more decide who hears about a punishment, rather than only who may issue one:
+## Updates
 
-- `heimdall.punishments.notify` - see **silent** punishment announcements (default: OP).
-  A punishment that is not silent is announced to everybody online and needs no node; a silent one
-  is announced only to holders of this (or of `heimdall.admin`), prefixed `(silent)`. Silent means
-  "the server at large does not find out", not "nobody does"
-- `heimdall.punishments.notify.muted` - be told when a muted player tries to talk: "Steve tried
-  to speak while muted", or "tried to use a blocked command" (default: **nobody**, operators
-  included, and not implied by `heimdall.admin`). Shown on the server that refused the line, at
-  most once every 30 seconds per mute while the player stays online, with a count of what it
-  folded in. For a hidden mute it
-  additionally needs `heimdall.punishments.hidden` and is prefixed `(hidden)`.
-- `heimdall.punishments.notify.muted.content` - with the node above, a second line with what the
-  player tried to say, or the command as typed (default: nobody). Plain text, so a player cannot
-  format staff chat. It never leaves the server: not stored, not sent to the bot or Discord.
-- `heimdall.punishments.hidden` - issue a **hidden** punishment with `-h`, and see hidden ones in
-  `/history`, `/banlist` and `/staffhistory` (default: OP). One node for both halves: a moderator
-  who can hide a punishment and then cannot find it again is worse than either. A hidden punishment
-  is enforced exactly like any other - the target meets the same ban or mute screen - but it is kept
-  out of in-game staff lookups for everybody else, and `-h` is refused without the node rather than
-  run as a visible punishment. The chat line follows the same rule: a hidden punishment (and the
-  lifting of one, and a hidden punishment arriving from the bot) is announced to holders of this
-  node **only**, prefixed `(hidden)` - not to `heimdall.punishments.notify`, which is the staff
-  audience the row is being kept from. `-p` cannot publish the lifting of a hidden ban, and the
-  "tried to edit a sign while muted" staff notice narrows to this node when the mute is hidden.
-  `-h` is refused on `/unban`, `/unmute`, `/unwarn` and `/rollback`: whether lifting a punishment is
-  hidden is a fact about the row being lifted. Hidden implies silent, and this node alone is enough
-  for that: the `silent` override is not additionally required. Unlike `notify` and `silent` this is **not** implied
-  by `heimdall.admin`, because keeping a record from the rest of the staff team is not the same
-  decision as administering the plugin
-- `heimdall.punishments.silent` - override the guild's `silentByDefault` setting with `-s` or `-p`
-  (default: OP). The guild default needs no permission. Departing from it in either direction does,
-  because both are a decision about who finds out that a moderator acted. Without the node the
-  command is **refused** rather than run with the flag quietly dropped: a moderator who believes a
-  ban went out quietly, on a server that announced it, has been misled by their own tool. A flag
-  that agrees with the default is a no-op and is always allowed. Revoking follows the row being
-  lifted rather than the guild setting, so lifting a silent ban is announced silently and needs
-  this node to be made loud
+The plugin checks for a new release at startup and every 12 hours, logs it, and tells admins as
+they join. `/hd version` shows where you stand, and `/hd update` installs the latest release.
 
-> **On a proxy, grant these through your permissions plugin.** The defaults above come from the
-> Bukkit descriptor, which only the backend build reads: Velocity and BungeeCord have no
-> equivalent, so an unlisted node there is simply *not held* by anyone except the console. That is
-> the right default, but it means `heimdall.punishments.notify` has to be granted explicitly in
-> LuckPerms (or whatever the proxy runs) before any staff member sees a silent punishment
-> announced on the proxy. `heimdall.admin` is honoured in code rather than by the descriptor, so an
-> admin sees silent announcements on every platform without the notify node; on the Bukkit family
-> the descriptor says so as well, via `children`, so `/lp user <name> permission check` agrees with
-> what actually happens.
+**Most updates apply live.** The jar is a small permanent shell around a core that can be swapped
+while the server runs. When a release's checksum matches the one GitHub publishes, `/hd update`
+swaps the new core in: the bot connection drops for a few seconds, logins wait up to five seconds,
+and bridged chat in that window is not relayed. The jar is installed for the next restart as well,
+so the update survives one.
 
-> **Announcements come from the outermost instance.** A gatekeeper proxy or a standalone server
-> announces punishments in chat; an enforcer backend never does. Otherwise a proxied network says
-> everything twice, once from the proxy and once from the backend the player is on. So on a
-> proxied network the nodes that matter for announcements are the ones on the **proxy**.
+An update needs a restart instead when the release has no published checksum or changes the shell
+itself. `/hd update` says which. The jar then goes into `plugins/update/` on Paper, and replaces the
+running jar on the proxies (on Windows, where a running jar cannot be replaced, it is downloaded
+into the plugin folder and the console tells you to move it).
 
-## How It Works
+Downloads are only accepted from this repository's releases. A fork can point the updater at its
+own with `updatesReleaseRepo: owner/name` in `bootstrap.yml`.
 
-### For Players
+If a core ever fails to start, the server refuses logins ("This server cannot check logins right
+now") rather than letting everyone in, and tells online admins. Restart, or stage a working core and
+run `/hd swap`.
 
-1. Player attempts to join your Minecraft server
-2. If not whitelisted, they're shown instructions to join Discord
-3. In Discord, they use `/link-minecraft <username>` to start linking
-4. They try joining the server again to receive their authentication code
-5. They confirm the code in Discord using `/confirm-code <code>`
-6. Staff approve their request through the Discord dashboard
-7. Player can now join the server normally
+## Configuration
 
-### For Staff
+Everything except the connection itself is configured on the dashboard and pushed to the server
+live. The only local file is `bootstrap.yml`, which `/hd setup` writes:
 
-1. View pending whitelist applications in the Discord dashboard
-2. See player information, Discord profile, and Minecraft username
-3. Approve or deny applications with optional notes
-4. Real-time updates - no server restarts needed
-5. Manage all linked players through the web interface
+```yaml
+endpoint: "https://api.bifrost.gg" # the Heimdall instance this server talks to
+tokenId: "..."                    # written by /hd setup
+token: "..."                      # written by /hd setup. Keep it secret
+serverId: "..."                   # written by /hd setup
+role: "auto"                      # auto | standalone | gatekeeper | enforcer
+identityCheck: "auto"             # auto | strict | off, see Troubleshooting
+debug: false                      # toggle with /hd debug on|off
+timeoutMs: 5000                   # per-attempt timeout for a login check
+retries: 3                        # login check attempts, including the first
+retryDelayMs: 1000                # pause between attempts
+updatesCheckEnabled: true
+updatesNotifyAdmins: true
+updatesCheckIntervalHours: 12     # minimum 1
+disabledModules: ""               # set by /hd enable and /hd disable
+instanceFingerprint: "..."        # written by the plugin
+guildIdCache: "..."               # written by the plugin
+```
 
-### Technical Flow
+The settings here are the ones that have to work before the dashboard can be reached: the login
+timing, the update checker, debug logging and the local module override. Do not hand-edit the
+token, ids or fingerprint. Run `/hd reload` after editing anything else.
 
-1. **Connection Attempt**: Player tries to join
-2. **API Request**: Plugin calls bot API with player info
-3. **Decision Logic**: Bot checks database for player status
-4. **Response**: API returns whitelist decision and any messages
-5. **Action**: Plugin allows/denies connection based on response
-6. **Caching**: Response cached briefly to reduce API load
+## When the bot is unreachable
+
+The plugin keeps running on the last configuration it received. Punishments keep working from the
+local copy. For logins, the whitelist's **fallback mode** on the dashboard decides:
+
+| Mode | When the bot cannot be asked |
+| --- | --- |
+| `whitelist-only` (default) | Players in the local mirror get in. The mirror is a full copy of the whitelist, kept current while connected, so whitelisted players do not notice an outage |
+| `allow` | Everyone gets in. The server stays open, and so does the whitelist |
+| `deny` | Nobody gets in |
+
+The default is the right choice for almost every server. Each login check is tried `retries` times
+before the fallback applies.
 
 ## Troubleshooting
 
-### Common Issues
+Start with `/hd status`. It has one line per part of the plugin and says how to fix anything that
+is wrong. `/hd status all` is the version to paste into a support ticket, and `/hd debug on` turns
+on verbose logging.
 
-**"Whitelist system is temporarily unavailable"**
+**"Whitelist system is temporarily unavailable" on join.** The bot could not be asked and the
+player is not in the mirror. Check the bot and tunnel lines of `/hd status`, and that the server can
+reach `endpoint` over HTTPS. No inbound ports are needed.
 
-- Check that your bot API is running and accessible
-- Verify `endpoint` in `bootstrap.yml`, and check `/hd status` for the tunnel and connection state
-- Check server logs for connection errors
+**A player is let in or refused and you do not know why.** `/hd test <player>` runs the real check
+without changing anything and says which part decided.
 
-**Players can't get auth codes**
+**"identity mismatch".** This `bootstrap.yml` was written on a different machine, usually because a
+server folder was copied or a backup restored. Two copies with the same identity knock each other
+offline. `/hd identity` shows both fingerprints. If you moved the server, run `/hd identity adopt`.
+If this is a copy and the original still runs, run `/hd identity reset confirm` on the copy and set
+it up with a new code. By default (`identityCheck: auto`) the plugin only refuses to connect when it
+can prove the machine changed, such as a different game panel server id, and otherwise warns.
 
-- Ensure Discord integration is properly configured
-- Check that the bot has necessary permissions in Discord
-- Verify the server ID matches between plugin and bot
+**Role sync does nothing at join.** See the [known gap](#role-sync).
 
-**"identity mismatch" in the console, or `/hd status` says `identity mismatch`**
+**The punishment commands say native punishments are not in replace mode.** The guild is not in
+**Heimdall runs bans** mode. Change it on the Enforcement page.
 
-This `bootstrap.yml` was bound to a different machine than the one reading it. Almost always a
-server directory that was copied, or a backup restored next to the original. Both copies claim the
-same `serverId`, and the bot keeps only the newest connection, so they take it in turns to be
-online.
+## Upgrading from v2
 
-- If you **moved** this server (new host, new panel, same server): `/hd identity adopt`.
-- If this is a **copy** and the original is still running: `/hd identity reset confirm` on the copy,
-  then claim a fresh code for it with `/hd setup <code>`.
+Replace the old jar with the new one and start the server. Remove the v2 jar: the two have different
+names, so both would load.
 
-Run `/hd identity` to see both fingerprints before deciding. On the default `identityCheck: auto`
-the plugin only refuses to connect when it can prove the machine changed (a game panel's server id);
-otherwise it warns every fifteen minutes and connects anyway, so a mismatch you have not dealt with
-is a warning rather than an outage. Set `identityCheck: strict` if you would rather it refused.
-
-**Plugin not working after restart**
-
-- Check console for configuration errors
-- Ensure all required permissions are granted
-- Verify Java version compatibility
-
-### Debug Mode
-
-Run `/hd debug on` (`/hdp debug on` on Velocity) to turn on verbose logging — it takes effect
-immediately and is persisted to `bootstrap.yml` so it survives a restart. `/hd debug off` turns it
-back off. Debug is local for a reason: it's the diagnostic you most need when the server can't
-reach the dashboard to be told anything else.
-
-## Error Handling & Fail-Open Behavior
-
-The plugin implements a robust error handling system with configurable fallback behavior when the Heimdall bot API is unavailable.
-
-### API Retry Logic
-
-When the API is unreachable or returns errors, the plugin will:
-
-1. **Retry** up to the configured attempt count (`retries` in `bootstrap.yml`, default 3)
-2. **Wait between retries** (`retryDelayMs` in `bootstrap.yml`, default 1000ms)
-3. **Fall back** to the fallback mode configured on the dashboard after all retries fail
-
-### Fallback Modes
-
-Unlike the retry timing above, the fallback mode itself is not a `bootstrap.yml` field — it's part
-of the whitelist module's settings on the dashboard's Minecraft page, pushed to the plugin like
-everything else module-related. If the bot can't be reached at all (including on a server that has
-never been claimed), the plugin falls back to its last-known pushed value, or a safe built-in
-default.
-
-**Available modes:**
-
-- **`"allow"`** (Recommended): **Fail-open** - Allow all players to join when API is down
-  - ✅ Ensures server availability during API outages
-  - ⚠️ Temporarily bypasses whitelist security
-  - 📝 Players receive a message explaining the situation
-  - 💡 Best for production servers where uptime is critical
-
-- **`"whitelist-only"`**: Fall back to local Minecraft whitelist only
-  - ✅ Maintains some security during outages
-  - ❌ Only previously whitelisted players can join
-  - 📝 New players cannot join during API downtime
-
-- **`"deny"`**: **Fail-closed** - Deny all connections when API is down
-  - ✅ Maximum security (no unauthorized access)
-  - ❌ Server becomes inaccessible during API outages
-  - 📝 All players see "API unavailable" message
-
-### Production Recommendation
-
-For production servers, set the fallback mode to `allow` on the dashboard's Minecraft page to ensure your server remains accessible even during:
-
-- Network connectivity issues
-- Bot maintenance/updates
-- API server downtime
-- Database connectivity problems
-
-Players connecting during fail-open mode will receive a message encouraging them to link their Discord account when the system is restored.
-
-### Performance Issues
-
-If you're experiencing lag:
-
-1. Increase the whitelist cache window on the dashboard's Minecraft page to reduce API calls, or
-   run `/hd cache stats` to see how the local mirror is doing
-2. Check your API server performance and network latency
-3. Consider if your API server needs more resources
-
-## Integration with Heimdall Bot
-
-This plugin requires the Heimdall Discord bot to be properly configured:
-
-1. **Environment Variables**: Set `ENABLE_MINECRAFT_SYSTEMS=true` in your bot
-2. **API Configuration**: Ensure the bot's API server is running
-3. **Database**: MongoDB should be accessible to the bot
-4. **Discord Setup**: Bot needs appropriate Discord permissions
-
-See the main Heimdall documentation for bot setup instructions.
+On first boot the plugin finds the v2 config (`plugins/HeimdallWhitelist/config.yml` on Paper,
+`plugins/heimdall-whitelist/config.json` on Velocity), writes a `bootstrap.yml` from its credentials,
+renames the original to `*.v2-backup`, and stages its other settings for the dashboard. Finish with
+`/hd setup <code>`, which is what applies them. Until then the server runs on v2-equivalent
+defaults. BungeeCord had no v2 build, so a BungeeCord proxy is always a fresh install.
 
 ## Development
 
-### Building from Source
-
-**Prerequisite: a JDK 21.** Gradle 8.14 does not run on JDK 25+, and the build
-targets Java 8 bytecode via toolchains, so 21 is what you need installed — not
-whatever your `JAVA_HOME` happens to point at. `gradle/gradle-daemon-jvm.properties`
-pins the daemon to 21, so Gradle will find a detected JDK 21 on its own and tell
-you clearly if there is not one.
+Building needs **JDK 21** (Gradle 8.14 does not run on 25+; the build targets Java 8 bytecode
+through toolchains).
 
 ```bash
 git clone https://github.com/Bifrostdotgg/heimdall-minecraft.git
@@ -651,66 +438,46 @@ cd heimdall-minecraft
 ./gradlew build
 ```
 
-The shipping JAR is `app/build/libs/heimdall-whitelist-X.X.X.jar`. It is a single
-shadow jar that runs on Velocity, BungeeCord, Paper, Folia/Canvas and Spigot 1.8.8+.
+The jar is `app/build/libs/heimdall-whitelist-<version>.jar`. `./gradlew build` is the whole gate:
+unit tests, the ArchUnit rules in `:conformance`, and `:app:verifyShadowJar`, which checks the jar
+for too-new bytecode, unrelocated dependencies and mismatched descriptors. `smoke/` boots the jar on
+real servers in Docker against `stub-bot/`, a fake bot that speaks the real wire contract.
 
-`./gradlew build` is the full gate, not just a compile: it builds every module at
-its own bytecode level, runs the unit tests, runs the ArchUnit conformance rules
-in `:conformance`, and then inspects the produced jar (`:app:verifyShadowJar`) for
-too-new bytecode, unrelocated dependencies and mismatched plugin descriptors.
+The version comes from `version` in `gradle.properties`. Releases are cut by pushing a `v*` tag,
+which builds the jar and creates the GitHub release. Do not create the release by hand first.
 
-The plugin version has a single source of truth: `version` in `gradle.properties`.
-The build generates `BuildConstants.VERSION` from it, substitutes it into
-`plugin.yml` and `bungee.yml`, and the Velocity annotation processor writes it into
-`velocity-plugin.json`. Release builds override it on the command line
-(`./gradlew build -Pversion=3.0.0`), which is what the tag-triggered release
-workflow does — so the tag, the jar name and every in-jar version reference cannot
-drift apart.
+**Where things are.** The platform loads a shell (`shell-*`) that never changes at runtime. The
+shell loads `core`, the platform adapters (`platform-*`) and the feature modules (`module-*`) as one
+swappable core. `api` is the public API. Deliberate behaviour changes from v2, and the reasoning
+behind most design choices, are recorded in [docs/v2-departures.md](docs/v2-departures.md).
 
-### Public API for other plugins
+### API for other plugins
 
-Other plugins compile against `com.heimdall.api` (the `:api` module) and soft-depend on Heimdall.
-Every object below is the shell's, so it survives a hot swap of the core and may be cached.
+Compile against `com.heimdall.api` (the `:api` module) and soft-depend on Heimdall. Both objects
+belong to the shell, so they survive a core swap and can be cached.
 
-- `HeimdallPunishments`: `isMuted(UUID)`, `isMuteHidden(UUID)`, `isBanned(UUID)`,
-  `isFrozen(UUID)`, `activePunishment(UUID, type)` and `isAvailable()`. Reads memory only, so it is
-  safe from async chat threads and the main thread. Answers "not punished" while no core or no
-  punishments module is running.
+- `HeimdallPunishments`: `isMuted`, `isMuteHidden`, `isBanned`, `isFrozen`, `activePunishment` and
+  `isAvailable`. Memory reads only, so safe from async chat threads. Answers "not punished" while
+  no core or no punishments module is running.
 - `HeimdallTunnel`: publish to, request from and subscribe to the bot over Heimdall's connection.
 
 ```java
-// Any platform
 HeimdallPunishments punishments = HeimdallPunishmentsProvider.get();
-// Bukkit family, also
-HeimdallPunishments viaServices = Bukkit.getServicesManager().load(HeimdallPunishments.class);
+// or, on the Bukkit family:
+// Bukkit.getServicesManager().load(HeimdallPunishments.class)
 
 if (punishments != null && punishments.isMuted(player.getUniqueId())) {
     // refuse the message
 }
 ```
 
-See departures D87 and D89 in `docs/v2-departures.md` for how they stay valid across a swap.
-
-### API Endpoints Used
-
-- `POST /api/minecraft/connection-attempt` - Check if player should be whitelisted
-
-### Dependencies
-
-- Spigot/Paper API 1.20.1
-- Gson 2.10.1 (bundled)
-
 ## Support
 
-- **Issues**: Report bugs on [GitHub Issues](https://github.com/Bifrostdotgg/heimdall-minecraft/issues)
-- **Discord**: Join our Discord server for community support
+Report bugs on [GitHub Issues](https://github.com/Bifrostdotgg/heimdall-minecraft/issues).
 
 ## License
 
-This project is **source-available, not open source**. It is licensed under the
-[PolyForm Shield License 1.0.0](https://polyformproject.org/licenses/shield/1.0.0)
-— see the [LICENSE](LICENSE) file for the full text.
-
-In short: you are free to download, build, run, and modify the plugin for your own
-Minecraft servers and networks (including commercial/monetized ones). What you may
-**not** do is use it to provide a product or service that competes with Heimdall.
+Source-available, not open source: [PolyForm Shield 1.0.0](https://polyformproject.org/licenses/shield/1.0.0),
+full text in [LICENSE](LICENSE). You may download, build, run and modify the plugin for your own
+servers and networks, commercial ones included. You may not use it to offer a product or service
+that competes with Heimdall.
