@@ -174,7 +174,8 @@ The dashboard's **Minecraft > Enforcement** page sets one of three modes for the
 | **Heimdall runs bans** | The plugin enforces everything itself: logins, chat, blocked commands and IP bans |
 
 The `/hd` punishment commands issue punishments only in **Heimdall runs bans**. In the other modes
-the lookups (`history`, `banlist`, `dupeip`) and `import` still work.
+the lookups (`history`, `banlist`, `dupeip`) and `import` still work. Freeze is the exception: it
+works alongside LiteBans too, because LiteBans has no freeze of its own.
 
 **Moving off LiteBans.** Run alongside it first, so staff see the history while nothing changes in
 game. Then preview the import with `/hd import --dry-run` (or **Preview import** on the dashboard),
@@ -189,6 +190,18 @@ reminder after that. They also cannot run the commands on the blocked list (`msg
 and `w` by default, editable on the dashboard). An entry blocks that command, its namespaced form
 and anything typed after it, a whole word at a time: `ch send` blocks `/ch send hi` but not
 `/ch join`, and `me` does not block `/menu`.
+
+**Freezes.** A frozen player cannot move (looking around is fine), interact, break or place
+blocks, drop or pick up items, use their inventory or run commands, and cannot take or deal
+damage. Staff can still teleport them. What they type in chat is not shown publicly: it goes to
+staff on the same server holding `heimdall.punishments.freeze` (or `heimdall.admin`), so you can
+talk them through a check. They are shown the freeze message (editable on the dashboard) when the
+freeze lands, when they join, and every 15 seconds. A freeze is only ever announced to staff, has
+no length, and lasts until someone runs `unfreeze`. When a frozen player logs out, staff on the
+proxy (or standalone server) are told, and if **Ban players who log out while frozen** is on, they
+are banned unless they reconnect within 30 seconds. Alongside LiteBans that ban is issued through
+LiteBans, so it needs LiteBans on the server that sees the logout. A backend behind a proxy never
+treats a server switch as a logout.
 
 **Staff alerts.** Staff holding `heimdall.punishments.notify.muted` are told when a muted player
 tries to talk or use a blocked command, on the server that refused it, at most once every 30
@@ -279,6 +292,7 @@ console. `/hwl` still works as a deprecated alias from v2.
 | `kick`, `warn` | `<player> [reason]` | proxy |
 | `unban`, `unwarn` | `<player> [reason]` | proxy |
 | `unmute` | `<player> [reason]` | backend |
+| `freeze`, `unfreeze` | `<player> [reason]` | backend |
 | `rollback` | `<player>`, lifts their latest active punishment | proxy |
 | `history`, `staffhistory`, `banlist` | `<player>`, `<staff>`, nothing | proxy |
 | `dupeip`, `iphistory` | `<player>` | proxy |
@@ -288,7 +302,7 @@ A standalone server registers all of them.
 - **Durations** go anywhere after the player: `/hd ban Steve 7d griefing` and
   `/hd ban Steve griefing 7d` are the same ban. Units are `s`, `m`, `h`, `d`, `w`, `mo` and `y`,
   compoundable (`1d12h`), and `perm` or no duration means permanent. Ten years is the longest
-  allowed. A kick or a warn takes no duration, and one that has one is refused.
+  allowed. A kick, a warn or a freeze takes no duration, and one that has one is refused.
 - **Flags** go anywhere too. `-s` is silent (only staff are told), `-p` is public, and `-h` is
   hidden (kept out of other staff's lookups, and implies `-s`).
 - **Root aliases.** With **Register root command aliases** on, in **Heimdall runs bans** mode only,
@@ -319,6 +333,7 @@ has no descriptor to hide it with. Running it without a node is refused.
 | `heimdall.punishments.kick` | `/kick`, with or without `/hd` or `/hdp` | op |
 | `heimdall.punishments.warn` | `/warn`, with or without `/hd` or `/hdp` | op |
 | `heimdall.punishments.unban` | `/unban`, `/unmute`, `/unwarn`, `/rollback`, with or without `/hd` or `/hdp` | op |
+| `heimdall.punishments.freeze` | `/freeze`, `/unfreeze`, with or without `/hd`; hear frozen players' chat and logout alerts | op |
 | `heimdall.punishments.history` | `/history`, `/staffhistory`, `/banlist`, with or without `/hd` or `/hdp` | op |
 | `heimdall.punishments.dupeip` | `/dupeip`, `/iphistory`, with or without `/hd` or `/hdp` | op |
 | `heimdall.punishments.notify` | See silent punishments announced | op |
