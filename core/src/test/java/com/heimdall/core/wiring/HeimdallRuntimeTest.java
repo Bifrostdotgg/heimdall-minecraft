@@ -757,6 +757,29 @@ class HeimdallRuntimeTest {
         }
 
         @Test
+        @DisplayName("a guild switch forgets the learned role, a confirmed guild keeps it")
+        void guildSwitchClearsIt(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            store.save(BootstrapConfig.builder()
+                    .endpoint("https://api.example.invalid")
+                    .token("secret")
+                    .serverId("survival")
+                    .guildId("111111111111111111")
+                    .learnedRole(ServerRole.STANDALONE)
+                    .build());
+            HeimdallRuntime runtime = backend(dataDir, store);
+
+            runtime.adoptGuild("111111111111111111");
+            assertEquals(ServerRole.STANDALONE, store.load().learnedRole(),
+                    "the bot confirming the cached guild changes nothing");
+
+            runtime.adoptGuild("222222222222222222");
+            assertEquals(ServerRole.AUTO, store.load().learnedRole(),
+                    "learned while talking to the wrong guild, so not evidence for this one");
+            runtime.close();
+        }
+
+        @Test
         @DisplayName("the save is handed to the io pool, never run on the thread that saw the ack")
         void theSinkRunsOffTheCallingThread(@TempDir Path dataDir) throws Exception {
             HeimdallRuntime runtime = backend(dataDir, configured(dataDir, ServerRole.AUTO));
