@@ -668,4 +668,83 @@ class HeimdallRuntimeTest {
             runtime.close();
         }
     }
+
+    @Nested
+    @DisplayName("learning its role from the bot")
+    class LearnsItsRole {
+
+        private BootstrapStore configured(Path dataDir, ServerRole role) throws IOException {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            store.save(BootstrapConfig.builder()
+                    .endpoint("https://api.example.invalid")
+                    .token("secret")
+                    .serverId("survival")
+                    .role(role)
+                    .build());
+            return store;
+        }
+
+        private HeimdallRuntime backend(Path dataDir, BootstrapStore store) {
+            return HeimdallRuntime.builder(logger, new FakePlatform(ServerRole.ENFORCER, dataDir))
+                    .bootstrapStore(store)
+                    .roleDetector(new com.heimdall.core.platform.InstanceRoleDetector() {
+                        @Override
+                        public boolean isProxy() {
+                            return false;
+                        }
+
+                        @Override
+                        public boolean isBehindProxy() {
+                            return true;
+                        }
+                    })
+                    .build();
+        }
+
+        @Test
+        @DisplayName("an enforcer told there is no Heimdall proxy records standalone for its next start")
+        void recordsStandaloneAndClearsItAgain(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = configured(dataDir, ServerRole.AUTO);
+            HeimdallRuntime runtime = backend(dataDir, store);
+            assertEquals(ServerRole.ENFORCER, runtime.roleAtNextStart(),
+                    "nothing learned yet: the next start is the same enforcer");
+
+            runtime.learnProxyRole(false);
+
+            assertEquals(ServerRole.STANDALONE, store.load().learnedRole());
+            assertEquals(ServerRole.AUTO, store.load().role(), "role: is the operator's");
+            assertEquals(ServerRole.STANDALONE, runtime.roleAtNextStart());
+            assertTrue(logger.logged(LogLevel.WARN, "restart to apply"), logger.records().toString());
+
+            runtime.learnProxyRole(true);
+
+            assertEquals(ServerRole.AUTO, store.load().learnedRole());
+            assertEquals(ServerRole.ENFORCER, runtime.roleAtNextStart());
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("an operator's role: is left alone whatever the bot says")
+        void configuredRoleIsNotTouched(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = configured(dataDir, ServerRole.ENFORCER);
+            HeimdallRuntime runtime = backend(dataDir, store);
+
+            runtime.learnProxyRole(false);
+
+            assertEquals(ServerRole.AUTO, store.load().learnedRole());
+            assertEquals(ServerRole.ENFORCER, runtime.roleAtNextStart());
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("a platform with no detector has no next-start role to report")
+        void noDetectorNoAnswer(@TempDir Path dataDir) throws IOException {
+            HeimdallRuntime runtime = runtime(dataDir, configured(dataDir, ServerRole.AUTO)).build();
+
+            assertNull(runtime.roleAtNextStart());
+            runtime.learnProxyRole(false);
+            assertEquals(ServerRole.AUTO, runtime.bootstrap().learnedRole());
+            runtime.close();
+        }
+    }
 }

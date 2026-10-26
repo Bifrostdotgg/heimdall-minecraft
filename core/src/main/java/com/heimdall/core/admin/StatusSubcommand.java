@@ -2,6 +2,7 @@ package com.heimdall.core.admin;
 
 import com.heimdall.core.command.CommandSource;
 import com.heimdall.core.config.BootstrapConfig;
+import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.http.HeimdallApi;
 import com.heimdall.core.module.ModuleManager;
 import com.heimdall.core.module.ModuleState;
@@ -193,6 +194,12 @@ final class StatusSubcommand implements AdminSubcommand {
         String label = "hd";
         String pluginVersion = "";
         String role = "";
+        /**
+         * The role the next start would resolve, when it differs from {@link #role}; {@code ""}
+         * otherwise. {@link #nextRoleReason} says why.
+         */
+        String nextRole = "";
+        String nextRoleReason = "";
         String software = "unknown server";
 
         boolean configured = true;
@@ -234,6 +241,11 @@ final class StatusSubcommand implements AdminSubcommand {
             s.label = context.label();
             s.pluginVersion = context.pluginVersion();
             s.role = context.role().wireName();
+            ServerRole next = runtime.roleAtNextStart();
+            if (next != null && next != context.role()) {
+                s.nextRole = next.wireName();
+                s.nextRoleReason = nextRoleReason(runtime.bootstrap(), next);
+            }
             s.software = shortServer(runtime);
 
             s.configured = runtime.isConfigured();
@@ -353,9 +365,30 @@ final class StatusSubcommand implements AdminSubcommand {
 
     // ── Judging ──────────────────────────────────────────────────────────────
 
+    /**
+     * Why the next start resolves {@code next}. A role the bot taught this server reads differently
+     * from one an operator set, because only the first is a surprise.
+     */
+    private static String nextRoleReason(BootstrapConfig bootstrap, ServerRole next) {
+        if (bootstrap.role() != ServerRole.AUTO) {
+            return "set in bootstrap.yml";
+        }
+        if (next == ServerRole.STANDALONE && bootstrap.learnedRole() == ServerRole.STANDALONE) {
+            return "no Heimdall proxy in this network";
+        }
+        if (next == ServerRole.ENFORCER) {
+            return "a Heimdall proxy joined this network";
+        }
+        return "detected";
+    }
+
     /** Works out every row and every problem. A pure function of the snapshot. */
     static Report assess(Snapshot s) {
         Report report = new Report();
+        if (!s.nextRole.isEmpty()) {
+            report.problem(Health.ATTENTION, "Restart to run as " + s.nextRole + ": "
+                    + s.nextRoleReason);
+        }
         boolean botUp = assessBot(report, s);
         assessTunnel(report, s, botUp);
         assessModules(report, s);
@@ -662,6 +695,11 @@ final class StatusSubcommand implements AdminSubcommand {
         source.sendMessage(Msg.legacy("§6Server"));
         detail(source, "software", describeServer(runtime));
         detail(source, "role", context.role().wireName());
+        ServerRole next = runtime.roleAtNextStart();
+        if (next != null && next != context.role()) {
+            detail(source, "role after restart", next.wireName() + " ("
+                    + nextRoleReason(runtime.bootstrap(), next) + ")");
+        }
         detail(source, "plugin", context.pluginVersion());
         if (!context.core().isEmpty()) {
             detail(source, "core", context.core());

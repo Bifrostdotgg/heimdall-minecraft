@@ -733,6 +733,33 @@ class StatusSubcommandTest {
     }
 
     @Nested
+    @DisplayName("a role that changes at the next restart")
+    class RoleAfterRestart {
+
+        @Test
+        @DisplayName("is one attention line that says what and why")
+        void saysRestart() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.nextRole = "standalone";
+            s.nextRoleReason = "no Heimdall proxy in this network";
+
+            StatusSubcommand.Report report = StatusSubcommand.assess(s);
+
+            assertTrue(problemSaying(report,
+                    "Restart to run as standalone: no Heimdall proxy in this network"),
+                    report.problems.toString());
+        }
+
+        @Test
+        @DisplayName("says nothing when the next start is the same role")
+        void quietWhenUnchanged() {
+            StatusSubcommand.Report report = StatusSubcommand.assess(healthy());
+
+            assertFalse(problemSaying(report, "Restart to run as"));
+        }
+    }
+
+    @Nested
     @DisplayName("formatting")
     class Formatting {
 

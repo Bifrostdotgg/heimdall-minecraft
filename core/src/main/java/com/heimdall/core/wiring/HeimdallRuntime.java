@@ -3,6 +3,7 @@ package com.heimdall.core.wiring;
 import com.heimdall.core.concurrent.HeimdallExecutors;
 import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
+import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.http.ApiClient;
 import com.heimdall.core.http.BedrockIdentityProvider;
 import com.heimdall.core.http.ClaimClient;
@@ -17,6 +18,7 @@ import com.heimdall.core.module.ModuleManager;
 import com.heimdall.core.pipeline.ChatPipeline;
 import com.heimdall.core.pipeline.CommandPipeline;
 import com.heimdall.core.pipeline.LoginPipeline;
+import com.heimdall.core.platform.InstanceRoleDetector;
 import com.heimdall.core.platform.PlatformFacade;
 import com.heimdall.core.remoteconfig.ConfigDocument;
 import com.heimdall.core.remoteconfig.ModuleConfig;
@@ -215,6 +217,12 @@ public final class HeimdallRuntime implements AutoCloseable {
      */
     private final Object reconfigureLock = new Object();
 
+    /**
+     * The platform's role signals, kept so a role learned from the bot can be judged against them.
+     * {@code null} on a proxy platform, which has nothing to learn. See {@link ProxyRoleLearner}.
+     */
+    private final InstanceRoleDetector roleDetector;
+
     private volatile boolean started;
     private volatile boolean closed;
 
@@ -222,6 +230,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         this.logger = builder.logger;
         this.platform = builder.platform;
         this.bootstrapStore = builder.bootstrapStore;
+        this.roleDetector = builder.roleDetector;
         this.commandLabel = Strings.isBlank(builder.commandLabel)
                 ? "hd" : builder.commandLabel.trim();
         this.handoff = builder.handoff == null
@@ -394,6 +403,9 @@ public final class HeimdallRuntime implements AutoCloseable {
         remoteConfig.loadFromCache();
 
         registrations.add(tunnel.onModeChange(remoteConfig));
+        if (roleDetector != null) {
+            registrations.add(tunnel.onModeChange(new ProxyRoleLearner(new ProxyRoleSink())));
+        }
         registrations.add(modules.followRemoteConfig());
         // The dashboard's three direct questions — the roster, the console box, the mod probe.
         // Subscribed unconditionally and BEFORE the not-configured return below: a subscription
@@ -549,6 +561,90 @@ public final class HeimdallRuntime implements AutoCloseable {
         synchronized (reconfigureLock) {
             bootstrapStore.save(updated);
             this.bootstrap = updated;
+        }
+    }
+
+    /**
+     * The role the next start would resolve from what is on disk now, or {@code null} on a platform
+     * that does not detect its role (a proxy).
+     *
+     * <p>Differs from the running role after the bot has taught this server something (see
+     * {@link ProxyRoleLearner}), or after an operator changed {@code role:} and ran
+     * {@code /hd reload}. Either way the role only changes at a restart, which is what
+     * {@code /hd status} tells them.
+     */
+    public ServerRole roleAtNextStart() {
+        if (roleDetector == null) {
+            return null;
+        }
+        BootstrapConfig current = bootstrap;
+        return InstanceRoleDetector.resolve(
+                current.role(), current.learnedRole(), roleDetector, null);
+    }
+
+    /**
+     * Records the bot's {@code heimdallProxy} answer as {@code learnedRole}, when it changes
+     * anything. On the io pool, never the socket thread; see {@link ProxyRoleLearner}.
+     *
+     * <p>A failed save leaves the in-memory config alone too, so {@code /hd status} does not promise
+     * a restart that would change nothing, and the next handshake tries again.
+     *
+     * <p>Package-private so a test can drive it without a bot.
+     */
+    void learnProxyRole(boolean heimdallProxy) {
+        synchronized (reconfigureLock) {
+            if (closed) {
+                return;
+            }
+            ServerRole next = ProxyRoleLearner.decide(
+                    bootstrap.role(), bootstrap.learnedRole(), roleDetector, heimdallProxy);
+            if (next == null) {
+                return;
+            }
+            BootstrapConfig updated = bootstrap.toBuilder().learnedRole(next).build();
+            try {
+                bootstrapStore.save(updated);
+            } catch (IOException | RuntimeException notPersisted) {
+                logger.warn("could not record the role learned from the bot in "
+                        + bootstrapStore.file() + "; set role: in it yourself: " + notPersisted);
+                return;
+            }
+            this.bootstrap = updated;
+            if (next == ServerRole.STANDALONE) {
+                logger.warn("the bot reports no Heimdall proxy in this server's network. As an "
+                        + "enforcer this server leaves IP, country and subnet bans, punishment "
+                        + "announcements and join role sync to a Heimdall proxy, so nothing is doing "
+                        + "them. It runs standalone from its next restart: restart to apply. If "
+                        + "Heimdall is on your proxy, check that it is set up; to keep this role, set "
+                        + "role: " + ServerRole.ENFORCER.wireName() + " in " + bootstrapStore.file());
+            } else {
+                logger.info("the bot reports a Heimdall proxy in this server's network now. This "
+                        + "server goes back to " + ServerRole.ENFORCER.wireName()
+                        + " at its next restart.");
+            }
+        }
+    }
+
+    /** The runtime's half of {@link ProxyRoleLearner}. */
+    private final class ProxyRoleSink implements ProxyRoleLearner.Sink {
+
+        @Override
+        public Boolean heimdallProxy() {
+            return tunnel.heimdallProxy();
+        }
+
+        @Override
+        public void submit(Runnable task) {
+            try {
+                executors.io().execute(task);
+            } catch (RejectedExecutionException shuttingDown) {
+                // Shutting down. The next handshake after a restart asks again.
+            }
+        }
+
+        @Override
+        public void learn(boolean heimdallProxy) {
+            learnProxyRole(heimdallProxy);
         }
     }
 
@@ -1414,6 +1510,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         private HealthSnapshotSource healthSource;
         private BedrockIdentityProvider bedrockIdentityProvider;
         private Map<String, Object> handoff;
+        private InstanceRoleDetector roleDetector;
 
         private Builder(HeimdallLogger logger, PlatformFacade platform) {
             if (logger == null || platform == null) {
@@ -1492,6 +1589,16 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         public Builder bedrockIdentityProvider(BedrockIdentityProvider value) {
             this.bedrockIdentityProvider = value;
+            return this;
+        }
+
+        /**
+         * The role signals this platform resolved its role from. Set on a backend so a role the bot
+         * teaches it can be recorded for the next start (see {@link ProxyRoleLearner}); left unset
+         * on a proxy, which learns nothing.
+         */
+        public Builder roleDetector(InstanceRoleDetector value) {
+            this.roleDetector = value;
             return this;
         }
 

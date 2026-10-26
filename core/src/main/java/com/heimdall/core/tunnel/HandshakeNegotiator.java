@@ -69,6 +69,16 @@ final class HandshakeNegotiator {
      */
     private volatile List<String> acceptedCapabilities = Collections.emptyList();
 
+    /**
+     * Whether the bot says this server's network has a Heimdall proxy registered, from the last
+     * {@code identify_ack}; {@code null} when it did not say.
+     *
+     * <p>Three states on purpose. The bot leaves the field out when it could not find out (a
+     * timeout, an error, a server with no network yet), and an absent answer must never read as
+     * "no proxy", because a backend acts on "no" by running standalone from its next start.
+     */
+    private volatile Boolean heimdallProxy;
+
     HandshakeNegotiator(
             HeimdallLogger logger,
             ScheduledExecutorService wsScheduler,
@@ -99,6 +109,11 @@ final class HandshakeNegotiator {
         return configVersion;
     }
 
+    /** See the field. {@code null} while disconnected, and whenever the bot did not say. */
+    Boolean heimdallProxy() {
+        return heimdallProxy;
+    }
+
     /** Registers a mode listener. Fired only on an actual change. */
     Registration onModeChange(final ProtocolModeListener listener) {
         if (listener == null) {
@@ -118,6 +133,7 @@ final class HandshakeNegotiator {
         transitionTo(ProtocolMode.UNKNOWN);
         configVersion = -1;
         acceptedCapabilities = Collections.emptyList();
+        heimdallProxy = null;
 
         Envelope identify = Envelope.fresh("identify", buildIdentifyPayload(settings));
         identifyId = identify.id();
@@ -131,6 +147,7 @@ final class HandshakeNegotiator {
         identifyId = null;
         configVersion = -1;
         acceptedCapabilities = Collections.emptyList();
+        heimdallProxy = null;
         transitionTo(ProtocolMode.UNKNOWN);
     }
 
@@ -210,6 +227,8 @@ final class HandshakeNegotiator {
         reportUnacceptedCapabilities();
 
         configVersion = payload.intValue("configVersion", -1);
+        // Before the transition below, so a mode listener reading it on V3 sees this ack's answer.
+        heimdallProxy = payload.optBool("heimdallProxy");
         int botProtocol = payload.intValue("protocolVersion", 0);
         logger.info("tunnel negotiated protocol v" + TunnelSettings.PROTOCOL_VERSION
                 + (botProtocol > 0 ? " with a v" + botProtocol + " bot" : "")
