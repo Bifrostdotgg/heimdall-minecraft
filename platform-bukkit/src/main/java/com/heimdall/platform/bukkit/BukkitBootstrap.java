@@ -165,7 +165,10 @@ final class BukkitBootstrap {
         // boot path either way.
         BootstrapConfig bootstrap = store.load();
         BukkitRoleDetector detector = new BukkitRoleDetector(Bukkit.getWorldContainer(), logger);
-        ServerRole role = InstanceRoleDetector.resolve(bootstrap.role(), detector, logger);
+        // learnedRole is what the bot taught this server about its proxy on an earlier boot; see
+        // ProxyRoleLearner. The same detector goes to the runtime so it can keep that up to date.
+        ServerRole role = InstanceRoleDetector.resolve(
+                bootstrap.role(), bootstrap.learnedRole(), detector, logger);
 
         executors = new HeimdallExecutors(logger);
         platform = new BukkitPlatform(
@@ -175,6 +178,7 @@ final class BukkitBootstrap {
         runtime = HeimdallRuntime.builder(logger, platform)
                 .executors(executors)
                 .bootstrapStore(store)
+                .roleDetector(detector)
                 .identitySource(new BukkitIdentitySource(role, startedAtMs))
                 .commandLabel("hd")
                 .healthSource(new BukkitHealthSource(ticks))

@@ -363,4 +363,35 @@ class BootstrapStoreTest {
 
         assertTrue(Files.isRegularFile(nested.resolve("bootstrap.yml")));
     }
+
+    @Test
+    @DisplayName("a learned role round-trips, and is only written when there is one")
+    void learnedRoleRoundTripsAndIsOmittedWhenUnset(@TempDir Path dir) throws IOException {
+        BootstrapStore store = storeIn(dir);
+        BootstrapConfig plain = BootstrapConfig.builder()
+                .endpoint("https://bot.example").token("shhh").build();
+        store.save(plain);
+        assertFalse(read(dir).contains("learnedRole"),
+                "most servers never learn a role, and a learnedRole: auto line in every file would "
+                        + "read as a setting");
+
+        store.save(plain.toBuilder().learnedRole(ServerRole.STANDALONE).build());
+        assertTrue(read(dir).contains("learnedRole: standalone"));
+        assertEquals(ServerRole.STANDALONE, store.load().learnedRole());
+        assertEquals(ServerRole.AUTO, store.load().role(),
+                "the learned value must never leak into the operator's role:");
+
+        store.save(store.load().toBuilder().learnedRole(ServerRole.AUTO).build());
+        assertFalse(read(dir).contains("learnedRole"),
+                "clearing it has to remove the key, not leave a stale one for the next load");
+        assertEquals(ServerRole.AUTO, store.load().learnedRole());
+    }
+
+    @Test
+    @DisplayName("a hand-edited learnedRole other than standalone reads as nothing learned")
+    void handEditedLearnedRoleIsIgnored(@TempDir Path dir) throws IOException {
+        write(dir, "endpoint: https://bot.example\ntoken: shhh\nlearnedRole: enforcer\n");
+
+        assertEquals(ServerRole.AUTO, storeIn(dir).load().learnedRole());
+    }
 }

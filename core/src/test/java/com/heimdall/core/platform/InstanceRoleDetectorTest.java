@@ -110,4 +110,55 @@ class InstanceRoleDetectorTest {
                 ServerRole.STANDALONE,
                 InstanceRoleDetector.resolve(ServerRole.AUTO, signals(false, false), null));
     }
+
+    // ── A role learned from the bot ─────────────────────────────────────────
+
+    @Test
+    @DisplayName("behind a proxy the bot says has no Heimdall, a learned standalone wins over enforcer")
+    void learnedStandaloneBeatsDetectedEnforcer() {
+        assertEquals(
+                ServerRole.STANDALONE,
+                InstanceRoleDetector.resolve(
+                        ServerRole.AUTO, ServerRole.STANDALONE, signals(false, true), logger));
+        assertTrue(logger.logged(LogLevel.INFO, "no Heimdall proxy"),
+                "the boot line has to say why forwarding did not make this an enforcer");
+    }
+
+    @Test
+    @DisplayName("nothing learned leaves the detected role alone")
+    void nothingLearnedIsTheOldPolicy() {
+        assertEquals(
+                ServerRole.ENFORCER,
+                InstanceRoleDetector.resolve(
+                        ServerRole.AUTO, ServerRole.AUTO, signals(false, true), logger));
+        assertEquals(
+                ServerRole.ENFORCER,
+                InstanceRoleDetector.resolve(ServerRole.AUTO, null, signals(false, true), logger));
+    }
+
+    @Test
+    @DisplayName("a learned role never overrules an operator's role: or the proxy")
+    void learnedRoleNeverBeatsConfiguredOrProxy() {
+        assertEquals(
+                ServerRole.ENFORCER,
+                InstanceRoleDetector.resolve(
+                        ServerRole.ENFORCER, ServerRole.STANDALONE, signals(false, true), logger));
+        assertEquals(
+                ServerRole.GATEKEEPER,
+                InstanceRoleDetector.resolve(
+                        ServerRole.AUTO, ServerRole.STANDALONE, signals(true, true), logger));
+    }
+
+    @Test
+    @DisplayName("a learned value other than standalone has no effect")
+    void onlyStandaloneCanBeLearned() {
+        assertEquals(
+                ServerRole.ENFORCER,
+                InstanceRoleDetector.resolve(
+                        ServerRole.AUTO, ServerRole.GATEKEEPER, signals(false, true), logger));
+        assertEquals(
+                ServerRole.STANDALONE,
+                InstanceRoleDetector.resolve(
+                        ServerRole.AUTO, ServerRole.ENFORCER, signals(false, false), logger));
+    }
 }

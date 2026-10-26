@@ -33,9 +33,11 @@ class VersionsTest {
             "v3.0.0,     3.0.0,          0",
             "3.0.0,      V3.0.0,         0",
             "'  3.0.0 ', 3.0.0,          0",
-            "3.0.0-SNAPSHOT, 3.0.0,      0",
-            "2.1.0-rc1,  2.1.0,          0",
+            "3.0.0+build.9, 3.0.0,       0",
+            "3.0.0-rc.6, v3.0.0-rc.6,    0",
             // older
+            "3.0.0-SNAPSHOT, 3.0.0,     -1",
+            "2.1.0-rc1,  2.1.0,         -1",
             "2.4.0,      3.0.0,         -1",
             "3.0,        3.0.1,         -1",
             "3.0.9,      3.1,           -1",
@@ -45,6 +47,19 @@ class VersionsTest {
             "3.1,        3.0.9,          1",
             "10.0.0,     9.9.9,          1",
             "3.0.1,      3.0,            1",
+            // pre-releases, as the v3 tags actually spell them
+            "3.0.0-rc.25, 3.0.0,        -1",
+            "3.0.0-rc.25, 3.0.1,        -1",
+            "3.0.0-rc.9, 3.0.0-rc.10,   -1",
+            "3.0.0-rc.24, 3.0.0-rc.25,  -1",
+            "3.0.0-rc,   3.0.0-rc.1,    -1",
+            "3.0.0-1,    3.0.0-alpha,   -1",
+            "3.0.0-alpha, 3.0.0-beta,   -1",
+            "3.0.0-rc.6, 3.0.0-rc.6-folia-experimental, -1",
+            "2.4.0,      3.0.0-rc.1,    -1",
+            "3.1.0-rc.1, 3.1.0,         -1",
+            "3.0.1,      3.1.0-rc.1,    -1",
+            "3.0.0-rc.99999999999999999999, 3.0.0-rc.100000000000000000000, -1",
         })
         void ordersVersions(String a, String b, int expected) {
             assertEquals(expected, Integer.signum(Versions.compare(a, b)),
@@ -55,12 +70,17 @@ class VersionsTest {
         }
 
         @Test
-        @DisplayName("a pre-release is not newer than the release it precedes")
-        void preReleaseIsNotNewer() {
-            // Deliberate: offering an operator running 2.1.0 an "update" to 2.1.0-rc1 would be
-            // offering them a downgrade.
+        @DisplayName("a pre-release is older than the release it precedes")
+        void preReleaseIsOlder() {
+            // Offering an operator running 2.1.0 an "update" to 2.1.0-rc1 would be offering them a
+            // downgrade.
             assertFalse(Versions.isNewer("2.1.0-rc1", "2.1.0"));
-            assertFalse(Versions.isNewer("2.1.0", "2.1.0-rc1"));
+            // And an operator on a release candidate must be offered the release. Before the
+            // pre-release rule, 3.0.0-rc.25 read as [3, 0, 0, 25] and outranked 3.0.0, so no rc
+            // server would ever have been told 3.0.0 was out.
+            assertTrue(Versions.isNewer("3.0.0", "3.0.0-rc.25"));
+            assertTrue(Versions.isNewer("3.0.1", "3.0.0-rc.25"));
+            assertTrue(Versions.isNewer("3.0.0-rc.26", "3.0.0-rc.25"));
         }
 
         @Test
@@ -77,7 +97,7 @@ class VersionsTest {
     class GarbageIn {
 
         @ParameterizedTest(name = "\"{0}\" is worth zero")
-        @ValueSource(strings = {"abc", "", "   ", "v", ".", "..", "-rc1", "99999999999999999999"})
+        @ValueSource(strings = {"abc", "", "   ", "v", ".", "..", "-rc1", "v-beta", "99999999999999999999"})
         void treatedAsZero(String garbage) {
             assertEquals(0, Versions.compare(garbage, "0"), "compare(\"" + garbage + "\", \"0\")");
             assertTrue(Versions.isNewer("0.0.1", garbage), "0.0.1 should beat \"" + garbage + "\"");
@@ -96,7 +116,8 @@ class VersionsTest {
         @DisplayName("nothing throws, whatever the tag says")
         void neverThrows() {
             List<String> nasty = Arrays.asList(
-                    null, "", "v", "...", "1.2.3.4.5.6.7.8", "1.-2.3", "١.٢.٣", "1e10", "🙂");
+                    null, "", "v", "...", "1.2.3.4.5.6.7.8", "1.-2.3", "١.٢.٣", "1e10", "🙂",
+                    "1.0.0-", "1.0.0-.", "1.0.0-rc..1", "1.0.0+", "-", "+", "1-2-3", "1.0.0-٣");
             for (String a : nasty) {
                 for (String b : nasty) {
                     Versions.compare(a, b);

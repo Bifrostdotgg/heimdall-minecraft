@@ -3,6 +3,7 @@ package com.heimdall.core.tunnel;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.json.Envelope;
@@ -335,5 +336,54 @@ class HandshakeNegotiatorTest {
         assertEquals(ProtocolMode.UNKNOWN, negotiator.mode());
         assertEquals(-1, negotiator.configVersion());
         assertFalse(scheduler.latestIsArmed());
+    }
+
+    // ── heimdallProxy: three states, and absent is not "no" ──────────────────
+
+    @Test
+    @DisplayName("identify_ack's heimdallProxy is read as true, false, or not said")
+    void heimdallProxyIsThreeState() {
+        HandshakeNegotiator negotiator = negotiator(new RecordingLogger(true));
+
+        negotiator.onOpen(SETTINGS);
+        negotiator.handle(Envelope.of("a", "identify_ack", Payload.builder()
+                .putStrings("accepted", Collections.<String>emptyList())
+                .put("heimdallProxy", false).build()));
+        assertEquals(Boolean.FALSE, negotiator.heimdallProxy());
+
+        negotiator.onClosed();
+        assertNull(negotiator.heimdallProxy(), "a closed connection has no answer");
+
+        negotiator.onOpen(SETTINGS);
+        negotiator.handle(Envelope.of("b", "identify_ack", acceptedList(4)));
+        assertNull(negotiator.heimdallProxy(),
+                "a bot that left it out said nothing, and nothing must never read as no proxy");
+
+        negotiator.onClosed();
+        negotiator.onOpen(SETTINGS);
+        negotiator.handle(Envelope.of("c", "identify_ack", Payload.builder()
+                .putStrings("accepted", Collections.<String>emptyList())
+                .put("heimdallProxy", true).build()));
+        assertEquals(Boolean.TRUE, negotiator.heimdallProxy());
+    }
+
+    @Test
+    @DisplayName("heimdallProxy is set before the V3 listeners run")
+    void heimdallProxyIsVisibleToTheV3Listener() {
+        HandshakeNegotiator negotiator = negotiator(new RecordingLogger(true));
+        final java.util.concurrent.atomic.AtomicReference<Boolean> seen =
+                new java.util.concurrent.atomic.AtomicReference<Boolean>();
+        negotiator.onModeChange((previous, current) -> {
+            if (current == ProtocolMode.V3) {
+                seen.set(negotiator.heimdallProxy());
+            }
+        });
+
+        negotiator.onOpen(SETTINGS);
+        negotiator.handle(Envelope.of("a", "identify_ack", Payload.builder()
+                .putStrings("accepted", Collections.<String>emptyList())
+                .put("heimdallProxy", false).build()));
+
+        assertEquals(Boolean.FALSE, seen.get());
     }
 }

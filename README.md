@@ -93,10 +93,22 @@ forwarding settings:
 
 Role sync, `/offend` and the chat bridge run on every role.
 
-You can override the role with `role:` in `bootstrap.yml` (it takes effect on restart). The one
-case that needs it: **if your proxy does not run Heimdall, set `role: standalone` on each
-backend.** Otherwise a backend with proxy forwarding on counts itself as an enforcer, and an
-enforcer leaves announcements, IP bans and join-time role sync to a proxy that is not there.
+**A proxy that does not run Heimdall is handled for you.** A backend with proxy forwarding on
+counts itself as an enforcer, and an enforcer leaves announcements, IP bans and join-time role
+sync to the proxy. When no Heimdall proxy is registered anywhere in your Discord server, the bot
+tells the backend, which records `learnedRole: standalone` in `bootstrap.yml` and runs standalone
+from its next restart. `/hd status` says "Restart to run as standalone" until then.
+
+If you later add Heimdall to the proxy, put the proxy in the same network as its backends on the
+dashboard, then run `/hd reload` on each backend and restart it to go back to enforcer. If the
+proxy is in a different network the bot cannot tell which backends it fronts and says nothing, so
+delete the `learnedRole` line (or set `role: enforcer`) on those backends yourself.
+
+You can always set the role yourself with `role:` in `bootstrap.yml` (it takes effect on restart),
+and a role you set always wins over a learned one. Otherwise leave `learnedRole` to the plugin. The
+bot only says "no Heimdall proxy" when it is sure. A server set up before claim codes existed is
+never told, and neither is any backend while a 2.x server or a pre-claim-code proxy has connected
+to the same Discord server since the bot last restarted: set `role: standalone` on those yourself.
 
 Things worth knowing on a network:
 

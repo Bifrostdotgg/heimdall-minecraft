@@ -668,4 +668,155 @@ class HeimdallRuntimeTest {
             runtime.close();
         }
     }
+
+    @Nested
+    @DisplayName("learning its role from the bot")
+    class LearnsItsRole {
+
+        private BootstrapStore configured(Path dataDir, ServerRole role) throws IOException {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            store.save(BootstrapConfig.builder()
+                    .endpoint("https://api.example.invalid")
+                    .token("secret")
+                    .serverId("survival")
+                    .role(role)
+                    .build());
+            return store;
+        }
+
+        private HeimdallRuntime backend(Path dataDir, BootstrapStore store) {
+            return HeimdallRuntime.builder(logger, new FakePlatform(ServerRole.ENFORCER, dataDir))
+                    .bootstrapStore(store)
+                    .roleDetector(new com.heimdall.core.platform.InstanceRoleDetector() {
+                        @Override
+                        public boolean isProxy() {
+                            return false;
+                        }
+
+                        @Override
+                        public boolean isBehindProxy() {
+                            return true;
+                        }
+                    })
+                    .build();
+        }
+
+        @Test
+        @DisplayName("an enforcer told there is no Heimdall proxy records standalone for its next start")
+        void recordsStandaloneAndClearsItAgain(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = configured(dataDir, ServerRole.AUTO);
+            HeimdallRuntime runtime = backend(dataDir, store);
+            assertEquals(ServerRole.ENFORCER, runtime.roleAtNextStart(),
+                    "nothing learned yet: the next start is the same enforcer");
+
+            runtime.learnProxyRole(false);
+
+            assertEquals(ServerRole.STANDALONE, store.load().learnedRole());
+            assertEquals(ServerRole.AUTO, store.load().role(), "role: is the operator's");
+            assertEquals(ServerRole.STANDALONE, runtime.roleAtNextStart());
+            assertTrue(logger.logged(LogLevel.WARN, "restart to apply"), logger.records().toString());
+
+            runtime.learnProxyRole(true);
+
+            assertEquals(ServerRole.AUTO, store.load().learnedRole());
+            assertEquals(ServerRole.ENFORCER, runtime.roleAtNextStart());
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("every other save keeps the learned role, and a reset or a new server clears it")
+        void otherSavesKeepItAndIdentityChangesClearIt(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = configured(dataDir, ServerRole.AUTO);
+            HeimdallRuntime runtime = backend(dataDir, store);
+            runtime.learnProxyRole(false);
+
+            runtime.setModuleLocallyDisabled("marker", true);
+            runtime.persist(runtime.bootstrap().toBuilder().debug(true).build());
+            assertEquals(ServerRole.STANDALONE, store.load().learnedRole(),
+                    "a save that is about something else must not erase what was learned");
+
+            runtime.resetIdentity();
+            assertEquals(ServerRole.AUTO, store.load().learnedRole(),
+                    "learned for credentials that are gone, so not evidence for the next ones");
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("setup as a different server forgets the learned role, setup as the same keeps it")
+        void setupClearsItOnlyForANewServer(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = configured(dataDir, ServerRole.AUTO);
+            HeimdallRuntime runtime = backend(dataDir, store);
+            runtime.learnProxyRole(false);
+
+            runtime.applySetup(runtime.bootstrap().toBuilder().token("rotated").build());
+            assertEquals(ServerRole.STANDALONE, store.load().learnedRole());
+
+            runtime.applySetup(runtime.bootstrap().toBuilder().serverId("lobby").build());
+            assertEquals(ServerRole.AUTO, store.load().learnedRole());
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("a guild switch forgets the learned role, a confirmed guild keeps it")
+        void guildSwitchClearsIt(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            store.save(BootstrapConfig.builder()
+                    .endpoint("https://api.example.invalid")
+                    .token("secret")
+                    .serverId("survival")
+                    .guildId("111111111111111111")
+                    .learnedRole(ServerRole.STANDALONE)
+                    .build());
+            HeimdallRuntime runtime = backend(dataDir, store);
+
+            runtime.adoptGuild("111111111111111111");
+            assertEquals(ServerRole.STANDALONE, store.load().learnedRole(),
+                    "the bot confirming the cached guild changes nothing");
+
+            runtime.adoptGuild("222222222222222222");
+            assertEquals(ServerRole.AUTO, store.load().learnedRole(),
+                    "learned while talking to the wrong guild, so not evidence for this one");
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("the save is handed to the io pool, never run on the thread that saw the ack")
+        void theSinkRunsOffTheCallingThread(@TempDir Path dataDir) throws Exception {
+            HeimdallRuntime runtime = backend(dataDir, configured(dataDir, ServerRole.AUTO));
+            final Thread caller = Thread.currentThread();
+            final java.util.concurrent.CompletableFuture<Thread> ranOn =
+                    new java.util.concurrent.CompletableFuture<Thread>();
+
+            runtime.proxyRoleSink().submit(() -> ranOn.complete(Thread.currentThread()));
+
+            Thread worker = ranOn.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertFalse(worker == caller,
+                    "inline, the save would take the reconfigure lock inside the negotiator's monitor");
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("an operator's role: is left alone whatever the bot says")
+        void configuredRoleIsNotTouched(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = configured(dataDir, ServerRole.ENFORCER);
+            HeimdallRuntime runtime = backend(dataDir, store);
+
+            runtime.learnProxyRole(false);
+
+            assertEquals(ServerRole.AUTO, store.load().learnedRole());
+            assertEquals(ServerRole.ENFORCER, runtime.roleAtNextStart());
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("a platform with no detector has no next-start role to report")
+        void noDetectorNoAnswer(@TempDir Path dataDir) throws IOException {
+            HeimdallRuntime runtime = runtime(dataDir, configured(dataDir, ServerRole.AUTO)).build();
+
+            assertNull(runtime.roleAtNextStart());
+            runtime.learnProxyRole(false);
+            assertEquals(ServerRole.AUTO, runtime.bootstrap().learnedRole());
+            runtime.close();
+        }
+    }
 }
