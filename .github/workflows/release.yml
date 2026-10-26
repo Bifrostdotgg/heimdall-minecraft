@@ -85,6 +85,17 @@ jobs:
           case "$VERSION" in
             *-*) prerelease=(--prerelease) ;;
           esac
+          # A hand-written changelog wins when the tagged commit carries one at
+          # release-notes/<version>.md (e.g. release-notes/3.0.1.md). Without it
+          # GitHub lists the PRs merged since the previous release, which is what
+          # every release candidate gets. VERSION has passed the semver gate
+          # above, so it cannot climb out of release-notes/.
+          notes_file="release-notes/${VERSION}.md"
+          if [ -s "$notes_file" ]; then
+            notes=(--notes-file "$notes_file")
+          else
+            notes=(--generate-notes)
+          fi
           gh release create "$TAG_NAME" "$jar" \
             --title "Heimdall ${VERSION}" \
-            --generate-notes "${prerelease[@]}"
+            "${notes[@]}" "${prerelease[@]}"
