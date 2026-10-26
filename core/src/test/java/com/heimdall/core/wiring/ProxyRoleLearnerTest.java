@@ -78,6 +78,19 @@ class ProxyRoleLearnerTest {
         assertNull(ProxyRoleLearner.decide(ServerRole.AUTO, ServerRole.AUTO, null, false));
     }
 
+    @Test
+    @DisplayName("a learned value that no longer applies is cleared, so it cannot come back later")
+    void staleValueIsCleared() {
+        // role: written down, or forwarding turned off: remove either later and an old standalone
+        // would otherwise apply for a boot behind a proxy that does run Heimdall.
+        assertEquals(ServerRole.AUTO, ProxyRoleLearner.decide(
+                ServerRole.ENFORCER, ServerRole.STANDALONE, BACKEND, false));
+        assertEquals(ServerRole.AUTO, ProxyRoleLearner.decide(
+                ServerRole.AUTO, ServerRole.STANDALONE, signals(false, false), false));
+        assertNull(ProxyRoleLearner.decide(ServerRole.AUTO, ServerRole.STANDALONE, null, false),
+                "with no detector there is no learner to have written it");
+    }
+
     /** Records what the learner hands the runtime, and runs nothing until told to. */
     private static final class RecordingSink implements ProxyRoleLearner.Sink {
 

@@ -244,7 +244,8 @@ final class StatusSubcommand implements AdminSubcommand {
             ServerRole next = runtime.roleAtNextStart();
             if (next != null && next != context.role()) {
                 s.nextRole = next.wireName();
-                s.nextRoleReason = nextRoleReason(runtime.bootstrap(), next);
+                s.nextRoleReason = nextRoleReason(
+                        runtime.bootstrap(), next, runtime.tunnel().heimdallProxy());
             }
             s.software = shortServer(runtime);
 
@@ -367,19 +368,20 @@ final class StatusSubcommand implements AdminSubcommand {
 
     /**
      * Why the next start resolves {@code next}. A role the bot taught this server reads differently
-     * from one an operator set, because only the first is a surprise.
+     * from one an operator set, because only the first is a surprise. The proxy reason is only given
+     * when this connection's answer actually said so; anything else is a change to the file.
      */
-    private static String nextRoleReason(BootstrapConfig bootstrap, ServerRole next) {
+    static String nextRoleReason(BootstrapConfig bootstrap, ServerRole next, Boolean heimdallProxy) {
         if (bootstrap.role() != ServerRole.AUTO) {
             return "set in bootstrap.yml";
         }
         if (next == ServerRole.STANDALONE && bootstrap.learnedRole() == ServerRole.STANDALONE) {
-            return "no Heimdall proxy in this network";
+            return "no Heimdall proxy in this guild";
         }
-        if (next == ServerRole.ENFORCER) {
-            return "a Heimdall proxy joined this network";
+        if (next == ServerRole.ENFORCER && Boolean.TRUE.equals(heimdallProxy)) {
+            return "a Heimdall proxy is registered in this network";
         }
-        return "detected";
+        return "bootstrap.yml changed";
     }
 
     /** Works out every row and every problem. A pure function of the snapshot. */
@@ -698,7 +700,8 @@ final class StatusSubcommand implements AdminSubcommand {
         ServerRole next = runtime.roleAtNextStart();
         if (next != null && next != context.role()) {
             detail(source, "role after restart", next.wireName() + " ("
-                    + nextRoleReason(runtime.bootstrap(), next) + ")");
+                    + nextRoleReason(runtime.bootstrap(), next, runtime.tunnel().heimdallProxy())
+                    + ")");
         }
         detail(source, "plugin", context.pluginVersion());
         if (!context.core().isEmpty()) {

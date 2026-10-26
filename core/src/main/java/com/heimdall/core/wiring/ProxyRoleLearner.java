@@ -79,9 +79,10 @@ final class ProxyRoleLearner implements ProtocolModeListener {
      * <p>A pure function, so every row of the policy is a test:
      *
      * <ul>
-     *   <li>no detector (a proxy platform), a configured role, or a server that is the proxy:
-     *       nothing to learn;
-     *   <li>no forwarding: auto already says standalone, so nothing to learn;
+     *   <li>no detector (a proxy platform): nothing to learn;
+     *   <li>a configured role, a server that is the proxy, or no forwarding: nothing to learn, and
+     *       a learned value left over from before is cleared, so it cannot come back for a boot
+     *       when the operator removes {@code role:} or turns forwarding back on;
      *   <li>forwarding on and the bot says no Heimdall proxy: learn {@link ServerRole#STANDALONE};
      *   <li>forwarding on and the bot says there is one: forget it ({@link ServerRole#AUTO}).
      * </ul>
@@ -93,14 +94,13 @@ final class ProxyRoleLearner implements ProtocolModeListener {
             ServerRole learned,
             InstanceRoleDetector detector,
             boolean heimdallProxy) {
-        if (detector == null || (configured != null && configured != ServerRole.AUTO)) {
+        if (detector == null) {
             return null;
         }
-        if (detector.isProxy() || !detector.isBehindProxy()) {
-            return null;
-        }
-        ServerRole wanted = heimdallProxy ? ServerRole.AUTO : ServerRole.STANDALONE;
         ServerRole current = learned == ServerRole.STANDALONE ? ServerRole.STANDALONE : ServerRole.AUTO;
+        boolean applies = (configured == null || configured == ServerRole.AUTO)
+                && !detector.isProxy() && detector.isBehindProxy();
+        ServerRole wanted = applies && !heimdallProxy ? ServerRole.STANDALONE : ServerRole.AUTO;
         return wanted == current ? null : wanted;
     }
 }

@@ -724,6 +724,55 @@ class HeimdallRuntimeTest {
         }
 
         @Test
+        @DisplayName("every other save keeps the learned role, and a reset or a new server clears it")
+        void otherSavesKeepItAndIdentityChangesClearIt(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = configured(dataDir, ServerRole.AUTO);
+            HeimdallRuntime runtime = backend(dataDir, store);
+            runtime.learnProxyRole(false);
+
+            runtime.setModuleLocallyDisabled("marker", true);
+            runtime.persist(runtime.bootstrap().toBuilder().debug(true).build());
+            assertEquals(ServerRole.STANDALONE, store.load().learnedRole(),
+                    "a save that is about something else must not erase what was learned");
+
+            runtime.resetIdentity();
+            assertEquals(ServerRole.AUTO, store.load().learnedRole(),
+                    "learned for credentials that are gone, so not evidence for the next ones");
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("setup as a different server forgets the learned role, setup as the same keeps it")
+        void setupClearsItOnlyForANewServer(@TempDir Path dataDir) throws IOException {
+            BootstrapStore store = configured(dataDir, ServerRole.AUTO);
+            HeimdallRuntime runtime = backend(dataDir, store);
+            runtime.learnProxyRole(false);
+
+            runtime.applySetup(runtime.bootstrap().toBuilder().token("rotated").build());
+            assertEquals(ServerRole.STANDALONE, store.load().learnedRole());
+
+            runtime.applySetup(runtime.bootstrap().toBuilder().serverId("lobby").build());
+            assertEquals(ServerRole.AUTO, store.load().learnedRole());
+            runtime.close();
+        }
+
+        @Test
+        @DisplayName("the save is handed to the io pool, never run on the thread that saw the ack")
+        void theSinkRunsOffTheCallingThread(@TempDir Path dataDir) throws Exception {
+            HeimdallRuntime runtime = backend(dataDir, configured(dataDir, ServerRole.AUTO));
+            final Thread caller = Thread.currentThread();
+            final java.util.concurrent.CompletableFuture<Thread> ranOn =
+                    new java.util.concurrent.CompletableFuture<Thread>();
+
+            runtime.proxyRoleSink().submit(() -> ranOn.complete(Thread.currentThread()));
+
+            Thread worker = ranOn.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            assertFalse(worker == caller,
+                    "inline, the save would take the reconfigure lock inside the negotiator's monitor");
+            runtime.close();
+        }
+
+        @Test
         @DisplayName("an operator's role: is left alone whatever the bot says")
         void configuredRoleIsNotTouched(@TempDir Path dataDir) throws IOException {
             BootstrapStore store = configured(dataDir, ServerRole.ENFORCER);

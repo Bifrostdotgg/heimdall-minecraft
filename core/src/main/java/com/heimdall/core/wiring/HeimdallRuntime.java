@@ -404,7 +404,7 @@ public final class HeimdallRuntime implements AutoCloseable {
 
         registrations.add(tunnel.onModeChange(remoteConfig));
         if (roleDetector != null) {
-            registrations.add(tunnel.onModeChange(new ProxyRoleLearner(new ProxyRoleSink())));
+            registrations.add(tunnel.onModeChange(new ProxyRoleLearner(proxyRoleSink())));
         }
         registrations.add(modules.followRemoteConfig());
         // The dashboard's three direct questions — the roster, the console box, the mod probe.
@@ -515,8 +515,14 @@ public final class HeimdallRuntime implements AutoCloseable {
         // Setup binds. These credentials are new, so whatever machine is claiming them is the one
         // they belong to, and a server that was blocked a moment ago is unblocked by having been set
         // up again here rather than by anything else having to notice.
-        BootstrapConfig bound =
-                updated.toBuilder().instanceFingerprint(fingerprint.value()).build();
+        BootstrapConfig.Builder binding =
+                updated.toBuilder().instanceFingerprint(fingerprint.value());
+        // A role learned for a different server identity says nothing about this one. The bot
+        // answers again on the first handshake, and until then nothing is learned.
+        if (!updated.serverId().equals(bootstrap.serverId())) {
+            binding.learnedRole(ServerRole.AUTO);
+        }
+        BootstrapConfig bound = binding.build();
         bootstrapStore.save(bound);
         this.bootstrap = bound;
         this.guildId = bound.guildId();
@@ -611,18 +617,27 @@ public final class HeimdallRuntime implements AutoCloseable {
             }
             this.bootstrap = updated;
             if (next == ServerRole.STANDALONE) {
-                logger.warn("the bot reports no Heimdall proxy in this server's network. As an "
-                        + "enforcer this server leaves IP, country and subnet bans, punishment "
-                        + "announcements and join role sync to a Heimdall proxy, so nothing is doing "
-                        + "them. It runs standalone from its next restart: restart to apply. If "
-                        + "Heimdall is on your proxy, check that it is set up; to keep this role, set "
-                        + "role: " + ServerRole.ENFORCER.wireName() + " in " + bootstrapStore.file());
-            } else {
+                logger.warn("the bot reports no Heimdall proxy registered for this server's "
+                        + "guild. As an enforcer this server leaves IP, country and subnet bans, "
+                        + "punishment announcements and join role sync to a Heimdall proxy, so "
+                        + "nothing is doing them. It runs standalone from its next restart or core "
+                        + "update: restart to apply. If Heimdall is on your proxy, check that it is "
+                        + "set up; to keep this role, set role: " + ServerRole.ENFORCER.wireName()
+                        + " in " + bootstrapStore.file());
+            } else if (roleAtNextStart() == ServerRole.ENFORCER) {
                 logger.info("the bot reports a Heimdall proxy in this server's network now. This "
                         + "server goes back to " + ServerRole.ENFORCER.wireName()
-                        + " at its next restart.");
+                        + " at its next restart or core update.");
+            } else {
+                // A stale value on a server it no longer applies to; clearing it changes nothing.
+                logger.debug("cleared a learned role that no longer applies to this server");
             }
         }
+    }
+
+    /** The runtime's half of {@link ProxyRoleLearner}. Package-private so a test can hold one. */
+    ProxyRoleLearner.Sink proxyRoleSink() {
+        return new ProxyRoleSink();
     }
 
     /** The runtime's half of {@link ProxyRoleLearner}. */
@@ -953,6 +968,7 @@ public final class HeimdallRuntime implements AutoCloseable {
                     .serverId("")
                     .guildId("")
                     .instanceFingerprint("")
+                    .learnedRole(ServerRole.AUTO)
                     .build();
             bootstrapStore.save(cleared);
             this.bootstrap = cleared;
@@ -1097,7 +1113,12 @@ public final class HeimdallRuntime implements AutoCloseable {
         BootstrapConfig current = bootstrap;
         apiClient.reconfigure(ApiSettingsFactory.fromBootstrap(current, resolved).build());
         try {
-            BootstrapConfig persisted = current.toBuilder().guildId(resolved).build();
+            BootstrapConfig.Builder next = current.toBuilder().guildId(resolved);
+            if (wasProvisional) {
+                // Learned in the guild this server was wrongly talking to, so not evidence here.
+                next.learnedRole(ServerRole.AUTO);
+            }
+            BootstrapConfig persisted = next.build();
             bootstrapStore.save(persisted);
             bootstrap = persisted;
         } catch (IOException | RuntimeException notPersisted) {
