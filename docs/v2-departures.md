@@ -2556,10 +2556,10 @@ vanish plugins (EssentialsX, CMI) exist only on backends, so a network using one
   platform-free; how long a join waits is the platform's answer (`joinWaitMillis`), so the bridge
   never learns what a backend is.
 - **`:platform-common`** has `VanishSupport`, the platform-neutral half: lazy resolution retried while
-  PremiumVanish is missing (at most every five seconds since D92) (no load-order guarantee, as for LuckPerms; a bootstrap
-  `prepare()` that runs first is a miss, never a failure), following a disable or reload, the join
-  wait, containment, the toggle listener list, and teardown. Written once so the three platforms
-  cannot drift.
+  PremiumVanish is missing (at most every five seconds since D92; no load-order guarantee, as for
+  LuckPerms; a bootstrap `prepare()` that runs first is a miss, never a failure), following a
+  disable or reload, the join wait, containment, the toggle listener list, and teardown. Written
+  once so the three platforms cannot drift.
 - **Each platform** supplies only the reflection: `BukkitVanish` (`VanishAPI.isInvisible(Player)`,
   `isInvisibleOffline(UUID)` once the player has gone, the `PostPlayerHideEvent` /
   `PostPlayerShowEvent` / `PlayerAutoVanishOnJoinEvent` events, falling back to the pre-change
