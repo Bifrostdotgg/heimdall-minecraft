@@ -603,6 +603,7 @@ class VanishSupportTest {
         vanish.current = false;
         vanish.installed = false;
         assertFalse(vanish.present(), "disabled: absent");
+        assertFalse(vanish.present(), "and still absent on the next call, as a per-player loop asks");
 
         vanish.installed = true;
         vanish.current = true;

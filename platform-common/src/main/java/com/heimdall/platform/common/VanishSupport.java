@@ -43,9 +43,9 @@ import java.util.function.LongSupplier;
  * {@link #prepare()} that runs before PremiumVanish has loaded costs nothing: plugins finish
  * enabling before players can join. A found plugin is cached, and checked to still be the live one
  * on every call, so a plugin manager that reloads PremiumVanish into a new class loader is followed
- * rather than left listening to the old copy's events. A lookup made because a bound PremiumVanish
- * was disabled or reloaded records no miss, so a reload in progress is looked at again on the next
- * call rather than {@link #MISS_RETRY_MS} later.
+ * rather than left listening to the old copy's events. For {@link #MISS_RETRY_MS} after a bound
+ * PremiumVanish is found disabled or reloaded, lookups record no miss, so a reload in progress is
+ * found on the next call rather than up to {@link #MISS_RETRY_MS} later.
  *
  * <h2>Two kinds of failure</h2>
  *
@@ -181,6 +181,10 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     /** When the last lookup found no PremiumVanish, on {@link #nanoNow()}'s clock, if it did. */
     private volatile boolean missed;
     private volatile long missedAtNanos;
+
+    /** When a bound PremiumVanish was last found disabled or reloaded, if it was. */
+    private volatile boolean wentStale;
+    private volatile long wentStaleAtNanos;
     private volatile Registration hooks = Registration.NONE;
     private volatile boolean closed;
     private volatile String brokenBecause;
@@ -507,7 +511,6 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             return null;
         }
         Binding current = bound;
-        boolean wasBound = current != null;
         if (current != null) {
             if (isCurrent(current)) {
                 return current;
@@ -515,6 +518,8 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             // Disabled or reloaded: the hook listens to the old copy's events. Take it off and look
             // again; a re-enabled or reloaded PremiumVanish is bound afresh below.
             bound = null;
+            wentStaleAtNanos = nanoNow();
+            wentStale = true;
             Registration stale = hooks;
             hooks = Registration.NONE;
             closeQuietly(stale);
@@ -537,15 +542,17 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             return null;
         }
         if (fresh == null) {
-            if (!wasBound) {
-                // Only a plain miss waits. One that follows a disable or reload may be a reload in
-                // progress, so the next call looks again at once.
-                missedAtNanos = nanoNow();
+            long now = nanoNow();
+            if (!wentStale || now - wentStaleAtNanos >= TimeUnit.MILLISECONDS.toNanos(MISS_RETRY_MS)) {
+                // Only a plain miss waits. For MISS_RETRY_MS after a bound copy was disabled or
+                // reloaded every call looks again, since a reload in progress comes back at once.
+                missedAtNanos = now;
                 missed = true;
             }
             return null;
         }
         missed = false;
+        wentStale = false;
         Registration hook = Registration.NONE;
         try {
             hook = fresh.hook();
