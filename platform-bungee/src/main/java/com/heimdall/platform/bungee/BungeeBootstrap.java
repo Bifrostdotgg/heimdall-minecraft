@@ -323,7 +323,7 @@ final class BungeeBootstrap {
                 logger, runtime.loginPipeline(), platform.integrations().floodgate(), text)));
         listen(new BungeeSessionListener(logger, runtime.playerSessions(), text));
         // PremiumVanish's hide/show hook, in place before the first join when it is already loaded.
-        // A miss (it loads after us) is retried on first use. Departure D88.
+        // A miss (it loads after us) is looked for again within seconds. Departures D88, D92.
         platform.vanish().prepare();
         // Chat, OBSERVED. A proxy still cannot cancel signed chat, so interception remains the
         // backends' — this listener reads and touches nothing, which is what makes a proxy-origin

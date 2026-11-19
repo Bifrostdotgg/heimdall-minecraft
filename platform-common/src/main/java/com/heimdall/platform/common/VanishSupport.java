@@ -41,9 +41,11 @@ import java.util.function.LongSupplier;
  * ask once per online player per heartbeat, and looking means the platform's plugin manager, whose
  * lock Spigot also holds for every synchronous event. A miss is never recorded as a failure, so a
  * {@link #prepare()} that runs before PremiumVanish has loaded costs nothing: plugins finish
- * enabling before players can join. A found plugin is cached, and checked to still be the live one on every call, so a
- * plugin manager that reloads PremiumVanish into a new class loader is followed rather than left
- * listening to the old copy's events.
+ * enabling before players can join. A found plugin is cached, and checked to still be the live one
+ * on every call, so a plugin manager that reloads PremiumVanish into a new class loader is followed
+ * rather than left listening to the old copy's events. A lookup made because a bound PremiumVanish
+ * was disabled or reloaded records no miss, so a reload in progress is looked at again on the next
+ * call rather than {@link #MISS_RETRY_MS} later.
  *
  * <h2>Two kinds of failure</h2>
  *
@@ -229,7 +231,8 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
 
     /**
      * Resolves now, so the event hook is in place before anybody joins. Called by the bootstrap. A
-     * miss (PremiumVanish loads after Heimdall) is not a failure, and is simply retried on first use.
+     * miss (PremiumVanish loads after Heimdall) is not a failure, and is looked for again at most
+     * every {@link #MISS_RETRY_MS} ms.
      */
     public final void prepare() {
         binding();
@@ -504,6 +507,7 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             return null;
         }
         Binding current = bound;
+        boolean wasBound = current != null;
         if (current != null) {
             if (isCurrent(current)) {
                 return current;
@@ -533,8 +537,12 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             return null;
         }
         if (fresh == null) {
-            missedAtNanos = nanoNow();
-            missed = true;
+            if (!wasBound) {
+                // Only a plain miss waits. One that follows a disable or reload may be a reload in
+                // progress, so the next call looks again at once.
+                missedAtNanos = nanoNow();
+                missed = true;
+            }
             return null;
         }
         missed = false;

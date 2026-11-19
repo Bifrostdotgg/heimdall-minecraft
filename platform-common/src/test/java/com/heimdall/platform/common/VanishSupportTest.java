@@ -592,4 +592,22 @@ class VanishSupportTest {
         assertEquals(2, vanish.hooksMade.get());
         assertEquals(1, vanish.hooksOpen.get(), "the stale hook is off, the fresh one is on");
     }
+
+    @Test
+    @DisplayName("disabled then re-enabled: found on the next call, not held back as a miss")
+    void aReEnableIsNotThrottled() {
+        TestVanish vanish = new TestVanish();
+        vanish.installed = true;
+        vanish.prepare();
+
+        vanish.current = false;
+        vanish.installed = false;
+        assertFalse(vanish.present(), "disabled: absent");
+
+        vanish.installed = true;
+        vanish.current = true;
+        assertTrue(vanish.present(),
+                "a lookup that followed a disable records no miss, so a reload in progress is "
+                        + "seen at once rather than five seconds later");
+    }
 }

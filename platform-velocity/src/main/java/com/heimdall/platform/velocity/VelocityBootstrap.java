@@ -325,7 +325,7 @@ final class VelocityBootstrap {
         // Backend connections, which time the proxy's link-code join check (departure D90).
         registrations.track(listenForBackends(events, sessions));
         // PremiumVanish's hide/show hook, in place before the first join when it is already loaded.
-        // A miss (it loads after us) is retried on first use.
+        // A miss (it loads after us) is looked for again within seconds (D92).
         platform.vanish().prepare();
         // Chat, OBSERVED. A proxy still cannot cancel signed chat, so interception remains the
         // backends' — this listener reads and touches nothing, which is what makes a proxy-origin
