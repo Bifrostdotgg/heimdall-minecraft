@@ -266,8 +266,9 @@ join when someone vanishes or reappears.
 **Player lists and counts mark vanished staff** the same way. Each server marks the vanished players
 it can see on its player list and in its player count, and the bot shows them only to people with the
 `minecraft.server.view_vanished` permission, in `/playerlist` and on the dashboard. The same limit
-applies: a proxy sees vanish only through PremiumVanish's proxy half, so without it the proxy's list
-and count include staff vanished on a backend.
+applies: a proxy sees vanish only through PremiumVanish's proxy half. Without it, the proxy's player
+count includes staff vanished on a backend, and so does its list when the proxy is looked at on its
+own (a whole network's list takes the marks from the backends).
 
 **ChatControl channels** are honoured: only the channels ticked on a mapping are relayed. A proxy
 cannot tell channels apart, so let backends relay chat when ChatControl channels are on.
