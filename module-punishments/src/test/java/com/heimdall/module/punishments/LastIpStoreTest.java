@@ -114,4 +114,32 @@ class LastIpStoreTest {
         assertEquals(1, store.get(STEVE).history.size(), "a repeat sighting is not a second entry");
         assertEquals(1, store.altsOf(STEVE, 50).rows.size(), "and imported history finds alts");
     }
+
+    @Test
+    void aLookedUpRowIsACopyThatALaterLoginCannotDisturb() {
+        LastIpStore store = new LastIpStore(new RecordingLogger(true), dir.resolve("ips.json"));
+        store.record(STEVE, "Steve", "203.0.113.9", 1L);
+
+        // Issue #5: /iphistory walked the live history while a login appended to it.
+        LastIpStore.PlayerIps byUuid = store.get(STEVE);
+        LastIpStore.PlayerIps byName = store.byName("steve");
+        store.record(STEVE, "Steve2", "203.0.113.10", 2L);
+
+        for (LastIpStore.PlayerIps held : new LastIpStore.PlayerIps[] {byUuid, byName}) {
+            int seen = 0;
+            for (LastIpStore.Sighting ignored : held.history) {
+                seen++;
+            }
+            assertEquals(1, seen, "the copy keeps the history it was taken with");
+            assertEquals("Steve", held.name);
+            assertEquals("203.0.113.9", held.lastIp);
+        }
+
+        // And writing to a copy changes nothing in the store.
+        byUuid.history.clear();
+        byUuid.name = "Mallory";
+        assertEquals(2, store.get(STEVE).history.size());
+        assertEquals("Steve2", store.get(STEVE).name);
+        assertEquals(STEVE, store.uuidByName("Steve2"));
+    }
 }

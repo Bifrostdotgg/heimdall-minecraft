@@ -370,6 +370,14 @@ public final class TunnelClient implements TunnelBus {
         return negotiator.configVersion();
     }
 
+    /**
+     * Whether the bot said, on this connection's {@code identify_ack}, that this server's network
+     * has a Heimdall proxy registered. {@code null} when it did not say, or there is no connection.
+     */
+    public Boolean heimdallProxy() {
+        return negotiator.heimdallProxy();
+    }
+
     /** The settings currently in force. */
     public TunnelSettings settings() {
         return settings;

@@ -14,9 +14,19 @@ import com.heimdall.core.log.HeimdallLogger;
  *       made a decision, and a detector that overruled them would be undebuggable;
  *   <li>otherwise, a proxy is a {@link ServerRole#GATEKEEPER};
  *   <li>otherwise, a server that has been told to trust a proxy's forwarded identity is an
- *       {@link ServerRole#ENFORCER};
+ *       {@link ServerRole#ENFORCER}, unless the bot has said that no Heimdall proxy is registered
+ *       in its network, in which case it is {@link ServerRole#STANDALONE};
  *   <li>otherwise, {@link ServerRole#STANDALONE}.
  * </ul>
+ *
+ * <h2>Why the bot gets a say</h2>
+ *
+ * <p>Forwarding on proves there is a proxy, not that the proxy runs Heimdall. An enforcer leaves
+ * IP, country and subnet bans, punishment announcements and join role sync to the gatekeeper, so
+ * behind a plain Velocity or BungeeCord nothing did them. The server cannot tell the two apart; the
+ * bot's registry can, and its answer is remembered as {@code learnedRole} in {@code bootstrap.yml}
+ * and applied here at the next start. It only ever turns enforcer into standalone, the direction
+ * the failure-mode note below calls safe.
  *
  * <h2>Why "behind a proxy" is read from the server's own config</h2>
  *
@@ -57,6 +67,26 @@ public interface InstanceRoleDetector {
      */
     static ServerRole resolve(
             ServerRole configured, InstanceRoleDetector detector, HeimdallLogger logger) {
+        return resolve(configured, ServerRole.AUTO, detector, logger);
+    }
+
+    /**
+     * Applies the policy above, including a role learned from the bot, and logs the outcome once.
+     *
+     * @param configured the role from {@code bootstrap.yml}; {@code null} is treated as
+     *     {@link ServerRole#AUTO}
+     * @param learned the role the plugin learned from the bot ({@code learnedRole}); only
+     *     {@link ServerRole#STANDALONE} has an effect, and only on a server that would otherwise be
+     *     an enforcer
+     * @param detector the platform's signals; {@code null} resolves to {@link ServerRole#STANDALONE}
+     * @param logger where the one-line explanation goes; {@code null} suppresses it
+     * @return a resolved role, never {@link ServerRole#AUTO}
+     */
+    static ServerRole resolve(
+            ServerRole configured,
+            ServerRole learned,
+            InstanceRoleDetector detector,
+            HeimdallLogger logger) {
         if (configured != null && configured != ServerRole.AUTO) {
             if (logger != null) {
                 logger.info("server role: " + configured.wireName() + " (set in bootstrap.yml)");
@@ -76,6 +106,10 @@ public interface InstanceRoleDetector {
         if (detector.isProxy()) {
             resolved = ServerRole.GATEKEEPER;
             because = "this instance is the proxy";
+        } else if (detector.isBehindProxy() && learned == ServerRole.STANDALONE) {
+            resolved = ServerRole.STANDALONE;
+            because = "proxy forwarding is on, but the bot reported no Heimdall proxy in this "
+                    + "network; set role: in bootstrap.yml to override";
         } else if (detector.isBehindProxy()) {
             resolved = ServerRole.ENFORCER;
             because = "proxy forwarding is enabled in this server's own config";

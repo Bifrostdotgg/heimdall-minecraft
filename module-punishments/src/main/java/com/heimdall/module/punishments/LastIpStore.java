@@ -190,14 +190,29 @@ final class LastIpStore {
         });
     }
 
+    /**
+     * A copy of the row for a uuid, or {@code null}.
+     *
+     * <p>A copy for the same reason {@link Alt} is one: {@link #record} mutates the live row and
+     * appends to its history on whichever thread a login arrives on, so a caller walking a live
+     * {@code history} outside the monitor could hit a {@code ConcurrentModificationException}
+     * (issue #5, {@code /iphistory}). The copy is the caller's to read at leisure; changing it
+     * changes nothing here.
+     */
     synchronized PlayerIps get(String uuid) {
         if (uuid == null) {
             return null;
         }
-        return byUuid.get(uuid.toLowerCase(Locale.ROOT));
+        return copyOf(byUuid.get(uuid.toLowerCase(Locale.ROOT)));
     }
 
+    /** A copy of the row for a name, case-insensitively, or {@code null}. See {@link #get}. */
     synchronized PlayerIps byName(String name) {
+        return copyOf(rowByName(name));
+    }
+
+    /** The live row for a name. Callers must hold the monitor and must not let it escape. */
+    private PlayerIps rowByName(String name) {
         if (name == null) {
             return null;
         }
@@ -207,6 +222,20 @@ final class LastIpStore {
             }
         }
         return null;
+    }
+
+    /** Sightings are immutable, so copying the list is copying the history. */
+    private static PlayerIps copyOf(PlayerIps row) {
+        if (row == null) {
+            return null;
+        }
+        PlayerIps copy = new PlayerIps();
+        copy.uuid = row.uuid;
+        copy.name = row.name;
+        copy.lastIp = row.lastIp;
+        copy.seenAt = row.seenAt;
+        copy.history.addAll(row.history);
+        return copy;
     }
 
     /**
@@ -228,7 +257,7 @@ final class LastIpStore {
 
     /** The stored uuid for a name, or {@code null}. A String is immutable, so this is a safe copy. */
     synchronized String uuidByName(String name) {
-        PlayerIps row = byName(name);
+        PlayerIps row = rowByName(name);
         return row == null ? null : row.uuid;
     }
 

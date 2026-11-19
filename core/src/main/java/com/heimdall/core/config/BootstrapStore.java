@@ -103,6 +103,15 @@ public final class BootstrapStore {
     private static final String KEY_INSTANCE_FINGERPRINT = "instanceFingerprint";
 
     /**
+     * The role this server learned from the bot (see {@code BootstrapConfig#learnedRole()}).
+     *
+     * <p>The third key the plugin writes for itself, and the only one written only when it holds
+     * something: most servers never learn a role, and a {@code learnedRole: auto} line in every
+     * file would be one more thing for an operator to mistake for a setting.
+     */
+    private static final String KEY_LEARNED_ROLE = "learnedRole";
+
+    /**
      * What the same cache was called before it was renamed.
      *
      * <p>Read, never written. 1d shipped the key as {@code guildId} for exactly as long as it took a
@@ -119,7 +128,7 @@ public final class BootstrapStore {
             KEY_ENDPOINT, KEY_TOKEN_ID, KEY_TOKEN, KEY_SERVER_ID, KEY_ROLE, KEY_IDENTITY_CHECK,
             KEY_DEBUG, KEY_TIMEOUT_MS, KEY_RETRIES, KEY_RETRY_DELAY_MS,
             KEY_UPDATES_CHECK, KEY_UPDATES_NOTIFY, KEY_UPDATES_INTERVAL, KEY_DISABLED_MODULES,
-            KEY_INSTANCE_FINGERPRINT, KEY_GUILD_ID_CACHE, LEGACY_KEY_GUILD_ID));
+            KEY_INSTANCE_FINGERPRINT, KEY_LEARNED_ROLE, KEY_GUILD_ID_CACHE, LEGACY_KEY_GUILD_ID));
 
     private final HeimdallLogger logger;
     private final Path file;
@@ -201,6 +210,8 @@ public final class BootstrapStore {
                 builder.disabledModules(asString(value));
             } else if (KEY_INSTANCE_FINGERPRINT.equals(key)) {
                 builder.instanceFingerprint(asString(value));
+            } else if (KEY_LEARNED_ROLE.equals(key)) {
+                builder.learnedRole(parseRole(asString(value)));
             } else if (KEY_GUILD_ID_CACHE.equals(key)) {
                 builder.guildId(asString(value));
             } else if (LEGACY_KEY_GUILD_ID.equals(key) && !raw.containsKey(KEY_GUILD_ID_CACHE)) {
@@ -257,12 +268,16 @@ public final class BootstrapStore {
             document.put(KEY_UPDATES_RELEASE_REPO, config.updatesReleaseRepo());
         }
         document.put(KEY_DISABLED_MODULES, config.disabledModules());
-        // The last two known keys are the appendix the plugin maintains for itself: which instance
-        // these credentials were bound to, and the guild the token last resolved to. They sit below
+        // The last known keys are the appendix the plugin maintains for itself: which instance
+        // these credentials were bound to, any role learned from the bot, and the guild the token
+        // last resolved to. They sit below
         // the fields the operator was actually asked for. The legacy guildId spelling is
         // deliberately not written back, so a file rewritten by this version ends up with one key
         // rather than two saying the same thing.
         document.put(KEY_INSTANCE_FINGERPRINT, config.instanceFingerprint());
+        if (config.learnedRole() != ServerRole.AUTO) {
+            document.put(KEY_LEARNED_ROLE, config.learnedRole().wireName());
+        }
         document.put(KEY_GUILD_ID_CACHE, config.guildId());
         document.putAll(unknownKeys());
 

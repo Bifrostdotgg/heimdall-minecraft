@@ -114,6 +114,21 @@ public final class BootstrapConfig {
      */
     private final String instanceFingerprint;
 
+    /**
+     * The role this server learned from the bot, {@link ServerRole#STANDALONE} or
+     * {@link ServerRole#AUTO} for "nothing learned".
+     *
+     * <p><strong>Written by the plugin, not by an operator</strong>, and kept apart from
+     * {@link #role()} for that reason. A backend with proxy forwarding on detects itself as an
+     * {@link ServerRole#ENFORCER}, which leaves IP, country and subnet bans, announcements and join
+     * role sync to the Heimdall plugin on the proxy. When the proxy does not run Heimdall, nothing
+     * does them. The bot can see that from its registry and says so on {@code identify_ack}, and
+     * this is where the answer is remembered, to apply from the next start. A separate key means the
+     * plugin can clear it again when a Heimdall proxy turns up, and never overwrites or looks like an
+     * operator's own {@code role:}, which always wins. See {@code ProxyRoleLearner}.
+     */
+    private final ServerRole learnedRole;
+
     private BootstrapConfig(Builder builder) {
         this.endpoint = stripTrailingSlash(Strings.trimToEmpty(builder.endpoint));
         this.tokenId = Strings.trimToEmpty(builder.tokenId);
@@ -135,6 +150,9 @@ public final class BootstrapConfig {
         this.disabledModules = Strings.trimToEmpty(builder.disabledModules);
         this.guildId = Strings.trimToEmpty(builder.guildId);
         this.instanceFingerprint = Strings.trimToEmpty(builder.instanceFingerprint);
+        // Only standalone can be learned. Anything else, a hand edit included, is "nothing learned".
+        this.learnedRole = builder.learnedRole == ServerRole.STANDALONE
+                ? ServerRole.STANDALONE : ServerRole.AUTO;
     }
 
     /** An empty, not-configured bootstrap: what a server with no {@code bootstrap.yml} has. */
@@ -166,6 +184,7 @@ public final class BootstrapConfig {
                 .updatesReleaseRepo(updatesReleaseRepo)
                 .disabledModules(disabledModules)
                 .instanceFingerprint(instanceFingerprint)
+                .learnedRole(learnedRole)
                 .guildId(guildId);
     }
 
@@ -294,6 +313,15 @@ public final class BootstrapConfig {
     }
 
     /**
+     * The role learned from the bot: {@link ServerRole#STANDALONE}, or {@link ServerRole#AUTO} when
+     * nothing has been learned. Never {@code null}. Only consulted when {@link #role()} is
+     * {@code AUTO}; see the field comment.
+     */
+    public ServerRole learnedRole() {
+        return learnedRole;
+    }
+
+    /**
      * Whether this config carries enough to talk to the bot at all.
      *
      * <p>{@code false} means the setup flow has not run: no endpoint, or no token. It is not
@@ -334,6 +362,7 @@ public final class BootstrapConfig {
                 && updatesCheckIntervalHours == that.updatesCheckIntervalHours
                 && updatesReleaseRepo.equals(that.updatesReleaseRepo)
                 && role == that.role
+                && learnedRole == that.learnedRole
                 && identityCheck == that.identityCheck
                 && instanceFingerprint.equals(that.instanceFingerprint)
                 && endpoint.equals(that.endpoint)
@@ -350,6 +379,7 @@ public final class BootstrapConfig {
         result = 31 * result + token.hashCode();
         result = 31 * result + serverId.hashCode();
         result = 31 * result + role.hashCode();
+        result = 31 * result + learnedRole.hashCode();
         result = 31 * result + identityCheck.hashCode();
         result = 31 * result + instanceFingerprint.hashCode();
         result = 31 * result + (debug ? 1 : 0);
@@ -373,6 +403,7 @@ public final class BootstrapConfig {
                 + "', token=" + (token.isEmpty() ? "<unset>" : "<redacted>")
                 + ", serverId='" + serverId
                 + "', role=" + role.wireName()
+                + ", learnedRole=" + learnedRole.wireName()
                 + ", identityCheck=" + identityCheck.wireName()
                 + ", instanceFingerprint='" + instanceFingerprint
                 + "', guildId='" + guildId
@@ -413,6 +444,7 @@ public final class BootstrapConfig {
         private String disabledModules = "";
         private String guildId = "";
         private String instanceFingerprint = "";
+        private ServerRole learnedRole = ServerRole.AUTO;
 
         private Builder() {
         }
@@ -505,6 +537,15 @@ public final class BootstrapConfig {
         /** The instance this config is bound to. Written by the plugin, not by an operator. */
         public Builder instanceFingerprint(String value) {
             this.instanceFingerprint = value;
+            return this;
+        }
+
+        /**
+         * The role learned from the bot. Written by the plugin, not by an operator. Anything but
+         * {@link ServerRole#STANDALONE}, {@code null} included, means nothing learned.
+         */
+        public Builder learnedRole(ServerRole value) {
+            this.learnedRole = value;
             return this;
         }
 

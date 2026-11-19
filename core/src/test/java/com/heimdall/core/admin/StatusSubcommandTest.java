@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.heimdall.core.BuildConstants;
+import com.heimdall.core.config.BootstrapConfig;
 import com.heimdall.core.config.BootstrapStore;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.log.RecordingLogger;
@@ -729,6 +730,80 @@ class StatusSubcommandTest {
             List<String> suggestions = commands().complete(admin, "hd", "status", "");
 
             assertTrue(suggestions.containsAll(StatusSubcommand.SECTIONS), suggestions.toString());
+        }
+    }
+
+    @Nested
+    @DisplayName("a role that changes at the next restart")
+    class RoleAfterRestart {
+
+        @Test
+        @DisplayName("is one attention line that says what and why")
+        void saysRestart() {
+            StatusSubcommand.Snapshot s = healthy();
+            s.nextRole = "standalone";
+            s.nextRoleReason = "no Heimdall proxy in this guild";
+
+            StatusSubcommand.Report report = StatusSubcommand.assess(s);
+
+            assertTrue(problemSaying(report,
+                    "Restart to run as standalone: no Heimdall proxy in this guild"),
+                    report.problems.toString());
+        }
+
+        @Test
+        @DisplayName("a live enforcer with a learned standalone says restart, in the summary and in server")
+        void readFromALiveRuntime() throws java.io.IOException {
+            runtime.close();
+            BootstrapStore store = new BootstrapStore(logger, dataDir.resolve("bootstrap.yml"));
+            store.save(BootstrapConfig.builder().learnedRole(ServerRole.STANDALONE).build());
+            runtime = HeimdallRuntime.builder(logger, platform)
+                    .bootstrapStore(store)
+                    .roleDetector(new com.heimdall.core.platform.InstanceRoleDetector() {
+                        @Override
+                        public boolean isProxy() {
+                            return false;
+                        }
+
+                        @Override
+                        public boolean isBehindProxy() {
+                            return true;
+                        }
+                    })
+                    .build();
+            install(context().role(ServerRole.ENFORCER));
+
+            assertTrue(anyContains(say("status"),
+                    "Restart to run as standalone: no Heimdall proxy in this guild"));
+            assertTrue(anyContains(say("status", "server"),
+                    "role after restart: standalone (no Heimdall proxy in this guild)"));
+        }
+
+        @Test
+        @DisplayName("names the proxy only when the bot said so, and the file otherwise")
+        void reasonFollowsTheEvidence() {
+            BootstrapConfig learned = BootstrapConfig.builder()
+                    .learnedRole(ServerRole.STANDALONE).build();
+            BootstrapConfig plain = BootstrapConfig.defaults();
+            BootstrapConfig configured = BootstrapConfig.builder().role(ServerRole.ENFORCER).build();
+
+            assertEquals("no Heimdall proxy in this guild",
+                    StatusSubcommand.nextRoleReason(learned, ServerRole.STANDALONE, Boolean.FALSE));
+            assertEquals("a Heimdall proxy is registered in this network",
+                    StatusSubcommand.nextRoleReason(plain, ServerRole.ENFORCER, Boolean.TRUE));
+            assertEquals("bootstrap.yml changed",
+                    StatusSubcommand.nextRoleReason(plain, ServerRole.ENFORCER, null),
+                    "a hand-deleted learnedRole is not a proxy joining");
+            assertEquals("set in bootstrap.yml",
+                    StatusSubcommand.nextRoleReason(configured, ServerRole.ENFORCER, Boolean.TRUE));
+        }
+
+        @Test
+        @DisplayName("says nothing when the next start is the same role")
+        void quietWhenUnchanged() {
+            StatusSubcommand.Report report = StatusSubcommand.assess(healthy());
+
+            assertFalse(problemSaying(report, "Restart to run as"));
         }
     }
 
