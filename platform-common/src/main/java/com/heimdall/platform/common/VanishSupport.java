@@ -543,7 +543,8 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         }
         if (fresh == null) {
             long now = nanoNow();
-            if (!wentStale || now - wentStaleAtNanos >= TimeUnit.MILLISECONDS.toNanos(MISS_RETRY_MS)) {
+            long retry = TimeUnit.MILLISECONDS.toNanos(MISS_RETRY_MS);
+            if (!wentStale || now - wentStaleAtNanos >= retry) {
                 // Only a plain miss waits. For MISS_RETRY_MS after a bound copy was disabled or
                 // reloaded every call looks again, since a reload in progress comes back at once.
                 missedAtNanos = now;

@@ -594,6 +594,25 @@ class VanishSupportTest {
     }
 
     @Test
+    @DisplayName("disabled for good: looked for on every call for one window, then held back again")
+    void aPermanentDisableIsThrottledAfterTheWindow() {
+        TestVanish vanish = new TestVanish();
+        vanish.installed = true;
+        vanish.prepare();
+        vanish.current = false;
+        vanish.installed = false;
+        assertFalse(vanish.present());
+
+        advanceMs(VanishSupport.MISS_RETRY_MS);
+        assertFalse(vanish.present(), "the first look after the window records a miss");
+        int before = vanish.binds.get();
+        vanish.present();
+        assertEquals(before, vanish.binds.get(),
+                "past the window a miss holds again, or a disabled PremiumVanish would be looked "
+                        + "for once per player per heartbeat for good");
+    }
+
+    @Test
     @DisplayName("disabled then re-enabled: found on the next call, not held back as a miss")
     void aReEnableIsNotThrottled() {
         TestVanish vanish = new TestVanish();
