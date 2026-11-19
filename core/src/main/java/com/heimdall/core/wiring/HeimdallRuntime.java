@@ -369,7 +369,7 @@ public final class HeimdallRuntime implements AutoCloseable {
         return TunnelClient.builder(logger, executors)
                 .settings(tunnelSettings(bootstrap, guildId))
                 .identitySource(identitySource)
-                .healthSource(builder.healthSource)
+                .healthSource(VanishReporting.counting(builder.healthSource, platform))
                 .configPushHandler(remoteConfig)
                 .build();
     }
