@@ -2957,6 +2957,49 @@ only informs; here it would decide what gets installed.
 
 These change no behaviour, but they are the reason the v3 code does not look like v2's.
 
+### D92 - the roster and the player count say who is vanished
+
+**New in 3.0.2.**
+
+**Before:** `player_list` rows and the health snapshot said nothing about vanish, so the bot's
+`/playerlist`, the dashboard's Online Players panel and every player count showed vanished staff to
+everybody. The bot side (the `minecraft.server.view_vanished` key, `vanish@1` accepted) had shipped
+already and was waiting for a plugin that reported it.
+**Now:** a hidden player's row carries `vanished: true` (other rows have no such key), every health
+snapshot carries `vanishedPlayers` beside `onlinePlayers`, and `HealthModule` declares `vanish@1`
+beside `status@1`.
+
+The plugin reports and never filters. Who may see a hidden player is the bot's permission, and the
+roster has no idea who is about to read it.
+
+#### One source of truth
+
+Every answer comes from `Integrations.vanish()`, the integration the chat bridge already asks
+before it relays a join (D88). So the roster, the count and the bridge cannot disagree, and the
+reach is the same: PremiumVanish or SuperVanish on all three platforms, plus the `vanished` metadata
+convention (EssentialsX, CMI, VanishNoPacket) on the Bukkit family. A proxy without PremiumVanish's
+proxy half sees nobody as hidden and reports so, the same limit D88 documents for relaying.
+
+An earlier draft of this (PR #9, September) carried its own Bukkit-only metadata reader and had the
+proxies declare nothing. It predated D88 and was rebuilt on it rather than merged beside it.
+
+#### The two counts travel together
+
+The bot shows `onlinePlayers - vanishedPlayers` to anyone without the key, so both come from one read
+of the roster: core overwrites the platform's `onlinePlayers` with the size of the same list it
+counted. If that read fails, both keys are dropped for the tick rather than sending the total alone,
+which the bot would publish with hidden staff still in it. A snapshot with no `onlinePlayers` (asked
+while the server starts or stops) is left as it is.
+
+#### Unreadable is hidden
+
+`Vanish.isVanished` already answers `true` when the vanish plugin throws. Core adds the same answer
+if the integration lookup itself throws. A wrong "hidden" costs one name missing from one refresh;
+a wrong "visible" publishes a hidden staff member.
+
+Both callers run off the main thread (the roster handler on the socket thread, the snapshot on the
+heartbeat), as `Vanish` requires.
+
 ### D20 — one request path instead of four
 
 v2 had four copy-pasted ~90-line request methods that had drifted: three carried their own retry

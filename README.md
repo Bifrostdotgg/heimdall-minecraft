@@ -263,6 +263,12 @@ SuperVanish, a vanished player's join, leave and death are never posted. Every s
 best-effort basis on backends only. `announceVanishToggles` (off by default) posts a leave and a
 join when someone vanishes or reappears.
 
+**Player lists and counts mark vanished staff** the same way. Each server marks the vanished players
+it can see on its player list and in its player count, and the bot shows them only to people with the
+`minecraft.server.view_vanished` permission, in `/playerlist` and on the dashboard. The same limit
+applies: a proxy sees vanish only through PremiumVanish's proxy half, so without it the proxy's list
+and count include staff vanished on a backend.
+
 **ChatControl channels** are honoured: only the channels ticked on a mapping are relayed. A proxy
 cannot tell channels apart, so let backends relay chat when ChatControl channels are on.
 
