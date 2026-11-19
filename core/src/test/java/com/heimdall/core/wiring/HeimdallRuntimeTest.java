@@ -572,11 +572,51 @@ class HeimdallRuntimeTest {
             assertTrue(runtime.modules().capabilities().contains("status@1"),
                     "identify must declare status@1 on a default jar so a bot that knows it can "
                             + "show MOTD cards: " + runtime.modules().capabilities());
+            assertTrue(runtime.modules().capabilities().contains("vanish@1"),
+                    "identify must declare vanish@1, the literal the bot negotiates (D92): "
+                            + runtime.modules().capabilities());
             assertTrue(runtime.modules().registeredIds().contains("health"));
             assertFalse(runtime.modules().registeredIds().contains("status"),
                     "status@1 is a second capability of health, not a managed module");
 
             runtime.close();
+        }
+
+        @Test
+        @DisplayName("the tunnel's health source carries the vanish count (D92)")
+        void theTunnelsHealthSourceCountsVanish(@TempDir Path dataDir) throws Exception {
+            FakePlatform platform = new FakePlatform(ServerRole.STANDALONE, dataDir);
+            final com.heimdall.core.testing.FakePlayer staff =
+                    platform.join(com.heimdall.core.testing.FakePlayer.named("Staff"));
+            platform.join(com.heimdall.core.testing.FakePlayer.named("Steve"));
+            platform.withVanish(VanishReportingTest.hiding(staff.uuid()));
+            HeimdallRuntime runtime = HeimdallRuntime.builder(logger, platform)
+                    .bootstrapStore(new BootstrapStore(logger, dataDir.resolve("bootstrap.yml")))
+                    .healthSource(new com.heimdall.core.tunnel.HealthSnapshotSource() {
+                        @Override
+                        public com.heimdall.core.json.Payload snapshot() {
+                            return com.heimdall.core.json.Payload.builder()
+                                    .put("onlinePlayers", 2).put("maxPlayers", 20).build();
+                        }
+                    })
+                    .build();
+            try {
+                // The heartbeat reads the tunnel's source, which is package-private to the tunnel;
+                // reflection keeps that seam closed to production code.
+                java.lang.reflect.Method read =
+                        com.heimdall.core.tunnel.TunnelClient.class.getDeclaredMethod("healthSource");
+                read.setAccessible(true);
+                com.heimdall.core.tunnel.HealthSnapshotSource source =
+                        (com.heimdall.core.tunnel.HealthSnapshotSource) read.invoke(runtime.tunnel());
+
+                com.heimdall.core.json.Payload sent = source.snapshot();
+                assertEquals(1, sent.intValue("vanishedPlayers", -1),
+                        "without the wrapper the bot gets onlinePlayers alone and publishes "
+                                + "hidden staff in it");
+                assertEquals(2, sent.intValue("onlinePlayers", -1));
+            } finally {
+                runtime.close();
+            }
         }
 
         @Test

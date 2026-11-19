@@ -24,7 +24,15 @@ import java.util.Collection;
  * <h2>Threading</h2>
  *
  * <p>{@link Vanish#isVanished} must not run on a server's main thread. Both callers here run off it:
- * the roster handler on the tunnel's socket thread, the snapshot on the heartbeat thread.
+ * the roster handler on {@code heimdall-io} (where {@code RemoteRequestWiring} subscribes it), the
+ * snapshot on the heartbeat ({@code heimdall-ws}).
+ *
+ * <h2>What it cannot see</h2>
+ *
+ * <p>Whatever {@link Vanish} cannot see. Two cases answer "visible" for a vanished player: a
+ * PremiumVanish whose API moved in an update (D88 then treats it as absent, logged once as an
+ * error), and a lookup that could not take the resolve lock in time. A proxy without PremiumVanish's
+ * proxy half sees nobody as hidden.
  */
 final class VanishReporting {
 
@@ -39,7 +47,15 @@ final class VanishReporting {
     }
 
     /**
-     * Whether {@code player} is hidden.
+     * Whether {@code player} is hidden, or not yet known not to be.
+     *
+     * <p>A join the vanish integration has not decided yet counts as hidden. On a proxy, PremiumVanish
+     * learns a player's state only once they reach a backend, so a vanished player sitting in an
+     * auth limbo, or in the first moments after connecting, answers "not invisible". The chat bridge
+     * waits that out before announcing a join (D88); a roster read in the same window would publish
+     * them. {@link Vanish#joinWaitMillis} with an unbounded elapsed time is positive exactly while
+     * that is still open on a proxy, and zero on a backend, whose settle window counts from a join
+     * that by then is long past.
      *
      * <p>{@code true} when the question throws. {@link Vanish} promises not to, and already answers
      * {@code true} when the vanish plugin itself throws; this guards the integration lookup too.
@@ -50,8 +66,11 @@ final class VanishReporting {
         try {
             Integrations integrations = platform.integrations();
             Vanish vanish = integrations == null ? null : integrations.vanish();
-            return vanish != null && vanish.isVanished(player);
-        } catch (RuntimeException unreadable) {
+            if (vanish == null) {
+                return false;
+            }
+            return vanish.isVanished(player) || vanish.joinWaitMillis(player, Long.MAX_VALUE) > 0L;
+        } catch (Throwable unreadable) {
             return true;
         }
     }
@@ -104,7 +123,9 @@ final class VanishReporting {
                     hidden++;
                 }
             }
-        } catch (RuntimeException unavailable) {
+        } catch (Throwable unavailable) {
+            // Throwable, not just RuntimeException: an Error escaping here would escape the
+            // heartbeat task too, and a periodic task that throws is never run again.
             return snapshot.without(ONLINE_KEY, VANISHED_KEY);
         }
         return snapshot.toBuilder()

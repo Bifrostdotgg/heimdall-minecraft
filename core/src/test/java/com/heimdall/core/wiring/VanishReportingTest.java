@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.heimdall.core.config.ServerRole;
 import com.heimdall.core.json.Payload;
 import com.heimdall.core.platform.PlatformFacade;
+import com.heimdall.core.platform.PlayerDirectory;
 import com.heimdall.core.platform.PlayerHandle;
 import com.heimdall.core.platform.Vanish;
 import com.heimdall.core.platform.VanishListener;
@@ -50,6 +51,26 @@ class VanishReportingTest {
                 throw new IllegalStateException("PremiumVanish exploded");
             }
         });
+    }
+
+    /** A proxy integration still deciding {@code pending}'s join, which is not invisible yet. */
+    static Vanish deciding(final UUID pending) {
+        return new Vanish() {
+            @Override
+            public long joinWaitMillis(PlayerHandle player, long elapsedMs) {
+                return pending.equals(player.uuid()) ? 1000L : 0L;
+            }
+
+            @Override
+            public boolean isVanished(PlayerHandle player) {
+                return false;
+            }
+
+            @Override
+            public Registration onToggle(VanishListener listener) {
+                return Registration.NONE;
+            }
+        };
     }
 
     private static Vanish integration(final Function<PlayerHandle, Boolean> answer) {
@@ -108,6 +129,80 @@ class VanishReportingTest {
         assertEquals(1, sent.intValue("onlinePlayers", -1));
         assertTrue(sent.has("vanishedPlayers"));
         assertEquals(0, sent.intValue("vanishedPlayers", -1));
+    }
+
+    @Test
+    @DisplayName("a join the integration has not decided yet counts as hidden")
+    void anUndecidedJoinCountsAsHidden() {
+        FakePlatform platform = platform();
+        FakePlayer limbo = platform.join(FakePlayer.named("Limbo"));
+        platform.join(FakePlayer.named("Steve"));
+        platform.withVanish(deciding(limbo.uuid()));
+
+        Payload sent = VanishReporting.withVanishCount(snapshot(2), platform);
+
+        assertEquals(1, sent.intValue("vanishedPlayers", -1),
+                "a proxy's PremiumVanish does not know yet, and the bridge waits too (D88)");
+        assertTrue(VanishReporting.isVanished(platform, limbo));
+    }
+
+    @Test
+    @DisplayName("a roster that comes back null drops both counts")
+    void aNullRosterDropsBothCounts() {
+        final FakePlatform fake = platform();
+        final PlayerDirectory real = fake.players();
+        final PlayerDirectory empty = (PlayerDirectory) Proxy.newProxyInstance(
+                PlayerDirectory.class.getClassLoader(), new Class<?>[] {PlayerDirectory.class},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args)
+                            throws Throwable {
+                        if ("onlinePlayers".equals(method.getName())) {
+                            return null;
+                        }
+                        return method.invoke(real, args);
+                    }
+                });
+        PlatformFacade platform = (PlatformFacade) Proxy.newProxyInstance(
+                PlatformFacade.class.getClassLoader(), new Class<?>[] {PlatformFacade.class},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args)
+                            throws Throwable {
+                        if ("players".equals(method.getName())) {
+                            return empty;
+                        }
+                        return method.invoke(fake, args);
+                    }
+                });
+
+        Payload sent = VanishReporting.withVanishCount(snapshot(3), platform);
+
+        assertFalse(sent.has("onlinePlayers"));
+        assertFalse(sent.has("vanishedPlayers"));
+    }
+
+    @Test
+    @DisplayName("an Error from the roster drops both counts instead of escaping the heartbeat")
+    void anErrorDropsBothCounts() {
+        final FakePlatform fake = platform();
+        PlatformFacade platform = (PlatformFacade) Proxy.newProxyInstance(
+                PlatformFacade.class.getClassLoader(), new Class<?>[] {PlatformFacade.class},
+                new InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, Method method, Object[] args)
+                            throws Throwable {
+                        if ("players".equals(method.getName())) {
+                            throw new NoClassDefFoundError("swapped out");
+                        }
+                        return method.invoke(fake, args);
+                    }
+                });
+
+        Payload sent = VanishReporting.withVanishCount(snapshot(3), platform);
+
+        assertFalse(sent.has("onlinePlayers"));
+        assertFalse(sent.has("vanishedPlayers"));
     }
 
     @Test
