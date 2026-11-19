@@ -216,6 +216,45 @@ class RemoteRequestWiringTest {
     }
 
     @Test
+    @DisplayName("a vanished player is marked, not dropped, and nobody else carries the key (D92)")
+    void aVanishedPlayerIsMarkedNotDropped() {
+        FakePlatform platform = platform(ServerRole.STANDALONE);
+        final FakePlayer staff = FakePlayer.named("Staff");
+        platform.join(staff);
+        platform.join(FakePlayer.named("Steve"));
+        platform.withVanish(VanishReportingTest.hiding(staff.uuid()));
+        install(platform);
+
+        tunnel.push(Envelope.of("req-v", "get_players", Payload.empty()));
+
+        List<Payload> players = onlyReply("player_list").payload().children("players");
+        assertEquals(2, players.size(), "the bot decides who sees a hidden player, so the row stays");
+        for (Payload row : players) {
+            if ("Staff".equals(row.string("username", ""))) {
+                assertTrue(row.bool("vanished", false));
+            } else {
+                assertFalse(row.has("vanished"),
+                        "an ordinary row has no key at all, so an older bot reads it as before");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("a vanish integration that throws marks the row vanished")
+    void aThrowingVanishIntegrationFailsClosed() {
+        FakePlatform platform = platform(ServerRole.STANDALONE);
+        platform.join(FakePlayer.named("Staff"));
+        platform.withVanish(VanishReportingTest.throwing());
+        install(platform);
+
+        tunnel.push(Envelope.of("req-t", "get_players", Payload.empty()));
+
+        List<Payload> players = onlyReply("player_list").payload().children("players");
+        assertEquals(1, players.size());
+        assertTrue(players.get(0).bool("vanished", false));
+    }
+
+    @Test
     @DisplayName("a platform that adds nothing still produces a well-formed row")
     void aPlatformWithNothingToAddStillAnswers() {
         FakePlatform platform = platform(ServerRole.STANDALONE);

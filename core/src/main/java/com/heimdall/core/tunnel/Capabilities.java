@@ -57,6 +57,17 @@ public final class Capabilities {
     public static final String STATUS = "status@1";
 
     /**
+     * Vanish state: {@code vanished: true} on a {@code player_list} row for a hidden player, and
+     * {@code vanishedPlayers} beside {@code onlinePlayers} on each health payload. Departure D92.
+     *
+     * <p>Declared by {@code HealthModule} beside {@link #STATUS}, not a module of its own. The plugin
+     * reports who is hidden and never filters: who may see a hidden player is a permission the bot
+     * holds. The answers come from {@code Integrations.vanish()}, so an instance reports only the
+     * vanish it can see (D88): a proxy without PremiumVanish's proxy half sees nobody as hidden.
+     */
+    public static final String VANISH = "vanish@1";
+
+    /**
      * The Discord chat bridge: batched {@code bridge.chat} and {@code bridge.event} out, rendered
      * {@code bridge.discord} in.
      *

@@ -257,6 +257,24 @@ class StubWsServerTest {
         }
 
         @Test
+        @DisplayName("vanish@1 is accepted and is never a key in config.push")
+        void vanishCapabilityIsAcceptedButNotManaged() throws Exception {
+            boot();
+            try (TestWsClient client = TestWsClient.connect(bot, GUILD, SERVER, KEY)) {
+                client.identifyV3(SERVER, "Survival", 3, List.of("whitelist@1", "vanish@1"));
+
+                JsonObject ack = client.await("identify_ack", 3000);
+                assertEquals(List.of("whitelist@1", "vanish@1"),
+                        TestWsClient.strings(TestWsClient.payload(ack).getAsJsonArray("accepted")));
+
+                JsonObject modules = TestWsClient.payload(client.await("config.push", 3000))
+                        .getAsJsonObject("modules");
+                assertFalse(modules.has("vanish"),
+                        "vanish@1 rides on health, like status@1, and has no config of its own");
+            }
+        }
+
+        @Test
         @DisplayName("an unregistered server is acked at version 0 and gets no config at all")
         void unregisteredServerGetsNoConfig() throws Exception {
             boot(StubBotConfig.withDemoFixtures().unregisterServer(SERVER));

@@ -41,6 +41,7 @@ class HealthModuleTest {
             Set<String> expected = new LinkedHashSet<String>();
             expected.add(Capabilities.HEALTH);
             expected.add(Capabilities.STATUS);
+            expected.add(Capabilities.VANISH);
             assertEquals(expected, module.capabilities());
             assertEquals(Collections.emptySet(), module.roles(),
                     "health (and therefore status) runs under every role");

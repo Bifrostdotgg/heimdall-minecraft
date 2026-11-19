@@ -39,6 +39,10 @@ import java.util.Set;
  * is a second capability of this module, not a dashboard toggle of its own. Disable health and
  * those fields stop with the rest of the snapshot.
  *
+ * <p>{@code vanish@1} is a third (D92): {@code vanishedPlayers} on the snapshot, and {@code vanished}
+ * on roster rows. The roster half is answered by core's request wiring, so it keeps going when health
+ * is switched off; the capability says what the jar can report either way.
+ *
  * <p>Registered by {@code HeimdallRuntime} itself rather than by {@code HeimdallModules} — it is
  * core's own module, and core must not depend on the feature modules.
  *
@@ -62,6 +66,7 @@ public final class HealthModule implements HeimdallModule {
         Set<String> caps = new LinkedHashSet<String>();
         caps.add(Capabilities.HEALTH);
         caps.add(Capabilities.STATUS);
+        caps.add(Capabilities.VANISH);
         CAPABILITIES = Collections.unmodifiableSet(caps);
     }
 

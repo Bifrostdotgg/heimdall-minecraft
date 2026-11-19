@@ -68,6 +68,8 @@ final class CapabilityNegotiation {
         majors.put("console", 1);
         majors.put("health", 1);
         majors.put("status", 1);
+        // vanish@1 (D92): the bot accepts it beside status, with no config key of its own.
+        majors.put("vanish", 1);
         majors.put("bridge", 1);
         majors.put("modules", 1);
         majors.put("config", 1);

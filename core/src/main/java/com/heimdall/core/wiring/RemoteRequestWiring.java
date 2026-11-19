@@ -210,6 +210,11 @@ public final class RemoteRequestWiring {
      * here, once, so the platforms cannot drift apart on them the way v2's two entry points did,
      * while the third column stays each platform's own answer.
      *
+     * <p>A player hidden by a vanish plugin gets {@code vanished: true}, and every other row has no
+     * such key, so an older bot reads them exactly as before (D92). Nothing is filtered out here:
+     * who may see a hidden player is a permission the bot holds, and this handler has no idea who is
+     * asking.
+     *
      * <p><strong>An empty roster is a successful answer.</strong> Nobody being online is the ordinary
      * state of most servers, and it must not be reported as a failure — a panel that says "error" when
      * a server is quiet is a panel nobody trusts when it says "error" for a real reason.
@@ -270,6 +275,9 @@ public final class RemoteRequestWiring {
             Payload described = platform.players().describe(player);
             if (described != null) {
                 row.putAll(described);
+            }
+            if (VanishReporting.isVanished(platform, player)) {
+                row.put(VanishReporting.ROW_KEY, true);
             }
             return row.build();
         }

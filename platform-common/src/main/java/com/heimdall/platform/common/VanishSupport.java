@@ -35,13 +35,17 @@ import java.util.function.LongSupplier;
  *
  * <h2>Resolution</h2>
  *
- * <p>Lazy, and retried on every call while the plugin is missing: there is no load-order guarantee
- * between plugins (the same reason as LuckPerms, #796 / MC-10), and the callers ask at human rates
- * (a join, a quit, a death), so an unthrottled lookup costs nothing worth designing around. A miss is
- * never recorded as a failure, so a {@link #prepare()} that runs before PremiumVanish has loaded
- * costs nothing. A found plugin is cached, and checked to still be the live one on every call, so a
- * plugin manager that reloads PremiumVanish into a new class loader is followed rather than left
- * listening to the old copy's events.
+ * <p>Lazy, and retried while the plugin is missing: there is no load-order guarantee between
+ * plugins (the same reason as LuckPerms, #796 / MC-10). A miss is retried at most every
+ * {@link #MISS_RETRY_MS} ms rather than on every call, because the roster and the health count (D92)
+ * ask once per online player per heartbeat, and looking means the platform's plugin manager, whose
+ * lock Spigot also holds for every synchronous event. A miss is never recorded as a failure, so a
+ * {@link #prepare()} that runs before PremiumVanish has loaded costs nothing: plugins finish
+ * enabling before players can join. A found plugin is cached, and checked to still be the live one
+ * on every call, so a plugin manager that reloads PremiumVanish into a new class loader is followed
+ * rather than left listening to the old copy's events. For {@link #MISS_RETRY_MS} after a bound
+ * PremiumVanish is found disabled or reloaded, lookups record no miss, so a reload in progress is
+ * found on the next call rather than up to {@link #MISS_RETRY_MS} later.
  *
  * <h2>Two kinds of failure</h2>
  *
@@ -121,6 +125,9 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     /** How long a caller waits for another thread's resolution before answering "absent". */
     static final long RESOLVE_WAIT_MS = 2000L;
 
+    /** How long a miss (PremiumVanish not installed or not enabled) stands before looking again. */
+    static final long MISS_RETRY_MS = 5000L;
+
     /**
      * One resolved PremiumVanish: the reflective handles a platform found through its class loader.
      *
@@ -170,6 +177,14 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             new ConcurrentHashMap<UUID, Long>();
 
     private volatile Binding bound;
+
+    /** When the last lookup found no PremiumVanish, on {@link #nanoNow()}'s clock, if it did. */
+    private volatile boolean missed;
+    private volatile long missedAtNanos;
+
+    /** When a bound PremiumVanish was last found disabled or reloaded, if it was. */
+    private volatile boolean wentStale;
+    private volatile long wentStaleAtNanos;
     private volatile Registration hooks = Registration.NONE;
     private volatile boolean closed;
     private volatile String brokenBecause;
@@ -220,7 +235,8 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
 
     /**
      * Resolves now, so the event hook is in place before anybody joins. Called by the bootstrap. A
-     * miss (PremiumVanish loads after Heimdall) is not a failure, and is simply retried on first use.
+     * miss (PremiumVanish loads after Heimdall) is not a failure, and is looked for again at most
+     * every {@link #MISS_RETRY_MS} ms.
      */
     public final void prepare() {
         binding();
@@ -465,6 +481,12 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         if (current != null && isCurrent(current)) {
             return current;
         }
+        if (current == null && missed
+                && nanoNow() - missedAtNanos < TimeUnit.MILLISECONDS.toNanos(MISS_RETRY_MS)) {
+            // Looked recently and found nothing. Not looking again yet keeps a per-player caller off
+            // the plugin manager's lock (see Resolution in the class javadoc).
+            return null;
+        }
         boolean locked;
         try {
             // Bounded, so a resolution stuck behind a server lock on another thread costs this
@@ -496,6 +518,8 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             // Disabled or reloaded: the hook listens to the old copy's events. Take it off and look
             // again; a re-enabled or reloaded PremiumVanish is bound afresh below.
             bound = null;
+            wentStaleAtNanos = nanoNow();
+            wentStale = true;
             Registration stale = hooks;
             hooks = Registration.NONE;
             closeQuietly(stale);
@@ -518,8 +542,18 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             return null;
         }
         if (fresh == null) {
+            long now = nanoNow();
+            long retry = TimeUnit.MILLISECONDS.toNanos(MISS_RETRY_MS);
+            if (!wentStale || now - wentStaleAtNanos >= retry) {
+                // Only a plain miss waits. For MISS_RETRY_MS after a bound copy was disabled or
+                // reloaded every call looks again, since a reload in progress comes back at once.
+                missedAtNanos = now;
+                missed = true;
+            }
             return null;
         }
+        missed = false;
+        wentStale = false;
         Registration hook = Registration.NONE;
         try {
             hook = fresh.hook();

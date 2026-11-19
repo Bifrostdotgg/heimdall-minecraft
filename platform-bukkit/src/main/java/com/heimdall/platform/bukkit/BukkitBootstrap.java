@@ -384,7 +384,7 @@ final class BukkitBootstrap {
         // deciding channels. attach() also registers ChatControl's channel hook when it is there.
         platform.chatControl().attach(runtime.chatPipeline());
         // PremiumVanish's hide/show hook, in place before the first join on an ordinary boot
-        // (plugin.yml softdepends on it). A miss is retried on first use. Departure D88.
+        // (plugin.yml softdepends on it). A miss is looked for again within seconds. Departures D88, D92.
         platform.vanish().prepare();
         // Paper's AsyncChatEvent, looked up by name through the server's own loader: it fires after
         // the legacy chat event, and on Paper that is where ChatControl does its work, so with

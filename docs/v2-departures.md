@@ -2555,11 +2555,11 @@ vanish plugins (EssentialsX, CMI) exist only on backends, so a network using one
   toggles, nothing waits"), exactly like `chatChannels()` (D85) and `itemImages()` (D86). Core stays
   platform-free; how long a join waits is the platform's answer (`joinWaitMillis`), so the bridge
   never learns what a backend is.
-- **`:platform-common`** has `VanishSupport`, the platform-neutral half: lazy resolution retried on
-  every call while PremiumVanish is missing (no load-order guarantee, as for LuckPerms; a bootstrap
-  `prepare()` that runs first is a miss, never a failure), following a disable or reload, the join
-  wait, containment, the toggle listener list, and teardown. Written once so the three platforms
-  cannot drift.
+- **`:platform-common`** has `VanishSupport`, the platform-neutral half: lazy resolution retried while
+  PremiumVanish is missing (at most every five seconds since D92; no load-order guarantee, as for
+  LuckPerms; a bootstrap `prepare()` that runs first is a miss, never a failure), following a
+  disable or reload, the join wait, containment, the toggle listener list, and teardown. Written
+  once so the three platforms cannot drift.
 - **Each platform** supplies only the reflection: `BukkitVanish` (`VanishAPI.isInvisible(Player)`,
   `isInvisibleOffline(UUID)` once the player has gone, the `PostPlayerHideEvent` /
   `PostPlayerShowEvent` / `PlayerAutoVanishOnJoinEvent` events, falling back to the pre-change
@@ -2950,6 +2950,67 @@ check fell back to whatever an older check had found, and with no older answer i
 *"already the latest version"*, which was not known. `checkNow()`, the periodic tick and the join
 notice still keep the previous answer through a failed check, because there a stale answer
 only informs; here it would decide what gets installed.
+
+### D92 - the roster and the player count say who is vanished
+
+**New in 3.0.2.**
+
+**Before:** `player_list` rows and the health snapshot said nothing about vanish, so the bot's
+`/playerlist`, the dashboard's Online Players panel and every player count showed vanished staff to
+everybody. The bot side (the `minecraft.server.view_vanished` key, `vanish@1` accepted) had shipped
+already and was waiting for a plugin that reported it.
+**Now:** a hidden player's row carries `vanished: true` (other rows have no such key), every health
+snapshot carries `vanishedPlayers` beside `onlinePlayers`, and `HealthModule` declares `vanish@1`
+beside `status@1`.
+
+The plugin reports and never filters. Who may see a hidden player is the bot's permission, and the
+roster has no idea who is about to read it.
+
+#### One source of truth
+
+Every answer comes from `Integrations.vanish()`, the integration the chat bridge already asks
+before it relays a join (D88). So the roster, the count and the bridge cannot disagree, and the
+reach is the same: PremiumVanish or SuperVanish on all three platforms, plus the `vanished` metadata
+convention (EssentialsX, CMI, VanishNoPacket) on the Bukkit family. A proxy without PremiumVanish's
+proxy half sees nobody as hidden and reports so, the same limit D88 documents for relaying. For a
+network, the bot copies the backends' marks onto the proxy's rows, so this matters when a proxy is
+looked at on its own, and for the proxy's count.
+
+A join the integration has not decided yet counts as hidden: on a proxy, PremiumVanish learns a
+player's state only once they reach a backend, and the bridge waits that out (D88). The roster asks
+`joinWaitMillis(player, Long.MAX_VALUE)`, which is positive while a proxy is still waiting and zero on
+a backend. The one gap: a proxy whose backend hook could not be registered falls back to a cap
+counted from the join, which the roster cannot know, so there it answers at once.
+
+An earlier draft of this (PR #9, September) carried its own Bukkit-only metadata reader and had the
+proxies declare nothing. It predated D88 and was rebuilt on it rather than merged beside it.
+
+#### The two counts travel together
+
+The bot shows `onlinePlayers - vanishedPlayers` to anyone without the key, so both come from one read
+of the roster: core overwrites the platform's `onlinePlayers` with the size of the same list it
+counted. If that read fails, both keys are dropped for the tick rather than sending the total alone,
+which the bot would publish with hidden staff still in it. A snapshot with no `onlinePlayers` (asked
+while the server starts or stops) is left as it is.
+
+#### Unreadable is hidden, with two exceptions inherited from D88
+
+`Vanish.isVanished` already answers `true` when the vanish plugin throws. Core adds the same answer
+if the integration lookup itself throws, Errors included. A wrong "hidden" costs one name missing
+from one refresh; a wrong "visible" publishes a hidden staff member.
+
+D88 deliberately fails open in two cases, and they carry over: a PremiumVanish whose API moved in an
+update is treated as absent for that core (logged once as an error), and a lookup that cannot take
+the resolve lock within two seconds answers "absent" for that call. In both, a vanished player is
+reported visible while `vanish@1` is still declared.
+
+#### Threads and cost
+
+Both callers run off the main thread, as `Vanish` requires: the roster handler on `heimdall-io`, the
+snapshot on the heartbeat (`heimdall-ws`). They ask once per online player, which D88's callers never
+did, so `VanishSupport` now looks for a missing PremiumVanish at most every five seconds instead of
+on every call. Looking goes through the plugin manager, and on Spigot that lock is also held for every
+synchronous event, so an unthrottled per-player lookup would tie the heartbeat to the main thread.
 
 ---
 

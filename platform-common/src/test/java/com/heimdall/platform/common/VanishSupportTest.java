@@ -187,6 +187,11 @@ class VanishSupportTest {
         int before = vanish.binds.get();
 
         vanish.isVanished(steve);
+        assertEquals(before, vanish.binds.get(),
+                "a recent miss is not looked for again: per-player callers would hammer the plugin "
+                        + "manager's lock");
+        advanceMs(VanishSupport.MISS_RETRY_MS);
+        vanish.isVanished(steve);
         assertTrue(vanish.binds.get() > before,
                 "a missing plugin is looked for again: it may simply have loaded second");
     }
@@ -210,7 +215,9 @@ class VanishSupportTest {
 
         vanish.installed = true;
         vanish.invisible.add(steve.uuid());
+        assertFalse(vanish.present(), "a miss stands for a few seconds before looking again");
 
+        advanceMs(VanishSupport.MISS_RETRY_MS);
         assertTrue(vanish.isVanished(steve));
         assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(steve, 0L));
         vanish.isVanished(steve);
@@ -584,5 +591,43 @@ class VanishSupportTest {
 
         assertEquals(2, vanish.hooksMade.get());
         assertEquals(1, vanish.hooksOpen.get(), "the stale hook is off, the fresh one is on");
+    }
+
+    @Test
+    @DisplayName("disabled for good: looked for on every call for one window, then held back again")
+    void aPermanentDisableIsThrottledAfterTheWindow() {
+        TestVanish vanish = new TestVanish();
+        vanish.installed = true;
+        vanish.prepare();
+        vanish.current = false;
+        vanish.installed = false;
+        assertFalse(vanish.present());
+
+        advanceMs(VanishSupport.MISS_RETRY_MS);
+        assertFalse(vanish.present(), "the first look after the window records a miss");
+        int before = vanish.binds.get();
+        vanish.present();
+        assertEquals(before, vanish.binds.get(),
+                "past the window a miss holds again, or a disabled PremiumVanish would be looked "
+                        + "for once per player per heartbeat for good");
+    }
+
+    @Test
+    @DisplayName("disabled then re-enabled: found on the next call, not held back as a miss")
+    void aReEnableIsNotThrottled() {
+        TestVanish vanish = new TestVanish();
+        vanish.installed = true;
+        vanish.prepare();
+
+        vanish.current = false;
+        vanish.installed = false;
+        assertFalse(vanish.present(), "disabled: absent");
+        assertFalse(vanish.present(), "and still absent on the next call, as a per-player loop asks");
+
+        vanish.installed = true;
+        vanish.current = true;
+        assertTrue(vanish.present(),
+                "a lookup that followed a disable records no miss, so a reload in progress is "
+                        + "seen at once rather than five seconds later");
     }
 }
