@@ -2555,8 +2555,8 @@ vanish plugins (EssentialsX, CMI) exist only on backends, so a network using one
   toggles, nothing waits"), exactly like `chatChannels()` (D85) and `itemImages()` (D86). Core stays
   platform-free; how long a join waits is the platform's answer (`joinWaitMillis`), so the bridge
   never learns what a backend is.
-- **`:platform-common`** has `VanishSupport`, the platform-neutral half: lazy resolution retried on
-  every call while PremiumVanish is missing (no load-order guarantee, as for LuckPerms; a bootstrap
+- **`:platform-common`** has `VanishSupport`, the platform-neutral half: lazy resolution retried while
+  PremiumVanish is missing (at most every five seconds since D92) (no load-order guarantee, as for LuckPerms; a bootstrap
   `prepare()` that runs first is a miss, never a failure), following a disable or reload, the join
   wait, containment, the toggle listener list, and teardown. Written once so the three platforms
   cannot drift.
@@ -2978,8 +2978,9 @@ looked at on its own, and for the proxy's count.
 
 A join the integration has not decided yet counts as hidden: on a proxy, PremiumVanish learns a
 player's state only once they reach a backend, and the bridge waits that out (D88). The roster asks
-`joinWaitMillis(player, Long.MAX_VALUE)`, which is positive exactly while a proxy is still waiting and
-zero on a backend.
+`joinWaitMillis(player, Long.MAX_VALUE)`, which is positive while a proxy is still waiting and zero on
+a backend. The one gap: a proxy whose backend hook could not be registered falls back to a cap
+counted from the join, which the roster cannot know, so there it answers at once.
 
 An earlier draft of this (PR #9, September) carried its own Bukkit-only metadata reader and had the
 proxies declare nothing. It predated D88 and was rebuilt on it rather than merged beside it.
