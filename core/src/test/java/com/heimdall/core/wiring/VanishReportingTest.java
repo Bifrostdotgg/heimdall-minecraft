@@ -43,6 +43,16 @@ class VanishReportingTest {
         });
     }
 
+    /** One that throws an Error, as a class swapped out from under it would. */
+    static Vanish erroring() {
+        return integration(new Function<PlayerHandle, Boolean>() {
+            @Override
+            public Boolean apply(PlayerHandle player) {
+                throw new NoClassDefFoundError("de/myzelyam/api/vanish/VanishAPI");
+            }
+        });
+    }
+
     /** One that breaks its own contract and throws. */
     static Vanish throwing() {
         return integration(new Function<PlayerHandle, Boolean>() {
@@ -203,6 +213,18 @@ class VanishReportingTest {
 
         assertFalse(sent.has("onlinePlayers"));
         assertFalse(sent.has("vanishedPlayers"));
+    }
+
+    @Test
+    @DisplayName("an Error from the vanish integration counts the player as hidden")
+    void anErroringIntegrationCountsAsHidden() {
+        FakePlatform platform = platform();
+        FakePlayer staff = platform.join(FakePlayer.named("Staff"));
+        platform.withVanish(erroring());
+
+        assertTrue(VanishReporting.isVanished(platform, staff));
+        assertEquals(1, VanishReporting.withVanishCount(snapshot(1), platform)
+                .intValue("vanishedPlayers", -1));
     }
 
     @Test
