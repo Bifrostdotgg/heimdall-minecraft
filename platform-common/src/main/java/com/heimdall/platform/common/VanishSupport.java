@@ -35,11 +35,13 @@ import java.util.function.LongSupplier;
  *
  * <h2>Resolution</h2>
  *
- * <p>Lazy, and retried on every call while the plugin is missing: there is no load-order guarantee
- * between plugins (the same reason as LuckPerms, #796 / MC-10), and the callers ask at human rates
- * (a join, a quit, a death), so an unthrottled lookup costs nothing worth designing around. A miss is
- * never recorded as a failure, so a {@link #prepare()} that runs before PremiumVanish has loaded
- * costs nothing. A found plugin is cached, and checked to still be the live one on every call, so a
+ * <p>Lazy, and retried while the plugin is missing: there is no load-order guarantee between
+ * plugins (the same reason as LuckPerms, #796 / MC-10). A miss is retried at most every
+ * {@link #MISS_RETRY_MS} ms rather than on every call, because the roster and the health count (D92)
+ * ask once per online player per heartbeat, and looking means the platform's plugin manager, whose
+ * lock Spigot also holds for every synchronous event. A miss is never recorded as a failure, so a
+ * {@link #prepare()} that runs before PremiumVanish has loaded costs nothing: plugins finish
+ * enabling before players can join. A found plugin is cached, and checked to still be the live one on every call, so a
  * plugin manager that reloads PremiumVanish into a new class loader is followed rather than left
  * listening to the old copy's events.
  *
@@ -121,6 +123,9 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
     /** How long a caller waits for another thread's resolution before answering "absent". */
     static final long RESOLVE_WAIT_MS = 2000L;
 
+    /** How long a miss (PremiumVanish not installed or not enabled) stands before looking again. */
+    static final long MISS_RETRY_MS = 5000L;
+
     /**
      * One resolved PremiumVanish: the reflective handles a platform found through its class loader.
      *
@@ -170,6 +175,10 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             new ConcurrentHashMap<UUID, Long>();
 
     private volatile Binding bound;
+
+    /** When the last lookup found no PremiumVanish, on {@link #nanoNow()}'s clock, if it did. */
+    private volatile boolean missed;
+    private volatile long missedAtNanos;
     private volatile Registration hooks = Registration.NONE;
     private volatile boolean closed;
     private volatile String brokenBecause;
@@ -465,6 +474,12 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
         if (current != null && isCurrent(current)) {
             return current;
         }
+        if (current == null && missed
+                && nanoNow() - missedAtNanos < TimeUnit.MILLISECONDS.toNanos(MISS_RETRY_MS)) {
+            // Looked recently and found nothing. Not looking again yet keeps a per-player caller off
+            // the plugin manager's lock (see Resolution in the class javadoc).
+            return null;
+        }
         boolean locked;
         try {
             // Bounded, so a resolution stuck behind a server lock on another thread costs this
@@ -518,8 +533,11 @@ public abstract class VanishSupport implements Vanish, AutoCloseable {
             return null;
         }
         if (fresh == null) {
+            missedAtNanos = nanoNow();
+            missed = true;
             return null;
         }
+        missed = false;
         Registration hook = Registration.NONE;
         try {
             hook = fresh.hook();

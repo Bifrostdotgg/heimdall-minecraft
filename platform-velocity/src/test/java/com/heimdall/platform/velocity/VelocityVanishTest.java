@@ -239,6 +239,8 @@ class VelocityVanishTest {
         assertFalse(vanish.present());
 
         environment.instance = new Object() { };
+        // A miss stands for MISS_RETRY_MS before the next look (D92: per-player callers).
+        nanos.addAndGet(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(5000L));
 
         assertTrue(vanish.present());
         assertTrue(vanish.brokenReason() == null);

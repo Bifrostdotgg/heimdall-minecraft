@@ -187,6 +187,11 @@ class VanishSupportTest {
         int before = vanish.binds.get();
 
         vanish.isVanished(steve);
+        assertEquals(before, vanish.binds.get(),
+                "a recent miss is not looked for again: per-player callers would hammer the plugin "
+                        + "manager's lock");
+        advanceMs(VanishSupport.MISS_RETRY_MS);
+        vanish.isVanished(steve);
         assertTrue(vanish.binds.get() > before,
                 "a missing plugin is looked for again: it may simply have loaded second");
     }
@@ -210,7 +215,9 @@ class VanishSupportTest {
 
         vanish.installed = true;
         vanish.invisible.add(steve.uuid());
+        assertFalse(vanish.present(), "a miss stands for a few seconds before looking again");
 
+        advanceMs(VanishSupport.MISS_RETRY_MS);
         assertTrue(vanish.isVanished(steve));
         assertEquals(VanishSupport.JOIN_SETTLE_MS, vanish.joinWaitMillis(steve, 0L));
         vanish.isVanished(steve);
